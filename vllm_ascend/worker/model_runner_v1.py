@@ -2542,14 +2542,14 @@ class NPUModelRunner(GPUModelRunner):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
-
-        # TODO: refactor the logic of attention
-        # Initialize drafter attention group initialization
-        if self.speculative_config and (
-            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
-        ):
-            assert isinstance(self.drafter, AscendEagleProposer | DraftModelProposer)
-            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
+        if vllm_version_is("0.17.0"):
+            # TODO: refactor the logic of attention
+            # Initialize drafter attention group initialization
+            if self.speculative_config and (
+                self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+            ):
+                assert isinstance(self.drafter, AscendEagleProposer | DraftModelProposer)
+                self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)

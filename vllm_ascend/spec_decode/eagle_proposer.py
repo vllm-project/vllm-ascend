@@ -22,6 +22,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
@@ -45,7 +46,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -191,7 +192,9 @@ class SpecDecodeBaseProposer(EagleProposer):
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        self._draft_attn_layer_names = set(all_attn_layers.keys()) - target_attn_layer_names
+        all_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
+        self._draft_attn_layer_names = set(all_attn_layers.keys()) - target_attn_layer_names - all_indexer_layer_names
+
         assert len(self._draft_attn_layer_names) == 1
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
@@ -681,9 +684,25 @@ class SpecDecodeBaseProposer(EagleProposer):
             if not self.parallel_drafting:
                 for draft_step in range(1, self.num_speculative_tokens):
                     per_layer_attn_metadata = dict()
-                    for attn_group in self.draft_attn_groups:
+                    if vllm_version_is("0.17.0"):
+                        for attn_group in self.draft_attn_groups:
+                            common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                                draft_step,
+                                attn_metadata,
+                                common_attn_metadata,
+                                batch_size,
+                                num_input_tokens,
+                                used_update_positions,
+                                aclgraph_runtime_mode,
+                                ori_seq_len,
+                                slot_indices,
+                                mtp_slot_mapping,
+                                attn_group=attn_group,
+                            )
+                            for layer_name in self.attn_layer_names:
+                                per_layer_attn_metadata[layer_name] = attn_metadata
+                    else:
                         common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                            attn_group,
                             draft_step,
                             attn_metadata,
                             common_attn_metadata,
@@ -702,9 +721,22 @@ class SpecDecodeBaseProposer(EagleProposer):
             # Copy the old attn_metadata and update
             for draft_step in range(1, self.num_speculative_tokens):
                 per_layer_attn_metadata = dict()
-                for attn_group in self.draft_attn_groups:
+                if vllm_version_is("0.17.0"):
+                    for attn_group in self.draft_attn_groups:
+                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                            draft_step,
+                            attn_metadata,
+                            common_attn_metadata,
+                            batch_size,
+                            num_input_tokens,
+                            used_update_positions,
+                            aclgraph_runtime_mode,
+                            attn_group=attn_group,
+                        )
+                        for layer_name in self.attn_layer_names:
+                            per_layer_attn_metadata[layer_name] = attn_metadata
+                else:
                     common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                        attn_group,
                         draft_step,
                         attn_metadata,
                         common_attn_metadata,
@@ -1081,7 +1113,6 @@ class SpecDecodeBaseProposer(EagleProposer):
 
     def attn_update_stack_num_spec_norm(
         self,
-        attn_group,
         # `draft_step` must start from `1`, no `0`
         draft_step,
         old_attn_metadata,
@@ -1093,8 +1124,11 @@ class SpecDecodeBaseProposer(EagleProposer):
         ori_seq_len=None,
         slot_indices=None,
         mtp_slot_mapping=None,
+        attn_group=None,
     ):
         assert draft_step > 0
+        if vllm_version_is("0.17.0"):
+            assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
         if draft_step == 1:
@@ -1205,7 +1239,15 @@ class SpecDecodeBaseProposer(EagleProposer):
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
 
-        attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+        if vllm_version_is("0.17.0"):
+            attn_metadata_builder = attn_group.get_metadata_builder()
+        else:
+            if self.attn_metadata_builder is None:
+                attn_metadata_builder = self._get_attention_metadata_builder()
+            else:
+                attn_metadata_builder = self.attn_metadata_builder
+
+        attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata,
             draft_index=draft_step,
         )
