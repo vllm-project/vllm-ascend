@@ -74,6 +74,7 @@ from vllm.v1.outputs import (
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
@@ -406,6 +407,16 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+
+        if vllm_version_is("0.17.0"):
+            # self.cudagraph_batch_sizes sorts in ascending order.
+            if (
+                self.compilation_config.cudagraph_capture_sizes
+                and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            ):
+                self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+            else:
+                self.cudagraph_batch_sizes = []
 
     @property
     def use_cp(self) -> bool:
@@ -1327,48 +1338,27 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
-        if vllm_version_is("0.16.0"):
-            with (
-                record_function_or_nullcontext("forward"),
-                set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=cudagraph_mode,
-                    batch_descriptor=batch_desc,
-                    num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
-                    model_instance=self.model,
-                    max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
-                    skip_compiled=has_encoder_input,
-                ),
-                self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
-            ):
-                hidden_states = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-                )
-        else:
-            with (
-                record_function_or_nullcontext("forward"),
-                set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=cudagraph_mode,
-                    batch_descriptor=batch_desc,
-                    num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
-                    model_instance=self.model,
-                    max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
-                    skip_compiled=has_encoder_input,
-                ),
-                self.maybe_get_kv_connector_output(
-                    scheduler_output, clear_metadata=clear_kv_metadata
-                ) as kv_connector_output,
-            ):
-                hidden_states = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-                )
+        with (
+            record_function_or_nullcontext("forward"),
+            set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens_padded,
+                num_tokens_across_dp=num_tokens_across_dp,
+                aclgraph_runtime_mode=cudagraph_mode,
+                batch_descriptor=batch_desc,
+                num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
+                model_instance=self.model,
+                max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
+                skip_compiled=has_encoder_input,
+            ),
+            self.maybe_get_kv_connector_output(
+                scheduler_output, clear_metadata=clear_kv_metadata
+            ) as kv_connector_output,
+        ):
+            hidden_states = self._model_forward(
+                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+            )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -1926,23 +1916,14 @@ class NPUModelRunner(GPUModelRunner):
             if force_eager:
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
-            if vllm_version_is("0.16.0"):
-                return self.cudagraph_dispatcher.dispatch(
-                    num_tokens=num_tokens,
-                    has_lora=has_lora,
-                    uniform_decode=uniform_decode,
-                    disable_full=disable_full,
-                    num_active_loras=num_active_loras,
-                )
-            else:
-                return self.cudagraph_dispatcher.dispatch(
-                    num_tokens=num_tokens,
-                    has_lora=has_lora,
-                    uniform_decode=uniform_decode,
-                    valid_modes=valid_modes,
-                    invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
-                    num_active_loras=num_active_loras,
-                )
+            return self.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens,
+                has_lora=has_lora,
+                uniform_decode=uniform_decode,
+                valid_modes=valid_modes,
+                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
+                num_active_loras=num_active_loras,
+            )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
         num_tokens_padded = batch_descriptor.num_tokens
@@ -1964,16 +1945,10 @@ class NPUModelRunner(GPUModelRunner):
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
                 # Re-dispatch with DP padding
-                if vllm_version_is("0.16.0"):
-                    cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                        num_tokens_padded,
-                        disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
-                    )
-                else:
-                    cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                        num_tokens_padded,
-                        valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
-                    )
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                    num_tokens_padded,
+                    valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
+                )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
@@ -2580,6 +2555,14 @@ class NPUModelRunner(GPUModelRunner):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        if vllm_version_is("0.17.0"):
+            # TODO: refactor the logic of attention
+            # Initialize drafter attention group initialization
+            if self.speculative_config and (
+                self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+            ):
+                assert isinstance(self.drafter, AscendEagleProposer | DraftModelProposer)
+                self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
@@ -2966,7 +2949,7 @@ class NPUModelRunner(GPUModelRunner):
         # For attention backends that support virtual block splitting,
         # use the supported block sizes from the backend
         # For other backends (like Mamba), use [0] (no splitting)
-        kernel_block_sizes = []
+        self.kernel_block_sizes = []
         for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -2993,15 +2976,15 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     # Fallback to cache config block_size if no backend found
                     kernel_block_size_list = [self.cache_config.block_size]
-                kernel_block_sizes.append(kernel_block_size_list)
+                self.kernel_block_sizes.append(kernel_block_size_list)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
                 # NOTE: set kernel_block_sizes to 0 to disable slotmapping computation
                 # of mamba block. In this case, BlockTable.block_size will never equal
                 # to kernel_block_sizes[0]
-                kernel_block_sizes.append([0])
-        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [[self.cache_config.block_size]]:
+                self.kernel_block_sizes.append([0])
+        if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
@@ -3023,7 +3006,7 @@ class NPUModelRunner(GPUModelRunner):
                     if self.vllm_config.speculative_config
                     else 0
                 ),
-                kernel_block_sizes=kernel_block_sizes,
+                kernel_block_sizes=self.kernel_block_sizes,
             )
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
