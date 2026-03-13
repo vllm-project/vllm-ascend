@@ -221,6 +221,8 @@ def dump_tp_row_output_if_needed(
     source: str,
     advance_decode_step: bool = True,
     proj_type_override: str | None = None,
+    bypass_comm_mode_filter: bool = False,
+    decode_step_offset: int = 0,
 ) -> None:
     """Dump selected row-parallel outputs for TP decode debugging."""
     global _TP_DUMP_DECODE_STEP
@@ -228,7 +230,7 @@ def dump_tp_row_output_if_needed(
         return
     if _TP_DUMP_RANK0_ONLY and tp_rank != 0:
         return
-    if not _tp_dump_comm_mode_match(comm_mode):
+    if not bypass_comm_mode_filter and not _tp_dump_comm_mode_match(comm_mode):
         return
 
     proj_type = proj_type_override or _get_proj_type(prefix)
@@ -252,7 +254,7 @@ def dump_tp_row_output_if_needed(
         # layer 0 records.
         if advance_decode_step and is_step_anchor:
             _TP_DUMP_DECODE_STEP += 1
-        decode_step = _TP_DUMP_DECODE_STEP
+        decode_step = _TP_DUMP_DECODE_STEP + decode_step_offset
         if decode_step < 0:
             return
         if decode_step < _TP_DUMP_START_STEP:
@@ -325,6 +327,8 @@ def dump_tp_tensor_if_needed(
     source: str,
     proj_type: str,
     advance_decode_step: bool = False,
+    bypass_comm_mode_filter: bool = True,
+    decode_step_offset: int = 0,
 ) -> None:
     dump_tp_row_output_if_needed(
         prefix=prefix,
@@ -334,6 +338,8 @@ def dump_tp_tensor_if_needed(
         source=source,
         advance_decode_step=advance_decode_step,
         proj_type_override=proj_type,
+        bypass_comm_mode_filter=bypass_comm_mode_filter,
+        decode_step_offset=decode_step_offset,
     )
 
 
@@ -341,6 +347,86 @@ def _all_gather_last_dim_if_needed(comm_group, tensor: torch.Tensor, tp_size: in
     if tp_size <= 1:
         return tensor
     return comm_group.all_gather(tensor.contiguous(), dim=-1)
+
+
+def _is_attn_qkv_prefix(prefix: str) -> bool:
+    qkv_prefixes = (
+        "qkv_proj",
+        "query_key_value",
+        "attn_qkv_proj",
+        "in_proj_qkvz",
+    )
+    return any(tag in prefix for tag in qkv_prefixes)
+
+
+def dump_tp_attn_qkv_tensors_if_needed(
+    *,
+    prefix: str,
+    input_tensor: torch.Tensor,
+    output_tensor,
+    tp_rank: int,
+    tp_size: int,
+    comm_group,
+    source_prefix: str,
+) -> None:
+    if not _TP_DUMP_ENABLE or not _is_attn_qkv_prefix(prefix):
+        return
+
+    output = _to_tensor(output_tensor)
+    if not isinstance(output, torch.Tensor):
+        return
+
+    # qkv happens before o_proj in one decode token. Shift by +1 so the step id
+    # aligns with that token's o_proj/down_proj dumps.
+    step_offset = 1
+
+    if _tp_dump_extra_any("attn_norm_output", "norm_output"):
+        dump_tp_tensor_if_needed(
+            prefix=prefix,
+            output=input_tensor,
+            tp_rank=tp_rank,
+            comm_mode="local",
+            source=f"{source_prefix}.attn_norm_output",
+            proj_type="attn_norm_output",
+            decode_step_offset=step_offset,
+        )
+
+    if _tp_dump_extra_any("qkv_input"):
+        dump_tp_tensor_if_needed(
+            prefix=prefix,
+            output=input_tensor,
+            tp_rank=tp_rank,
+            comm_mode="local",
+            source=f"{source_prefix}.qkv_input",
+            proj_type="qkv_input",
+            decode_step_offset=step_offset,
+        )
+
+    if not _tp_dump_extra_any("qkv_output"):
+        return
+
+    shard_mode = "local_shard" if tp_size > 1 else "local"
+    dump_tp_tensor_if_needed(
+        prefix=prefix,
+        output=output,
+        tp_rank=tp_rank,
+        comm_mode=shard_mode,
+        source=f"{source_prefix}.qkv_output",
+        proj_type="qkv_output",
+        decode_step_offset=step_offset,
+    )
+
+    if _TP_DUMP_EXTRA_GATHER_FULL and tp_size > 1:
+        gathered = _all_gather_last_dim_if_needed(comm_group, output, tp_size)
+        dump_tp_tensor_if_needed(
+            prefix=prefix,
+            output=gathered,
+            tp_rank=tp_rank,
+            comm_mode="all_gather_full",
+            source=f"{source_prefix}.qkv_output_full",
+            proj_type="qkv_output",
+            decode_step_offset=step_offset,
+        )
 
 
 def dump_tp_gate_up_tensors_if_needed(
@@ -475,6 +561,21 @@ class CustomColumnParallelOp(CustomLinearOp):
     def update_attrs(self):
         super().update_attrs()
         self.gather_output = self.layer.gather_output
+
+    def apply(self, input_):
+        output, output_bias = self.apply_impl(input_)
+        dump_tp_attn_qkv_tensors_if_needed(
+            prefix=self.prefix,
+            input_tensor=input_,
+            output_tensor=output,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            comm_group=self.comm_group,
+            source_prefix=self.__class__.__name__,
+        )
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
 
 class CustomRowParallelOp(CustomLinearOp):

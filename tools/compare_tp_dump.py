@@ -5,39 +5,26 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 """
-Compare TP dump tensors from two runs.
+Simple TP dump comparator.
 
-Supports:
-1) JSONL dump records (`sample` field) produced by TP dump hooks.
-2) PT tensor dumps (`VLLM_ASCEND_TP_DUMP_SAVE_TENSOR=1`).
+Only reports two metrics:
+1) cosine similarity (torch.cosine_similarity, float64)
+2) max-diff (max absolute difference, float64)
 
-Examples:
-  python tools/compare_tp_dump.py \
-    --base /tmp/tp1 --cand /tmp/tp8 --rank 0 \
-    --comm-mode pre_all_reduce,all_reduce --layer-ids 0-4
-  python tools/compare_tp_dump.py \
-    --base /tmp/tp1 --cand /tmp/tp8 --rank 0 \
-    --base-comm-mode local --cand-comm-mode all_reduce \
-    --ignore-comm-mode-in-key --layer-ids 0-4
-  python tools/compare_tp_dump.py \
-    --base /tmp/tp2 --cand /tmp/tp2 \
-    --base-rank -1 --cand-rank 0 \
-    --base-comm-mode pre_all_reduce --cand-comm-mode all_reduce \
-    --aggregate-base-ranks sum --ignore-comm-mode-in-key
+Supported dump formats:
+- JSONL (`tp_row_dump_rank*.jsonl`)
+- PT tensors (`*.pt`)
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 LAYER_PATTERNS = (
     r"(?:^|\.)layers\.(\d+)\.",
@@ -47,7 +34,8 @@ LAYER_PATTERNS = (
 
 PT_DUMP_PATTERN = re.compile(
     r"^step(?P<step>\d+)_rank(?P<rank>\d+)_(?:(?P<comm_mode>.+)_)?"
-    r"(?P<proj_type>o_proj|down_proj|gate_up_input|gate_up_output|down_input)_(?P<prefix>.+)\.pt$"
+    r"(?P<proj_type>o_proj|down_proj|attn_norm_output|qkv_input|qkv_output|gate_up_input|gate_up_output|down_input)"
+    r"_(?P<prefix>.+)\.pt$"
 )
 
 
@@ -59,35 +47,42 @@ class DumpEntry:
     comm_mode: str
     prefix: str
     rank: int
-    source: str
-    payload_type: str  # "jsonl_sample" | "pt_tensor"
-    payload: list[float] | Path
-    shape: list[int] | None
-    dtype: str | None
+    payload_type: str  # jsonl_sample | pt_tensor | tensor
+    payload: Any
+
+
+_TORCH = None
+
+
+def get_torch():
+    global _TORCH
+    if _TORCH is not None:
+        return _TORCH
+    try:
+        import torch
+    except ImportError as e:
+        raise ImportError("compare_tp_dump.py requires torch to compute cosine similarity.") from e
+    _TORCH = torch
+    return _TORCH
 
 
 def parse_layer_ids(raw: str | None) -> set[int] | None:
     if not raw:
         return None
-    raw = raw.strip()
-    if not raw:
-        return None
     out: set[int] = set()
-    for token in raw.split(","):
+    for token in raw.strip().split(","):
         token = token.strip()
         if not token:
             continue
         if "-" in token:
-            bounds = token.split("-", maxsplit=1)
-            if len(bounds) != 2:
-                continue
+            left, right = token.split("-", maxsplit=1)
             try:
-                start = int(bounds[0].strip())
-                end = int(bounds[1].strip())
+                lo = int(left.strip())
+                hi = int(right.strip())
             except ValueError:
                 continue
-            lo = min(start, end)
-            hi = max(start, end)
+            if lo > hi:
+                lo, hi = hi, lo
             out.update(range(lo, hi + 1))
             continue
         try:
@@ -100,8 +95,8 @@ def parse_layer_ids(raw: str | None) -> set[int] | None:
 def parse_csv_set(raw: str | None) -> set[str] | None:
     if not raw:
         return None
-    items = {x.strip() for x in raw.split(",") if x.strip()}
-    return items or None
+    out = {x.strip() for x in raw.split(",") if x.strip()}
+    return out or None
 
 
 def get_layer_idx(prefix: str) -> int | None:
@@ -148,6 +143,25 @@ def should_keep_entry(
     return True
 
 
+def discover_jsonl_paths(path: Path, rank_filter: int | None) -> list[Path]:
+    if path.is_file():
+        return [path] if path.suffix == ".jsonl" else []
+    if not path.is_dir():
+        return []
+    if rank_filter is None:
+        return sorted(path.glob("tp_row_dump_rank*.jsonl"))
+    ranked = path / f"tp_row_dump_rank{rank_filter}.jsonl"
+    return [ranked] if ranked.exists() else []
+
+
+def discover_pt_paths(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path] if path.suffix == ".pt" else []
+    if not path.is_dir():
+        return []
+    return sorted(path.glob("*.pt"))
+
+
 def load_jsonl_entries(
     jsonl_paths: list[Path],
     *,
@@ -158,9 +172,8 @@ def load_jsonl_entries(
     start_step: int,
     max_steps: int,
     ignore_comm_mode: bool,
-) -> tuple[dict[tuple[Any, ...], DumpEntry], int]:
+) -> dict[tuple[Any, ...], DumpEntry]:
     entries: dict[tuple[Any, ...], DumpEntry] = {}
-    duplicate_count = 0
 
     for path in jsonl_paths:
         with path.open("r", encoding="utf-8-sig") as f:
@@ -191,11 +204,8 @@ def load_jsonl_entries(
                     comm_mode=str(record.get("comm_mode", "unknown")),
                     prefix=prefix,
                     rank=rank,
-                    source=str(record.get("source", "jsonl")),
                     payload_type="jsonl_sample",
                     payload=[float(x) for x in sample],
-                    shape=record.get("shape", None),
-                    dtype=str(record.get("dtype", "unknown")),
                 )
                 if not should_keep_entry(
                     entry,
@@ -208,11 +218,9 @@ def load_jsonl_entries(
                     continue
 
                 key = make_key(entry, ignore_comm_mode=ignore_comm_mode)
-                if key in entries:
-                    duplicate_count += 1
                 entries[key] = entry
 
-    return entries, duplicate_count
+    return entries
 
 
 def load_pt_entries(
@@ -225,14 +233,14 @@ def load_pt_entries(
     start_step: int,
     max_steps: int,
     ignore_comm_mode: bool,
-) -> tuple[dict[tuple[Any, ...], DumpEntry], int]:
+) -> dict[tuple[Any, ...], DumpEntry]:
     entries: dict[tuple[Any, ...], DumpEntry] = {}
-    duplicate_count = 0
 
     for path in pt_paths:
         match = PT_DUMP_PATTERN.match(path.name)
         if match is None:
             continue
+
         rank = int(match.group("rank"))
         if rank_filter is not None and rank != rank_filter:
             continue
@@ -240,6 +248,7 @@ def load_pt_entries(
         prefix = match.group("prefix")
         layer_idx = get_layer_idx(prefix)
         comm_mode = match.group("comm_mode") or "unknown"
+
         entry = DumpEntry(
             step=int(match.group("step")),
             layer_idx=layer_idx,
@@ -247,11 +256,8 @@ def load_pt_entries(
             comm_mode=comm_mode,
             prefix=prefix,
             rank=rank,
-            source="pt",
             payload_type="pt_tensor",
             payload=path,
-            shape=None,
-            dtype=None,
         )
         if not should_keep_entry(
             entry,
@@ -264,30 +270,9 @@ def load_pt_entries(
             continue
 
         key = make_key(entry, ignore_comm_mode=ignore_comm_mode)
-        if key in entries:
-            duplicate_count += 1
         entries[key] = entry
 
-    return entries, duplicate_count
-
-
-def discover_jsonl_paths(path: Path, rank_filter: int | None) -> list[Path]:
-    if path.is_file():
-        return [path] if path.suffix == ".jsonl" else []
-    if not path.is_dir():
-        return []
-    if rank_filter is None:
-        return sorted(path.glob("tp_row_dump_rank*.jsonl"))
-    ranked = path / f"tp_row_dump_rank{rank_filter}.jsonl"
-    return [ranked] if ranked.exists() else []
-
-
-def discover_pt_paths(path: Path) -> list[Path]:
-    if path.is_file():
-        return [path] if path.suffix == ".pt" else []
-    if not path.is_dir():
-        return []
-    return sorted(path.glob("*.pt"))
+    return entries
 
 
 def load_entries(
@@ -301,110 +286,95 @@ def load_entries(
     start_step: int,
     max_steps: int,
     ignore_comm_mode: bool,
-) -> tuple[dict[tuple[Any, ...], DumpEntry], str, int]:
+) -> tuple[dict[tuple[Any, ...], DumpEntry], str]:
     jsonl_paths = discover_jsonl_paths(path, rank_filter)
     pt_paths = discover_pt_paths(path)
 
     if mode == "jsonl":
         if not jsonl_paths:
             raise FileNotFoundError(f"No jsonl dump found under: {path}")
-        loaded, dup = load_jsonl_entries(
-            jsonl_paths,
-            rank_filter=rank_filter,
-            layer_ids=layer_ids,
-            proj_types=proj_types,
-            comm_modes=comm_modes,
-            start_step=start_step,
-            max_steps=max_steps,
-            ignore_comm_mode=ignore_comm_mode,
+        return (
+            load_jsonl_entries(
+                jsonl_paths,
+                rank_filter=rank_filter,
+                layer_ids=layer_ids,
+                proj_types=proj_types,
+                comm_modes=comm_modes,
+                start_step=start_step,
+                max_steps=max_steps,
+                ignore_comm_mode=ignore_comm_mode,
+            ),
+            "jsonl",
         )
-        return loaded, "jsonl", dup
 
     if mode == "pt":
         if not pt_paths:
             raise FileNotFoundError(f"No pt dump found under: {path}")
-        loaded, dup = load_pt_entries(
-            pt_paths,
-            rank_filter=rank_filter,
-            layer_ids=layer_ids,
-            proj_types=proj_types,
-            comm_modes=comm_modes,
-            start_step=start_step,
-            max_steps=max_steps,
-            ignore_comm_mode=ignore_comm_mode,
+        return (
+            load_pt_entries(
+                pt_paths,
+                rank_filter=rank_filter,
+                layer_ids=layer_ids,
+                proj_types=proj_types,
+                comm_modes=comm_modes,
+                start_step=start_step,
+                max_steps=max_steps,
+                ignore_comm_mode=ignore_comm_mode,
+            ),
+            "pt",
         )
-        return loaded, "pt", dup
 
-    # auto mode: prefer jsonl if exists, fallback to pt.
     if jsonl_paths:
-        loaded, dup = load_jsonl_entries(
-            jsonl_paths,
-            rank_filter=rank_filter,
-            layer_ids=layer_ids,
-            proj_types=proj_types,
-            comm_modes=comm_modes,
-            start_step=start_step,
-            max_steps=max_steps,
-            ignore_comm_mode=ignore_comm_mode,
+        return (
+            load_jsonl_entries(
+                jsonl_paths,
+                rank_filter=rank_filter,
+                layer_ids=layer_ids,
+                proj_types=proj_types,
+                comm_modes=comm_modes,
+                start_step=start_step,
+                max_steps=max_steps,
+                ignore_comm_mode=ignore_comm_mode,
+            ),
+            "jsonl",
         )
-        return loaded, "jsonl", dup
+
     if pt_paths:
-        loaded, dup = load_pt_entries(
-            pt_paths,
-            rank_filter=rank_filter,
-            layer_ids=layer_ids,
-            proj_types=proj_types,
-            comm_modes=comm_modes,
-            start_step=start_step,
-            max_steps=max_steps,
-            ignore_comm_mode=ignore_comm_mode,
+        return (
+            load_pt_entries(
+                pt_paths,
+                rank_filter=rank_filter,
+                layer_ids=layer_ids,
+                proj_types=proj_types,
+                comm_modes=comm_modes,
+                start_step=start_step,
+                max_steps=max_steps,
+                ignore_comm_mode=ignore_comm_mode,
+            ),
+            "pt",
         )
-        return loaded, "pt", dup
 
     raise FileNotFoundError(f"No dump files found under: {path}")
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = 0.0
-    a_sq = 0.0
-    b_sq = 0.0
-    for ai, bi in zip(a, b):
-        dot += ai * bi
-        a_sq += ai * ai
-        b_sq += bi * bi
+def entry_to_tensor(entry: DumpEntry, cache: dict[Path, Any]) -> Any:
+    torch = get_torch()
+    if entry.payload_type == "tensor":
+        assert isinstance(entry.payload, torch.Tensor)
+        return entry.payload.reshape(-1).to(torch.float64)
 
-    a_norm = math.sqrt(a_sq)
-    b_norm = math.sqrt(b_sq)
-    if a_norm == 0.0 and b_norm == 0.0:
-        return 1.0
-    if a_norm == 0.0 or b_norm == 0.0:
-        return 0.0
-    return dot / (a_norm * b_norm)
-
-
-def _import_torch():
-    try:
-        import torch  # type: ignore
-    except ImportError as e:
-        raise ImportError("Reading .pt dumps requires torch. Please run in an environment with torch installed.") from e
-    return torch
-
-
-def entry_to_flat_values(entry: DumpEntry, cache: dict[Path, list[float]]) -> list[float]:
     if entry.payload_type == "jsonl_sample":
-        payload = entry.payload
-        assert isinstance(payload, list)
-        return payload
+        assert isinstance(entry.payload, list)
+        return torch.tensor(entry.payload, dtype=torch.float64)
 
-    path = entry.payload
-    assert isinstance(path, Path)
-    if path not in cache:
-        torch = _import_torch()
-        tensor = torch.load(path, map_location="cpu")
+    assert entry.payload_type == "pt_tensor"
+    assert isinstance(entry.payload, Path)
+    if entry.payload not in cache:
+        tensor = torch.load(entry.payload, map_location="cpu")
         if not isinstance(tensor, torch.Tensor):
-            raise TypeError(f"Invalid pt dump (not tensor): {path}")
-        cache[path] = tensor.detach().reshape(-1).to(torch.float64).tolist()
-    return cache[path]
+            raise TypeError(f"Invalid pt dump (not tensor): {entry.payload}")
+        cache[entry.payload] = tensor.detach().reshape(-1).to(torch.float64)
+    return cache[entry.payload]
 
 
 def aggregate_entries_across_ranks(
@@ -412,9 +382,10 @@ def aggregate_entries_across_ranks(
     *,
     method: str,
     ignore_comm_mode: bool,
-) -> tuple[dict[tuple[Any, ...], DumpEntry], int, int]:
+) -> dict[tuple[Any, ...], DumpEntry]:
+    torch = get_torch()
     if method == "none":
-        return entries, 0, 0
+        return entries
 
     grouped: dict[tuple[int, int | None, str, str, str], list[DumpEntry]] = defaultdict(list)
     for entry in entries.values():
@@ -422,64 +393,58 @@ def aggregate_entries_across_ranks(
         grouped[group_key].append(entry)
 
     out: dict[tuple[Any, ...], DumpEntry] = {}
-    tensor_cache: dict[Path, list[float]] = {}
-    truncated_groups = 0
+    cache: dict[Path, Any] = {}
 
-    for _, group in grouped.items():
+    for group in grouped.values():
         group = sorted(group, key=lambda e: e.rank)
-        values = [entry_to_flat_values(e, tensor_cache) for e in group]
-        if not values:
+        tensors = [entry_to_tensor(e, cache) for e in group]
+        if not tensors:
             continue
-
-        min_len = min(len(v) for v in values)
-        if any(len(v) != min_len for v in values):
-            truncated_groups += 1
-
-        agg = [0.0] * min_len
-        for v in values:
-            for i in range(min_len):
-                agg[i] += v[i]
-
-        if method == "mean":
-            inv_n = 1.0 / len(values)
-            agg = [x * inv_n for x in agg]
+        min_len = min(int(t.numel()) for t in tensors)
+        if min_len <= 0:
+            continue
+        stacked = torch.stack([t[:min_len] for t in tensors], dim=0)
+        if method == "sum":
+            agg = stacked.sum(dim=0)
+        elif method == "mean":
+            agg = stacked.mean(dim=0)
+        else:
+            raise ValueError(f"Unknown aggregation method: {method}")
 
         template = group[0]
-        agg_entry = DumpEntry(
+        entry = DumpEntry(
             step=template.step,
             layer_idx=template.layer_idx,
             proj_type=template.proj_type,
             comm_mode=template.comm_mode,
             prefix=template.prefix,
-            # Keep rank compatible with default compare target (rank 0).
             rank=0,
-            source=f"{template.source}.agg_{method}",
-            payload_type="jsonl_sample",
+            payload_type="tensor",
             payload=agg,
-            shape=[min_len],
-            dtype="float64",
         )
-        out_key = make_key(agg_entry, ignore_comm_mode=ignore_comm_mode)
-        out[out_key] = agg_entry
+        out[make_key(entry, ignore_comm_mode=ignore_comm_mode)] = entry
 
-    aggregated_groups = len(grouped)
-    return out, aggregated_groups, truncated_groups
+    return out
+
+
+def cosine_similarity_float64(a, b) -> float:
+    torch = get_torch()
+    # Required by user: torch.cosine_similarity() + high precision.
+    # Handle zero vectors explicitly to avoid NaN from 0/0.
+    a_zero = bool(torch.count_nonzero(a).item() == 0)
+    b_zero = bool(torch.count_nonzero(b).item() == 0)
+    if a_zero and b_zero:
+        return 1.0
+    if a_zero or b_zero:
+        return 0.0
+    return float(torch.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0), dim=1).item())
 
 
 def safe_float(v: float) -> str:
-    if math.isnan(v) or math.isinf(v):
-        return "nan"
     return f"{v:.6e}"
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def summarize_entry_axes(entries: dict[tuple[Any, ...], DumpEntry]) -> dict[str, Any]:
+def summarize_axes(entries: dict[tuple[Any, ...], DumpEntry]) -> dict[str, Any]:
     if not entries:
         return {
             "steps": (None, None, 0),
@@ -488,7 +453,6 @@ def summarize_entry_axes(entries: dict[tuple[Any, ...], DumpEntry]) -> dict[str,
             "comm_modes": [],
             "ranks": [],
         }
-
     values = list(entries.values())
     steps = sorted({e.step for e in values})
     layers = sorted({e.layer_idx for e in values})
@@ -497,7 +461,7 @@ def summarize_entry_axes(entries: dict[tuple[Any, ...], DumpEntry]) -> dict[str,
     ranks = sorted({e.rank for e in values})
     return {
         "steps": (steps[0], steps[-1], len(steps)),
-        "layers": layers[:16],
+        "layers": layers,
         "proj_types": proj_types,
         "comm_modes": comm_modes,
         "ranks": ranks,
@@ -505,18 +469,14 @@ def summarize_entry_axes(entries: dict[tuple[Any, ...], DumpEntry]) -> dict[str,
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare TP dump tensors from two runs.")
-    parser.add_argument("--base", type=Path, required=True, help="Baseline dump file or directory")
-    parser.add_argument("--cand", type=Path, required=True, help="Candidate dump file or directory")
-    parser.add_argument(
-        "--mode",
-        choices=("auto", "jsonl", "pt"),
-        default="auto",
-        help="Input format selection (default: auto)",
-    )
-    parser.add_argument("--rank", type=int, default=0, help="Rank filter. Use -1 for all ranks. (default: 0)")
-    parser.add_argument("--base-rank", type=int, default=None, help="Base-only rank filter. Use -1 for all ranks.")
-    parser.add_argument("--cand-rank", type=int, default=None, help="Cand-only rank filter. Use -1 for all ranks.")
+    parser = argparse.ArgumentParser(description="Simple TP dump comparator.")
+    parser.add_argument("--base", type=Path, required=True, help="Baseline dump path")
+    parser.add_argument("--cand", type=Path, required=True, help="Candidate dump path")
+    parser.add_argument("--mode", choices=("auto", "jsonl", "pt"), default="auto", help="Input format")
+
+    parser.add_argument("--rank", type=int, default=0, help="Rank filter. -1 means all ranks.")
+    parser.add_argument("--base-rank", type=int, default=None, help="Base-only rank filter. -1 means all ranks.")
+    parser.add_argument("--cand-rank", type=int, default=None, help="Cand-only rank filter. -1 means all ranks.")
     parser.add_argument(
         "--aggregate-base-ranks",
         choices=("none", "sum", "mean"),
@@ -529,42 +489,25 @@ def parse_args() -> argparse.Namespace:
         default="none",
         help="Aggregate cand entries across ranks before compare",
     )
-    parser.add_argument("--layer-ids", type=str, default="", help="Layer filter, e.g. '0-4,8,10-12'")
+
+    parser.add_argument("--layer-ids", type=str, default="", help="Layer filter, e.g. 0-4,8")
     parser.add_argument(
         "--proj",
         type=str,
-        default="o_proj,down_proj",
-        help="Proj filter csv, e.g. o_proj,down_proj,gate_up_input,gate_up_output,down_input",
+        default="o_proj,attn_norm_output,qkv_input,qkv_output,gate_up_input,gate_up_output,down_proj",
+        help="Proj filter csv",
     )
-    parser.add_argument("--comm-mode", type=str, default="", help="Comm mode filter csv (applies to both sides)")
-    parser.add_argument("--base-comm-mode", type=str, default="", help="Base-only comm mode filter csv")
-    parser.add_argument("--cand-comm-mode", type=str, default="", help="Cand-only comm mode filter csv")
+    parser.add_argument("--comm-mode", type=str, default="", help="Comm mode filter for both sides")
+    parser.add_argument("--base-comm-mode", type=str, default="", help="Base comm mode filter")
+    parser.add_argument("--cand-comm-mode", type=str, default="", help="Cand comm mode filter")
     parser.add_argument(
         "--ignore-comm-mode-in-key",
         action="store_true",
-        help="Do not require comm_mode equality when matching keys across runs",
+        help="Do not require comm_mode equality when matching keys",
     )
     parser.add_argument("--start-step", type=int, default=0, help="Start decode step (inclusive)")
-    parser.add_argument("--max-steps", type=int, default=-1, help="Max decode steps to compare")
-    parser.add_argument(
-        "--print-details",
-        action="store_true",
-        help="Print per-prefix detailed rows (otherwise print summary only)",
-    )
-    parser.add_argument("--summary-csv", type=Path, default=None, help="Optional summary csv output path")
-    parser.add_argument("--details-csv", type=Path, default=None, help="Optional details csv output path")
-    parser.add_argument(
-        "--warn-cos-threshold",
-        type=float,
-        default=0.999,
-        help="Warn threshold for cosine similarity in summary rows",
-    )
-    parser.add_argument(
-        "--warn-max-abs-threshold",
-        type=float,
-        default=1e-2,
-        help="Warn threshold for max_abs in summary rows",
-    )
+    parser.add_argument("--max-steps", type=int, default=-1, help="Max decode steps")
+    parser.add_argument("--print-details", action="store_true", help="Print per-prefix rows")
     return parser.parse_args()
 
 
@@ -574,13 +517,14 @@ def main() -> None:
     shared_rank_filter = normalize_rank(args.rank)
     base_rank_filter = normalize_rank(args.base_rank) if args.base_rank is not None else shared_rank_filter
     cand_rank_filter = normalize_rank(args.cand_rank) if args.cand_rank is not None else shared_rank_filter
+
     layer_ids = parse_layer_ids(args.layer_ids)
     proj_types = parse_csv_set(args.proj)
     shared_comm_modes = parse_csv_set(args.comm_mode)
     base_comm_modes = parse_csv_set(args.base_comm_mode) or shared_comm_modes
     cand_comm_modes = parse_csv_set(args.cand_comm_mode) or shared_comm_modes
 
-    base_map, base_mode, base_dup = load_entries(
+    base_map, base_mode = load_entries(
         args.base,
         mode=args.mode,
         rank_filter=base_rank_filter,
@@ -591,7 +535,7 @@ def main() -> None:
         max_steps=args.max_steps,
         ignore_comm_mode=args.ignore_comm_mode_in_key,
     )
-    cand_map, cand_mode, cand_dup = load_entries(
+    cand_map, cand_mode = load_entries(
         args.cand,
         mode=args.mode,
         rank_filter=cand_rank_filter,
@@ -603,52 +547,34 @@ def main() -> None:
         ignore_comm_mode=args.ignore_comm_mode_in_key,
     )
 
-    base_agg_groups = 0
-    cand_agg_groups = 0
-    base_truncated_groups = 0
-    cand_truncated_groups = 0
     if args.aggregate_base_ranks != "none":
-        base_map, base_agg_groups, base_truncated_groups = aggregate_entries_across_ranks(
+        base_map = aggregate_entries_across_ranks(
             base_map,
             method=args.aggregate_base_ranks,
             ignore_comm_mode=args.ignore_comm_mode_in_key,
         )
     if args.aggregate_cand_ranks != "none":
-        cand_map, cand_agg_groups, cand_truncated_groups = aggregate_entries_across_ranks(
+        cand_map = aggregate_entries_across_ranks(
             cand_map,
             method=args.aggregate_cand_ranks,
             ignore_comm_mode=args.ignore_comm_mode_in_key,
         )
 
     if base_mode != cand_mode:
-        raise ValueError(f"Input mode mismatch: base={base_mode}, cand={cand_mode}. Use same dump format.")
+        raise ValueError(f"Input mode mismatch: base={base_mode}, cand={cand_mode}")
 
     base_keys = set(base_map.keys())
     cand_keys = set(cand_map.keys())
     common_keys = sorted(base_keys & cand_keys)
-    only_base = len(base_keys - cand_keys)
-    only_cand = len(cand_keys - base_keys)
 
     print(f"[info] base_mode={base_mode}, cand_mode={cand_mode}")
     print(f"[info] base_records={len(base_map)}, cand_records={len(cand_map)}, common={len(common_keys)}")
-    print(f"[info] only_base={only_base}, only_cand={only_cand}")
-    if args.aggregate_base_ranks != "none" or args.aggregate_cand_ranks != "none":
-        print(
-            f"[info] aggregation: base={args.aggregate_base_ranks}({base_agg_groups} groups), "
-            f"cand={args.aggregate_cand_ranks}({cand_agg_groups} groups)"
-        )
-    if base_truncated_groups > 0 or cand_truncated_groups > 0:
-        print(
-            f"[warn] aggregation_truncated_groups: base={base_truncated_groups}, "
-            f"cand={cand_truncated_groups}"
-        )
-    if base_dup > 0 or cand_dup > 0:
-        print(f"[warn] duplicate_keys_overwritten: base={base_dup}, cand={cand_dup}")
+    print(f"[info] only_base={len(base_keys - cand_keys)}, only_cand={len(cand_keys - base_keys)}")
 
     if not common_keys:
         print("[error] no common keys to compare")
-        base_axes = summarize_entry_axes(base_map)
-        cand_axes = summarize_entry_axes(cand_map)
+        base_axes = summarize_axes(base_map)
+        cand_axes = summarize_axes(cand_map)
         print(
             "[debug] base: "
             f"steps={base_axes['steps']} comm_modes={base_axes['comm_modes']} "
@@ -659,75 +585,42 @@ def main() -> None:
             f"steps={cand_axes['steps']} comm_modes={cand_axes['comm_modes']} "
             f"proj_types={cand_axes['proj_types']} ranks={cand_axes['ranks']}"
         )
-        if not args.ignore_comm_mode_in_key:
-            print(
-                "[hint] If comparing tp=1(local) vs tp>1(all_reduce), use "
-                "--base-comm-mode local --cand-comm-mode all_reduce --ignore-comm-mode-in-key"
-            )
-        print(
-            "[hint] For pre_all_reduce, compare aggregated pre against post: "
-            "--base-rank -1 --cand-rank 0 --aggregate-base-ranks sum "
-            "--base-comm-mode pre_all_reduce --cand-comm-mode all_reduce "
-            "--ignore-comm-mode-in-key"
-        )
         return
 
-    tensor_cache: dict[Path, list[float]] = {}
+    tensor_cache: dict[Path, torch.Tensor] = {}
     detail_rows: list[dict[str, Any]] = []
 
     for key in common_keys:
         base_entry = base_map[key]
         cand_entry = cand_map[key]
-        a = entry_to_flat_values(base_entry, tensor_cache)
-        b = entry_to_flat_values(cand_entry, tensor_cache)
+        a = entry_to_tensor(base_entry, tensor_cache)
+        b = entry_to_tensor(cand_entry, tensor_cache)
 
-        numel_base = len(a)
-        numel_cand = len(b)
-        numel_cmp = min(numel_base, numel_cand)
-        if numel_cmp == 0:
+        numel_cmp = min(int(a.numel()), int(b.numel()))
+        if numel_cmp <= 0:
             continue
-        a_cmp = a[:numel_cmp]
-        b_cmp = b[:numel_cmp]
+        a = a[:numel_cmp]
+        b = b[:numel_cmp]
+        diff = (a - b).abs()
 
-        max_abs = 0.0
-        abs_sum = 0.0
-        sq_sum = 0.0
-        for ai, bi in zip(a_cmp, b_cmp):
-            d = ai - bi
-            ad = abs(d)
-            if ad > max_abs:
-                max_abs = ad
-            abs_sum += ad
-            sq_sum += d * d
-        mean_abs = abs_sum / numel_cmp
-        rmse = math.sqrt(sq_sum / numel_cmp)
-        l2 = math.sqrt(sq_sum)
-
+        cosine = cosine_similarity_float64(a, b)
+        max_diff = float(diff.max().item())
+        comm_pair = (
+            base_entry.comm_mode
+            if base_entry.comm_mode == cand_entry.comm_mode
+            else f"{base_entry.comm_mode}->{cand_entry.comm_mode}"
+        )
         detail_rows.append(
             {
                 "step": base_entry.step,
                 "layer_idx": base_entry.layer_idx,
                 "proj_type": base_entry.proj_type,
-                "comm_mode": base_entry.comm_mode,
-                "comm_mode_base": base_entry.comm_mode,
-                "comm_mode_cand": cand_entry.comm_mode,
-                "comm_mode_pair": (
-                    base_entry.comm_mode
-                    if base_entry.comm_mode == cand_entry.comm_mode
-                    else f"{base_entry.comm_mode}->{cand_entry.comm_mode}"
-                ),
+                "comm_mode_pair": comm_pair,
                 "rank": base_entry.rank,
                 "prefix": base_entry.prefix,
-                "source_base": base_entry.source,
-                "source_cand": cand_entry.source,
                 "numel_cmp": numel_cmp,
-                "numel_base": numel_base,
-                "numel_cand": numel_cand,
-                "cosine": cosine_similarity(a_cmp, b_cmp),
-                "max_abs": max_abs,
-                "mean_abs": mean_abs,
-                "rmse": rmse,
-                "l2": l2,
+                "cosine": cosine,
+                "max_diff": max_diff,
             }
         )
 
@@ -740,67 +633,25 @@ def main() -> None:
         group_key = (row["step"], row["layer_idx"], row["proj_type"], row["comm_mode_pair"])
         summary_groups[group_key].append(row)
 
-    summary_rows: list[dict[str, Any]] = []
-    for (step, layer_idx, proj_type, comm_mode_pair), rows in sorted(summary_groups.items()):
+    print("\n[summary]")
+    print("step layer proj_type comm_mode pairs cosine_mean cosine_min max_diff_max")
+    for (step, layer_idx, proj_type, comm_pair), rows in sorted(summary_groups.items()):
         cosines = [float(r["cosine"]) for r in rows]
-        max_abs_list = [float(r["max_abs"]) for r in rows]
-        mean_abs_list = [float(r["mean_abs"]) for r in rows]
-        rmse_list = [float(r["rmse"]) for r in rows]
-        l2_list = [float(r["l2"]) for r in rows]
-        summary_rows.append(
-            {
-                "step": step,
-                "layer_idx": layer_idx,
-                "proj_type": proj_type,
-                "comm_mode": comm_mode_pair,
-                "pairs": len(rows),
-                "cosine_mean": sum(cosines) / len(cosines),
-                "cosine_min": min(cosines),
-                "max_abs_max": max(max_abs_list),
-                "mean_abs_mean": sum(mean_abs_list) / len(mean_abs_list),
-                "rmse_mean": sum(rmse_list) / len(rmse_list),
-                "l2_mean": sum(l2_list) / len(l2_list),
-            }
-        )
-
-    print("\n[summary] step/layer/proj/comm")
-    print(
-        "step layer proj_type comm_mode pairs cosine_mean cosine_min max_abs_max mean_abs_mean rmse_mean l2_mean"
-    )
-    for row in summary_rows:
+        max_diffs = [float(r["max_diff"]) for r in rows]
         print(
-            f"{row['step']:>4} "
-            f"{str(row['layer_idx']):>5} "
-            f"{row['proj_type']:<9} "
-            f"{row['comm_mode']:<14} "
-            f"{row['pairs']:>5} "
-            f"{safe_float(row['cosine_mean'])} "
-            f"{safe_float(row['cosine_min'])} "
-            f"{safe_float(row['max_abs_max'])} "
-            f"{safe_float(row['mean_abs_mean'])} "
-            f"{safe_float(row['rmse_mean'])} "
-            f"{safe_float(row['l2_mean'])}"
+            f"{step:>4} "
+            f"{str(layer_idx):>5} "
+            f"{proj_type:<13} "
+            f"{comm_pair:<24} "
+            f"{len(rows):>5} "
+            f"{safe_float(sum(cosines) / len(cosines))} "
+            f"{safe_float(min(cosines))} "
+            f"{safe_float(max(max_diffs))}"
         )
-
-    warn_rows = [
-        r
-        for r in summary_rows
-        if (r["cosine_min"] < args.warn_cos_threshold or r["max_abs_max"] > args.warn_max_abs_threshold)
-    ]
-    if warn_rows:
-        print(
-            f"\n[warn] {len(warn_rows)} summary rows exceeded thresholds: "
-            f"cosine_min<{args.warn_cos_threshold} or max_abs_max>{args.warn_max_abs_threshold}"
-        )
-        for row in warn_rows:
-            print(
-                f"  step={row['step']} layer={row['layer_idx']} proj={row['proj_type']} comm={row['comm_mode']} "
-                f"cosine_min={row['cosine_min']:.6e} max_abs_max={row['max_abs_max']:.6e}"
-            )
 
     if args.print_details:
-        print("\n[details] matched keys")
-        print("step layer proj_type comm_mode_pair rank cosine max_abs mean_abs rmse l2 numel_cmp prefix")
+        print("\n[details]")
+        print("step layer proj_type comm_mode rank cosine max_diff numel_cmp prefix")
         for row in sorted(
             detail_rows,
             key=lambda x: (
@@ -815,65 +666,14 @@ def main() -> None:
             print(
                 f"{row['step']:>4} "
                 f"{str(row['layer_idx']):>5} "
-                f"{row['proj_type']:<9} "
-                f"{row['comm_mode_pair']:<14} "
+                f"{row['proj_type']:<13} "
+                f"{row['comm_mode_pair']:<24} "
                 f"{row['rank']:>4} "
-                f"{safe_float(row['cosine'])} "
-                f"{safe_float(row['max_abs'])} "
-                f"{safe_float(row['mean_abs'])} "
-                f"{safe_float(row['rmse'])} "
-                f"{safe_float(row['l2'])} "
+                f"{safe_float(float(row['cosine']))} "
+                f"{safe_float(float(row['max_diff']))} "
                 f"{row['numel_cmp']:>8} "
                 f"{row['prefix']}"
             )
-
-    if args.summary_csv is not None:
-        write_csv(
-            args.summary_csv,
-            summary_rows,
-            [
-                "step",
-                "layer_idx",
-                "proj_type",
-                "comm_mode",
-                "pairs",
-                "cosine_mean",
-                "cosine_min",
-                "max_abs_max",
-                "mean_abs_mean",
-                "rmse_mean",
-                "l2_mean",
-            ],
-        )
-        print(f"\n[info] summary csv written: {args.summary_csv}")
-
-    if args.details_csv is not None:
-        write_csv(
-            args.details_csv,
-            detail_rows,
-            [
-                "step",
-                "layer_idx",
-                "proj_type",
-                "comm_mode",
-                "comm_mode_base",
-                "comm_mode_cand",
-                "comm_mode_pair",
-                "rank",
-                "prefix",
-                "source_base",
-                "source_cand",
-                "numel_cmp",
-                "numel_base",
-                "numel_cand",
-                "cosine",
-                "max_abs",
-                "mean_abs",
-                "rmse",
-                "l2",
-            ],
-        )
-        print(f"[info] details csv written: {args.details_csv}")
 
 
 if __name__ == "__main__":

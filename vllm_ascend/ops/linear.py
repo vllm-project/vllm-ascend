@@ -45,6 +45,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import (
+    dump_tp_attn_qkv_tensors_if_needed,
     dump_tp_down_input_if_needed,
     dump_tp_gate_up_tensors_if_needed,
     dump_tp_row_output_if_needed,
@@ -472,6 +473,15 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             return self.custom_op.apply(input_)
 
         output = super().forward(input_)
+        dump_tp_attn_qkv_tensors_if_needed(
+            prefix=self.prefix,
+            input_tensor=input_,
+            output_tensor=output,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            comm_group=get_tp_group(),
+            source_prefix="AscendColumnParallelLinear",
+        )
         if "gate_up_proj" in self.prefix:
             output_tensor = output[0] if isinstance(output, tuple) else output
             dump_tp_gate_up_tensors_if_needed(
