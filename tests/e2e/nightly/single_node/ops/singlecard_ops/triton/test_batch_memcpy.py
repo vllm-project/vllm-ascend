@@ -35,4 +35,4 @@ def test_batch_memcpy(dtype):
     batch_memcpy_kernel[grid](src_addr_list, dst_addr_list, sizes, BLOCK_SIZE=BLOCK_SIZE)
 
     for i in range(len(sizes)):
-        assert src_tensors_list[i] == dst_tensors_list[i]
+        torch.testing.assert_close(src_tensors_list[i], dst_tensors_list[i], rtol=0, atol=0)
