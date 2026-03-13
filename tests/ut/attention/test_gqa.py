@@ -182,7 +182,6 @@ def _test_npu_attention_correctness(
         s_len = seq_lens[i]
         q_len = query_lens[i]
         context_len = s_len - q_len
-        print(f"s_len is {s_len}, q_len is {q_len}, context_len is {context_len}")
 
         # Generate Q, K, V for the whole sequence to be used in SDPA
         q = torch.randn(q_len, num_q_heads, head_size, dtype=dtype, device=device)
@@ -275,7 +274,7 @@ def _test_npu_attention_correctness(
         backend_output,
         sdpa_output,
         rtol=rtol,
-        atol=atol,
+        atol=atol, 
         msg=partial(error_msg, backend_name="GQA"),
     )
 
