@@ -39,7 +39,7 @@ on:
       vllm_version:
         required: false
         type: string
-        default: "v0.16.0"
+        default: "v0.17.0"
       is_pr_test:
         required: true
         type: boolean
