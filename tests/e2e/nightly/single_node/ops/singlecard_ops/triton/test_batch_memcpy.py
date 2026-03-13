@@ -27,7 +27,7 @@ def test_batch_memcpy(dtype):
     src_addr_list = torch.tensor(src_addr_list, dtype=torch.int64, device=device)
     dst_addr_list = torch.tensor(dst_addr_list, dtype=torch.int64, device=device)
 
-    batch = src_addr_list.shape[0]
+    batch = sizes.shape[0]
 
     grid = (batch,)
     # using larger block_size to accelerate copy.
