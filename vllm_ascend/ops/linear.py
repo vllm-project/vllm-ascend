@@ -482,7 +482,19 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             comm_group=get_tp_group(),
             source_prefix="AscendColumnParallelLinear",
         )
-        if any(tag in self.prefix for tag in ("gate_up_proj", "gate_proj", "up_proj")):
+        if any(
+            tag in self.prefix
+            for tag in (
+                "gate_up_proj",
+                "gate_proj",
+                "up_proj",
+                "dense_h_to_4h",
+                "c_fc",
+                "fc1",
+                ".w1",
+                ".w3",
+            )
+        ):
             output_tensor = output[0] if isinstance(output, tuple) else output
             dump_tp_gate_up_tensors_if_needed(
                 prefix=self.prefix,

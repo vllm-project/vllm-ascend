@@ -19,10 +19,55 @@
 import torch
 from torch import nn
 from vllm.config import get_current_vllm_config
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+
+
+def _dump_rmsnorm_io_if_needed(x_in: torch.Tensor, x_out: torch.Tensor) -> None:
+    try:
+        from vllm_ascend.ops.linear_op import dump_tp_tensor_if_needed
+    except Exception:
+        return
+    try:
+        forward_context = get_forward_context()
+    except AssertionError:
+        return
+
+    layer_idx = getattr(forward_context, "layer_idx", None)
+    if layer_idx is None:
+        return
+    try:
+        layer_idx = int(layer_idx)
+    except (TypeError, ValueError):
+        return
+
+    # Keep step id aligned with row-linear dumps:
+    # only layer0 norms run before the layer0 o_proj anchor.
+    step_offset = 1 if layer_idx == 0 else 0
+    prefix = f"model.layers.{layer_idx}.input_layernorm"
+    tp_rank = get_tp_group().rank_in_group
+    dump_tp_tensor_if_needed(
+        prefix=prefix,
+        output=x_in,
+        tp_rank=tp_rank,
+        comm_mode="local",
+        source="AscendRMSNorm.input",
+        proj_type="rmsnorm_input",
+        decode_step_offset=step_offset,
+    )
+    dump_tp_tensor_if_needed(
+        prefix=prefix,
+        output=x_out,
+        tp_rank=tp_rank,
+        comm_mode="local",
+        source="AscendRMSNorm.output",
+        proj_type="rmsnorm_output",
+        decode_step_offset=step_offset,
+    )
 
 
 class AscendRMSNorm(RMSNorm):
@@ -50,6 +95,7 @@ class AscendRMSNorm(RMSNorm):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         import torch_npu
 
+        x_in = x
         if residual is not None:
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
@@ -59,11 +105,13 @@ class AscendRMSNorm(RMSNorm):
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
                 if self.bias is not None:
                     x.add_(self.bias)
+            _dump_rmsnorm_io_if_needed(x_in, x)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias is not None:
             x.add_(self.bias)
+        _dump_rmsnorm_io_if_needed(x_in, x)
 
         weight_prefetch_method = get_weight_prefetch_method()
         weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(x)
@@ -78,6 +126,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         import torch_npu
 
+        x_in = x
         if residual is not None:
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
@@ -85,9 +134,11 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
                 )
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
+            _dump_rmsnorm_io_if_needed(x_in, x)
             return x, residual
 
         x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
+        _dump_rmsnorm_io_if_needed(x_in, x)
         return x
 
 

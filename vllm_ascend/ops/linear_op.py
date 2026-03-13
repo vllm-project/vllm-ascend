@@ -351,18 +351,35 @@ def _all_gather_last_dim_if_needed(comm_group, tensor: torch.Tensor, tp_size: in
 
 
 def _is_attn_qkv_prefix(prefix: str) -> bool:
+    lowered = prefix.lower()
+    # Attention input linears before o_proj.
+    # Keep this inclusive to cover diverse model naming conventions.
     qkv_prefixes = (
         "qkv_proj",
         "query_key_value",
         "attn_qkv_proj",
+        "fused_qkv_a_proj",
         "in_proj_qkvz",
+        "in_proj",
         "c_attn",
         "wqkv",
+        "to_qkv",
+        "q_a_proj",
+        "kv_a_proj",
         "q_proj",
         "k_proj",
         "v_proj",
+        ".wq",
+        ".wk",
+        ".wv",
     )
-    return any(tag in prefix for tag in qkv_prefixes)
+    if any(tag in lowered for tag in qkv_prefixes):
+        return True
+    if ("self_attn" in lowered or "attention" in lowered) and not (
+        "o_proj" in lowered or "out_proj" in lowered or "attention.dense" in lowered
+    ):
+        return True
+    return False
 
 
 def dump_tp_attn_qkv_tensors_if_needed(
@@ -382,9 +399,10 @@ def dump_tp_attn_qkv_tensors_if_needed(
     if not isinstance(output, torch.Tensor):
         return
 
-    # qkv happens before o_proj in one decode token. Shift by +1 so the step id
-    # aligns with that token's o_proj/down_proj dumps.
-    step_offset = 1
+    # qkv in layer0 happens before the step anchor (layer0 o_proj), while qkv in
+    # layer1+ happens after the anchor in the same decode forward.
+    layer_idx = _get_layer_idx_from_prefix(prefix)
+    step_offset = 1 if layer_idx == 0 else 0
 
     if _tp_dump_extra_any("attn_norm_output", "norm_output"):
         dump_tp_tensor_if_needed(

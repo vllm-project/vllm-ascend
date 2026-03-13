@@ -34,7 +34,7 @@ LAYER_PATTERNS = (
 
 PT_DUMP_PATTERN = re.compile(
     r"^step(?P<step>\d+)_rank(?P<rank>\d+)_(?:(?P<comm_mode>.+)_)?"
-    r"(?P<proj_type>o_proj|down_proj|attn_norm_output|qkv_input|qkv_output|gate_up_input|gate_up_output|down_input)"
+    r"(?P<proj_type>o_proj|down_proj|attn_norm_output|rmsnorm_input|rmsnorm_output|qkv_input|qkv_output|gate_up_input|gate_up_output|down_input)"
     r"_(?P<prefix>.+)\.pt$"
 )
 
@@ -494,7 +494,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--proj",
         type=str,
-        default="o_proj,attn_norm_output,qkv_input,qkv_output,gate_up_input,gate_up_output,down_proj",
+        default="o_proj,rmsnorm_input,rmsnorm_output,qkv_input,qkv_output,gate_up_input,gate_up_output,down_proj",
         help="Proj filter csv",
     )
     parser.add_argument("--comm-mode", type=str, default="", help="Comm mode filter for both sides")
