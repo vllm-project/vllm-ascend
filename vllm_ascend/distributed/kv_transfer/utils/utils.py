@@ -261,6 +261,7 @@ def get_transfer_mappings(
     pd_head_mapping: dict[int, set],
     d_trans_count_mapping: dict[tuple[str, int], int],
     req_meta,
+    block_group_idx: int,
     p_parallel_info: parallel_info,
     req_id: str,
     transed_idx: int,
@@ -272,15 +273,17 @@ def get_transfer_mappings(
     transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
     p_head_group_rank = (tp_rank - dcp_rank) // p_parallel_info.dcp_size
     p_block_idxs: list[int] = p_rank_block_mapping[pcp_rank][p_head_group_rank][dcp_rank]
+    p_block_ids = req_meta.local_block_ids[block_group_idx]
+    d_block_ids = req_meta.remote_block_ids[block_group_idx]
     for p_block_idx, logic_block_idx in enumerate(p_block_idxs):
         if logic_block_idx < transed_idx or logic_block_idx >= to_trans_idx:
             continue
         for d_head_group_rank in pd_head_mapping[p_head_group_rank]:
-            p_block_id = req_meta.local_block_ids[p_block_idx]
+            p_block_id = p_block_ids[p_block_idx]
             remote_host = d_block_rank_mapping[logic_block_idx][d_head_group_rank]["host"]
             remote_port = d_block_rank_mapping[logic_block_idx][d_head_group_rank]["port"]
             d_block_idx = d_block_rank_mapping[logic_block_idx][d_head_group_rank]["block_idx"]
-            d_block_id = req_meta.remote_block_ids[d_block_idx]
+            d_block_id = d_block_ids[d_block_idx]
             if (remote_host, remote_port) not in transfer_mappings:
                 transfer_mappings[(remote_host, remote_port)] = {
                     "local_block_ids": [],
