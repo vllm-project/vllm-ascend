@@ -243,40 +243,30 @@ def test_recover_request_lengths_empty():
 # # =============================================================================
 
 
-# @patch("vllm_ascend.worker.kvcomp_utils.extract_layer_index")
-# def test_bind_hashk_cache_basic(mock_extract):
-#     """Test bind_hashk_cache populates runner and forward_context."""
-#     mock_extract.side_effect = lambda name, _: (
-#         0 if "layers.0" in name else (1 if "layers.1" in name else 2)
-#     )
+@patch("vllm_ascend.worker.kvcomp_utils.extract_layer_index")
+def test_bind_hashk_cache_basic(mock_extract):
+    """Test bind_hashk_cache populates runner and forward_context."""
+    mock_extract.side_effect = lambda name, _: (
+        0 if "layers.0" in name else (1 if "layers.1" in name else 2)
+    )
 
-#     cache0 = torch.zeros(2, 8, 128, 16, dtype=torch.uint8)
-#     cache1 = torch.ones(2, 8, 128, 16, dtype=torch.uint8)
-#     hashk_caches = {"model.layers.0.self_attn": cache0, "model.layers.1.self_attn": cache1}
+    cache0 = torch.zeros(2, 8, 128, 16, dtype=torch.uint8)
+    cache1 = torch.ones(2, 8, 128, 16, dtype=torch.uint8)
+    hashk_caches = {"model.layers.0.self_attn": cache0, "model.layers.1.self_attn": cache1}
 
-#     attn0 = MagicMock()
-#     attn1 = MagicMock()
-#     forward_context = {
-#         "model.layers.0.self_attn": attn0,
-#         "model.layers.1.self_attn": attn1,
-#     }
+    attn0 = MagicMock()
+    attn1 = MagicMock()
+    forward_context = {
+        "model.layers.0.self_attn": attn0,
+        "model.layers.1.self_attn": attn1,
+    }
 
-#     runner_hashk_caches = []
+    runner_hashk_caches = []
 
-#     bind_hashk_cache(hashk_caches, forward_context, runner_hashk_caches, num_attn_module=1)
+    bind_hashk_cache(hashk_caches, forward_context, runner_hashk_caches, num_attn_module=1)
 
-#     assert len(runner_hashk_caches) == 2
-#     assert runner_hashk_caches[0] is cache0
-#     assert runner_hashk_caches[1] is cache1
-#     assert attn0.hashk_cache == [cache0]
-#     assert attn1.hashk_cache == [cache1]
-
-
-# def test_bind_hashk_cache_assert_nonempty_runner():
-#     """Test bind_hashk_cache asserts runner_hashk_caches is empty."""
-#     hashk_caches = {"layers.0": torch.zeros(1, 1, 1, 1, dtype=torch.uint8)}
-#     forward_context = {"layers.0": MagicMock()}
-#     runner_hashk_caches = [torch.zeros(1, dtype=torch.uint8)]  # not empty
-
-#     with pytest.raises(AssertionError):
-#         bind_hashk_cache(hashk_caches, forward_context, runner_hashk_caches)
+    assert len(runner_hashk_caches) == 2
+    assert runner_hashk_caches[0] is cache0
+    assert runner_hashk_caches[1] is cache1
+    assert attn0.hashk_cache == [cache0]
+    assert attn1.hashk_cache == [cache1]
