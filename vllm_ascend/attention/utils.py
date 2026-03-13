@@ -331,3 +331,19 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)
+
+
+def enabling_fa_quant(vllm_config: VllmConfig, layer_name) -> bool:
+    is_decode_instance = (
+        vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.is_kv_consumer
+        and not vllm_config.kv_transfer_config.is_kv_producer
+    )
+    quant_config = vllm_config.quant_config
+    enable_fa_quant = quant_config.enable_fa_quant if quant_config is not None else False
+    fa_quant_layer = False
+    if is_decode_instance and enable_fa_quant:
+        id = "".join(re.findall(r"\.(\d+)\.", layer_name))
+        if int(id) in quant_config.kvcache_quant_layers:
+            fa_quant_layer = True
+    return fa_quant_layer

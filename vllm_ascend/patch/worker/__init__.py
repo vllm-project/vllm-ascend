@@ -26,6 +26,7 @@ if not vllm_version_is("v0.16.0"):
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
 
 # isort: off
+import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 import vllm_ascend.patch.worker.patch_unquantized_gemm  # noqa
 import vllm_ascend.patch.worker.patch_bert  # noqa
