@@ -179,7 +179,6 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         quant_config = self.get_quant_config(vllm_config)
         m = getattr(config, "vwn_m", 1)
         expanded_factor = getattr(config, "vwn_r", 1)
-        self.hidden_size = config.hiddensize
         wider_dim = int(self.hidden_size * expanded_factor)
         self.wider_dim = wider_dim
 
