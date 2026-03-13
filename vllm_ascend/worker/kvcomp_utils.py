@@ -525,7 +525,7 @@ class HashEncoder:
         # [N * hash_bits]
         xW_flat = xW.view(-1)
         # [N*hash_numbers], where hash_numbers = hash_bits // 8
-        packed_codes_flat = torch.ops._C_ascend.npu_sign_bits_pack(xW_flat, size=1)
+        packed_codes_flat = torch_npu.npu_sign_bits_pack(xW_flat, size=1)
 
         # e.g., [s1, s2, s3, hash_numbers]
         out_shape = orig_shape + (self.hash_numbers,)
