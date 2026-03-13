@@ -449,7 +449,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[1], N)
         self.assertEqual(result.shape[2], self.impl.kv_lora_rank + 1)
 
-    @patch('vllm_ascend.attention.context_parallel.mla_cp.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch('torch_npu.npu_attention_update')
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)

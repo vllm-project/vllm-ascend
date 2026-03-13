@@ -184,7 +184,7 @@ def test_token_dispatcher_with_all_gather_quant(
 ):
     context_mock = MagicMock()
     context_mock.fused_moe_state = 0
-    with patch("vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context",
+    with patch("vllm_ascend.ascend_forward_context.get_forward_context",
                return_value=context_mock):
         a = torch.randn((m, k), device=device, dtype=dtype) / 10
         w1 = torch.randn((e, k, 2 * n), device=device, dtype=torch.int8)
