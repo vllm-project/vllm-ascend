@@ -102,6 +102,8 @@
       "Qwen/Qwen3-VL-30B-A3B-Instruct",
       "Qwen/Qwen3-VL-32B-Instruct",
       "Qwen/Qwen3-VL-8B-Instruct",
+      "Qwen/Qwen3.5-27B",
+      "Qwen/Qwen3.5-35B-A3B",
       "RedHatAI/Qwen3-32B-speculator.eagle3",
       "RedHatAI/Qwen3-8B-speculator.eagle3",
       "Shanghai_AI_Laboratory/internlm--chat-7b",
