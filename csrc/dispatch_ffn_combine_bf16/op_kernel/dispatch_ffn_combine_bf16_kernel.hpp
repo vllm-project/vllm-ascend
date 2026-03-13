@@ -390,9 +390,6 @@ private:
             int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
             gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB *>(GetTensorAddr<int8_t>(arrayGroupIdx, params.ptrB1)));
             gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale *>(GetTensorAddr<int64_t>(arrayGroupIdx, params.ptrScale1)));
-
-            AscendC::PipeBarrier<PIPE_ALL>();
-
             if (currentM <= L1TileShape::M) {
                 gmB1.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
             }
@@ -894,15 +891,37 @@ private:
         CombineV2(params, blockEpilogue2);
 
         AscendC::SyncAll<true>();
+        #ifndef __CROSSRANKSYNCANDALLGATHERV1__
         ResetTokenPerExpert(params.EP * AlignUp(params.EP * params.expertPerRank, 128));
-        shmem.CrossRankSync();
-
-        MoeTokenUnpermuteTilingData tilingData;
-        MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum);
-        KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
-
-        kernelMoeTokenUnpermuteOp.Init(shmem() + peermemInfo.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
-        kernelMoeTokenUnpermuteOp.Process();
+        #endif
+        shmem.InitStatusTargetSum();
+        if (get_subblockid() == 0) {
+            AscendC::LocalTensor<int32_t> ctrBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
+            shmem.CrossRankSyncV2Set(ctrBuffer);
+        } else {
+            uint32_t uboffset = 0;
+            uint32_t aicCoreNum = coreNum / 2;
+            uint32_t aicCoreIdx = get_block_idx();
+            uint32_t sendRankNum_ = params.EP / aicCoreNum;
+            uint32_t remainderRankNum = params.EP % aicCoreNum;
+            if (aicCoreIdx < remainderRankNum) {
+                sendRankNum_++;
+            }
+            AscendC::LocalTensor<float> statusTensor = resource.ubBuf.template GetBufferByByte<float>(uboffset);
+            uboffset += sendRankNum_ * UB_ALIGN;
+            AscendC::LocalTensor<float> gatherMaskOutTensor = resource.ubBuf.template GetBufferByByte<float>(uboffset);
+            uboffset += AlignUp(params.EP * sizeof(float), 32);
+            AscendC::LocalTensor<uint32_t> gatherTmpTensor = resource.ubBuf.template GetBufferByByte<uint32_t>(uboffset);
+            uboffset += AlignUp(sizeof(uint32_t), 32);
+            AscendC::LocalTensor<float> statusSumOutTensor = resource.ubBuf.template GetBufferByByte<float>(uboffset);
+            uboffset += AlignUp(sizeof(float), 32);
+            shmem.CrossRankSyncV2Wait(statusTensor, gatherMaskOutTensor, gatherTmpTensor, statusSumOutTensor);
+            MoeTokenUnpermuteTilingData tilingData;
+            MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum / 2);
+            KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
+            kernelMoeTokenUnpermuteOp.Init(shmem() + peermemInfo.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
+            kernelMoeTokenUnpermuteOp.Process();
+        }
 
     }
 
