@@ -17,7 +17,7 @@ vllm serve Qwen/Qwen3-VL-2B-Instruct \
     --compilation-config '{"pass_config": {"enable_sp": true, , "sp_min_token_num": 1000}}'
 ```
 
-- `"pass_config": {"enable_sp": true}`: This is the switch for SP. Since SP relies on graph mode, it must be enabled and is not supported in eager mode.
+- `"enable_sp"`: This is the switch for SP. Since SP relies on graph mode, it is not supported in eager mode.
 - `sp_min_token_num` (from upstream vllm's `pass_config`): Based on our experiments, when the number of tokens is small (empirical value is less than 1000), SP can actually bring negative benefits. This is because when the communication volume is small, the fixed overhead of the communication operator becomes the dominant factor. SP will only take effect when `num_tokens >= sp_min_token_num`. **The default value is 1000 on Ascend, which generally does not need to be modified.** To customize, use `--compilation-config '{"pass_config": {"enable_sp": true, "sp_min_token_num": 512}}'`. The value will be appended into `compile_ranges_split_points`, which splits the graph compilation range and checks whether the pass is applicable per range.
 
 Without modifying `sp_min_token_num`, the simplest way and recommended way to enable SP is:
@@ -94,3 +94,16 @@ After `SequenceParallelismPass` applies, the MoE model computation graph looks l
 | `LastLayerAllgatherRMSNormPattern`             | Same (last layer, no residual)           | Same                                    |
 | `Qwen3VLMiddleLayerAllgatherAddRMSNormPattern` | `all_gather` + slice + add + `layernorm` | add(chunk) + `layernorm` + `all_gather` |
 | `AllGatherChunkNoOpPattern`                    | `all_gather` + `sequence_parallel_chunk_impl` | identity (no-op)                    |
+
+### FAQ
+
+#### Q1: Is SP enabled by default?
+
+No, SP is not enabled by default. SP is currently in the experimental stage and will be enabled by default in the future.
+
+The processing flow of `enable_sp` in the code is:
+
+- In `pass_config`, `enable_sp` and `sp_min_token_num` default to `None`
+- `NPUPlatform.apply_config_platform_defaults`: If `enable_sp` is `True` and `sp_min_token_num` is None, set default `sp_min_token_num` (1000 for Dense models, 1 for MoE models)
+- `VllmConfig._apply_optimization_level_defaults`: `enable_sp` is set to `True` for dense models.
+- `VllmConfig.__post_init__`: If `sp_min_token_num` is still `None`, then `enable_sp` is set to `False`
