@@ -32,6 +32,8 @@ from vllm_ascend.worker.kvcomp_utils import (
     recover_request_lengths,
 )
 
+NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
+print(f"NPU_AVAILABLE={NPU_AVAILABLE}")
 
 # =============================================================================
 # test KVCompConfig
@@ -145,7 +147,8 @@ def test_kvcomp_metadata_creation():
     assert metadata.hash_encoder_nope is None
     assert metadata.hash_encoder_rope is None
 
-
+# when build kvcomp metadata, we will create hashencoder which requires NPU
+@pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
 def test_build_kvcomp_metadata():
     """Test build_kvcomp_metadata."""
     vllm_config = MagicMock()
@@ -178,61 +181,29 @@ def test_build_kvcomp_metadata():
 # # test HashEncoder
 # # =============================================================================
 
-# NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
 
+@pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
+def test_hash_encoder():
+    """Test HashEncoder init with valid params (NPU only)."""
+    encoder = HashEncoder(
+        input_dim=128,
+        hash_bits=128,
+        dtype=torch.float16,
+        device=torch.device("npu:0"),
+    )
+    assert encoder.input_dim == 128
+    assert encoder.hash_bits == 128
+    assert encoder.hash_numbers == 16
+    assert encoder.hash_weights.shape == (128, 128)
+    
+    x = torch.randn((2, 8, 128), device=torch.device("npu:0"), dtype=torch.float16)
 
-# @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
-# def test_hash_encoder_init_valid():
-#     """Test HashEncoder init with valid params (NPU only)."""
-#     encoder = HashEncoder(
-#         input_dim=128,
-#         hash_bits=128,
-#         dtype=torch.float16,
-#         device=torch.device("npu:0"),
-#     )
-#     assert encoder.input_dim == 128
-#     assert encoder.hash_bits == 128
-#     assert encoder.hash_numbers == 16
-#     assert encoder.hash_weights.shape == (128, 128)
+    hash_codes = encoder.compute_hash(x)
+    assert hash_codes.shape == (2, 8, 16)
 
+    unpacked_bits = encoder._unpack_hash(hash_codes)
+    assert unpacked_bits.shape == (2, 8, 128)
 
-# def test_hash_encoder_init_invalid_hash_bits():
-#     """Test HashEncoder init raises when hash_bits not multiple of 8."""
-#     with pytest.raises(ValueError, match="hash_bits must be a multiple of 8"):
-#         HashEncoder(
-#             input_dim=128,
-#             hash_bits=100,
-#             dtype=torch.float16,
-#             device=torch.device("npu:0"),  # may fail if NPU unavailable
-#         )
-
-
-# @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
-# def test_hash_encoder_set_hash_weight_valid():
-#     """Test HashEncoder.set_hash_weight with matching tensor (NPU only)."""
-#     encoder = HashEncoder(
-#         input_dim=8,
-#         hash_bits=16,
-#         dtype=torch.float16,
-#         device=torch.device("npu:0"),
-#     )
-#     weights = torch.randn(8, 16, dtype=torch.float16, device=torch.device("npu:0"))
-#     encoder.set_hash_weight(weights)
-#     assert torch.allclose(encoder.hash_weights, weights)
-
-
-# @pytest.mark.skipif(not NPU_AVAILABLE, reason="NPU not available")
-# def test_hash_encoder_set_hash_weight_invalid_shape():
-#     """Test HashEncoder.set_hash_weight raises on shape mismatch (NPU only)."""
-#     encoder = HashEncoder(
-#         input_dim=8,
-#         hash_bits=16,
-#         dtype=torch.float16,
-#         device=torch.device("npu:0"),
-#     )
-#     wrong_weights = torch.randn(4, 16, dtype=torch.float16, device=torch.device("npu:0"))
-#     with pytest.raises(ValueError, match="hash_weights shape"):
-#         encoder.set_hash_weight(wrong_weights)
 
 
 # # =============================================================================
