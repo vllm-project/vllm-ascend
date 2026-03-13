@@ -199,9 +199,10 @@ def _tp_dump_comm_mode_match(record_mode: str) -> bool:
     if _TP_DUMP_COMM_MODE == "all":
         return True
     # Keep default behavior practical for TP comm debugging:
-    # selecting "all_reduce" dumps both pre/post all-reduce snapshots.
+    # selecting "all_reduce" dumps pre/post all-reduce snapshots and also
+    # local/custom outputs, so tp=1 and custom-tp paths are not silently dropped.
     if _TP_DUMP_COMM_MODE == "all_reduce":
-        return record_mode in ("all_reduce", "pre_all_reduce")
+        return record_mode in ("all_reduce", "pre_all_reduce", "local", "custom", "local_shard", "all_gather_full")
     return record_mode == _TP_DUMP_COMM_MODE
 
 
