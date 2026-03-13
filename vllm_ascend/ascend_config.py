@@ -159,6 +159,10 @@ class AscendConfig:
             and get_ascend_device_type() != AscendDeviceType.A5
         )
 
+        self.enable_sp_by_pass = (
+            not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
+        )
+
     @staticmethod
     def _get_compile_ranges(compilation_config):
         return compilation_config.compile_ranges_endpoints

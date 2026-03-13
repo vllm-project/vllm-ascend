@@ -19,7 +19,6 @@ from abc import ABC, abstractmethod
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch_npu
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_pcp_group,
@@ -334,7 +333,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     ) -> MoEPrepareOutput:
         pertoken_scale = None
         if quant_type == QuantType.W8A8:
-            hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            # hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            pass
         elif quant_type == QuantType.MXFP8:
             # TODO(linfeng): MXFP8 with AllGather+EP currently does not pre-quantize
             # per-token activations in prepare. Keep quantization in the MoE MLP path.
