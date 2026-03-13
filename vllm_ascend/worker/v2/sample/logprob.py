@@ -78,7 +78,6 @@ def compute_token_logprobs(
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,  # type: ignore
-        PADDED_TOPK=triton.next_power_of_2(num_logprobs),
+        PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
     )
     return logprobs
-
