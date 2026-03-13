@@ -420,9 +420,6 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(self.drafter, AscendEagleProposer)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
                 self.rejection_sampler = RejectionSampler(self.sampler)
-            self.actual_seq_lengths_q = list(
-                range(self.decode_token_per_req, self.max_num_tokens + 1, self.decode_token_per_req)
-            )
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
@@ -2855,8 +2852,8 @@ class NPUModelRunner(GPUModelRunner):
                         # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
 
-                        target_idx += torch.prod(torch.tensor(target_shape)).item()
-                        tensor = raw_tensor.view(dtype)[start_idx:target_idx].view(target_shape)
+                        target_idx += math.prod(target_shape) * get_dtype_size(dtype)
+                        tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
