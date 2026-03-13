@@ -1170,3 +1170,48 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(mla_caches)
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.layer_metadata["encoder.layer.0"].block_len), 2)
+
+    def test_rebuild_kv_transfer_endpoint_producer_only_updates_host(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = True
+        self.vllm_config.kv_transfer_config.is_kv_consumer = False
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
+        worker.side_channel_host = "127.0.0.1"
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.reset"
+        ) as mock_reset:
+            worker.rebuild_kv_transfer_endpoint("10.0.0.8")
+
+        self.assertEqual(worker.side_channel_host, "10.0.0.8")
+        mock_reset.assert_not_called()
+
+    def test_rebuild_kv_transfer_endpoint_consumer_resets_and_reregisters(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        self.vllm_config.kv_transfer_config.is_kv_consumer = True
+        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
+        worker._registered_regions = SimpleNamespace(ptrs=[0x1000], lengths=[4096])
+        worker.kv_recv_layer_thread = None
+
+        new_engine = MagicMock()
+        new_engine.get_rpc_port.return_value = 7777
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.reset"
+            ) as mock_reset,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.get_transfer_engine",
+                return_value=new_engine,
+            ) as mock_get_engine,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.register_buffer"
+            ) as mock_register_buffer,
+        ):
+            worker.rebuild_kv_transfer_endpoint("10.0.0.8")
+
+        mock_reset.assert_called_once()
+        mock_get_engine.assert_called_once_with("10.0.0.8", device_name=None)
+        mock_register_buffer.assert_called_once_with([0x1000], [4096])
+        self.assertIs(worker.engine, new_engine)
+        self.assertEqual(worker.te_rpc_port, 7777)
+        self.assertEqual(worker.side_channel_host, "10.0.0.8")

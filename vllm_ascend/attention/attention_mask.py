@@ -16,7 +16,7 @@ import torch
 from vllm.distributed import get_pcp_group
 
 from vllm_ascend.platform import ModelConfig
-from vllm_ascend.utils import singleton
+from vllm_ascend.utils import is_restore, singleton
 
 
 def _generate_attn_mask(max_seq_len, dtype):
@@ -41,35 +41,52 @@ class AttentionMaskBuilder:
         self.chunked_prefill_attn_mask = None
         self.pcp_mla_mask = None
 
+        self.attn_mask_restore_first = True
+        self.splitfuse_attn_mask_restore_first = True
+        self.mla_mask_restore_first = True
+        self.pcp_mla_mask_restore_first = True
+
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
-        if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
+        need_restore_regen = is_restore() and self.attn_mask_restore_first
+        if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached or need_restore_regen:
             self.attn_mask_cache = _generate_attn_mask(max_seq_len, dtype)
             self._seq_len_cached = max_seq_len
+        if need_restore_regen:
+            self.attn_mask_restore_first = False
         assert self.attn_mask_cache is not None, "Something is wrong in generate_attn_mask."
         if self.attn_mask_cache.dtype != dtype:
             self.attn_mask_cache = self.attn_mask_cache.to(dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous().to(self.device, non_blocking=True)
 
     def get_splitfuse_attn_mask(self) -> torch.Tensor:
-        if self.chunked_prefill_attn_mask is None:
+        need_restore_regen = is_restore() and self.splitfuse_attn_mask_restore_first
+        if self.chunked_prefill_attn_mask is None or need_restore_regen:
             self.chunked_prefill_attn_mask = (
                 torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8).to(self.device)
             )
+        if need_restore_regen:
+            self.splitfuse_attn_mask_restore_first = False
         return self.chunked_prefill_attn_mask
 
     def get_mla_mask(self, dtype: torch.dtype) -> torch.Tensor:
-        if self.mla_mask is None or self.mla_mask.dtype != dtype:
+        need_restore_regen = is_restore() and self.mla_mask_restore_first
+        if self.mla_mask is None or self.mla_mask.dtype != dtype or need_restore_regen:
             if dtype == torch.float16:
                 mask_value = torch.finfo(torch.float32).min
             else:
                 mask_value = 1
             prefill_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
             self.mla_mask = torch.where(prefill_mask == 1, mask_value, 0).to(dtype)
+        if need_restore_regen:
+            self.mla_mask_restore_first = False
         return self.mla_mask
 
     def get_pcp_mla_mask(self, dtype: torch.dtype):
-        if self.pcp_mla_mask is None or self.pcp_mla_mask.dtype != dtype:
+        need_restore_regen = is_restore() and self.pcp_mla_mask_restore_first
+        if self.pcp_mla_mask is None or self.pcp_mla_mask.dtype != dtype or need_restore_regen:
             self.pcp_mla_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=dtype), 1)
+        if need_restore_regen:
+            self.pcp_mla_mask_restore_first = False
         return self.pcp_mla_mask
 
     def get_attention_mask(self, causal: bool, model_config: ModelConfig):
