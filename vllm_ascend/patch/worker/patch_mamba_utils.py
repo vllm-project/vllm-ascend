@@ -2,6 +2,7 @@
 
 
 import vllm
+from  vllm.v1.worker import mamba_utils
 
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 
@@ -17,5 +18,5 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
 
 
-vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
-vllm.v1.worker.mamba_utils.batch_memcpy = batch_memcpy
+mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
+mamba_utils.batch_memcpy = batch_memcpy
