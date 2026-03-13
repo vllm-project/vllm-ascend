@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from functools import wraps
 
 import torch
+import torch_npu
 import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
@@ -36,6 +37,7 @@ if not vllm_version_is("0.16.0"):
     from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter  # type: ignore
     from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -45,6 +47,7 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
     enable_sp,
     maybe_trans_nz,
     npu_stream_switch,
@@ -84,6 +87,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
 
     def apply(
         self,
