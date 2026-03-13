@@ -51,6 +51,15 @@ class DumpEntry:
     payload: Any
 
 
+@dataclass
+class QKVReassembleConfig:
+    enabled: bool
+    total_num_heads: int
+    total_num_kv_heads: int
+    head_size: int
+    v_head_size: int
+
+
 _TORCH = None
 
 
@@ -385,11 +394,106 @@ def entry_to_tensor(
     return tensor.reshape(-1) if flatten else tensor
 
 
+def _reassemble_qkv_shards(
+    group: list[DumpEntry],
+    cache: dict[Path, Any],
+    *,
+    cfg: QKVReassembleConfig,
+):
+    torch = get_torch()
+    if not group:
+        raise ValueError("Empty qkv shard group.")
+
+    shards = [entry_to_tensor(e, cache, flatten=False) for e in group]
+    ranks = [e.rank for e in group]
+    tp_size = len(shards)
+
+    if cfg.total_num_heads <= 0 or cfg.total_num_kv_heads <= 0:
+        raise ValueError("qkv heads must be positive.")
+    if cfg.head_size <= 0 or cfg.v_head_size <= 0:
+        raise ValueError("qkv head_size must be positive.")
+    if cfg.total_num_heads % tp_size != 0:
+        raise ValueError(
+            f"total_num_heads={cfg.total_num_heads} is not divisible by tp_size={tp_size}. "
+            "Please provide correct qkv metadata."
+        )
+
+    q_heads_local = cfg.total_num_heads // tp_size
+    if tp_size >= cfg.total_num_kv_heads:
+        if tp_size % cfg.total_num_kv_heads != 0:
+            raise ValueError(
+                f"tp_size={tp_size} is not divisible by total_num_kv_heads={cfg.total_num_kv_heads}. "
+                "Please provide correct qkv metadata."
+            )
+        kv_heads_local = 1
+        kv_head_replicas = tp_size // cfg.total_num_kv_heads
+    else:
+        if cfg.total_num_kv_heads % tp_size != 0:
+            raise ValueError(
+                f"total_num_kv_heads={cfg.total_num_kv_heads} is not divisible by tp_size={tp_size}. "
+                "Please provide correct qkv metadata."
+            )
+        kv_heads_local = cfg.total_num_kv_heads // tp_size
+        kv_head_replicas = 1
+
+    q_width = q_heads_local * cfg.head_size
+    k_width = kv_heads_local * cfg.head_size
+    v_width = kv_heads_local * cfg.v_head_size
+    local_expected = q_width + k_width + v_width
+
+    if any(t.dim() <= 0 for t in shards):
+        raise ValueError("qkv shard tensors must have ndim >= 1 for head-wise reassemble.")
+    ndims = {t.dim() for t in shards}
+    if len(ndims) != 1:
+        raise ValueError(f"Inconsistent shard ndim for qkv reassemble: {sorted(ndims)}")
+    ndim = next(iter(ndims))
+
+    # Align non-last dimensions for variable token counts caused by runtime behavior.
+    min_prefix_shape = [min(int(t.shape[d]) for t in shards) for d in range(ndim - 1)]
+    aligned = []
+    for t in shards:
+        slicing = tuple(slice(0, dim_size) for dim_size in min_prefix_shape) + (slice(None),)
+        aligned.append(t[slicing])
+
+    for idx, t in enumerate(aligned):
+        last_dim = int(t.shape[-1])
+        if last_dim < local_expected:
+            raise ValueError(
+                "qkv shard last dim is smaller than expected. "
+                f"rank={ranks[idx]} last_dim={last_dim} expected>={local_expected}"
+            )
+
+    q_parts = []
+    k_parts = []
+    v_parts = []
+    for t in aligned:
+        q = t[..., :q_width]
+        k = t[..., q_width : q_width + k_width]
+        v = t[..., q_width + k_width : q_width + k_width + v_width]
+        q_parts.append(q)
+        k_parts.append(k)
+        v_parts.append(v)
+
+    q_full = torch.cat(q_parts, dim=-1)
+    if kv_head_replicas == 1:
+        k_full = torch.cat(k_parts, dim=-1)
+        v_full = torch.cat(v_parts, dim=-1)
+    else:
+        # kv heads are replicated across rank groups; keep one representative
+        # per unique kv head to match tp=1 logical layout.
+        representative_indices = [i * kv_head_replicas for i in range(cfg.total_num_kv_heads)]
+        k_full = torch.cat([k_parts[i] for i in representative_indices], dim=-1)
+        v_full = torch.cat([v_parts[i] for i in representative_indices], dim=-1)
+
+    return torch.cat([q_full, k_full, v_full], dim=-1)
+
+
 def aggregate_entries_across_ranks(
     entries: dict[tuple[Any, ...], DumpEntry],
     *,
     method: str,
     ignore_comm_mode: bool,
+    qkv_cfg: QKVReassembleConfig | None = None,
 ) -> dict[tuple[Any, ...], DumpEntry]:
     torch = get_torch()
     if method == "none":
@@ -406,21 +510,29 @@ def aggregate_entries_across_ranks(
     for group in grouped.values():
         group = sorted(group, key=lambda e: e.rank)
         if method == "concat":
-            tensors = [entry_to_tensor(e, cache, flatten=False) for e in group]
-            if not tensors:
-                continue
-            rank_dims = [t.dim() for t in tensors]
-            if len(set(rank_dims)) == 1 and rank_dims[0] > 0:
-                ndim = rank_dims[0]
-                min_prefix_shape = [min(int(t.shape[d]) for t in tensors) for d in range(ndim - 1)]
-                aligned = []
-                for t in tensors:
-                    slicing = tuple(slice(0, dim_size) for dim_size in min_prefix_shape) + (slice(None),)
-                    aligned.append(t[slicing])
-                agg = torch.cat(aligned, dim=-1)
+            template = group[0]
+            if (
+                qkv_cfg is not None
+                and qkv_cfg.enabled
+                and template.proj_type == "qkv_output"
+            ):
+                agg = _reassemble_qkv_shards(group, cache, cfg=qkv_cfg)
             else:
-                # Fallback for shape-mismatch cases: compare concatenated flattened vectors.
-                agg = torch.cat([t.reshape(-1) for t in tensors], dim=0)
+                tensors = [entry_to_tensor(e, cache, flatten=False) for e in group]
+                if not tensors:
+                    continue
+                rank_dims = [t.dim() for t in tensors]
+                if len(set(rank_dims)) == 1 and rank_dims[0] > 0:
+                    ndim = rank_dims[0]
+                    min_prefix_shape = [min(int(t.shape[d]) for t in tensors) for d in range(ndim - 1)]
+                    aligned = []
+                    for t in tensors:
+                        slicing = tuple(slice(0, dim_size) for dim_size in min_prefix_shape) + (slice(None),)
+                        aligned.append(t[slicing])
+                    agg = torch.cat(aligned, dim=-1)
+                else:
+                    # Fallback for shape-mismatch cases: compare concatenated flattened vectors.
+                    agg = torch.cat([t.reshape(-1) for t in tensors], dim=0)
         else:
             tensors = [entry_to_tensor(e, cache) for e in group]
             if not tensors:
@@ -533,6 +645,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-step", type=int, default=0, help="Start decode step (inclusive)")
     parser.add_argument("--max-steps", type=int, default=-1, help="Max decode steps")
     parser.add_argument("--print-details", action="store_true", help="Print per-prefix rows")
+    parser.add_argument(
+        "--qkv-head-aware-reassemble",
+        action="store_true",
+        help=(
+            "When aggregate-* = concat and proj_type=qkv_output, reassemble tp shards "
+            "as [Q(all ranks), K(unique kv heads), V(unique kv heads)] instead of raw concat"
+        ),
+    )
+    parser.add_argument(
+        "--qkv-total-num-heads",
+        type=int,
+        default=0,
+        help="Total query heads for qkv head-aware reassemble",
+    )
+    parser.add_argument(
+        "--qkv-total-num-kv-heads",
+        type=int,
+        default=0,
+        help="Total kv heads for qkv head-aware reassemble",
+    )
+    parser.add_argument(
+        "--qkv-head-size",
+        type=int,
+        default=0,
+        help="Q/K head dim for qkv head-aware reassemble",
+    )
+    parser.add_argument(
+        "--qkv-v-head-size",
+        type=int,
+        default=0,
+        help="V head dim for qkv head-aware reassemble, defaults to --qkv-head-size",
+    )
     return parser.parse_args()
 
 
@@ -572,17 +716,35 @@ def main() -> None:
         ignore_comm_mode=args.ignore_comm_mode_in_key,
     )
 
+    qkv_cfg: QKVReassembleConfig | None = None
+    if args.qkv_head_aware_reassemble:
+        v_head_size = args.qkv_v_head_size if args.qkv_v_head_size > 0 else args.qkv_head_size
+        qkv_cfg = QKVReassembleConfig(
+            enabled=True,
+            total_num_heads=args.qkv_total_num_heads,
+            total_num_kv_heads=args.qkv_total_num_kv_heads,
+            head_size=args.qkv_head_size,
+            v_head_size=v_head_size,
+        )
+        if qkv_cfg.total_num_heads <= 0 or qkv_cfg.total_num_kv_heads <= 0 or qkv_cfg.head_size <= 0:
+            raise ValueError(
+                "--qkv-head-aware-reassemble requires positive "
+                "--qkv-total-num-heads/--qkv-total-num-kv-heads/--qkv-head-size"
+            )
+
     if args.aggregate_base_ranks != "none":
         base_map = aggregate_entries_across_ranks(
             base_map,
             method=args.aggregate_base_ranks,
             ignore_comm_mode=args.ignore_comm_mode_in_key,
+            qkv_cfg=qkv_cfg,
         )
     if args.aggregate_cand_ranks != "none":
         cand_map = aggregate_entries_across_ranks(
             cand_map,
             method=args.aggregate_cand_ranks,
             ignore_comm_mode=args.ignore_comm_mode_in_key,
+            qkv_cfg=qkv_cfg,
         )
 
     if base_mode != cand_mode:
