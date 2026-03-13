@@ -112,23 +112,23 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         )
 
         # self.profiler
-        import os
-        experimental_config = torch_npu.profiler._ExperimentalConfig(
-            export_type=torch_npu.profiler.ExportType.Text,
-            profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
-            aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
-        )
-        self.prof = torch_npu.profiler.profile(
-            activities=[
-                torch_npu.profiler.ProfilerActivity.CPU,
-                torch_npu.profiler.ProfilerActivity.NPU
-            ],
-            schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=20, repeat=1, skip_first=120),
-            # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
-            experimental_config=experimental_config,
-            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof_ffn")
-        )
-        self.prof.start()
+        # import os
+        # experimental_config = torch_npu.profiler._ExperimentalConfig(
+        #     export_type=torch_npu.profiler.ExportType.Text,
+        #     profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
+        #     aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+        # )
+        # self.prof = torch_npu.profiler.profile(
+        #     activities=[
+        #         torch_npu.profiler.ProfilerActivity.CPU,
+        #         torch_npu.profiler.ProfilerActivity.NPU
+        #     ],
+        #     schedule=torch_npu.profiler.schedule(wait=2, warmup=1, active=20, repeat=1, skip_first=120),
+        #     # 初步采集最好不要使用下面两个选项， with_stack 会大幅增加采集时间及采集的数据大小，深入分析CPU测瓶颈时再打开
+        #     experimental_config=experimental_config,
+        #     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("/home/y00889327/prof_ffn")
+        # )
+        # self.prof.start()
 
     def get_model(self) -> nn.Module:
         return self.model
