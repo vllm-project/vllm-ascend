@@ -589,11 +589,12 @@ class NPUPlatform(Platform):
         if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
             return {}
 
+        # is_draft_model will be removed later, so we set it to False temporarily.
+        is_draft_model = False
         moe_comm_type = select_moe_comm_method(
             num_tokens,
             vllm_config,
-            # is_draft_model will be removed later, so we set it to False temporarily.
-            is_draft_model=False,
+            is_draft_model=is_draft_model,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -620,7 +621,7 @@ class NPUPlatform(Platform):
 
         # TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
         flashcomm_v2_enabled = flashcomm2_enable() and tp_world_size > 1 and num_tokens is not None
-        pad_size = None
+        pad_size = 0
         padded_length = None
         if flash_comm_v1_enabled or flashcomm_v2_enabled:
             pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
@@ -657,6 +658,7 @@ class NPUPlatform(Platform):
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,
             "mc2_mask": mc2_mask,
+            "is_draft_model": is_draft_model,
         }
 
     @staticmethod

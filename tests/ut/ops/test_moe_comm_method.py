@@ -28,7 +28,7 @@ class TestMoECommMethod(TestBase):
         self.moe_config.dp_group = MagicMock()
         self.moe_config.global_redundant_expert_num = 0
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather"
     )
@@ -73,7 +73,7 @@ class TestMoECommMethod(TestBase):
                            context_metadata=context_metadata)
         mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
@@ -116,7 +116,7 @@ class TestMoECommMethod(TestBase):
                            context_metadata=context_metadata)
         mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAll2All"
     )
@@ -155,7 +155,7 @@ class TestMoECommMethod(TestBase):
         mock_pf_instance.prepare.assert_called_once_with(
             hidden_states, router_logits, False, False, QuantType.NONE)
 
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch(
         "vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather"
     )

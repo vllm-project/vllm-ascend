@@ -153,7 +153,7 @@ def propose(
 
     # FIXME(woosuk): This is UNSAFE!!
     attn_metadata = build_attn_metadata(
-        attn_metadata_builders=self.attn_metadata_builders,
+        attn_groups=self.attn_groups,
         num_reqs=num_reqs,
         num_tokens=num_reqs,
         query_start_loc_gpu=query_start_loc,
