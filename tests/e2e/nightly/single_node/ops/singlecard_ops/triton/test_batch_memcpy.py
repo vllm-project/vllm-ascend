@@ -5,9 +5,10 @@ from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_batch_memcpy(dtype):
+    element_size = 2 if dtype == torch.bfloat16 else 4
     device = "npu:0"
     # this is a typical case when used in mamba states copy.
-    sizes = torch.tensors([24576, 262144, 24576, 262144], device=device, dtype=torch.int32)
+    sizes = torch.tensor([24576, 262144, 24576, 262144], device=device, dtype=torch.int32)
 
     src_tensors_list = []
     src_addr_list = []
@@ -15,11 +16,11 @@ def test_batch_memcpy(dtype):
     dst_addr_list = []
     for i in range(len(sizes)):
         src_tensors_list.append(
-            torch.rand(sizes[i].item(), dtype=dtype, device=device)
+            torch.rand(sizes[i].item() // element_size, dtype=dtype, device=device)
         )
         src_addr_list.append(src_tensors_list[-1].data_ptr())
         dst_tensors_list.append(
-            torch.empty(sizes[i].item(), dtype=dtype, device=device)
+            torch.empty(sizes[i].item() // element_size, dtype=dtype, device=device)
         )
         dst_addr_list.append(dst_tensors_list[-1].data_ptr())
     
