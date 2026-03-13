@@ -3082,6 +3082,43 @@ class NPUModelRunner(GPUModelRunner):
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
+        # Initialize drafter attention backend
+        if self.speculative_config and (
+            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+        ):
+            from vllm.v1.spec_decode.draft_model import DraftModelProposer
+            from vllm.v1.spec_decode.eagle import EagleProposer
+
+            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            # Get kernel_block_sizes for the drafter
+            kernel_block_sizes = self._get_kernel_block_sizes(kv_cache_config)
+            self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+
+    def _get_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> list[list[int]]:
+        """Get kernel_block_sizes for each kv_cache_group."""
+        kernel_block_sizes = []
+        for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
+            elif isinstance(kv_cache_spec, AttentionSpec):
+                try:
+                    attn_groups = self.attn_groups[kv_cache_group_id]
+                except IndexError:
+                    attn_groups = None
+                if attn_groups and self.use_hybrid_blocks:
+                    backend = attn_groups[0].backend
+                    supported_sizes = backend.get_supported_kernel_block_sizes()
+                    kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
+                else:
+                    kernel_block_size_list = [self.cache_config.block_size]
+                kernel_block_sizes.append(kernel_block_size_list)
+            else:
+                kernel_block_sizes.append([0])
+        return kernel_block_sizes
+
     def calculate_reorder_batch_threshold(self) -> None:
         """
         Check that if any backends reorder batches; that the reordering
