@@ -340,11 +340,11 @@ class TestEagleProposerDummyRun(TestBase):
         set_current_vllm_config(None)
 
     # cpu does not support parallel-group, let alone `sp`
-    @patch(
-        "vllm_ascend.spec_decode.eagle_proposer.get_forward_context", **{"return_value.flash_comm_v1_enabled": False}
-    )
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context",
+           **{"return_value.flash_comm_v1_enabled": False})
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
-    def test_dummy_run_basic(self, mock_context, mock_get_context):
+    def test_dummy_run_basic(self, mock_context, mock_get_context, mock_get_context_2):
         num_tokens = 32
         with_prefill = False
 
@@ -356,11 +356,11 @@ class TestEagleProposerDummyRun(TestBase):
             self.assertTrue(self.proposer._runnable.call_count == 1)
 
     # cpu does not support parallel-group, let alone `sp`
-    @patch(
-        "vllm_ascend.spec_decode.eagle_proposer.get_forward_context", **{"return_value.flash_comm_v1_enabled": False}
-    )
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
+    @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context",
+           **{"return_value.flash_comm_v1_enabled": False})
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
-    def test_dummy_run_with_prefill(self, mock_context, mock_get_context):
+    def test_dummy_run_with_prefill(self, mock_context, mock_get_context, mock_get_context_2):
         mock_context.return_value.__enter__.return_value = None
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
@@ -368,10 +368,12 @@ class TestEagleProposerDummyRun(TestBase):
             self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
             self.assertTrue(self.proposer._runnable.call_count == 1)
 
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("vllm_ascend.spec_decode.eagle_proposer.update_full_graph_params")
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
-    def test_dummy_run_in_graph_capture(self, mock_context, mock_get_context, mock_update_full_graph_params):
+    def test_dummy_run_in_graph_capture(self, mock_context, mock_get_context,
+                                        mock_update_full_graph_params, mock_get_context_2):
         last_use_cuda_graph = self.proposer.use_cuda_graph
         mock_return_context = MagicMock()
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
@@ -379,6 +381,7 @@ class TestEagleProposerDummyRun(TestBase):
         # cpu does not support parallel-group, let alone `sp`
         mock_return_context.flash_comm_v1_enabled = False
         mock_get_context.return_value = mock_return_context
+        mock_get_context_2.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
@@ -387,11 +390,13 @@ class TestEagleProposerDummyRun(TestBase):
             self.assertTrue(self.proposer._runnable.call_count == 1)
             mock_update_full_graph_params.assert_not_called()
             self.proposer.use_cuda_graph = last_use_cuda_graph
-
+    
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("vllm_ascend.spec_decode.eagle_proposer.update_full_graph_params")
     @patch("vllm_ascend.spec_decode.eagle_proposer.get_forward_context")
     @patch("vllm_ascend.spec_decode.eagle_proposer.set_ascend_forward_context")
-    def test_dummy_run_in_graph_run(self, mock_context, mock_get_context, mock_update_full_graph_params):
+    def test_dummy_run_in_graph_run(self, mock_context, mock_get_context,
+                                    mock_update_full_graph_params, mock_get_context_2):
         last_use_cuda_graph = self.proposer.use_cuda_graph
         mock_return_context = MagicMock()
         mock_return_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
@@ -399,6 +404,7 @@ class TestEagleProposerDummyRun(TestBase):
         # cpu does not support parallel-group, let alone `sp`
         mock_return_context.flash_comm_v1_enabled = False
         mock_get_context.return_value = mock_return_context
+        mock_get_context_2.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
