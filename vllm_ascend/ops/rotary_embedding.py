@@ -433,7 +433,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         )
         inv_freq_mask = 1.0 - self._yarn_linear_ramp_mask(low, high, dim // 2).to(device=device, dtype=torch.float32)
         inv_freq = freq_inter * (1 - inv_freq_mask) + freq_extra * inv_freq_mask
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("inv_freq", inv_freq, persistent=True)
 
         t = torch.arange(max_seq_len, device=device, dtype=torch.float32)
 
@@ -443,9 +443,9 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         cos_cached = cos_cached.to(dtype)
         sin_cached = sin_cached.to(dtype)
         cache = torch.cat([freqs.cos() * self.mscale, freqs.sin() * self.mscale], dim=-1).to(dtype)
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
-        self.register_buffer("cos_cached", cos_cached, persistent=False)
-        self.register_buffer("sin_cached", sin_cached, persistent=False)
+        self.register_buffer("cos_sin_cache", cache, persistent=True)
+        self.register_buffer("cos_cached", cos_cached, persistent=True)
+        self.register_buffer("sin_cached", sin_cached, persistent=True)
         _record_cos_sin_cache(cache)
         _record_cos_and_sin_cache(cos_cached, sin_cached)
 
