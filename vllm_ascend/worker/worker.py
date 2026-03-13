@@ -20,6 +20,11 @@
 import copy
 import gc
 import logging
+import os
+import platform
+import time
+from ctypes import CDLL, c_int, c_void_p
+from datetime import datetime
 from types import NoneType
 
 import torch
@@ -29,7 +34,10 @@ import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
-from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
@@ -52,7 +60,7 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import destroy_ascend_model_parallel, init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -79,6 +87,8 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 
 
 class NPUWorker(WorkerBase):
+    distributed_init_method: str
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -530,6 +540,143 @@ class NPUWorker(WorkerBase):
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
+    _acl_rt_lib: CDLL | None = None
+
+    @classmethod
+    def _get_acl_rt_lib(cls) -> CDLL:
+        if cls._acl_rt_lib is not None:
+            return cls._acl_rt_lib
+        try:
+            cls._acl_rt_lib = CDLL("libacl_rt.so")
+        except OSError:
+            ascend_home = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/cann")
+            arch = "aarch64" if platform.machine() == "aarch64" else "x86_64"
+            lib_path = os.path.join(ascend_home, f"{arch}-linux", "lib64", "libacl_rt.so")
+            cls._acl_rt_lib = CDLL(lib_path)
+        return cls._acl_rt_lib
+
+    def _call_aclrt_snapshot_api(self, api_name: str) -> None:
+        npu_aclrt_lib = self._get_acl_rt_lib()
+        api = getattr(npu_aclrt_lib, api_name)
+        api.argtypes = [c_int, c_void_p]
+        api.restype = c_int
+        result = api(os.getpid(), None)
+        if result == 0:
+            logger.info("[snapshot] [worker] [rank:%s] %s success.", self.rank, api_name)
+        else:
+            logger.error("[snapshot] [worker] [rank:%s] %s failed %s.", self.rank, api_name, result)
+
+    def aclrt_snapshot_process_lock(self) -> None:
+        self._call_aclrt_snapshot_api("aclrtSnapShotProcessLock")
+
+    def aclrt_snapshot_process_backup(self) -> None:
+        self._call_aclrt_snapshot_api("aclrtSnapShotProcessBackup")
+
+    def aclrt_snapshot_process_restore(self) -> None:
+        self._call_aclrt_snapshot_api("aclrtSnapShotProcessRestore")
+
+    def aclrt_snapshot_process_unlock(self) -> None:
+        self._call_aclrt_snapshot_api("aclrtSnapShotProcessUnlock")
+
+    def dump_model(self, model_save_path=None) -> None:
+        self.model_runner.dump_model(path=model_save_path)
+
+    def re_load_weights(self, model_path=None) -> None:
+        self.model_runner.restore_model(path=model_path)
+
+    def clean_up(self) -> None:
+        destroy_ascend_model_parallel()
+        logger.info("[snapshot][parallel] rank %s: destroy_ascend_model_parallel done", self.rank)
+        # for snapshot
+        # Imported lazily: cleanup_dist_env_for_snapshot is injected into
+        # vllm.distributed by the container_snapshot runtime patch, which may
+        # be applied after this module is first imported.
+        from vllm.distributed import cleanup_dist_env_for_snapshot
+
+        cleanup_dist_env_for_snapshot()
+        logger.info("[snapshot][parallel] rank %s: cleanup_dist_env_for_snapshot done", self.rank)
+
+    def rebuild_parallel_group_after_resume(self) -> None:
+        """[snapshot] Tear down and re-init HCCL / TP / PP parallel groups after resume."""
+        import torch.distributed as dist
+
+        # DEBUG level triggers a known torchair bug, so keep INFO level.
+        dist.set_debug_level(dist.DebugLevel.INFO)
+
+        rebuild_time_start = time.time()
+        logger.info(
+            "[snapshot][parallel] rank %s: destroying HCCL and model-parallel groups",
+            self.rank,
+        )
+        self.clean_up()
+
+        logger.info(
+            "[snapshot][parallel] rank %s: rebuilding HCCL and model-parallel groups",
+            self.rank,
+        )
+        import urllib.parse
+
+        # distributed_init_method must point to the Pod where DP rank 0 runs.
+        init_method = self.distributed_init_method
+        parsed = urllib.parse.urlparse(init_method)
+        master_ip = self.vllm_config.parallel_config.data_parallel_master_ip or os.environ.get(
+            "HCCL_IF_IP", parsed.hostname
+        )
+        if not master_ip:
+            raise RuntimeError(f"Unable to resolve master IP for distributed init method: {init_method}")
+        port = parsed.port
+        if port is None:
+            raise RuntimeError(f"Invalid distributed init method URL (missing port): {init_method}")
+        new_method = urllib.parse.urlunparse(parsed._replace(netloc=f"{master_ip}:{port + 1}"))
+
+        logger.info(
+            "[snapshot][parallel] rank %s: distributed_init_method %s -> %s (port+1)",
+            self.rank,
+            init_method,
+            new_method,
+        )
+        self.distributed_init_method = new_method
+
+        with set_current_vllm_config(self.vllm_config):
+            self._init_worker_distributed_environment()
+
+        logger.info(
+            "[snapshot][parallel] rank %s: rebuild_parallel_group cost %.2fs",
+            self.rank,
+            time.time() - rebuild_time_start,
+        )
+
+    def update_worker_info_after_resume(self, local_ip: str, data_parallel_master_ip: str) -> None:
+        """Update worker network and master info after resume."""
+        os.environ["HCCL_IF_IP"] = local_ip
+        self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
+        logger.info(
+            "[snapshot][worker] rank %s: HCCL_IF_IP=%s data_parallel_master_ip=%s",
+            self.rank,
+            local_ip,
+            data_parallel_master_ip,
+        )
+
+    def rebuild_kv_transfer_engine_after_resume(self, local_ip: str) -> None:
+        """[snapshot] Rebuild KV transfer endpoints after container resume."""
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is None:
+            return
+        connector_name = getattr(kv_cfg, "kv_connector", "") or ""
+        if "Hybrid" in connector_name or not (
+            getattr(kv_cfg, "is_kv_producer", False) or getattr(kv_cfg, "is_kv_consumer", False)
+        ):
+            return
+        if not has_kv_transfer_group():
+            return
+        rebuild = getattr(
+            getattr(get_kv_transfer_group(), "connector_worker", None),
+            "rebuild_kv_transfer_endpoint",
+            None,
+        )
+        if callable(rebuild):
+            rebuild(local_ip)
+
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
@@ -646,6 +793,20 @@ class NPUWorker(WorkerBase):
                 0.0,
             ),
         )
+
+    def recapture_graph(self) -> None:
+        if self.model_config.enforce_eager:
+            return
+
+        from vllm_ascend.compilation.acl_graph import (
+            clear_all_aclgraph_entries,
+            clear_graph_params_for_recapture,
+        )
+
+        clear_all_aclgraph_entries()
+        clear_graph_params_for_recapture()
+
+        self.model_runner.capture_model()
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()

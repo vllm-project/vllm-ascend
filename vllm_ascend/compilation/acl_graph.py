@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import gc
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -416,3 +417,52 @@ def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any
 
 def get_draft_graph_prefill_params():
     return _draft_graph_prefill_params
+
+
+def clear_graph_params_for_recapture() -> None:
+    """Clear stale graph param contents in-place for snapshot recapture.
+
+    Unlike reset_graph_params(), this preserves the GraphParams objects so
+    capture_model() can reuse the existing capture_sizes structure.
+    """
+    for params in (_graph_params, _draft_graph_params, _draft_graph_prefill_params):
+        if params is None:
+            continue
+        for size in params.events:
+            params.events[size] = []
+            params.workspaces[size] = None
+            params.handles[size] = []
+            params.attn_params[size] = []
+            params.conv1d_params[size] = []
+            params.conv1d_handles[size] = []
+            params.conv1d_events[size] = []
+
+
+def clear_all_aclgraph_entries():
+    """Clear all cached ACL graph entries across all ACLGraphWrapper instances.
+
+    This must be called before recapturing graphs after snapshot restore,
+    because the old NPUGraph objects hold stale HCCL handles / NPU events
+    that are no longer valid in the restored environment.
+    """
+    torch.npu.synchronize()
+
+    for wrapper in list(ACLGraphWrapper._all_instances):
+        for entry in wrapper.concrete_aclgraph_entries.values():
+            if entry.aclgraph is not None:
+                entry.aclgraph.reset()
+        wrapper.concrete_aclgraph_entries.clear()
+
+    gc.collect()
+    torch.npu.empty_cache()
+
+    # Force a new graph pool so that we don't inherit stale pool state from
+    # before the snapshot.  Reset the class-level cache first, then eagerly
+    # create the replacement and propagate it into every live wrapper.
+    if hasattr(current_platform, "_global_graph_pool"):
+        current_platform._global_graph_pool = None
+    if hasattr(current_platform.__class__, "_global_graph_pool"):
+        current_platform.__class__._global_graph_pool = None
+    new_pool = current_platform.get_global_graph_pool()
+    for wrapper in list(ACLGraphWrapper._all_instances):
+        wrapper.graph_pool = new_pool

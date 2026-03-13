@@ -16,9 +16,10 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
-
+import ctypes
 import gc
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -3590,6 +3591,80 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
+
+    def dump_model(self, path="/mnt") -> None:
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        model_name = self.vllm_config.model_config.model.rstrip('/').rsplit('/', 1)[-1]
+        model_dir = os.path.join(path, "snapshot_weight", f"{model_name}_dp{self.dp_size}_tp{tp_size}")
+        model_save_path = os.path.join(model_dir, f"model_ckpt.{self.dp_rank}tp{get_tp_group().rank_in_group}.pth")
+        logger.info("model type is %s", type(self.model))
+        if os.path.exists(model_save_path):
+            logger.info("model save path %s exists, skip dump model", model_save_path)
+            return
+        os.makedirs(model_dir, exist_ok=True)
+        logger.info("[dump model] start dump model to %s", model_save_path)
+        start = time.time()
+        import psutil
+        process = psutil.Process(os.getpid())
+        logger.info("start dump_model() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
+        torch.save(self.get_model().state_dict(), model_save_path)
+        gc.collect()
+        logger.info("after gc.collect() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
+        torch.npu.empty_cache()
+        logger.info("after torch.npu.empty_cache() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            result = libc.malloc_trim(0)
+            if result == 1:
+                print("exec malloc_trim(0) success")
+            else:
+                print("exec malloc_trim(0) fail")
+        except Exception as e:
+            print(f"exec malloc_trim(0) with error: {e}")
+        
+        logger.info("after dump_model() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
+        elapse = time.time() - start
+        logger.info("[dump model] save model ckpt to %s, elapse %.4f s", model_save_path, elapse)
+
+    def restore_model(self, path="/mnt") -> None:
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        model_name = self.vllm_config.model_config.model.rstrip('/').rsplit('/', 1)[-1]
+        model_dir = os.path.join(
+            path,
+            "snapshot_weight",
+            f"{model_name}_dp{self.dp_size}_tp{tp_size}",
+        )
+        model_save_path = os.path.join(
+            model_dir,
+            f"model_ckpt.{self.dp_rank}tp{get_tp_group().rank_in_group}.pth",
+        )
+        start = time.time()
+        sd = torch.load(model_save_path, map_location="cpu", mmap=True)
+        logger.info(
+            "[restore model] load model to cpu from %s, elapse %ss, the num of items is %s",
+            model_save_path,
+            time.time() - start,
+            len(sd.items()),
+        )
+        cnt = 0
+
+        model = self.get_model()
+        param_dict = dict(model.named_parameters())
+        buffer_dict = dict(model.named_buffers())
+        for name, cpu_tensor in sd.items():
+            if name in param_dict:
+                npu_tensor = param_dict[name]
+                npu_tensor.data.copy_(cpu_tensor)
+                cnt += 1
+
+            if name in buffer_dict:
+                npu_tensor = buffer_dict[name]
+                npu_tensor.data.copy_(cpu_tensor)
+                cnt += 1
+
+        logger.info("replace success %s / %s", cnt, len(sd.items()))
+        elapse = time.time() - start
+        logger.info("[restore model] restore model ckpt from %s, elapse %.4f s", model_save_path, elapse)
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

@@ -227,6 +227,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
+        # [snapshot] update moe_all_to_all_group_name
+        device_group = get_mc2_group().device_group
+        local_rank = torch.distributed.get_rank(group=device_group)
+        backend = device_group._get_backend(torch.device("npu"))
+        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)

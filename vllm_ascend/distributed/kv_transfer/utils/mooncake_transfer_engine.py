@@ -39,5 +39,30 @@ class GlobalTE:
                     raise RuntimeError("Mooncake memory registration failed.")
             self.is_register_buffer = True
 
+    def reset(self):
+        """[snapshot] Drop the cached transfer engine so it can be re-initialized
+        on a new host IP after container snapshot restore (PD-disaggregated only).
+
+        The next get_transfer_engine() call will create a brand-new engine bound
+        to the new hostname. We best-effort release the old engine's RPC endpoint
+        first so the listening port can be reused.
+        """
+        with self.transfer_engine_lock:
+            old_engine = self.transfer_engine
+            self.transfer_engine = None
+        with self.register_buffer_lock:
+            self.is_register_buffer = False
+        if old_engine is not None:
+            for closer in ("close", "shutdown", "deinitialize", "finalize", "stop"):
+                fn = getattr(old_engine, closer, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+                    break
+        # Drop the last reference; rely on GC/destructor to free native resources.
+        del old_engine
+
 
 global_te = GlobalTE()
