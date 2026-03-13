@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 from functools import wraps
 
 import torch
-import torch_npu
 import torch.nn.functional as F
+import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
