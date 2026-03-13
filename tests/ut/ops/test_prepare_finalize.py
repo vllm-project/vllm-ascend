@@ -32,7 +32,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
     @patch(
         "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
         return_value=0)
-    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     def test_mc2_prepare_finalize(self, mock_get_forward_context, mock_tp_rank,
                                   mock_tp_size):
         mock_context = MagicMock()
@@ -65,7 +65,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
     @patch(
         "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
         return_value=0)
-    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("torch.distributed.all_gather")
     def test_mc2_tp_split_allgather(self, mock_all_gather,
                                     mock_get_forward_context, mock_tp_rank,
@@ -169,7 +169,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(final_result.shape[0], 2)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
-    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp",
            return_value=False)
     def test_allgather_prepare_finalize(self, mock_enable_sp,

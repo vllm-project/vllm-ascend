@@ -34,7 +34,7 @@ from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID, EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -398,7 +398,7 @@ class AscendEagleProposer(EagleProposer):
                 num_tokens=num_tokens,
             )
             forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
                 self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
 
     def _propose(
@@ -784,8 +784,8 @@ class AscendEagleProposer(EagleProposer):
         input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
 
         forward_context = get_forward_context()
-        forward_context.num_tokens = input_batch_size
-        forward_context.num_accept_tokens = batch_size
+        _EXTRA_CTX.num_tokens = input_batch_size
+        _EXTRA_CTX.num_accept_tokens = batch_size
 
         for draft_step in range(self.num_speculative_tokens - 1):
             # Reset MOE layer index for each draft step iteration
@@ -1361,15 +1361,14 @@ class AscendEagleProposer(EagleProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        forward_context = get_forward_context()
         if self.method == "mtp":
-            if forward_context.flash_comm_v1_enabled:
+            if _EXTRA_CTX.flash_comm_v1_enabled:
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
                 positions = positions.unsqueeze(-1)
                 positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
                 positions = positions.squeeze(-1)
         else:
-            if forward_context.flash_comm_v1_enabled:
+            if _EXTRA_CTX.flash_comm_v1_enabled:
                 hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
 
@@ -1388,8 +1387,7 @@ class AscendEagleProposer(EagleProposer):
                 if hidden_states is not None:
                     hidden_states = last_hidden_states
         else:
-            forward_context = get_forward_context()
-            if forward_context.flash_comm_v1_enabled:
+            if _EXTRA_CTX.flash_comm_v1_enabled:
                 last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                     last_hidden_states.contiguous(), True
                 )

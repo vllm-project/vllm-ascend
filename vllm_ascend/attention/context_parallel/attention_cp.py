@@ -29,10 +29,10 @@ from vllm.distributed import (
     get_decode_context_model_parallel_world_size,
     get_pcp_group,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -559,9 +559,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "actual_seq_lengths": torch.arange(attn_metadata.num_decodes_flatten) + 1,
         }
         graph_params = get_graph_params()
-        forward_context: ForwardContext = get_forward_context()
         num_tokens = query.shape[0]
-        if forward_context.capturing:
+        if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
