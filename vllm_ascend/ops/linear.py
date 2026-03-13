@@ -29,6 +29,7 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
@@ -44,6 +45,8 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import (
+    dump_tp_down_input_if_needed,
+    dump_tp_gate_up_tensors_if_needed,
     dump_tp_row_output_if_needed,
     get_parallel_op,
     get_replicated_op,
@@ -335,6 +338,16 @@ class AscendRowParallelLinear(RowParallelLinear):
             splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
+        if "down_proj" in self.prefix:
+            dump_tp_down_input_if_needed(
+                prefix=self.prefix,
+                input_tensor=input_parallel,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+                comm_group=get_tp_group(),
+                source="AscendRowParallelLinear.down_input",
+            )
+
         assert self.quant_method is not None
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self, input_parallel, bias_)
@@ -458,7 +471,19 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_)
+        output = super().forward(input_)
+        if "gate_up_proj" in self.prefix:
+            output_tensor = output[0] if isinstance(output, tuple) else output
+            dump_tp_gate_up_tensors_if_needed(
+                prefix=self.prefix,
+                input_tensor=input_,
+                output_tensor=output_tensor,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+                comm_group=get_tp_group(),
+                source_prefix="AscendColumnParallelLinear",
+            )
+        return output
 
 
 class AscendReplicatedLinear(ReplicatedLinear):

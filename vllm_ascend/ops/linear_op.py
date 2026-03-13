@@ -98,6 +98,12 @@ _TP_DUMP_DECODE_ONLY = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_DECODE_ONLY", "1"
 _TP_DUMP_SAVE_TENSOR = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_SAVE_TENSOR", "0")))
 _TP_DUMP_INCLUDE_DRAFT = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_INCLUDE_DRAFT", "0")))
 _TP_DUMP_COMM_MODE = os.getenv("VLLM_ASCEND_TP_DUMP_COMM_MODE", "all_reduce")
+_TP_DUMP_EXTRA_TENSORS = {
+    token.strip().lower()
+    for token in os.getenv("VLLM_ASCEND_TP_DUMP_EXTRA_TENSORS", "").split(",")
+    if token.strip()
+}
+_TP_DUMP_EXTRA_GATHER_FULL = bool(int(os.getenv("VLLM_ASCEND_TP_DUMP_EXTRA_GATHER_FULL", "0")))
 _TP_DUMP_LOCK = threading.Lock()
 _TP_DUMP_DECODE_STEP = -1
 
@@ -199,6 +205,13 @@ def _tp_dump_comm_mode_match(record_mode: str) -> bool:
     return record_mode == _TP_DUMP_COMM_MODE
 
 
+def _tp_dump_extra_enabled(name: str) -> bool:
+    if not _TP_DUMP_EXTRA_TENSORS:
+        return False
+    lowered = name.strip().lower()
+    return "all" in _TP_DUMP_EXTRA_TENSORS or lowered in _TP_DUMP_EXTRA_TENSORS
+
+
 def dump_tp_row_output_if_needed(
     *,
     prefix: str,
@@ -207,6 +220,7 @@ def dump_tp_row_output_if_needed(
     comm_mode: str,
     source: str,
     advance_decode_step: bool = True,
+    proj_type_override: str | None = None,
 ) -> None:
     """Dump selected row-parallel outputs for TP decode debugging."""
     global _TP_DUMP_DECODE_STEP
@@ -217,7 +231,7 @@ def dump_tp_row_output_if_needed(
     if not _tp_dump_comm_mode_match(comm_mode):
         return
 
-    proj_type = _get_proj_type(prefix)
+    proj_type = proj_type_override or _get_proj_type(prefix)
     if proj_type is None:
         return
     layer_idx = _get_layer_idx_from_prefix(prefix)
@@ -296,6 +310,119 @@ def dump_tp_row_output_if_needed(
             f"step{decode_step:06d}_rank{tp_rank}_{safe_comm_mode}_{proj_type}_{safe_prefix}.pt",
         )
         torch.save(detached.to("cpu"), tensor_path)
+
+
+def _tp_dump_extra_any(*names: str) -> bool:
+    return any(_tp_dump_extra_enabled(name) for name in names)
+
+
+def dump_tp_tensor_if_needed(
+    *,
+    prefix: str,
+    output,
+    tp_rank: int,
+    comm_mode: str,
+    source: str,
+    proj_type: str,
+    advance_decode_step: bool = False,
+) -> None:
+    dump_tp_row_output_if_needed(
+        prefix=prefix,
+        output=output,
+        tp_rank=tp_rank,
+        comm_mode=comm_mode,
+        source=source,
+        advance_decode_step=advance_decode_step,
+        proj_type_override=proj_type,
+    )
+
+
+def _all_gather_last_dim_if_needed(comm_group, tensor: torch.Tensor, tp_size: int) -> torch.Tensor:
+    if tp_size <= 1:
+        return tensor
+    return comm_group.all_gather(tensor.contiguous(), dim=-1)
+
+
+def dump_tp_gate_up_tensors_if_needed(
+    *,
+    prefix: str,
+    input_tensor: torch.Tensor,
+    output_tensor: torch.Tensor,
+    tp_rank: int,
+    tp_size: int,
+    comm_group,
+    source_prefix: str,
+) -> None:
+    if not _TP_DUMP_ENABLE:
+        return
+
+    if _tp_dump_extra_any("gate_up_input", "gate_up_in"):
+        dump_tp_tensor_if_needed(
+            prefix=prefix,
+            output=input_tensor,
+            tp_rank=tp_rank,
+            comm_mode="local",
+            source=f"{source_prefix}.gate_up_input",
+            proj_type="gate_up_input",
+        )
+
+    if not _tp_dump_extra_any("gate_up_output", "gate_up_out"):
+        return
+
+    shard_mode = "local_shard" if tp_size > 1 else "local"
+    dump_tp_tensor_if_needed(
+        prefix=prefix,
+        output=output_tensor,
+        tp_rank=tp_rank,
+        comm_mode=shard_mode,
+        source=f"{source_prefix}.gate_up_output",
+        proj_type="gate_up_output",
+    )
+
+    if _TP_DUMP_EXTRA_GATHER_FULL and tp_size > 1:
+        gathered = _all_gather_last_dim_if_needed(comm_group, output_tensor, tp_size)
+        dump_tp_tensor_if_needed(
+            prefix=prefix,
+            output=gathered,
+            tp_rank=tp_rank,
+            comm_mode="all_gather_full",
+            source=f"{source_prefix}.gate_up_output_full",
+            proj_type="gate_up_output",
+        )
+
+
+def dump_tp_down_input_if_needed(
+    *,
+    prefix: str,
+    input_tensor: torch.Tensor,
+    tp_rank: int,
+    tp_size: int,
+    comm_group,
+    source: str,
+) -> None:
+    if not _TP_DUMP_ENABLE or not _tp_dump_extra_any("down_input", "down_in"):
+        return
+
+    shard_mode = "local_shard" if tp_size > 1 else "local"
+    dump_tp_tensor_if_needed(
+        prefix=prefix,
+        output=input_tensor,
+        tp_rank=tp_rank,
+        comm_mode=shard_mode,
+        source=source,
+        proj_type="down_input",
+    )
+
+    if _TP_DUMP_EXTRA_GATHER_FULL and tp_size > 1:
+        gathered = _all_gather_last_dim_if_needed(comm_group, input_tensor, tp_size)
+        dump_tp_tensor_if_needed(
+            prefix=prefix,
+            output=gathered,
+            tp_rank=tp_rank,
+            comm_mode="all_gather_full",
+            source=f"{source}.full",
+            proj_type="down_input",
+        )
 
 
 class CustomLinearOp:
@@ -403,6 +530,15 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
         assert self.quant_method is not None
         input_parallel = self.comm_group.all_gather(input_, 0)
         output = self.quant_method.apply(self.layer, input_parallel, bias)
+        dump_tp_gate_up_tensors_if_needed(
+            prefix=self.layer.prefix,
+            input_tensor=input_parallel,
+            output_tensor=output,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            comm_group=self.comm_group,
+            source_prefix="MLPColumnParallelOp",
+        )
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
@@ -422,6 +558,15 @@ class MLPRowParallelOp(CustomRowParallelOp):
         else:
             splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        dump_tp_down_input_if_needed(
+            prefix=self.layer.prefix,
+            input_tensor=input_parallel,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            comm_group=self.comm_group,
+            source="MLPRowParallelOp.down_input",
+        )
 
         assert self.quant_method is not None
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.layer.bias

@@ -46,7 +46,8 @@ LAYER_PATTERNS = (
 )
 
 PT_DUMP_PATTERN = re.compile(
-    r"^step(?P<step>\d+)_rank(?P<rank>\d+)_(?:(?P<comm_mode>.+)_)?(?P<proj_type>o_proj|down_proj)_(?P<prefix>.+)\.pt$"
+    r"^step(?P<step>\d+)_rank(?P<rank>\d+)_(?:(?P<comm_mode>.+)_)?"
+    r"(?P<proj_type>o_proj|down_proj|gate_up_input|gate_up_output|down_input)_(?P<prefix>.+)\.pt$"
 )
 
 
@@ -529,7 +530,12 @@ def parse_args() -> argparse.Namespace:
         help="Aggregate cand entries across ranks before compare",
     )
     parser.add_argument("--layer-ids", type=str, default="", help="Layer filter, e.g. '0-4,8,10-12'")
-    parser.add_argument("--proj", type=str, default="o_proj,down_proj", help="Proj filter csv")
+    parser.add_argument(
+        "--proj",
+        type=str,
+        default="o_proj,down_proj",
+        help="Proj filter csv, e.g. o_proj,down_proj,gate_up_input,gate_up_output,down_input",
+    )
     parser.add_argument("--comm-mode", type=str, default="", help="Comm mode filter csv (applies to both sides)")
     parser.add_argument("--base-comm-mode", type=str, default="", help="Base-only comm mode filter csv")
     parser.add_argument("--cand-comm-mode", type=str, default="", help="Cand-only comm mode filter csv")
