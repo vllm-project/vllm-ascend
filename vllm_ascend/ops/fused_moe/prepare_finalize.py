@@ -151,7 +151,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         self.enable_shared_expert_dp = enable_shared_expert_dp
 
         padded_hidden_states_shape = hidden_states.shape
-        if not (self.replace_allreduce or self.enable_shared_expert_dp or enable_sp_by_pass()):
+        if not (self.replace_allreduce or self.enable_shared_expert_dp):
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
 
@@ -190,7 +190,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         Skips if `enable_shared_expert_dp` or `replace_allreduce` is True.
         """
 
-        if not (self.enable_shared_expert_dp or self.replace_allreduce or enable_sp_by_pass()):
+        if not (self.enable_shared_expert_dp or self.replace_allreduce):
             if self.tp_size > 1:
                 assert padded_hidden_states_shape is not None
                 # Cannot reuse `split_hidden_states` from prepare phase as it
