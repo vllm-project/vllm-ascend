@@ -145,14 +145,17 @@ def test_kvcomp_metadata_creation():
     assert metadata.hash_encoder_nope is None
     assert metadata.hash_encoder_rope is None
 
+
 def test_build_kvcomp_metadata():
     """Test build_kvcomp_metadata."""
     vllm_config = MagicMock()
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.model = "Qwen/Qwen3-32B"
+    vllm_config.model_config.use_mla = False
     vllm_config.model_config.get_num_kv_heads = MagicMock(return_value=8)
     parallel_config = MagicMock()
 
+    #import pdb; pdb.set_trace()
     metadata = build_kvcomp_metadata(
         max_num_reqs=4,
         block_size=128,
@@ -161,18 +164,14 @@ def test_build_kvcomp_metadata():
         parallel_config=parallel_config,
         dtype=torch.float16,
     )
-    # assert metadata.kvcomp_config is config
-    # assert metadata.chunk_sizes_for_hamming_full.shape == (4,)
-    # assert metadata.topk_for_hamming_full.shape == (4,)
-    # assert metadata.hash_encoder is None
-    # assert metadata.hashk_caches is None
-    # assert metadata.hamming_output.shape[:-1] == (4, 8)
-    # assert metadata.hamming_output.dtype == torch.int32
-    # assert metadata.hash_encoder.input_dim == 128
-    # assert metadata.hash_encoder.hash_bits == 128
-    # assert metadata.hash_encoder.hash_weights.shape == (128, 128)
-    # assert metadata.hash_encoder.hash_weights.dtype == torch.float16
-    # assert metadata.hashk_caches is None
+
+    assert metadata.chunk_sizes_for_hamming_full.shape == (4,)
+    assert metadata.chunk_sizes_for_hamming_full[0] == 128
+    assert metadata.topk_for_hamming_full.shape == (4,)
+    assert metadata.hash_encoder.hash_bits == 128
+    assert metadata.hash_encoder.hash_numbers == 16
+    assert metadata.hash_encoder.hash_weights.shape == (128, 128)
+    assert metadata.hash_encoder.hash_weights.dtype == torch.float16
 
 
 # # =============================================================================
