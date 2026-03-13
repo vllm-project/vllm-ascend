@@ -1,13 +1,14 @@
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from transformers import AutoModelForSequenceClassification
+import huggingface_hub
 
 from tests.e2e.conftest import HfRunner, VllmRunner
 
 
 def test_qwen_pooling_classify_correctness() -> None:
 
-    model_name = snapshot_download("Howeee/Qwen2.5-1.5B-apeach")
+    model_name = snapshot_download("Howeee/Qwen2.5-1.5B-apeach", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
 
     prompts = [
         "Hello, my name is",
