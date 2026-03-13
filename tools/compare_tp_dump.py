@@ -357,15 +357,22 @@ def load_entries(
     raise FileNotFoundError(f"No dump files found under: {path}")
 
 
-def entry_to_tensor(entry: DumpEntry, cache: dict[Path, Any]) -> Any:
+def entry_to_tensor(
+    entry: DumpEntry,
+    cache: dict[Path, Any],
+    *,
+    flatten: bool = True,
+) -> Any:
     torch = get_torch()
     if entry.payload_type == "tensor":
         assert isinstance(entry.payload, torch.Tensor)
-        return entry.payload.reshape(-1).to(torch.float64)
+        tensor = entry.payload
+        return tensor.reshape(-1).to(torch.float64) if flatten else tensor.to(torch.float64)
 
     if entry.payload_type == "jsonl_sample":
         assert isinstance(entry.payload, list)
-        return torch.tensor(entry.payload, dtype=torch.float64)
+        tensor = torch.tensor(entry.payload, dtype=torch.float64)
+        return tensor.reshape(-1) if flatten else tensor
 
     assert entry.payload_type == "pt_tensor"
     assert isinstance(entry.payload, Path)
@@ -373,8 +380,9 @@ def entry_to_tensor(entry: DumpEntry, cache: dict[Path, Any]) -> Any:
         tensor = torch.load(entry.payload, map_location="cpu")
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"Invalid pt dump (not tensor): {entry.payload}")
-        cache[entry.payload] = tensor.detach().reshape(-1).to(torch.float64)
-    return cache[entry.payload]
+        cache[entry.payload] = tensor.detach().to(torch.float64)
+    tensor = cache[entry.payload]
+    return tensor.reshape(-1) if flatten else tensor
 
 
 def aggregate_entries_across_ranks(
@@ -397,19 +405,36 @@ def aggregate_entries_across_ranks(
 
     for group in grouped.values():
         group = sorted(group, key=lambda e: e.rank)
-        tensors = [entry_to_tensor(e, cache) for e in group]
-        if not tensors:
-            continue
-        min_len = min(int(t.numel()) for t in tensors)
-        if min_len <= 0:
-            continue
-        stacked = torch.stack([t[:min_len] for t in tensors], dim=0)
-        if method == "sum":
-            agg = stacked.sum(dim=0)
-        elif method == "mean":
-            agg = stacked.mean(dim=0)
+        if method == "concat":
+            tensors = [entry_to_tensor(e, cache, flatten=False) for e in group]
+            if not tensors:
+                continue
+            rank_dims = [t.dim() for t in tensors]
+            if len(set(rank_dims)) == 1 and rank_dims[0] > 0:
+                ndim = rank_dims[0]
+                min_prefix_shape = [min(int(t.shape[d]) for t in tensors) for d in range(ndim - 1)]
+                aligned = []
+                for t in tensors:
+                    slicing = tuple(slice(0, dim_size) for dim_size in min_prefix_shape) + (slice(None),)
+                    aligned.append(t[slicing])
+                agg = torch.cat(aligned, dim=-1)
+            else:
+                # Fallback for shape-mismatch cases: compare concatenated flattened vectors.
+                agg = torch.cat([t.reshape(-1) for t in tensors], dim=0)
         else:
-            raise ValueError(f"Unknown aggregation method: {method}")
+            tensors = [entry_to_tensor(e, cache) for e in group]
+            if not tensors:
+                continue
+            min_len = min(int(t.numel()) for t in tensors)
+            if min_len <= 0:
+                continue
+            stacked = torch.stack([t[:min_len] for t in tensors], dim=0)
+            if method == "sum":
+                agg = stacked.sum(dim=0)
+            elif method == "mean":
+                agg = stacked.mean(dim=0)
+            else:
+                raise ValueError(f"Unknown aggregation method: {method}")
 
         template = group[0]
         entry = DumpEntry(
@@ -479,13 +504,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cand-rank", type=int, default=None, help="Cand-only rank filter. -1 means all ranks.")
     parser.add_argument(
         "--aggregate-base-ranks",
-        choices=("none", "sum", "mean"),
+        choices=("none", "sum", "mean", "concat"),
         default="none",
         help="Aggregate base entries across ranks before compare",
     )
     parser.add_argument(
         "--aggregate-cand-ranks",
-        choices=("none", "sum", "mean"),
+        choices=("none", "sum", "mean", "concat"),
         default="none",
         help="Aggregate cand entries across ranks before compare",
     )
