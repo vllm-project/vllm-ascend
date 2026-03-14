@@ -1,6 +1,7 @@
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group, get_world_group, init_model_parallel_group
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
@@ -225,8 +226,10 @@ def model_parallel_initialized():
     return _MC2 is not None
 
 
-def get_mc2_group() -> GroupCoordinator:
-    assert _MC2 is not None, "mc2 group is not initialized"
+def get_mc2_group() -> GroupCoordinator | None:
+    if _MC2 is None:
+        logger.warning("mc2 group is not initialized")
+        return None
     return _MC2
 
 
