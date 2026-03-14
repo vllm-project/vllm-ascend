@@ -106,8 +106,16 @@ Install lm-eval in the container:
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
+export USE_MODELSCOPE_HUB=0
 pip install lm-eval[api]
 ```
+
+:::{note}
+The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
+cause lm-eval to download datasets from ModelScope instead of HuggingFace.
+Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
+fetch datasets from HuggingFace correctly.
+:::
 
 Run the following command:
 
@@ -170,8 +178,16 @@ Install lm-eval in the container:
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
+export USE_MODELSCOPE_HUB=0
 pip install lm-eval
 ```
+
+:::{note}
+The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
+cause lm-eval to download datasets from ModelScope instead of HuggingFace.
+Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
+fetch datasets from HuggingFace correctly.
+:::
 
 Run the following command:
 
