@@ -66,7 +66,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     kv_alltoall_and_rearrange,
     parallel_info,
 )
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
 
 # isort: off
 if TYPE_CHECKING:
@@ -1594,8 +1594,8 @@ class MooncakeLayerwiseConnectorWorker:
                     quant_keys = torch.ops.vllm.quantize(
                         quant_key, layer.fak_descale, layer.fak_descale_reciprocal, layer.fak_offset
                     )
-                    quant_keys = self.trans_nd_to_nz(quant_keys, layer_group_idx)
-                    quant_values = self.trans_nd_to_nz(quant_values, layer_group_idx)
+                    quant_keys = self.get_nz_cache(quant_keys, layer_group_idx)
+                    quant_values = self.get_nz_cache(quant_values, layer_group_idx)
 
             assert self.kv_send_layer_thread is not None
             assert reshape_cache_event is not None
@@ -1619,29 +1619,12 @@ class MooncakeLayerwiseConnectorWorker:
             self.kv_send_layer_thread.send_queue.put(layer_send_task)
             self.current_layer += 1
 
-    def trans_nd_to_nz(self, cache_tensor: torch.Tensor, layer_group_idx: int):
+    # NOTE: Due to the FIA operator constraints, the expected kv cache is ND format, NZ shape,
+    # while the npu_format_cast method only modifies the memory layout, we manually convert it to NZ shape here
+    def get_nz_cache(self, cache_tensor: torch.Tensor, layer_group_idx: int):
         head_num, head_dim = cache_tensor.shape[-2], cache_tensor.shape[-1]
         cache_tensor = cache_tensor.view(-1, self.block_size[layer_group_idx], head_num * head_dim)
-
-        batch = cache_tensor.shape[:-2]
-        a, b = cache_tensor.shape[-2], cache_tensor.shape[-1]
-
-        dtype = cache_tensor.dtype
-        if dtype == torch.int8:
-            a0, b0 = 16, 32
-        else:
-            a0, b0 = 16, 16
-
-        nz_shape = list(batch) + [math.ceil(b / b0), math.ceil(a / a0), a0, b0]
-
-        # Generate the axis order for the transpose operation.
-        offset = len(cache_tensor.shape) - 2
-        base = [2, 0, 1, 3]
-        array_trans = [i for i in range(offset)] + [i + offset for i in base]
-        # Perform shape transformation and transpose operation.
-        *_, n1, m1, m0, n0 = nz_shape
-        cache_tensor = cache_tensor.reshape(nz_shape[:-4] + [m1, m0, n1, n0])
-        cache_tensor = cache_tensor.permute(*array_trans)
+        cache_tensor = trans_nd_to_nz(cache_tensor)
         cache_tensor = cache_tensor.reshape(-1, head_num, head_dim)
         return cache_tensor
 

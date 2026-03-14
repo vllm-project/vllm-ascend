@@ -571,10 +571,18 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def is_fa_quant_layer(self, prefix):
         if self.enable_fa_quant:
-            _id = int("".join(re.findall(r"\.(\d+)\.", prefix)))
-            if _id in self.kvcache_quant_layers:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.kvcache_quant_layers:
                 return True
         return False
+
+    def enabling_fa_quant(self, vllm_config, layer_name) -> bool:
+        is_decode_instance = (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.kv_transfer_config.is_kv_consumer
+            and not vllm_config.kv_transfer_config.is_kv_producer
+        )
+        return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):

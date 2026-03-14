@@ -719,7 +719,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
         self.layer_name = kwargs.get("layer_name")
-        self.fa_quant_layer = enabling_fa_quant(self.vllm_config, self.layer_name)
+        quant_config = self.vllm_config.quant_config
+        self.fa_quant_layer = (
+            quant_config.enabling_fa_quant(self.vllm_config, self.layer_name) if quant_config is not None else False
+        )
         self.dtype = torch.int8 if self.fa_quant_layer else self.vllm_config.model_config.dtype
         self.layer_sharding_kwargs = []
         for layer_name in get_ascend_config().layer_sharding or []:
