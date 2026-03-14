@@ -28,7 +28,23 @@ Two performance collection solutions are provided below: Ascend PyTorch Profiler
 
 ### 0. Installation and Configuration
 
-No additional packages need to be installed; it can be enabled through command-line configuration. Currently, vLLM enables **python stack** by default, which can significantly inflate the collected performance data. If you do not wish to collect **python stack**, you can disable it using `torch_profiler_with_stack=false`.
+No additional packages need to be installed; it can be enabled through command-line configuration.
+
+#### Profiler Configuration Options
+
+The `--profiler-config` parameter accepts a JSON object with the following options:
+
+| Parameter | Description | Default |
+|:----------|:------------|:--------|
+| `profiler` | Profiler type. Use `"torch"` for Ascend PyTorch Profiler. | `"torch"` |
+| `torch_profiler_dir` | Directory path to save profiling data. **Required** when using torch profiler. | - |
+| `torch_profiler_with_stack` | Whether to record Python stack trace for each operator. Enabling this provides more detailed call stack information but significantly increases profiling data size. | `true` |
+| `torch_profiler_with_memory` | Whether to record memory allocation and deallocation information. Useful for debugging memory issues but increases overhead. | `false` |
+
+```{note}
+- When `torch_profiler_with_stack=true` (default), the collected performance data can be significantly larger. If you only need operator timing information without call stacks, set `torch_profiler_with_stack=false` to reduce data size.
+- The `torch_profiler_with_memory` option is useful for debugging memory-related issues but may impact performance during profiling.
+```
 
 ### 1. Preparation for Collection
 
