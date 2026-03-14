@@ -120,7 +120,12 @@ if not envs.SOC_VERSION:
         raise RuntimeError(
             "Could not determine chip type automatically via 'npu-smi'. "
             "This can happen in a CPU-only environment. "
-            "Please set the 'SOC_VERSION' environment variable to specify the target chip."
+            "Please set the 'SOC_VERSION' environment variable to specify the target chip, for example:\n"
+            '  - Atlas A2: export SOC_VERSION="ascend910b1"\n'
+            '  - Atlas A3: export SOC_VERSION="ascend910_9391"\n'
+            '  - Atlas 300I: export SOC_VERSION="ascend310p1"\n'
+            '  - Atlas A5: export SOC_VERSION="<value starting with ascend950>"\n'
+            "You can also refer to the SOC_VERSION defaults in Dockerfile*."
         )
     envs.SOC_VERSION = soc_version
 else:
