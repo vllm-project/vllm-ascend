@@ -70,7 +70,7 @@ attention layers). If you encounter this error:
 2. Ensure the Bisheng compiler version matches the CANN version (mismatched versions
    from different CANN releases will also trigger this error)
 3. Upgrade to the recommended CANN version listed in the
-   [installation guide](../../getting_started/installation.md)
+   [installation guide](../../installation.md)
 
 Note: The service may start successfully but fail on the first inference request,
 since Triton kernels are JIT-compiled at first use.
