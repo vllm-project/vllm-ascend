@@ -20,12 +20,10 @@
 import importlib.util
 import logging
 import os
-import re
 import subprocess
 import sys
 from sysconfig import get_paths
 
-from packaging.requirements import Requirement
 from setuptools import Command, Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
@@ -454,6 +452,7 @@ def get_requirements() -> list[str]:
     soc_version = (envs.SOC_VERSION or "").lower()
     # Align with CMakeLists.txt: if(SOC_VERSION MATCHES "ascend310p.*")
     skip_triton_ascend = soc_version.startswith("ascend310p")
+
     def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().splitlines()
@@ -464,9 +463,7 @@ def get_requirements() -> list[str]:
                 continue
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
-            elif line.startswith("--"):
-                continue
-            elif skip_triton_ascend and line.startswith("triton-ascend"):
+            elif line.startswith("--") or skip_triton_ascend and line.startswith("triton-ascend"):
                 continue
             else:
                 resolved_requirements.append(line)
