@@ -3,6 +3,12 @@ import threading
 
 class GlobalTE:
     def __init__(self):
+        self.transfer_engine = None
+        self.is_register_buffer: bool = False
+        self.transfer_engine_lock = threading.Lock()
+        self.register_buffer_lock = threading.Lock()
+
+    def get_transfer_engine(self, hostname: str, device_name: str | None):
         try:
             from mooncake.engine import TransferEngine  # type: ignore
         except ImportError as e:
@@ -11,12 +17,6 @@ class GlobalTE:
                 "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
                 "to run vLLM with MooncakeConnector."
             ) from e
-        self.transfer_engine = None
-        self.is_register_buffer: bool = False
-        self.transfer_engine_lock = threading.Lock()
-        self.register_buffer_lock = threading.Lock()
-
-    def get_transfer_engine(self, hostname: str, device_name: str | None):
         if self.transfer_engine is None:
             with self.transfer_engine_lock:
                 # Double-Checked Locking
