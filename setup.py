@@ -373,7 +373,7 @@ class cmake_build_ext(build_ext):
         ]
         try:
             subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as e:
             if num_jobs <= 1:
                 raise
             logger.warning(
@@ -388,8 +388,10 @@ class cmake_build_ext(build_ext):
             ]
             try:
                 subprocess.check_call(["cmake", *serial_build_args], cwd=self.build_temp)
-            except OSError as e:
-                raise RuntimeError(f"Build library failed: {e}")
+            except subprocess.CalledProcessError as serial_e:
+                raise serial_e from e
+            except OSError as serial_e:
+                raise RuntimeError(f"Build library failed: {serial_e}") from e
         except OSError as e:
             raise RuntimeError(f"Build library failed: {e}")
         # Install the libraries
