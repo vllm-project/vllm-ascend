@@ -105,8 +105,13 @@ The output format matches the following:
 Install lm-eval in the container:
 
 ```bash
+export USE_MODELSCOPE_HUB=0
 export HF_ENDPOINT="https://hf-mirror.com"
 pip install lm-eval[api]
+```
+
+```{note}
+The lm-eval examples in this guide use HuggingFace datasets. If your environment enables ModelScope by default, for example with `VLLM_USE_MODELSCOPE=True`, set `USE_MODELSCOPE_HUB=0` before running `lm_eval`; otherwise some tasks such as CEval may resolve datasets from an unexpected source.
 ```
 
 Run the following command:
@@ -169,6 +174,7 @@ docker run --rm \
 Install lm-eval in the container:
 
 ```bash
+export USE_MODELSCOPE_HUB=0
 export HF_ENDPOINT="https://hf-mirror.com"
 pip install lm-eval
 ```

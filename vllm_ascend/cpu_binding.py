@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 
+import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 from collections import defaultdict
 
 import psutil
-from vllm.logger import logger
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+try:
+    from vllm.logger import logger
+except ModuleNotFoundError:
+    logger = logging.getLogger(__name__)
+
+from vllm_ascend.device_type import AscendDeviceType, get_ascend_device_type
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group
 MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main, at least 1 CPU) + 1(acl) + 1(release) = 5 CPUs per NPU
@@ -18,6 +24,9 @@ ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
 TOPO_AFFINITY_MODE = "topo_affinity"
 GLOBAL_SLICE_MODE = "global_slice"
+PCI_ADDR_PATTERN = re.compile(r"\b[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]\b")
+NPU_CHIP_FIELD_PATTERN = re.compile(r"^\d+\s+\d+$")
+PROCESS_ID_FIELD_PATTERN = re.compile(r"^\d+")
 
 DEVICE_BINDING_MODE: dict["AscendDeviceType", str] = {
     AscendDeviceType.A2: TOPO_AFFINITY_MODE,
@@ -92,27 +101,27 @@ class DeviceInfo:
 
     def get_running_npus(self) -> list[int]:
         npu_message, _ = execute_command(["npu-smi", "info"])
-        in_proc_section = False
         running_npu_set = set()
         for line in npu_message.splitlines():
             line = line.strip()
-            if line.startswith("| NPU") and "Process id" in line:
-                in_proc_section = True
+            if not line.startswith("|"):
                 continue
-            if not in_proc_section:
+
+            parts = [p.strip() for p in line.strip("|").split("|")]
+            if len(parts) < 2:
                 continue
-            if line.startswith("| "):
-                parts = [p.strip() for p in line.strip("|").split("|")]
-                if len(parts) < 2:
-                    continue
-                npu_id = parts[0].split()[0]
-                chip_id = parts[0].split()[1]
-                if not npu_id.isdigit() or not chip_id.isdigit():
-                    continue
-                chip_logic_id = self.npu_map_info.get(npu_id, {}).get(chip_id)
-                if not chip_logic_id or not chip_logic_id.isdigit():
-                    raise RuntimeError("Failed to get correct chip_logic_id from command 'npu-smi info -m'.")
-                running_npu_set.add(int(chip_logic_id))
+
+            npu_chip_field, process_id_field = parts[0], parts[1]
+            if not NPU_CHIP_FIELD_PATTERN.fullmatch(npu_chip_field):
+                continue
+            if not PROCESS_ID_FIELD_PATTERN.match(process_id_field):
+                continue
+
+            npu_id, chip_id = npu_chip_field.split()
+            chip_logic_id = self.npu_map_info.get(npu_id, {}).get(chip_id)
+            if not chip_logic_id or not chip_logic_id.isdigit():
+                raise RuntimeError("Failed to get correct chip_logic_id from command 'npu-smi info -m'.")
+            running_npu_set.add(int(chip_logic_id))
         if ASCEND_RT_VISIBLE_DEVICES:
             devices_str = ASCEND_RT_VISIBLE_DEVICES
             devices_list = [int(x) for x in devices_str.split(",")]
@@ -461,8 +470,9 @@ class CpuAlloc:
             info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(npu)])
 
         for line in info.splitlines():
-            if "PCIe Bus Info" in line:
-                pci_addr = line.split()[-1].lower()
+            match = PCI_ADDR_PATTERN.search(line)
+            if match:
+                pci_addr = match.group(0).lower()
                 break
 
         if not pci_addr:
