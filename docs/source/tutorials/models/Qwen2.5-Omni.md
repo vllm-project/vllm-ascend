@@ -71,6 +71,8 @@ docker run --rm \
 :::{note}
 The env `LOCAL_MEDIA_PATH` which allowing API requests to read local images or videos from directories specified by the server file system. Please note this is a security risk. Should only be enabled in trusted environments.
 
+Do not set `full_cuda_graph` or `cudagraph_mode=FULL` on Ascend NPU. Full graph capture is not supported on NPU and will fall back to `NONE`.
+
 ```bash
 export VLLM_USE_MODELSCOPE=true
 export MODEL_PATH="Qwen/Qwen2.5-Omni-7B"
@@ -82,7 +84,6 @@ vllm serve "${MODEL_PATH}" \
 --served-model-name Qwen-Omni \
 --allowed-local-media-path ${LOCAL_MEDIA_PATH} \
 --trust-remote-code \
---compilation-config '{"full_cuda_graph": 1}' \
 --no-enable-prefix-caching
 ```
 
@@ -113,10 +114,11 @@ vllm serve ${MODEL_PATH}\
 --served-model-name Qwen-Omni \
 --allowed-local-media-path ${LOCAL_MEDIA_PATH} \
 --trust-remote-code \
---compilation-config {"full_cuda_graph": 1} \
 --data-parallel-size ${DP_SIZE} \
 --no-enable-prefix-caching
 ```
+
+`full_cuda_graph` and `cudagraph_mode=FULL` are not supported on Ascend NPU for this model. Leave them unset unless a future release explicitly documents support.
 
 `--tensor_parallel_size` no need to set for this 7B model, but if you really need tensor parallel, tp size can be one of `1/2/4`.
 
