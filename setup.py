@@ -25,6 +25,7 @@ import subprocess
 import sys
 from sysconfig import get_paths
 
+from packaging.requirements import Requirement
 from setuptools import Command, Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
@@ -450,16 +451,9 @@ def read_readme() -> str:
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
 
-    def _requirement_name(requirement: str) -> str:
-        requirement = requirement.split(";", maxsplit=1)[0].strip()
-        return re.split(r"[<>=!~ \\[]", requirement, maxsplit=1)[0].lower()
-
     soc_version = (envs.SOC_VERSION or "").lower()
     # Align with CMakeLists.txt: if(SOC_VERSION MATCHES "ascend310p.*")
-    skip_triton_ascend = bool(re.match(r"^ascend310p.*", soc_version))
-    if skip_triton_ascend:
-        logger.info("Skip `triton-ascend` for 310P SOC version `%s`.", envs.SOC_VERSION)
-
+    skip_triton_ascend = soc_version.startswith("ascend310p")
     def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().splitlines()
@@ -472,8 +466,8 @@ def get_requirements() -> list[str]:
                 resolved_requirements += _read_requirements(line.split()[1])
             elif line.startswith("--"):
                 continue
-            elif skip_triton_ascend and _requirement_name(line) == "triton-ascend":
-                logger.info("Filtered requirement `%s` for 310P SOC version `%s`.", line, envs.SOC_VERSION)
+            elif skip_triton_ascend and line.startswith("triton-ascend"):
+                continue
             else:
                 resolved_requirements.append(line)
         return resolved_requirements
