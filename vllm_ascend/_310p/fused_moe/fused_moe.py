@@ -264,6 +264,10 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
         self._gate = gate
+        # Recreate runner after shared_experts is set. The base __init__
+        # builds runner too early (before _shared_experts exists), which can
+        # wrongly select moe_forward instead of moe_forward_shared.
+        self.runner = self._init_runner()
 
     def forward(
         self,
