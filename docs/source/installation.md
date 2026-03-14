@@ -177,6 +177,13 @@ If you are building custom operators for Atlas A3, you should run `git submodule
 ```{note}
 To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 If you encounter other problems during compiling, it is probably because an unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in the environment to specify your g++ and gcc locations before compiling.
+
+If you are building in a CPU-only environment where `npu-smi` is unavailable, you need to set `SOC_VERSION` before `pip install -e .` so the build can target the correct chip. You can refer to `Dockerfile*` defaults, for example:
+
+- Atlas A2: `export SOC_VERSION=ascend910b1`
+- Atlas A3: `export SOC_VERSION=ascend910_9391`
+- Atlas 300I: `export SOC_VERSION=ascend310p1`
+- Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
 ```
 
 ## Set up using Docker
