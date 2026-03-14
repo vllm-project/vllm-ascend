@@ -21,6 +21,16 @@ from vllm.platforms import current_platform
 
 from ..utils import weak_ref_tensors
 
+# Module-level flag set by the NPU worker when torch_npu.profiler is active.
+# torch_npu.profiler does not set torch.autograd.profiler._is_profiler_enabled,
+# so we need our own flag to detect it.
+_npu_profiler_active = False
+
+
+def set_npu_profiler_active(active: bool) -> None:
+    global _npu_profiler_active
+    _npu_profiler_active = active
+
 
 @dataclasses.dataclass
 class ACLGraphEntry:
@@ -113,7 +123,11 @@ class ACLGraphWrapper:
         # individual operators are dispatched eagerly and visible in the
         # profiler trace. ACLGraph replay collapses the entire captured graph
         # into a single opaque op, making the trace useless for analysis.
-        if torch.autograd.profiler._is_profiler_enabled:
+        # We check both the standard torch profiler flag and our own flag
+        # set by the NPU worker (torch_npu.profiler does not set the
+        # standard torch flag).
+        if (torch.autograd.profiler._is_profiler_enabled
+                or _npu_profiler_active):
             logger.debug(
                 "Torch profiler is active, bypassing ACLGraph replay "
                 "and running in eager mode for profiler visibility."

@@ -539,11 +539,18 @@ class NPUWorker(WorkerBase):
                 # Profiler already initialized. Restart profiling but keep
                 # the original trace name from the first initialization.
                 self.profiler.start()
+
+            # Notify ACLGraph to bypass graph replay while profiling
+            from vllm_ascend.compilation.acl_graph import set_npu_profiler_active
+            set_npu_profiler_active(True)
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
             self.profiler.stop()
+
+            from vllm_ascend.compilation.acl_graph import set_npu_profiler_active
+            set_npu_profiler_active(False)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
