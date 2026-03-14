@@ -15,11 +15,19 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import logging
+
 import torch
 import torch_npu
 
+from vllm_ascend.attention.attention_mask import (
+    _check_attn_mask_memory,
+    _estimate_attn_mask_memory,
+)
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
+
+logger = logging.getLogger(__name__)
 
 
 class AttentionMaskBuilder310:
@@ -54,6 +62,9 @@ class AttentionMaskBuilder310:
         Returns:
             torch.Tensor: A float16 tensor representing the causal mask.
         """
+        # Check memory requirement before allocating tensors
+        _check_attn_mask_memory(max_seq_len, torch.float16)
+
         tril = torch.ones((max_seq_len, max_seq_len), dtype=torch.bool, device=device).tril_()
         upper = ~tril
         mask = torch.zeros((max_seq_len, max_seq_len), dtype=torch.float16, device=device)
@@ -149,6 +160,12 @@ class AttentionMaskBuilder310:
             torch.Tensor: The cached causal mask in ACL_FORMAT_FRACTAL_NZ.
         """
         if self.attn_mask_cache is None:
+            estimated_memory = _estimate_attn_mask_memory(max_seq_len, torch.float16)
+            logger.debug(
+                "Generating 310P causal attention mask: max_seq_len=%d, estimated_memory=%.2f MB",
+                max_seq_len,
+                estimated_memory / (1024 * 1024),
+            )
             attn_mask = self.gen_causal_additive_mask(max_seq_len, self.device)
             self.attn_mask_cache = torch_npu.npu_format_cast(nd_to_nz_2d(attn_mask), ACL_FORMAT_FRACTAL_NZ)
         return self.attn_mask_cache
