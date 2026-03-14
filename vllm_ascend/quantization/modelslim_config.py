@@ -440,6 +440,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 new_k = k.replace("weight_packed", "weight")
                 extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
+        self._add_kvcache_quant_metadata()
 
     def __repr__(self) -> str:
         return "AscendModelSlimConfig:\n" + super().__repr__()
