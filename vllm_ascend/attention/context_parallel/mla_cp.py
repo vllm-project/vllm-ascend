@@ -602,6 +602,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         k_pe: torch.Tensor,
         block_size: int,
         attn_metadata: AscendMLAMetadata,
+        dequant_scale_q_nope=None,
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None

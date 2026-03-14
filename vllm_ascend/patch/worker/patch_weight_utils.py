@@ -1,4 +1,5 @@
 import sys
+from typing import Any
 
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import maybe_remap_kv_scale_name
@@ -9,7 +10,7 @@ logger = init_logger(__name__)
 class ImportPatchDecorator:
     """Import patch decorator"""
 
-    _patches = {}
+    _patches: dict[str, Any] = {}
 
     @classmethod
     def register(cls, module_name):
@@ -65,7 +66,7 @@ def patch_weight_utils(module):
             module.maybe_remap_kv_scale_name = deepseek.maybe_remap_kv_scale_name
 
 
-original_import = __builtins__["__import__"]
+original_import = __builtins__["__import__"]  # type: ignore
 
 
 def patched_import(name, globals=None, locals=None, fromlist=(), level=0):

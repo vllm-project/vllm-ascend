@@ -1346,9 +1346,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(softmax_lse),
             )
             if self.fa_quant_layer:
-                attn_params = attn_params + (dequant_scale_q_nope, self.fak_descale_float)
+                attn_params = attn_params + (dequant_scale_q_nope, self.fak_descale_float)  # type: ignore
             else:
-                attn_params = attn_params + (None, None)
+                attn_params = attn_params + (None, None)  # type: ignore
 
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
