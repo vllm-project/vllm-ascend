@@ -51,18 +51,21 @@ class QuantTypeMapping:
         return QuantTypeMapping.SUPPORTED_QUANT_TYPES
 
 
-def sanitize_quant_type(quant_type: Optional[str], field_name: str = None) -> Optional[str]:
+def sanitize_quant_type(quant_type: Any, field_name: str = None) -> Optional[str]:
    
-    if quant_type is None or quant_type == "null" or (isinstance(quant_type, str) and quant_type.strip() == ""):
+    if quant_type is None:
+        if field_name:
+            logger.debug(f"Quant type for field '{field_name}' is null/empty")
+        return None
+
+    # Convert to string, strip whitespace, and check for "null"
+    s_quant_type = str(quant_type).strip()
+    if not s_quant_type or s_quant_type.lower() == "null":
         if field_name:
             logger.debug(f"Quant type for field '{field_name}' is null/empty")
         return None
     
-    # 如果是字符串，去除空格
-    if isinstance(quant_type, str):
-        quant_type = quant_type.strip()
-    
-    return quant_type
+    return s_quant_type
 
 
 def load_quant_model_description(model_path: str) -> Dict[str, Any]:
