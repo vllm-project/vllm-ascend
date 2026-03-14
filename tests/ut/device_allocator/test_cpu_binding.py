@@ -59,6 +59,14 @@ class TestDeviceInfo(unittest.TestCase):
         self.assertEqual(len(running_npus), 1)
 
     @patch('vllm_ascend.cpu_binding.execute_command')
+    def test_get_running_npus_with_non_english_header(self, mock_execute_command):
+        mock_execute_command.return_value = (
+            "| NPU Chip | 进程 ID |\n| 1 0 | 1236 | vllm | 56000 |", 0
+        )
+        running_npus = self.device_info.get_running_npus()
+        self.assertEqual(running_npus, [1])
+
+    @patch('vllm_ascend.cpu_binding.execute_command')
     def test_parse_topo_affinity(self, mock_execute_command):
         mock_execute_command.return_value = (
             "NPU0 X HCCS HCCS HCCS HCCS HCCS HCCS HCCS 0-3", 0)
