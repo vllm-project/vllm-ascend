@@ -72,18 +72,51 @@ def rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        # TODO: Remove the contiguous in the future.
-        query = query.contiguous().view(query.shape[0], -1)
-        key = key.contiguous().view(key.shape[0], -1)
-        torch_npu._npu_rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            self.cos_sin_cache,
-            neox_style,
-        )
-    return query.view(query_shape), key.view(key_shape)
+        # Handle partial rotary embedding (rotary_dim < head_size)
+        # This is needed for models like GLM-4 where only part of the
+        # head dimensions use rotary position embeddings.
+        if self.rotary_dim < self.head_size:
+            num_tokens = query.shape[0]
+            query = query.view(num_tokens, -1, self.head_size)
+            key = key.view(num_tokens, -1, self.head_size)
+            # Split into rotary and pass-through parts
+            q_rot = query[..., :self.rotary_dim]
+            q_pass = query[..., self.rotary_dim:]
+            k_rot = key[..., :self.rotary_dim]
+            k_pass = key[..., self.rotary_dim:]
+            # Flatten rotary parts for NPU kernel
+            q_rot = q_rot.contiguous().view(num_tokens, -1)
+            k_rot = k_rot.contiguous().view(num_tokens, -1)
+            # Apply rotary embedding only to the rotary part
+            torch_npu._npu_rotary_embedding(
+                positions,
+                q_rot,
+                k_rot,
+                self.rotary_dim,
+                self.cos_sin_cache,
+                neox_style,
+            )
+            # Reshape and concatenate with pass-through parts
+            q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
+            k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
+            query = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
+            key = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
+        else:
+            # Full rotary embedding (rotary_dim == head_size)
+            # TODO: Remove the contiguous in the future.
+            query = query.contiguous().view(query.shape[0], -1)
+            key = key.contiguous().view(key.shape[0], -1)
+            torch_npu._npu_rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.cos_sin_cache,
+                neox_style,
+            )
+            query = query.view(query_shape)
+            key = key.view(key_shape)
+    return query, key
 
 
 def native_rope_deepseek_forward(self,

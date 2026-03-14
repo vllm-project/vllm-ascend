@@ -80,6 +80,7 @@ class TestRopeForwardOot(unittest.TestCase):
         # Mock self object for rope_forward_oot
         self.mock_self = MagicMock()
         self.mock_self.head_size = self.head_size
+        self.mock_self.rotary_dim = self.head_size  # Add rotary_dim for partial rope support
         self.mock_self.cos_sin_cache = self.cos_sin_cache
         self.mock_self.is_neox_style = True
         self.mock_self.forward_native.return_value = (self.query, self.key)
@@ -178,6 +179,54 @@ class TestRopeForwardOot(unittest.TestCase):
         # Check that neox_style=False was passed to the NPU function
         args, kwargs = mock_npu_rotary.call_args
         self.assertFalse(args[-1])
+
+    @patch('vllm_ascend.ops.rotary_embedding.get_ascend_config')
+    @patch('vllm_ascend.ops.rotary_embedding.custom_rotary_embedding_enabled',
+           return_value=False)
+    @patch('torch_npu._npu_rotary_embedding')
+    def test_rope_forward_oot_partial_rotary(self, mock_npu_rotary,
+                                             mock_custom_enabled,
+                                             mock_get_ascend_config):
+        """Test partial rotary embedding when rotary_dim < head_size.
+
+        This is needed for models like GLM-4 where only part of the head
+        dimensions use rotary position embeddings (e.g., head_size=128,
+        rotary_dim=64).
+        """
+        mock_config = MagicMock()
+        mock_config.torchair_graph_config.enabled = False
+        mock_get_ascend_config.return_value = mock_config
+
+        # Setup for partial rotary: head_size=128, rotary_dim=64
+        head_size = 128
+        rotary_dim = 64
+        num_heads = 2
+        num_tokens = 4
+
+        # Create mock with partial rotary configuration
+        mock_self_partial = MagicMock()
+        mock_self_partial.head_size = head_size
+        mock_self_partial.rotary_dim = rotary_dim
+        mock_self_partial.cos_sin_cache = torch.randn(1024, rotary_dim,
+                                                      dtype=torch.float16)
+        mock_self_partial.is_neox_style = True
+
+        positions = torch.tensor([0, 1, 2, 3])
+        query = torch.randn(num_tokens, num_heads * head_size,
+                            dtype=torch.float16)
+        key = torch.randn(num_tokens, num_heads * head_size,
+                          dtype=torch.float16)
+
+        result_q, result_k = rope_forward_oot(mock_self_partial, positions,
+                                              query, key)
+
+        # Verify output shapes match input shapes
+        self.assertEqual(result_q.shape, query.shape)
+        self.assertEqual(result_k.shape, key.shape)
+
+        # Verify NPU kernel was called with rotary_dim, not head_size
+        args, kwargs = mock_npu_rotary.call_args
+        self.assertEqual(args[3], rotary_dim)
 
 
 class MockRopeModule:
