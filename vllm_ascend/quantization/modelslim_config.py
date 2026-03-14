@@ -102,6 +102,17 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
 # key: model_type
 # value: dict of fused module name -> list of original module names
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
+    "qwen3": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    },
     "qwen3_moe": {
         "qkv_proj": [
             "q_proj",
