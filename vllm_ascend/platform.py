@@ -479,13 +479,13 @@ class NPUPlatform(Platform):
                 For optimal performance with VL models, we recommend enabling Sequence Parallelism \
                 via --compilation-config '{"pass_config": {"enable_sp": true}}'."""
 
-            assert vllm_config.parallel_config.tensor_parallel_size > 1, (
-                "Flash Comm v1 is only supported when tp_size > 1."
-            )
+            assert (
+                vllm_config.parallel_config.tensor_parallel_size > 1
+            ), "Flash Comm v1 is only supported when tp_size > 1."
 
-            assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
-                "Flash Comm v1 requires enable_expert_parallel=True for MoE models."
-            )
+            assert (
+                not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel
+            ), "Flash Comm v1 requires enable_expert_parallel=True for MoE models."
 
         _apply_qwen3_next_a3_memory_workaround(vllm_config)
         _set_default_npu_alloc_conf(vllm_config)
