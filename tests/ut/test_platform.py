@@ -1,4 +1,5 @@
 import importlib
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,7 +10,7 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType 
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType
 
 
 class TestNPUPlatform(TestBase):
@@ -52,8 +53,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_with_parser(self, mock_quant_config,
-                                                 mock_adapt_patch):
+    def test_pre_register_and_update_with_parser(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", "gptq"]
@@ -68,16 +68,14 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_without_parser(self, mock_quant_config,
-                                                    mock_adapt_patch):
+    def test_pre_register_and_update_without_parser(self, mock_quant_config, mock_adapt_patch):
         self.platform.pre_register_and_update(None)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_with_parser_no_quant_action(
-            self, mock_quant_config, mock_adapt_patch):
+    def test_pre_register_and_update_with_parser_no_quant_action(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_parser._option_string_actions = {}
 
@@ -87,8 +85,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_with_existing_ascend_quant(
-            self, mock_quant_config, mock_adapt_patch):
+    def test_pre_register_and_update_with_existing_ascend_quant(self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
         mock_action.choices = ["awq", ASCEND_QUANTIZATION_METHOD]
@@ -117,7 +114,7 @@ class TestNPUPlatform(TestBase):
         device_properties.uuid = "01020304-0000-0000-0000-01020304"
         mock_get_device_properties.return_value = device_properties
         self.assertEqual(self.platform.get_device_uuid(device_id), device_properties.uuid)
-        mock_get_device_properties.assert_called_once_with(0)        
+        mock_get_device_properties.assert_called_once_with(0)
 
     @patch("torch.inference_mode")
     def test_inference_mode(self, mock_inference_mode):
@@ -187,7 +184,9 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_enforce_eager_mode(self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect):
+    def test_check_and_update_config_enforce_eager_mode(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = True
@@ -260,7 +259,9 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_unsupported_cudagraph_mode(self, mock_init_ascend, mock_soc_version, mock_auto_detect):
+    def test_check_and_update_config_unsupported_cudagraph_mode(
+        self, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
@@ -347,7 +348,9 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType._310P)
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
-    def test_check_and_update_config_310p_no_custom_ops(self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect):
+    def test_check_and_update_config_310p_no_custom_ops(
+        self, mock_init_recompute, mock_soc_version, mock_init_ascend, mock_auto_detect
+    ):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.custom_ops = []
@@ -444,6 +447,72 @@ class TestNPUPlatform(TestBase):
 
     def test_is_pin_memory_available_returns_true(self):
         self.assertTrue(self.platform.is_pin_memory_available())
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_qwen3_next_tp8_applies_memory_workaround(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_recompute.return_value = MagicMock()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.scheduler_config = MagicMock()
+        vllm_config.model_config.enable_sleep_mode = False
+        vllm_config.model_config.hf_text_config.model_type = "qwen3_next"
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 8
+        vllm_config.parallel_config.enable_expert_parallel = True
+        vllm_config.cache_config.gpu_memory_utilization = 0.7
+        vllm_config.cache_config.block_size = 128
+        vllm_config.cache_config.enable_prefix_caching = False
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.gpu_memory_utilization, 0.5)
+        self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], "max_split_size_mb:32")
+
+    @patch.dict(os.environ, {"PYTORCH_NPU_ALLOC_CONF": "page_size:1g"}, clear=True)
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_qwen3_next_tp8_keeps_user_alloc_conf(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_recompute.return_value = MagicMock()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.scheduler_config = MagicMock()
+        vllm_config.model_config.enable_sleep_mode = False
+        vllm_config.model_config.hf_text_config.model_type = "qwen3_next"
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 8
+        vllm_config.parallel_config.enable_expert_parallel = True
+        vllm_config.cache_config.gpu_memory_utilization = 0.7
+        vllm_config.cache_config.block_size = 128
+        vllm_config.cache_config.enable_prefix_caching = False
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.gpu_memory_utilization, 0.5)
+        self.assertEqual(os.environ["PYTORCH_NPU_ALLOC_CONF"], "page_size:1g")
 
     def test_get_static_graph_wrapper_cls_returns_correct_value(self):
         self.assertEqual(

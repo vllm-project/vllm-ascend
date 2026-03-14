@@ -59,6 +59,74 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+_QWEN3_NEXT_A3_OOM_WORKAROUND_MIN_TP = 8
+_QWEN3_NEXT_A3_OOM_WORKAROUND_GPU_MEMORY_UTILIZATION = 0.5
+_QWEN3_NEXT_A3_OOM_WORKAROUND_ALLOC_CONF = "max_split_size_mb:32"
+
+
+def _get_model_type(model_config: ModelConfig | None) -> str | None:
+    if model_config is None:
+        return None
+
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if hf_text_config is not None:
+        model_type = getattr(hf_text_config, "model_type", None)
+        if model_type:
+            return model_type
+
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is not None:
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type:
+            return model_type
+
+    return getattr(model_config, "model_type", None)
+
+
+def _is_qwen3_next_a3_tp_oom_prone(vllm_config: VllmConfig) -> bool:
+    model_type = _get_model_type(vllm_config.model_config)
+    return (
+        get_ascend_device_type() == AscendDeviceType.A3
+        and model_type == "qwen3_next"
+        and vllm_config.parallel_config.tensor_parallel_size >= _QWEN3_NEXT_A3_OOM_WORKAROUND_MIN_TP
+    )
+
+
+def _apply_qwen3_next_a3_memory_workaround(vllm_config: VllmConfig) -> None:
+    if not _is_qwen3_next_a3_tp_oom_prone(vllm_config):
+        return
+
+    cache_config = vllm_config.cache_config
+    if cache_config.gpu_memory_utilization > _QWEN3_NEXT_A3_OOM_WORKAROUND_GPU_MEMORY_UTILIZATION:
+        logger.warning(
+            "Lowering gpu_memory_utilization from %s to %s for Qwen3-Next TP>=%s on A3 to avoid OOM.",
+            cache_config.gpu_memory_utilization,
+            _QWEN3_NEXT_A3_OOM_WORKAROUND_GPU_MEMORY_UTILIZATION,
+            _QWEN3_NEXT_A3_OOM_WORKAROUND_MIN_TP,
+        )
+        cache_config.gpu_memory_utilization = _QWEN3_NEXT_A3_OOM_WORKAROUND_GPU_MEMORY_UTILIZATION
+
+
+def _set_default_npu_alloc_conf(vllm_config: VllmConfig) -> None:
+    model_config = vllm_config.model_config
+    if model_config is None or model_config.enable_sleep_mode:
+        return
+
+    if _is_qwen3_next_a3_tp_oom_prone(vllm_config):
+        if "PYTORCH_NPU_ALLOC_CONF" not in os.environ:
+            os.environ["PYTORCH_NPU_ALLOC_CONF"] = _QWEN3_NEXT_A3_OOM_WORKAROUND_ALLOC_CONF
+        logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", os.environ["PYTORCH_NPU_ALLOC_CONF"])
+        return
+
+    npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+    if (
+        "expandable_segments" not in npu_alloc_configs
+        and "max_split_size_mb" not in npu_alloc_configs
+        and "garbage_collection_threshold" not in npu_alloc_configs
+    ):
+        npu_alloc_configs += ",expandable_segments:True"
+    os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
+    logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
 
 def config_deprecated_logging():
@@ -411,33 +479,16 @@ class NPUPlatform(Platform):
                 For optimal performance with VL models, we recommend enabling Sequence Parallelism \
                 via --compilation-config '{"pass_config": {"enable_sp": true}}'."""
 
-            assert vllm_config.parallel_config.tensor_parallel_size > 1, (
-                "Flash Comm v1 is only supported when tp_size > 1."
-            )
+            assert (
+                vllm_config.parallel_config.tensor_parallel_size > 1
+            ), "Flash Comm v1 is only supported when tp_size > 1."
 
-            assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
-                "Flash Comm v1 requires enable_expert_parallel=True for MoE models."
-            )
+            assert (
+                not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel
+            ), "Flash Comm v1 requires enable_expert_parallel=True for MoE models."
 
-        # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
-        # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
-        # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
-        # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
-        if model_config and not model_config.enable_sleep_mode:
-            npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
-            # This environment variable may have more than one key-value pairs.
-            # We should append ",expandable_segments:True" to the current configs.
-            # For example: "page_size:1g" + ",expandable_segments:True".
-            # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
-            # be enabled together with `expandable_segments=True`.
-            if (
-                "expandable_segments" not in npu_alloc_configs
-                and "max_split_size_mb" not in npu_alloc_configs
-                and "garbage_collection_threshold" not in npu_alloc_configs
-            ):
-                npu_alloc_configs += ",expandable_segments:True"
-            os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
-            logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
+        _apply_qwen3_next_a3_memory_workaround(vllm_config)
+        _set_default_npu_alloc_conf(vllm_config)
 
         # NOTE: vllm sets `speculative_config.enforce_eager` as True if using
         # deepseek_v32 with mtp. Since we support graph mode, we simply ignore
