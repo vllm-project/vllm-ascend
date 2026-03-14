@@ -16,8 +16,68 @@
 #
 import sys
 import types
+from typing import Any, cast
+
+import torch  # type: ignore[import-not-found]
+
+
+def fused_topk(hidden_states, gating_output, topk, renormalize):
+    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+
+    scores = torch.softmax(gating_output, dim=-1)
+    topk_weights, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
+
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+def grouped_topk(
+    hidden_states,
+    gating_output,
+    topk,
+    renormalize,
+    num_expert_group=0,
+    topk_group=0,
+    scoring_func="softmax",
+    e_score_correction_bias=None,
+):
+    from vllm_ascend.ops.fused_moe import group_topk as ascend_group_topk
+
+    return ascend_group_topk(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=renormalize,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        scoring_func=scoring_func,
+        e_score_correction_bias=e_score_correction_bias,
+    )
+
+
+def fused_experts(
+    hidden_states, w1, w2, topk_weights, topk_ids, inplace=False, **kwargs
+):
+    from vllm_ascend.ops.fused_moe import fused_experts as ascend_fused_experts
+
+    del inplace, kwargs
+    return ascend_fused_experts(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        top_k=topk_ids.shape[1],
+    )
+
 
 # prevent errors caused by triton not supported
-sys.modules[
-    'vllm.model_executor.layers.fused_moe.fused_moe'] = types.ModuleType(
-        'fused_moe_module')
+fused_moe_module = types.ModuleType("fused_moe_module")
+fused_moe_module_any = cast(Any, fused_moe_module)
+fused_moe_module_any.fused_topk = fused_topk
+fused_moe_module_any.grouped_topk = grouped_topk
+fused_moe_module_any.fused_experts = fused_experts
+
+sys.modules["vllm.model_executor.layers.fused_moe.fused_moe"] = fused_moe_module
