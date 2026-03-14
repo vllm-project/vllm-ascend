@@ -74,7 +74,6 @@ from vllm.v1.outputs import (
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
-from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
@@ -2561,7 +2560,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config and (
                 self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
             ):
-                assert isinstance(self.drafter, AscendEagleProposer | DraftModelProposer)
+                assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
                 self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
 
         if has_kv_transfer_group():
