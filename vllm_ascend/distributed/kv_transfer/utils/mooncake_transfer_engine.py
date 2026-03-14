@@ -9,20 +9,18 @@ class GlobalTE:
         self.register_buffer_lock = threading.Lock()
 
     def get_transfer_engine(self, hostname: str, device_name: str | None):
-        try:
-            from mooncake.engine import TransferEngine  # type: ignore
-        except ImportError as e:
-            raise ImportError(
-                "Please install mooncake by following the instructions at "
-                "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
-                "to run vLLM with MooncakeConnector."
-            ) from e
         if self.transfer_engine is None:
             with self.transfer_engine_lock:
                 # Double-Checked Locking
                 if self.transfer_engine is None:
-                    if TransferEngine is None:
-                        raise RuntimeError("mooncake is not available")
+                    try:
+                        from mooncake.engine import TransferEngine  # type: ignore
+                    except ImportError as e:
+                        raise ImportError(
+                            "Please install mooncake by following the instructions at "
+                            "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
+                            "to run vLLM with MooncakeConnector."
+                        ) from e
                     self.transfer_engine = TransferEngine()
                     device_name = device_name if device_name is not None else ""
                     ret_value = self.transfer_engine.initialize(hostname, "P2PHANDSHAKE", "ascend", device_name)
