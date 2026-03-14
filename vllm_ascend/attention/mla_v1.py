@@ -27,7 +27,6 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_cp,
-    enabling_fa_quant,
     enabling_mlapo,
     maybe_save_kv_layer_to_connector,
     split_decodes_and_prefills,
