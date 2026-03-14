@@ -791,54 +791,36 @@ class AscendMLAImpl(MLAAttentionImpl):
                     seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
-                if dequant_scale_q_nope is None:
-                    torch_npu.npu_fused_infer_attention_score.out(
-                        q_nope,
-                        k_nope,
-                        k_nope,
-                        query_rope=q_pe,
-                        key_rope=k_pe,
-                        num_heads=num_heads,
-                        num_key_value_heads=num_kv_heads,
-                        input_layout=input_layout,
-                        atten_mask=attn_mask,
-                        sparse_mode=sparse_mode,
-                        scale=scale,
-                        antiquant_mode=0,
-                        antiquant_scale=None,
-                        block_table=block_table,
-                        block_size=block_size,
-                        actual_seq_lengths_kv=seq_lens_list,
-                        actual_seq_lengths=actual_seq_lengths,
-                        workspace=graph_params.workspaces.get(num_tokens),
-                        out=[attn_output, softmax_lse],
-                    )
-                else:
-                    torch_npu.npu_fused_infer_attention_score_v2.out(
-                        q_nope,
-                        k_nope,
-                        k_nope,
-                        query_rope=q_pe,
-                        key_rope=k_pe,
-                        num_query_heads=num_heads,
-                        num_key_value_heads=num_kv_heads,
-                        input_layout=input_layout,
-                        atten_mask=attn_mask,
-                        sparse_mode=sparse_mode,
-                        softmax_scale=scale,
-                        query_quant_mode=3,
-                        key_quant_mode=0,
-                        value_quant_mode=0,
-                        dequant_scale_query=dequant_scale_q_nope,
-                        dequant_scale_key=fak_descale_float,
-                        dequant_scale_value=fak_descale_float,
-                        block_table=block_table,
-                        block_size=block_size,
-                        actual_seq_kvlen=seq_lens_list,
-                        actual_seq_qlen=actual_seq_lengths,
-                        workspace=graph_params.workspaces.get(num_tokens),
-                        out=[attn_output, softmax_lse],
-                    )
+                extra_args = {}
+                if dequant_scale_q_nope is not None:
+                    extra_args = {
+                        "query_quant_mode": 3,
+                        "key_quant_mode": 0,
+                        "value_quant_mode": 0,
+                        "dequant_scale_query": dequant_scale_q_nope,
+                        "dequant_scale_key": fak_descale_float,
+                        "dequant_scale_value": fak_descale_float,
+                    }
+                torch_npu.npu_fused_infer_attention_score_v2.out(
+                    q_nope,
+                    k_nope,
+                    k_nope,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    num_query_heads=num_heads,
+                    num_key_value_heads=num_kv_heads,
+                    input_layout=input_layout,
+                    atten_mask=attn_mask,
+                    sparse_mode=sparse_mode,
+                    softmax_scale=scale,
+                    block_table=block_table,
+                    block_size=block_size,
+                    actual_seq_kvlen=seq_lens_list,
+                    actual_seq_qlen=actual_seq_lengths,
+                    workspace=graph_params.workspaces.get(num_tokens),
+                    out=[attn_output, softmax_lse],
+                    **extra_args,
+                )
                 torch.npu.graph_task_update_end(update_stream)
 
                 event.record(update_stream)
@@ -1287,26 +1269,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
             sparse_mode = 0
             actual_seq_lengths = None
-            common_kwargs_v2 = {
-                "query_rope": q_pe,
-                "key_rope": k_pe,
-                "num_query_heads": self.num_heads,
-                "num_key_value_heads": self.num_kv_heads,
-                "input_layout": input_layout,
-                "atten_mask": attn_mask,
-                "sparse_mode": sparse_mode,
-                "softmax_scale": self.scale,
-                "query_quant_mode": 3,
-                "key_quant_mode": 0,
-                "value_quant_mode": 0,
-                "dequant_scale_query": dequant_scale_q_nope,
-                "dequant_scale_key": self.fak_descale_float,
-                "dequant_scale_value": self.fak_descale_float,
-                "block_table": decode_meta.block_table,
-                "block_size": block_size,
-                "actual_seq_qlen": actual_seq_lengths,
-                "actual_seq_kvlen": decode_meta.seq_lens_list,
-            }
             attn_output_shape = (self.num_heads, num_tokens, 1, self.kv_lora_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
@@ -1329,19 +1291,27 @@ class AscendMLAImpl(MLAAttentionImpl):
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
-            "num_heads": self.num_heads,
+            "num_query_heads": self.num_heads,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": input_layout,
             "atten_mask": attn_mask,
             "sparse_mode": sparse_mode,
-            "scale": self.scale,
-            "antiquant_mode": 0,
-            "antiquant_scale": None,
+            "softmax_scale": self.scale,
             "block_table": decode_meta.block_table,
             "block_size": block_size,
-            "actual_seq_lengths": actual_seq_lengths,
-            "actual_seq_lengths_kv": decode_meta.seq_lens_list,
+            "actual_seq_qlen": actual_seq_lengths,
+            "actual_seq_kvlen": decode_meta.seq_lens_list,
         }
+        if self.fa_quant_layer:
+            extra_fa_args = {
+                "query_quant_mode": 3,
+                "key_quant_mode": 0,
+                "value_quant_mode": 0,
+                "dequant_scale_query": dequant_scale_q_nope,
+                "dequant_scale_key": self.fak_descale_float,
+                "dequant_scale_value": self.fak_descale_float,
+            }
+            common_kwargs.update(extra_fa_args)
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
@@ -1376,18 +1346,15 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(softmax_lse),
             )
             if self.fa_quant_layer:
-                get_max_workspace_func = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace
-                fused_infer_attention_func = torch_npu.npu_fused_infer_attention_score_v2.out
                 attn_params = attn_params + (dequant_scale_q_nope, self.fak_descale_float)
-                common_kwargs = common_kwargs_v2
             else:
-                get_max_workspace_func = torch_npu._npu_fused_infer_attention_score_get_max_workspace
-                fused_infer_attention_func = torch_npu.npu_fused_infer_attention_score.out
                 attn_params = attn_params + (None, None)
 
             if workspace is None:
-                workspace = get_max_workspace_func(q_nope, k_nope, k_nope, **common_kwargs)
-                if forward_context.is_draft_model:
+                workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                    q_nope, k_nope, k_nope, **common_kwargs
+                )
+                if _EXTRA_CTX.is_draft_model:
                     update_draft_graph_params_workspaces(num_tokens, workspace)
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)
@@ -1395,15 +1362,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params.attn_params[num_tokens].append(attn_params)
 
             torch.npu.graph_task_group_begin(stream)
-            fused_infer_attention_func(
+            torch_npu.npu_fused_infer_attention_score_v2.out(
                 q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
             )
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
-        elif self.fa_quant_layer:
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs_v2)
         else:
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score(q_nope, k_nope, k_nope, **common_kwargs)
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
+
         return self._v_up_proj(attn_output)
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
@@ -1659,6 +1625,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 decode_preprocess_res.k_pe,
                 kv_cache[0].shape[1],
                 attn_metadata,
+                decode_preprocess_res.dequant_scale_q_nope,
             )
 
             o_proj_input[:num_decode_tokens] = output_decode
@@ -1675,7 +1642,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_preprocess_res.value,
                 kv_cache,
                 attn_metadata,
-                decode_preprocess_res.dequant_scale_q_nope,
             )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill

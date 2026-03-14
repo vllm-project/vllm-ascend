@@ -334,7 +334,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                 grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
                     remote_block_ids, local_block_ids
                 )
-# kv cache quantization scenario
+                # kv cache quantization scenario
                 if self.enable_kv_quant and send_task.k_quant_cache is not None:
                     assert len(block_lens) == 2, "Quantization block length must be 2!"
                     quant_block_lens = [block_lens[0] // 2, block_lens[1]]

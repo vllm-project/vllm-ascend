@@ -1,6 +1,9 @@
 import sys
 
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import maybe_remap_kv_scale_name
+
+logger = init_logger(__name__)
 
 
 class ImportPatchDecorator:

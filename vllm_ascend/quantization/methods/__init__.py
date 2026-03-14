@@ -32,11 +32,11 @@ from typing import Any
 # Import base classes
 from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
 
-# Import registry functions
-from .registry import get_scheme_class, register_scheme
-
 # Import all scheme classes for external access
 from .kv_c8 import AscendFAQuantAttentionMethod
+
+# Import registry functions
+from .registry import get_scheme_class, register_scheme
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod

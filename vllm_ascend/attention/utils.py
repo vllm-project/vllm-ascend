@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -343,7 +344,7 @@ def enabling_fa_quant(vllm_config: VllmConfig, layer_name) -> bool:
     enable_fa_quant = quant_config.enable_fa_quant if quant_config is not None else False
     fa_quant_layer = False
     if is_decode_instance and enable_fa_quant:
-        id = "".join(re.findall(r"\.(\d+)\.", layer_name))
-        if int(id) in quant_config.kvcache_quant_layers:
+        layer_id_str = "".join(re.findall(r"\.(\d+)\.", layer_name))
+        if layer_id_str.isdigit() and int(layer_id_str) in quant_config.kvcache_quant_layers:
             fa_quant_layer = True
     return fa_quant_layer

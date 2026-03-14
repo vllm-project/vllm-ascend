@@ -39,9 +39,8 @@ from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.utils.torch_utils import get_dtype_size
 
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, calc_split_factor
 
 from .methods import get_scheme_class
 
@@ -512,8 +511,6 @@ class AscendModelSlimConfig(QuantizationConfig):
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
-        from vllm.model_executor.layers.attention import Attention
-
         if model_type != "kimi_k2":
             if prefix.startswith("language_model"):
                 prefix = prefix.split(".", 1)[-1]
@@ -589,6 +586,13 @@ class AscendModelSlimConfig(QuantizationConfig):
             else:
                 return quant_dtype, quant_dtype
         return cache_dtype, cache_dtype
+
+    def get_kv_quant_split_factor(self, layer_name, kv_head_dim_list):
+        if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
+            k_quant_head_dim = kv_head_dim_list[0]
+            v_quant_head_dim = kv_head_dim_list[1] * 2
+            kv_head_dim_list = [k_quant_head_dim, v_quant_head_dim]
+        return calc_split_factor(kv_head_dim_list)
 
     def maybe_update_config(self, model_name: str, revision: str | None = None) -> None:
         """Load the ModelSlim quantization config from model directory.

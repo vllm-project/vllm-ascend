@@ -1211,3 +1211,11 @@ def get_rope_dim(vllm_config):
             rope_dim = int(model_config.hf_text_config.rotary_dim)
 
     return rope_dim
+
+
+def calc_split_factor(num_list: list[int]):
+    total = sum(num_list)
+    split_factor_list = []
+    for num in num_list:
+        split_factor_list.append(total / num)
+    return split_factor_list
