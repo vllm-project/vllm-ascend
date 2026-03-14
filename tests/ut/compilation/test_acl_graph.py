@@ -210,6 +210,81 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(result, "test_output")
 
     @patch('vllm_ascend.compilation.acl_graph.torch')
+    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.compilation.acl_graph.current_platform')
+    @patch('vllm_ascend.compilation.acl_graph.envs')
+    def test_call_bypasses_aclgraph_when_profiler_is_active(
+            self, mock_envs, mock_current_platform, mock_get_forward_context,
+            mock_torch):
+        """Test __call__ runs in eager mode and skips ACLGraph when profiler is active (issue #1702)"""
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        mock_get_forward_context.return_value = self.mock_forward_context
+        self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+
+        # Simulate profiler being active
+        mock_torch.autograd.profiler._is_profiler_enabled = True
+
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            cudagraph_options=self.mock_cudagraph_options)
+
+        result = wrapper("arg1", "arg2")
+
+        # Should call the runnable directly in eager mode, not capture/replay a graph
+        self.mock_runnable.assert_called_once_with("arg1", "arg2")
+        self.assertEqual(result, "test_output")
+        # No NPU graph should have been created
+        mock_torch.npu.NPUGraph.assert_not_called()
+        mock_torch.npu.graph.assert_not_called()
+        # No graph entries should have been created
+        self.assertEqual(wrapper.concrete_aclgraph_entries, {})
+
+    @patch('vllm_ascend.compilation.acl_graph.torch')
+    @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.compilation.acl_graph.current_platform')
+    @patch('vllm_ascend.compilation.acl_graph.envs')
+    def test_call_does_not_bypass_aclgraph_when_profiler_is_inactive(
+            self, mock_envs, mock_current_platform, mock_get_forward_context,
+            mock_torch):
+        """Test __call__ proceeds with ACLGraph capture when profiler is not active"""
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+        mock_get_forward_context.return_value = self.mock_forward_context
+        self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+
+        # Profiler is NOT active
+        mock_torch.autograd.profiler._is_profiler_enabled = False
+
+        # Mock NPUGraph so capture can proceed
+        mock_npu_graph = MagicMock()
+        mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+        mock_graph_context = MagicMock()
+        mock_torch.npu.graph.return_value = mock_graph_context
+        mock_graph_context.__enter__ = Mock(return_value=None)
+        mock_graph_context.__exit__ = Mock(return_value=None)
+        mock_torch.Tensor = torch.Tensor
+
+        with patch('vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'), \
+             patch('vllm_ascend.compilation.acl_graph.compilation_counter'), \
+             patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors', return_value="weak_ref_output"):
+
+            wrapper = ACLGraphWrapper(
+                runnable=self.mock_runnable,
+                vllm_config=self.mock_vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                cudagraph_options=self.mock_cudagraph_options)
+
+            test_tensor = torch.tensor([1, 2, 3])
+            wrapper(test_tensor, "arg2")
+
+        # Graph capture should have proceeded (NPUGraph was created)
+        mock_torch.npu.NPUGraph.assert_called_once()
+        self.assertIn(self.mock_batch_descriptor, wrapper.concrete_aclgraph_entries)
+
+    @patch('vllm_ascend.compilation.acl_graph.torch')
     @patch(
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )

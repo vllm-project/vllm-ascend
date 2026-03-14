@@ -109,6 +109,17 @@ class ACLGraphWrapper:
             # runtime modes.
             return self.runnable(*args, **kwargs)
 
+        # When the torch profiler is active, bypass ACLGraph replay so that
+        # individual operators are dispatched eagerly and visible in the
+        # profiler trace. ACLGraph replay collapses the entire captured graph
+        # into a single opaque op, making the trace useless for analysis.
+        if torch.autograd.profiler._is_profiler_enabled:
+            logger.debug(
+                "Torch profiler is active, bypassing ACLGraph replay "
+                "and running in eager mode for profiler visibility."
+            )
+            return self.runnable(*args, **kwargs)
+
         if batch_descriptor not in self.concrete_aclgraph_entries:
             # create a new entry for this batch descriptor
             self.concrete_aclgraph_entries[batch_descriptor] = ACLGraphEntry(batch_descriptor=batch_descriptor)
