@@ -1,10 +1,16 @@
 import threading
 
-from mooncake.engine import TransferEngine  # type: ignore
-
 
 class GlobalTE:
     def __init__(self):
+        try:
+            from mooncake.engine import TransferEngine  # type: ignore
+        except ImportError as e:
+            raise ImportError(
+                "Please install mooncake by following the instructions at "
+                "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
+                "to run vLLM with MooncakeConnector."
+            ) from e
         self.transfer_engine = None
         self.is_register_buffer: bool = False
         self.transfer_engine_lock = threading.Lock()
