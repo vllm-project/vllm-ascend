@@ -82,7 +82,7 @@ vllm serve "${MODEL_PATH}" \
 --served-model-name Qwen-Omni \
 --allowed-local-media-path ${LOCAL_MEDIA_PATH} \
 --trust-remote-code \
---compilation-config '{"full_cuda_graph": 1}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --no-enable-prefix-caching
 ```
 
@@ -113,7 +113,7 @@ vllm serve ${MODEL_PATH}\
 --served-model-name Qwen-Omni \
 --allowed-local-media-path ${LOCAL_MEDIA_PATH} \
 --trust-remote-code \
---compilation-config {"full_cuda_graph": 1} \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --data-parallel-size ${DP_SIZE} \
 --no-enable-prefix-caching
 ```
