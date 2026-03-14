@@ -131,6 +131,12 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
+from vllm_ascend.openai_proxy_utils import (
+    append_text_to_chat_content,
+    append_text_to_prompt,
+    streaming_response_kwargs,
+)
+
 try:
     from vllm.logger import init_logger
 
@@ -788,9 +794,9 @@ async def _handle_completions(api: str, request: Request):
                             retry = True
                             retry_count += 1
                             if chat_flag:
-                                messages[0]["content"] = origin_prompt + generated_token
+                                messages[0]["content"] = append_text_to_chat_content(origin_prompt, generated_token)
                             else:
-                                req_data["prompt"] = origin_prompt + generated_token
+                                req_data["prompt"] = append_text_to_prompt(origin_prompt, generated_token)
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await _handle_select_instance(api, req_data, tmp_request_length)
@@ -814,9 +820,7 @@ async def _handle_completions(api: str, request: Request):
             # After streaming done, release tokens
             proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
 
-        # Determine the correct media type based on stream flag
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        return StreamingResponse(generate_stream(), **streaming_response_kwargs(stream_flag))
     except Exception as e:
         import traceback
 
