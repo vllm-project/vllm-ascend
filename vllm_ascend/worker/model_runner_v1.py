@@ -2946,7 +2946,7 @@ class NPUModelRunner(GPUModelRunner):
                 # of mamba block. In this case, BlockTable.block_size will never equal
                 # to kernel_block_sizes[0]
                 self.kernel_block_sizes.append([0])
-        
+
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
@@ -2960,7 +2960,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
             max_num_blocks.append(max_num_blocks_per_req)
-        
+
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
