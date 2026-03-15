@@ -734,11 +734,12 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
     return None, get_tp_group().rank_in_group, get_tp_group().world_size
 
 
-def get_replicated_op(disable_tp, prefix, layer) -> CustomReplicatedOp | None:
+def get_replicated_op(disable_tp, prefix, layer) -> tuple[CustomReplicatedOp | None, int | None, int | None]:
     if disable_tp:
-        return None
+        return None, None, None
 
-    return CustomReplicatedOp(layer)
+    custom_op = CustomReplicatedOp(layer)
+    return custom_op, custom_op.tp_rank, custom_op.tp_size
 
 
 def is_moe_layer(prefix: str) -> bool:
