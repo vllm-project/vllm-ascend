@@ -160,7 +160,9 @@ class AscendConfig:
         )
 
         self.enable_sp_by_pass = (
-            not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
+            vllm_config.model_config is not None
+            and not vllm_config.model_config.enforce_eager
+            and vllm_config.compilation_config.pass_config.enable_sp
         )
 
     @staticmethod
