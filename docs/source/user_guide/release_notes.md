@@ -1,5 +1,58 @@
 # Release Notes
 
+## v0.17.0rc1 - 2026.03.15
+
+This is the first release candidate of v0.17.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+
+### Highlights
+
+- Ascend950 chip is now supported. [#7151](https://github.com/vllm-project/vllm-ascend/pull/7151)
+- ACLGraph (graph mode) is now supported for Model Runner V2. [#7110](https://github.com/vllm-project/vllm-ascend/pull/7110)
+- Unified parallelized speculative decoding is supported, enabling parallel draft inference schemes simultaneously. [#6766](https://github.com/vllm-project/vllm-ascend/pull/6766)
+
+### Features
+
+- Auto-detect quantization format from model files, and remote model IDs (e.g., `org/model-name`) are also supported. `--quantization ascend` is not required now. [#7111](https://github.com/vllm-project/vllm-ascend/pull/7111)
+- Qwen3.5 is supported from this version on.
+- FlashLB algorithm for EPLB: supports per-step heat collection and multi-stage load balancing for better expert parallelism efficiency. [#6477](https://github.com/vllm-project/vllm-ascend/pull/6477)
+- LoRA with tensor parallel and `--fully-sharded-loras` is now fixed and working. [#6650](https://github.com/vllm-project/vllm-ascend/pull/6650)
+- LMCacheAscendConnector is added as a new KV cache pooling solution for Ascend. [#6882](https://github.com/vllm-project/vllm-ascend/pull/6882)
+- W8A8C8 quantization is now supported for DeepSeek-V3.2 and GLM5 in PD-mix scenario. [#7029](https://github.com/vllm-project/vllm-ascend/pull/7029)
+- [Experimental] Minimax-m2.5 model is now supported on Ascend NPU. [#7105](https://github.com/vllm-project/vllm-ascend/pull/7105)
+- [Experimental] Mooncake Layerwise Connector now supports hybrid attention manager with multiple KV cache groups. [#7022](https://github.com/vllm-project/vllm-ascend/pull/7022)
+- [Experimental] Prefix cache is now supported in hybrid model. [#7103](https://github.com/vllm-project/vllm-ascend/pull/7103)
+
+### Performance
+
+- Pipeline Parallel now supports async scheduling, improving throughput for PP deployments. [#7136](https://github.com/vllm-project/vllm-ascend/pull/7136)
+- Improved TTFT when using Mooncake connector by reducing log overhead. [#6125](https://github.com/vllm-project/vllm-ascend/pull/6125)
+- KV Pool lookup is optimized for short sequences (token length < block_size). [#7146](https://github.com/vllm-project/vllm-ascend/pull/7146)
+- Fix penalty ops in Model Runner V2, achieving ~10% performance improvement. [#7013](https://github.com/vllm-project/vllm-ascend/pull/7013)
+
+### Documentation
+
+- Added EPD (Encode-Prefill-Decode) documentation and load-balance proxy example. [#6221](https://github.com/vllm-project/vllm-ascend/pull/6221)
+- Added Ascend PyTorch Profiler usage guide. [#7117](https://github.com/vllm-project/vllm-ascend/pull/7117)
+- Fixed DSV3.1 PD configuration documentation. [#7187](https://github.com/vllm-project/vllm-ascend/pull/7187)
+
+### Others
+
+- Fix drafter crash in full graph mode for speculative decoding. [#7158](https://github.com/vllm-project/vllm-ascend/pull/7158) [#7148](https://github.com/vllm-project/vllm-ascend/pull/7148)
+- Fix GLM5-W8A8 precision issues caused by rotary quant MTP weights. [#7139](https://github.com/vllm-project/vllm-ascend/pull/7139)
+- Fix ngram graph replay accuracy error on 310P. [#7134](https://github.com/vllm-project/vllm-ascend/pull/7134)
+- Fix FIA pad logic in graph mode after upstream vLLM change. [#7144](https://github.com/vllm-project/vllm-ascend/pull/7144)
+- Fix a precision issue caused by wrong KV cache reshape on Qwen3.5. [#7209](https://github.com/vllm-project/vllm-ascend/pull/7209)
+- Fix extra processes spawned on rank0 device. [#7107](https://github.com/vllm-project/vllm-ascend/pull/7107)
+- Graph capture failures now properly raise exceptions for easier debugging. [#5644](https://github.com/vllm-project/vllm-ascend/pull/5644)
+- Fix Qwen3.5 model by replacing torch_npu.npu_recurrent_gated_delta_rule by fused_recurrent_gated_delta_rule. [#7109](https://github.com/vllm-project/vllm-ascend/pull/7109)
+- Fix the bug when running Qwen3-Reranker-0.6B with LoRA. [#7156](https://github.com/vllm-project/vllm-ascend/pull/7156)
+
+### Known Issue
+
+- GLM5 requires transformers==5.2.0, and this will resolved by [vllm-project/vllm#30566](https://github.com/vllm-project/vllm/pull/30566), will not included in v0.17.0.
+- There is a precision issue with Qwen3-Next due to the changed tp weight split method. Will fix it in next release.
+- The minimum number of tokens of prefix cache hit in hybrid model is 2k now
+
 ## v0.16.0rc1 - 2026.03.09
 
 This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
@@ -42,7 +95,7 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 ### Deprecation & Breaking Changes
 
 - `enable_flash_comm_v1` config option has been renamed back to `enable_sp`. [#6883](https://github.com/vllm-project/vllm-ascend/pull/6883)
-- The auto-detect quantization format from model files is reverted, in v0.16.0rc1, we still need to add `---quantization ascend` to serve a model quantinized by modelslim. It will be added back in the next version after the bug with the remote model id is fixed. [#6873](https://github.com/vllm-project/vllm-ascend/pull/6873)
+- The auto-detect quantization format from model files is reverted, in v0.16.0rc1, we still need to add `--quantization ascend` to serve a model quantinized by modelslim. It will be added back in the next version after the bug with the remote model id is fixed. [#6873](https://github.com/vllm-project/vllm-ascend/pull/6873)
 
 ### Documentation
 
