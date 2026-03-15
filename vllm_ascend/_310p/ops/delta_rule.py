@@ -138,7 +138,8 @@ def _run_recurrent_gated_delta_rule(
                     )
                 h_t = states[state_idx]
             else:
-                h_t = torch.zeros(HV, Kdim, v.shape[-1], dtype=q.dtype, device=q.device)
+                # Keep temporary state dtype aligned with persistent state buffer.
+                h_t = torch.zeros(HV, Kdim, v.shape[-1], dtype=states.dtype, device=q.device)
 
             q_t = _maybe_l2norm(q_t, use_qk_l2norm_in_kernel)
             k_t = _maybe_l2norm(k_t, use_qk_l2norm_in_kernel)

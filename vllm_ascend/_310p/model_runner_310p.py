@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager, nullcontext
 
 import numpy as np
@@ -24,6 +25,7 @@ import torch
 import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.logger import logger
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -266,8 +268,9 @@ class NPUModelRunner310(NPUModelRunner):
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             for layer_name in kv_cache_tensor.shared_by:
                 if "linear_attn" in layer_name and layer_name not in kv_cache_raw_tensors:
-                    # 310P mamba state uses fp16 raw pages.
-                    tensor = torch.zeros(kv_cache_tensor.size // 2, dtype=torch.float16, device=self.device)
+                    # Keep mamba cache as raw bytes, then reinterpret by spec dtypes
+                    # during reshape. This matches MambaSpec byte-level contract.
+                    tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         if "linear_attn" in layer_name_inner:
                             kv_cache_raw_tensors[layer_name_inner] = tensor
@@ -347,17 +350,17 @@ class NPUModelRunner310(NPUModelRunner):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert isinstance(raw_tensor, torch.Tensor)
-                    assert raw_tensor.numel() * 2 % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = raw_tensor.numel() * 2 // kv_cache_spec.page_size_bytes
+                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
-                    for shape, _dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         target_shape = (num_blocks, *shape)
-                        target_idx += torch.prod(torch.tensor(target_shape)).item()
-                        tensor = raw_tensor[start_idx:target_idx].view(target_shape)
+                        target_idx += math.prod(target_shape) * get_dtype_size(dtype)
+                        tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
