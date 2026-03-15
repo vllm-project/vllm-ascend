@@ -16,8 +16,8 @@
 from __future__ import annotations
 
 import torch
-from vllm.forward_context import get_forward_context
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 
 from .moe_mlp import unified_apply_mlp
@@ -50,7 +50,7 @@ class AllGatherCommImpl310(AllGatherCommImpl):
     ) -> FusedExpertsResult:
         # This method is overridden to use the 310p-specific unified_apply_mlp
         # which provides optimized MLP computation for the 310p platform
-        moe_comm_method = get_forward_context().moe_comm_method
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
         dispatch_results = self.token_dispatcher.token_dispatch(

@@ -929,7 +929,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
         self.assertEqual(lse.shape, prefix_lse.shape)
 
-    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode_without_graph(self,
@@ -1095,7 +1095,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
-    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode(self, mock_npu_fused_infer_attention_score,
                             mock_get_forward_context):
