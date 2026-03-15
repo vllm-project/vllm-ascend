@@ -42,7 +42,6 @@
 #include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
-#include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
@@ -919,16 +918,4 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> Tensor[]"
     );
     ops.impl("moe_grouped_matmul", torch::kPrivateUse1,&vllm_ascend::moe_grouped_matmul);
-
-    // This operator is planned to be integrated into PTA in the near future.
-    // Once that happens, the implementation in csrc will be removed.
-    ops.def(
-        "npu_lightning_indexer_quant(Tensor query, Tensor key, Tensor weights, Tensor query_dequant_scale, "
-        "                            Tensor key_dequant_scale, *, Tensor? actual_seq_lengths_query=None, "
-        "                            Tensor? actual_seq_lengths_key=None, Tensor? block_table=None, "
-        "                            int query_quant_mode=0, int key_quant_mode=0, "
-        "                            str layout_query='BSND', str layout_key='BSND',"
-        "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
-    );
-    ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
 }

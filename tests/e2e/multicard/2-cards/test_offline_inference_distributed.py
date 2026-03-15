@@ -266,33 +266,6 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
         vllm_model.generate_greedy(long_example_prompts, max_tokens)
 
 
-@patch.dict(os.environ, {"HCCL_OP_EXPANSION_MODE": "AIV"})
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-@patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
-    short_example_prompts = [
-        "Hello ",
-    ]
-    # "max_position_embeddings": 163840,
-    long_example_prompts = ["Hello " * (163839 - 500) + "Hello"]
-    max_tokens = 500
-    with VllmRunner(
-        "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
-        tensor_parallel_size=2,
-        quantization="ascend",
-        enable_expert_parallel=True,
-        max_model_len=163840,
-        compilation_config={"cudagraph_capture_sizes": [2, 4, 6, 8, 10, 12], "cudagraph_mode": "FULL_DECODE_ONLY"},
-        speculative_config={"num_speculative_tokens": 1, "method": "deepseek_mtp"},
-        additional_config={"layer_sharding": ["q_b_proj", "o_proj"], "enable_sparse_c8": True},
-        reasoning_parser="deepseek_v3",
-        tokenizer_mode="deepseek_v32",
-    ) as vllm_model:
-        vllm_model.generate_greedy(short_example_prompts, max_tokens)
-        vllm_model.generate_greedy(long_example_prompts, max_tokens)
-
-
 @pytest.mark.parametrize("model", QWEN_W4A4_MODELS)
 def test_qwen3_w4a4_distributed_tp2(model):
     example_prompts = [
