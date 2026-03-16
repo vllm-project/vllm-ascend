@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: '0 2 * * 1'  # Every Monday at 02:00 UTC
   workflow_dispatch:
-  pull_request:
-    branches:
-      - 'main'
-    paths:
-      - '.github/workflows/schedule_update_estimated_time.yaml'
 
 permissions:
   contents: write
