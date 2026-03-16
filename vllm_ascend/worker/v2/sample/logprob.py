@@ -48,6 +48,7 @@ def _topk_log_softmax_kernel(
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=0.0)
         # NOTE(woosuk): Make sure that logits and all following operations use FP32.
         logits = logits.to(tl.float32)
+        # NOTE(wangx700): tl.where does not support int64 so we cast it to float32.
         block = block.to(tl.float32)
         e = tl.exp(logits - max_val)
         e = tl.where(block < vocab_size, e, 0.0)
@@ -77,6 +78,8 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,  # type: ignore
+        # NOTE(wangx700): PADDED_TOPK must be at least 2 to avoid 
+        # num_logprobs=1 getting wrong results.
         PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
     )
     return logprobs
