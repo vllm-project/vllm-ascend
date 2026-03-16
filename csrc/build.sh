@@ -168,8 +168,13 @@ else
     exit 1
 fi
 
+# Get CPU count using the common script (handles container environments correctly)
+SCRIPT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+VLLM_ASCEND_ROOT=$(dirname ${SCRIPT_DIR})
 if [ "${PARENT_JOB}" == "false" ];then
-    CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)*2))
+    CPU_NUM=$(${VLLM_ASCEND_ROOT}/tools/get_cpu_count.sh)
+    # Double the CPU count for parallel builds
+    CPU_NUM=$((CPU_NUM * 2))
     JOB_NUM="-j${CPU_NUM}"
 fi
 

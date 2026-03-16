@@ -44,6 +44,49 @@ ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
 
 
+def get_container_cpu_count() -> int:
+    """Get the number of CPUs available in the current environment.
+
+    This function correctly handles container environments where nproc or
+    os.cpu_count() may return the host's CPU count instead of the container's
+    limit. It reads from cgroups to get the actual CPU limit.
+    """
+    # Try cgroup v2 first (most reliable for containers)
+    cpu_max_path = "/sys/fs/cgroup/cpu.max"
+    if os.path.exists(cpu_max_path):
+        try:
+            with open(cpu_max_path) as f:
+                content = f.read().strip()
+                quota, period = content.split()
+                if quota != "max":
+                    return max(1, int(int(quota) / int(period)))
+        except (OSError, ValueError):
+            pass
+
+    # Try cgroup v1
+    quota_path = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
+    period_path = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
+    if os.path.exists(quota_path) and os.path.exists(period_path):
+        try:
+            with open(quota_path) as f:
+                quota = int(f.read().strip())
+            with open(period_path) as f:
+                period = int(f.read().strip())
+            if quota > 0:  # quota <= 0 means unlimited
+                return max(1, int(quota / period))
+        except (OSError, ValueError):
+            pass
+
+    # Fallback: try sched_getaffinity
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        pass
+
+    # Final fallback: os.cpu_count()
+    return os.cpu_count() or 1
+
+
 def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""):
     if env_variable is None:
         logging.warning(
@@ -229,12 +272,8 @@ class cmake_build_ext(build_ext):
             num_jobs = int(num_jobs)
             logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
-            try:
-                # os.sched_getaffinity() isn't universally available, so fall
-                #  back to os.cpu_count() if we get an error here.
-                num_jobs = len(os.sched_getaffinity(0))
-            except AttributeError:
-                num_jobs = os.cpu_count()
+            # Use cgroup-aware CPU count to handle container environments
+            num_jobs = get_container_cpu_count()
         num_jobs = max(1, num_jobs)
 
         return num_jobs

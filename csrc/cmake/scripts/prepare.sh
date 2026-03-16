@@ -8,7 +8,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ======================================================================================================================
 
-CPU_NUM=$(($(cat /proc/cpuinfo | grep "^processor" | wc -l)*2))
+# Get CPU count using the common script (handles container environments correctly)
+SCRIPT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
+VLLM_ASCEND_ROOT=$(dirname $(dirname $(dirname ${SCRIPT_DIR})))
+CPU_NUM=$(${VLLM_ASCEND_ROOT}/tools/get_cpu_count.sh)
+# Double the CPU count for parallel builds
+CPU_NUM=$((CPU_NUM * 2))
 JOB_NUM="-j${CPU_NUM}"
 
 while [[ $# -gt 0 ]]; do
