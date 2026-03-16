@@ -8,14 +8,12 @@ import shlex
 import subprocess
 import sys
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from variantlib.constants import VALIDATION_WHEEL_NAME_REGEX
-from variantlib.constants import VARIANT_DIST_INFO_FILENAME
+from variantlib.constants import VALIDATION_WHEEL_NAME_REGEX, VARIANT_DIST_INFO_FILENAME
 from variantlib.variant_dist_info import VariantDistInfo
 
 VARIANTLIB_CMD = "variantlib"
@@ -51,9 +49,7 @@ def _expand_wheel_paths(wheel: str, job_index: int) -> list[str]:
     # Support passing a subdirectory directly (e.g. 310p/a2/a3) and expand all wheels in it.
     candidates = sorted(p for p in wheel_path.iterdir() if p.is_file() and p.suffix == ".whl")
     if not candidates:
-        raise ValueError(
-            f"Job #{job_index} wheel directory has no .whl files: {wheel_path}"
-        )
+        raise ValueError(f"Job #{job_index} wheel directory has no .whl files: {wheel_path}")
     return [str(path) for path in candidates]
 
 
@@ -72,9 +68,7 @@ def _resolve_output_wheel(job: Job) -> Path:
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
-        raise FileNotFoundError(
-            f"No output wheel found for base name {base_wheel_name!r} in {output_dir}"
-        )
+        raise FileNotFoundError(f"No output wheel found for base name {base_wheel_name!r} in {output_dir}")
     raise ValueError(
         f"Multiple output wheels found for base name {base_wheel_name!r}; "
         "please set variant_label in job to disambiguate"
@@ -95,10 +89,7 @@ def _verify_built_wheel(job: Job) -> str:
     if filename_label is None:
         raise ValueError(f"Output wheel is not a variant wheel: {output_name!r}")
     if job.variant_label is not None and filename_label != job.variant_label:
-        raise ValueError(
-            "Variant label mismatch: "
-            f"expected={job.variant_label!r}, actual={filename_label!r}"
-        )
+        raise ValueError(f"Variant label mismatch: expected={job.variant_label!r}, actual={filename_label!r}")
 
     with zipfile.ZipFile(output_wheel, "r") as zip_file:
         for name in zip_file.namelist():
@@ -111,16 +102,13 @@ def _verify_built_wheel(job: Job) -> str:
                 variant_dist_info = VariantDistInfo(zip_file.read(name), filename_label)
                 break
         else:
-            raise ValueError(
-                f"Invalid wheel -- no {VARIANT_DIST_INFO_FILENAME} found: {output_name!r}"
-            )
+            raise ValueError(f"Invalid wheel -- no {VARIANT_DIST_INFO_FILENAME} found: {output_name!r}")
 
     actual_properties = {x.to_str() for x in variant_dist_info.variant_desc.properties}
     expected_properties = set(job.properties)
     if actual_properties != expected_properties:
         raise ValueError(
-            "Variant properties mismatch: "
-            f"expected={sorted(expected_properties)}, actual={sorted(actual_properties)}"
+            f"Variant properties mismatch: expected={sorted(expected_properties)}, actual={sorted(actual_properties)}"
         )
 
     return (
@@ -154,10 +142,7 @@ def load_jobs(data: Any) -> list[Job]:
         if not wheel:
             wheel = os.environ.get(wheel_env)
         if not wheel:
-            raise ValueError(
-                f"Job #{i} is missing required field: 'wheel'. "
-                f"You can also set env var {wheel_env!r}."
-            )
+            raise ValueError(f"Job #{i} is missing required field: 'wheel'. You can also set env var {wheel_env!r}.")
 
         job_pyproject_toml = item.get("pyproject_toml", config_defaults.get("pyproject_toml"))
         pyproject_env = str(
@@ -170,8 +155,7 @@ def load_jobs(data: Any) -> list[Job]:
             job_pyproject_toml = os.environ.get(pyproject_env)
         if not job_pyproject_toml:
             raise ValueError(
-                f"Job #{i} is missing required field: 'pyproject_toml'. "
-                f"You can also set env var {pyproject_env!r}."
+                f"Job #{i} is missing required field: 'pyproject_toml'. You can also set env var {pyproject_env!r}."
             )
 
         job_output_dir = item.get("output_dir", config_defaults.get("output_dir"))
@@ -185,8 +169,7 @@ def load_jobs(data: Any) -> list[Job]:
             job_output_dir = os.environ.get(output_dir_env)
         if not job_output_dir:
             raise ValueError(
-                f"Job #{i} is missing required field: 'output_dir'. "
-                f"You can also set env var {output_dir_env!r}."
+                f"Job #{i} is missing required field: 'output_dir'. You can also set env var {output_dir_env!r}."
             )
 
         properties_raw = item.get("properties")
@@ -194,9 +177,7 @@ def load_jobs(data: Any) -> list[Job]:
 
         properties: list[str]
         if properties_raw is not None:
-            if not isinstance(properties_raw, list) or not all(
-                isinstance(x, str) for x in properties_raw
-            ):
+            if not isinstance(properties_raw, list) or not all(isinstance(x, str) for x in properties_raw):
                 raise ValueError(f"Job #{i} field 'properties' must be a list of strings.")
             properties = properties_raw
         elif property_single is not None:
@@ -210,9 +191,7 @@ def load_jobs(data: Any) -> list[Job]:
 
         null_variant = bool(item.get("null_variant", False))
         if null_variant and properties:
-            raise ValueError(
-                f"Job #{i} cannot set both 'null_variant' and property/properties."
-            )
+            raise ValueError(f"Job #{i} cannot set both 'null_variant' and property/properties.")
 
         expanded_wheels = _expand_wheel_paths(str(wheel), i)
         for expanded_wheel in expanded_wheels:
@@ -252,9 +231,7 @@ def load_variant_label_aliases(data: Any) -> dict[str, str]:
     alias_map: dict[str, str] = {}
     for source_label, target_label in aliases.items():
         if not isinstance(target_label, str):
-            raise ValueError(
-                "Config field 'variant_label_aliases' must map strings to strings."
-            )
+            raise ValueError("Config field 'variant_label_aliases' must map strings to strings.")
         alias_map[source_label] = target_label
 
     return alias_map
@@ -283,10 +260,7 @@ def build_command(job: Job) -> list[str]:
         cmd.append("--null-variant")
     else:
         if not job.properties:
-            raise ValueError(
-                f"Job for wheel '{job.wheel}' must provide property/properties "
-                "or set null_variant=true."
-            )
+            raise ValueError(f"Job for wheel '{job.wheel}' must provide property/properties or set null_variant=true.")
         for prop in job.properties:
             cmd.extend(["--property", prop])
 
@@ -308,9 +282,7 @@ def build_command(job: Job) -> list[str]:
 def _prepare_output_dir(job: Job) -> Path:
     output_dir = Path(job.output_dir)
     if output_dir.exists() and not output_dir.is_dir():
-        raise NotADirectoryError(
-            f"Output path exists but is not a directory: {output_dir}"
-        )
+        raise NotADirectoryError(f"Output path exists but is not a directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
 
@@ -405,15 +377,12 @@ def main() -> int:
         print(f"Failed to load config: {exc}", file=sys.stderr)
         return 2
 
-    selected_labels = {
-        variant_label_aliases.get(label, label) for label in variant_labels
-    }
+    selected_labels = {variant_label_aliases.get(label, label) for label in variant_labels}
     if selected_labels:
         jobs = [job for job in jobs if job.variant_label in selected_labels]
         if not jobs:
             print(
-                "No matching jobs for --variant-label: "
-                f"{sorted(selected_labels)}",
+                f"No matching jobs for --variant-label: {sorted(selected_labels)}",
                 file=sys.stderr,
             )
             return 2
