@@ -10,7 +10,6 @@ from vllm.distributed import (
     get_decode_context_model_parallel_world_size,
     get_pcp_group,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
@@ -30,6 +29,8 @@ from vllm_ascend.attention.mla_v1 import (
 )
 # isort: on
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata,
     CPChunkedContextMetadata,
@@ -189,6 +190,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             max_seq_lens=chunked_context_metadata.max_seq_lens,
             chunk_seq_lens=self.chunk_seq_lens,
             chunk_seq_lens_npu=chunked_context_metadata.chunk_seq_lens_npu,
+            chunk_actual_seq_lengths_kv_list=chunked_context_metadata.chunk_actual_seq_lengths_kv_list,
             workspace=chunked_context_metadata.workspace,
             padded_chunk_seq_lens_npu=padded_local_chunk_seq_lens.npu(),
             padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
@@ -276,6 +278,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             **kwargs,
         )
 
+        # npu_ring_mla needs bfloat16 512x512 mask, different from FIA's int8 2048x2048 mask
+        # TODO: Remove this when mla_cp.py also migrates to FIA
+        self._ring_mla_mask_builder = AttentionMaskBuilder(torch.device("npu"))
+
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.pcp_group = get_pcp_group().device_group if self.pcp_size > 1 else None
@@ -294,7 +300,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        if forward_context.is_draft_model:
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
@@ -484,6 +490,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_mask_seqlens = attn_metadata.prefill.pcp_metadata.attn_mask_seqlens
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
+        # Use ring_mla-specific mask (bfloat16, 512x512)
+        # TODO: Remove this when mla_cp.py migrates to FIA
+        ring_mla_mask = self._ring_mla_mask_builder.get_mla_mask(self.vllm_config.model_config.dtype)
+
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
@@ -494,7 +504,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             kv_nomask_idx=kv_with_q_head_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
             attn_nomask_seqlens=head_attn_nomask_seqlens,
-            mask=attn_metadata.attn_mask,
+            mask=ring_mla_mask,
         )
 
         output_tail, lse_tail = self._attention_with_mask_and_nomask(
@@ -507,7 +517,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             kv_nomask_idx=kv_with_q_tail_nomask_idx,
             attn_mask_seqlens=attn_mask_seqlens,
             attn_nomask_seqlens=tail_attn_nomask_seqlens,
-            mask=attn_metadata.attn_mask,
+            mask=ring_mla_mask,
         )
 
         q_full_idx = attn_metadata.prefill.pcp_metadata.q_full_idx
@@ -659,12 +669,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
             "softmax_lse_flag": True,
         }
 
-        forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_draft_model:
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if forward_context.capturing:
+        if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
             event.wait(stream)
