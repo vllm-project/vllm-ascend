@@ -442,8 +442,10 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     head_size: int,
     eps: float,
     mrope_section: list[int],
+    rope_dim: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
+    thw_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
     q_size = num_q_heads * head_size
