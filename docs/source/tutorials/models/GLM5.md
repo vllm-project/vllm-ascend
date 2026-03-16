@@ -1025,7 +1025,7 @@ Before you start, please
              }'
          ```
 
-   6. Decode node 3
+    6. Decode node 3
 
          ```shell
          nic_name="enp48s3u1u1" # change to your own nic name
@@ -1149,10 +1149,10 @@ python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-
 # change ip to your own
 python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address 141.61.39.101 --dp-rpc-port 10523 --vllm-start-port 6721
 ```
+
 ### Request Forwarding
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
-
 
 ```shell
 unset http_proxy
