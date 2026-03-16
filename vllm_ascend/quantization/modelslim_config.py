@@ -353,6 +353,8 @@ def get_quant_type_for_layer(
     # Attention
     if layer_type == "attention" and "fa_quant_type" in quant_description:
         return quant_description["fa_quant_type"]
+    if layer_type == "attention" and "kv_quant_type" in quant_description:
+        return quant_description["kv_quant_type"]
     # Linear / MoE
     return get_linear_quant_type(quant_description, prefix, packed_modules_mapping)
 
@@ -553,10 +555,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             return AscendLinearMethod(scheme)
-        elif (
-            isinstance(layer, Attention)
-            and "fa_quant_type" in self.quant_description
-            and self.quant_description["fa_quant_type"] is not None
+        elif isinstance(layer, Attention) and (
+            ("fa_quant_type" in self.quant_description and self.quant_description["fa_quant_type"] is not None)
+            or ("kv_quant_type" in self.quant_description and self.quant_description["kv_quant_type"] is not None)
         ):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             return AscendKVCacheMethod(scheme)
