@@ -78,7 +78,7 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,  # type: ignore
-        # NOTE(wangx700): PADDED_TOPK must be at least 2 to avoid 
+        # NOTE(wangx700): PADDED_TOPK must be at least 2 to avoid
         # num_logprobs=1 getting wrong results.
         PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
     )
