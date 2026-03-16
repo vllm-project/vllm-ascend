@@ -41,7 +41,6 @@ concurrency:
 
 jobs:
     e2e-upstream:
-        name: singlecard-light
         runs-on: linux-aarch64-a2b3-1
         strategy:
           fail-fast: false
