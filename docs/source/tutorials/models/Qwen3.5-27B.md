@@ -124,7 +124,6 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 
 **Notice:**
 
-
 The parameters are explained as follows:
 
 - `--data-parallel-size` 1 and `--tensor-parallel-size` 2 are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
