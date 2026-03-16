@@ -2612,6 +2612,34 @@ class NPUModelRunner(GPUModelRunner):
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches, num_attn_module)
         return kv_caches
 
+    def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+        layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
+        for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
+            group_spec = group_kv_cache_spec.kv_cache_spec
+            for layer_name in group_kv_cache_spec.layer_names:
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    layer_kv_cache_spec[layer_name] = group_spec.kv_cache_specs[layer_name]
+                else:
+                    layer_kv_cache_spec[layer_name] = group_spec
+        return layer_kv_cache_spec
+
+    def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
+        if isinstance(kv_cache_spec, MLAAttentionSpec):
+            attn_layers = get_layers_from_vllm_config(
+                self.vllm_config,
+                AttentionLayerBase,
+                [layer_name],
+            )
+            attn_layer = attn_layers[layer_name]
+            if not isinstance(attn_layer, MLAAttention):
+                raise TypeError(
+                    f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
+                )
+            return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
+
+        head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
+        return kv_cache_spec.head_size, head_size_v
+
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
@@ -2632,10 +2660,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_raw_tensors: dict[str, torch.Tensor | torch.Tensor | None] = {}
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
-        layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
-        for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
-            for layer_name in group_kv_cache_spec.layer_names:
-                layer_kv_cache_spec[layer_name] = group_kv_cache_spec.kv_cache_spec
+        layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
@@ -2670,19 +2695,12 @@ class NPUModelRunner(GPUModelRunner):
                     # as it only support the 0-dim of kv_cache is `num_blocks`.
                     # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
                     # and rope head dim.
-                    if self.model_config.use_mla:
-                        head_size = (
-                            self.model_config.hf_text_config.qk_rope_head_dim
-                            + self.model_config.hf_text_config.kv_lora_rank
-                        )
+                    current_kv_cache_spec = layer_kv_cache_spec[layer_name]
+                    assert isinstance(current_kv_cache_spec, AttentionSpec)
 
                     dsa_k_cache_factor = None
                     dsa_k_cache_size = None
-                    if not self.model_config.use_mla:
-                        # for non-mla model, use FullAttentionSpec
-                        k_tensor_split_factor = 2
-                        v_tensor_split_factor = 2
-                    elif self.use_sparse:
+                    if self.use_sparse:
                         # for deepseek v3.2, we split the kv cache according to the corresponding ratio
                         sparse_sum_head_size = sum(self._get_sparse_kv_cache_ratio())
                         k_tensor_split_factor, v_tensor_split_factor, dsa_k_cache_factor = [  # type: ignore
@@ -2690,9 +2708,10 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         dsa_k_cache_size = int(kv_cache_tensor.size // dsa_k_cache_factor)
                     else:
-                        # for other deepseek models, use MLAAttentionSpec
-                        k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
-                        v_tensor_split_factor = head_size / self.model_config.hf_text_config.qk_rope_head_dim
+                        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
+                        total_dim = k_dim + v_dim
+                        k_tensor_split_factor = total_dim / k_dim
+                        v_tensor_split_factor = total_dim / v_dim
 
                     k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                     v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
@@ -2752,10 +2771,7 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
-        layer_kv_cache_spec = {}
-        for group in kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                layer_kv_cache_spec[layer_name] = group.kv_cache_spec
+        layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -2763,9 +2779,11 @@ class NPUModelRunner(GPUModelRunner):
                 if layer_name in self.runner_only_attn_layers:
                     continue
 
+                current_kv_cache_spec = layer_kv_cache_spec[layer_name]
+
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
-                if isinstance(kv_cache_spec, AttentionSpec):
+                if isinstance(current_kv_cache_spec, AttentionSpec):
                     raw_dsa_k_tensor = None
                     if self.use_sparse:
                         raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
@@ -2785,8 +2803,8 @@ class NPUModelRunner(GPUModelRunner):
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
                     assert raw_v_tensor is not None
-                    assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
+                    assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
+                    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
@@ -2800,16 +2818,16 @@ class NPUModelRunner(GPUModelRunner):
                     if hasattr(attn_backend, "get_supported_kernel_block_sizes") and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_kernel_block_sizes()[0]
 
-                        block_size_chunk = kv_cache_spec.block_size // block_size
+                        block_size_chunk = current_kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks * block_size_chunk,
                             block_size,
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.head_size,
+                            current_kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
                             attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
-                                kv_cache_spec.dtype
+                                current_kv_cache_spec.dtype
                             )
                             conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
                             raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
@@ -2817,26 +2835,33 @@ class NPUModelRunner(GPUModelRunner):
                             raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
                     else:
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                            num_blocks, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
+                            num_blocks,
+                            current_kv_cache_spec.block_size,
+                            current_kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.head_size,
                         )
-                    dtype = kv_cache_spec.dtype
-                    if not self.model_config.use_mla:
+                    dtype = current_kv_cache_spec.dtype
+                    if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
                         k_shape = kv_cache_shape[1:]
-                        v_shape = k_shape
+                        if hasattr(current_kv_cache_spec, "head_size_v"):
+                            v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
+                        else:
+                            v_shape = k_shape
                     else:
                         # k_cache: nope_cache    v_cache: rope_cache
                         mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
+                        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         k_shape = [
                             mla_num_blocks,
                             mla_block_size,
                             num_kv_heads,
-                            self.model_config.hf_text_config.kv_lora_rank,
+                            k_dim,
                         ]
                         v_shape = [
                             mla_num_blocks,
                             mla_block_size,
                             num_kv_heads,
-                            self.model_config.hf_text_config.qk_rope_head_dim,
+                            v_dim,
                         ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
@@ -2845,19 +2870,19 @@ class NPUModelRunner(GPUModelRunner):
                         index_head_dim = self._get_sparse_kv_cache_ratio()[-1]
                         dsa_k_cache_shape = (
                             num_blocks,
-                            kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.block_size,
+                            current_kv_cache_spec.num_kv_heads,
                             index_head_dim,
                         )
                         dsa_k_cache = raw_dsa_k_tensor.view(dtype).view(dsa_k_cache_shape)
                         kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
-                elif isinstance(kv_cache_spec, MambaSpec):
+                elif isinstance(current_kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
-                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                    assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     # `num_blocks` is the number of blocks the model runner can use.
@@ -2877,7 +2902,7 @@ class NPUModelRunner(GPUModelRunner):
                     # tensor1: [(kv_padding), conv           , ...]
                     # tensor2: [k           , ssm            , ...]
                     # tensor3: [v           , (mamba_padding), ...]
-                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                    for shape, dtype in zip(current_kv_cache_spec.shapes, current_kv_cache_spec.dtypes):
                         # normally, there is conv state and ssm state in this loop. And there is only
                         # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
