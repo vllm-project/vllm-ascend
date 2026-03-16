@@ -622,8 +622,8 @@ Before you start, please
     1. Prefill node 0
 
         ```shell
-        nic_name="enp48s3u1u1" # change to your own nic name
-        local_ip=141.61.39.129 # change to your own ip
+        nic_name="xxxx" # change to your own nic name
+        local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -701,8 +701,8 @@ Before you start, please
     2. Prefill node 1
 
         ```shell
-        nic_name="enp48s3u1u1" # change to your own nic name
-        local_ip=141.61.39.133 # change to your own ip
+        nic_name="xxxx" # change to your own nic name
+        local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -780,8 +780,8 @@ Before you start, please
     3. Decode node 0
 
         ```shell
-        nic_name="enp48s3u1u1" # change to your own nic name
-        local_ip=141.61.39.101 # change to your own ip
+        nic_name="xxxx" # change to your own nic name
+        local_ip="xxxx" # change to your own ip
     
         export HCCL_OP_EXPANSION_MODE="AIV"
     
@@ -861,8 +861,8 @@ Before you start, please
     4. Decode node 1
 
          ```shell
-         nic_name="enp48s3u1u1" # change to your own nic name
-         local_ip=141.61.39.109 # change to your own ip
+         nic_name="xxxx" # change to your own nic name
+         local_ip="xxxx" # change to your own ip
             
          export HCCL_OP_EXPANSION_MODE="AIV"
             
@@ -942,8 +942,8 @@ Before you start, please
     5. Decode node 2
 
          ```shell
-         nic_name="enp48s3u1u1" # change to your own nic name
-         local_ip=141.61.39.185 # change to your own ip
+         nic_name="xxxx" # change to your own nic name
+         local_ip="xxxx" # change to your own ip
             
          export HCCL_OP_EXPANSION_MODE="AIV"
             
@@ -1023,8 +1023,8 @@ Before you start, please
     6. Decode node 3
 
          ```shell
-         nic_name="enp48s3u1u1" # change to your own nic name
-         local_ip=141.61.39.173 # change to your own ip
+         nic_name="xxxx" # change to your own nic name
+         local_ip="xxxx" # change to your own ip
             
          export HCCL_OP_EXPANSION_MODE="AIV"
             
@@ -1107,42 +1107,42 @@ Once the preparation is done, you can start the server with the following comman
 
 ```shell
 # change ip to your own
-python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.61.39.129 --dp-rpc-port 10521 --vllm-start-port 6700
+python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
 ```
 
 2. Prefill node 1
 
 ```shell
 # change ip to your own
-python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address 141.61.39.129 --dp-rpc-port 10521 --vllm-start-port 6700
+python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
 ```
 
 3. Decode node 0
 
 ```shell
 # change ip to your own
-python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.61.39.101 --dp-rpc-port 10523 --vllm-start-port 6721
+python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
 ```
 
 4. Decode node 1
 
 ```shell
 # change ip to your own
-python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.101 --dp-rpc-port 10523 --vllm-start-port 6721
+python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
 ```
 
 5. Decode node 2
 
 ```shell
 # change ip to your own
-python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 8 --dp-address 141.61.39.101 --dp-rpc-port 10523 --vllm-start-port 6721
+python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 8 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
 ```
 
 6. Decode node 3
 
 ```shell
 # change ip to your own
-python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address 141.61.39.101 --dp-rpc-port 10523 --vllm-start-port 6721
+python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
 ```
 
 ### Request Forwarding
@@ -1157,30 +1157,30 @@ python load_balance_proxy_server_example.py \
     --port 8000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
-       141.61.39.129 \
-       141.61.39.129 \
-       141.61.39.133 \
-       141.61.39.133 \
+       $node_p0_ip \
+       $node_p0_ip \
+       $node_p1_ip \
+       $node_p1_ip \
     --prefiller-ports \
        6700 6701 \
        6700 6701 \
     --decoder-hosts \
-      141.61.39.101 \
-      141.61.39.101 \
-      141.61.39.101 \
-      141.61.39.101 \
-      141.61.39.109 \
-      141.61.39.109 \
-      141.61.39.109 \
-      141.61.39.109 \
-      141.61.39.185 \
-      141.61.39.185 \
-      141.61.39.185 \
-      141.61.39.185 \
-      141.61.39.173 \
-      141.61.39.173 \
-      141.61.39.173 \
-      141.61.39.173 \
+      $node_d0_ip \
+      $node_d0_ip \
+      $node_d0_ip1 \
+      $node_d0_ip \
+      $node_d1_ip \
+      $node_d1_ip \
+      $node_d1_ip \
+      $node_d1_ip \
+      $node_d2_ip \
+      $node_d2_ip \
+      $node_d2_ip \
+      $node_d2_ip \
+      $node_d3_ip \
+      $node_d3_ip \
+      $node_d3_ip \
+      $node_d3_ip \
     --decoder-ports \
       6721 6722 6723 6724 \
       6721 6722 6723 6724 \
