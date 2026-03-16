@@ -29,7 +29,7 @@ from torch._inductor.decomposition import select_decomp_table
 from torch.fx import GraphModule
 from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config import VllmConfig
-from vllm.config.utils import Range
+from vllm.config.utils import Range, vllm_version_is
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
@@ -84,9 +84,6 @@ def fusion_pass_compile(
     compile_range: Range,
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
-    # Fix for FakeTensorMode mismatch issue in vllm upgrade
-    example_inputs = convert_fake_inputs_to_current_fake_mode(example_inputs)
-
     def compile_inner(graph, example_inputs):
         current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
         graph = current_pass_manager(graph)
@@ -139,14 +136,12 @@ def npugraph_ex_compile(
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
 
-    # Apply graph fusion passes (including GELU replacement) before torchair compilation
-    # This is needed to replace unsupported operations like aten::gelu with NPU-compatible versions
-    if COMPILATION_PASS_KEY in compiler_config:
-        current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
-        graph = current_pass_manager(graph)
-
-    # Fix for FakeTensorMode mismatch issue in vllm upgrade
-    example_inputs = convert_fake_inputs_to_current_fake_mode(example_inputs)
+    if not vllm_version_is("0.17.0"):
+        # Apply graph fusion passes (including GELU replacement) before torchair compilation
+        # This is needed to replace unsupported operations like aten::gelu with NPU-compatible versions
+        if COMPILATION_PASS_KEY in compiler_config:
+            current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
+            graph = current_pass_manager(graph)
 
     # torch.compile requires the output of the fx graph to be a tuple
     if not graph_returns_tuple(graph):
@@ -180,6 +175,11 @@ class AscendCompiler(CompilerInterface):
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
         graph = copy.deepcopy(graph)
+
+        # Fix for FakeTensorMode mismatch issue in vllm upgrade.
+        # Apply once here, so both npugraph_ex_compile and fusion_pass_compile benefit.
+        if not vllm_version_is("0.17.0"):
+            example_inputs = convert_fake_inputs_to_current_fake_mode(example_inputs)
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex:

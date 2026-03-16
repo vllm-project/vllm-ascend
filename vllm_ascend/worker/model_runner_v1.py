@@ -126,6 +126,7 @@ from vllm_ascend.utils import (
     is_moe_model,
     lmhead_tp_enable,
     set_weight_prefetch_method,
+    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -1374,7 +1375,12 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
             ),
             self.maybe_get_kv_connector_output(
-                scheduler_output, defer_finalize=not clear_kv_metadata
+                scheduler_output,
+                **(
+                    {"clear_metadata": clear_kv_metadata}
+                    if vllm_version_is("0.17.0")
+                    else {"defer_finalize": not clear_kv_metadata}
+                ),
             ) as kv_connector_output,
         ):
             hidden_states = self._model_forward(
@@ -3032,11 +3038,18 @@ class NPUModelRunner(GPUModelRunner):
             max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
-            assert self.offload_config.uva.cpu_offload_gb == 0, (
-                "Cannot re-initialize the input batch when CPU weight "
-                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                "for more details."
-            )
+            if vllm_version_is("0.17.0"):
+                assert self.cache_config.cpu_offload_gb == 0, (
+                    "Cannot re-initialize the input batch when CPU weight "
+                    "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                    "for more details."
+                )
+            else:
+                assert self.offload_config.uva.cpu_offload_gb == 0, (
+                    "Cannot re-initialize the input batch when CPU weight "
+                    "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                    "for more details."
+                )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,
