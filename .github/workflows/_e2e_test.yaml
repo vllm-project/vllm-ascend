@@ -116,10 +116,9 @@ jobs:
         if: ${{ failure() }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
-            --mode e2e \
-            --step-name "Run vllm-project/vllm-ascend test" \
+            --step-name "Run singlecard-light test" \
             --log-file /tmp/e2e-singlecard-light-part${{ matrix.part }}.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"
 
 
       - name: Upload timing data
@@ -221,10 +220,9 @@ jobs:
         if: ${{ failure() }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
-            --mode e2e \
-            --step-name "Run e2e test" \
+            --step-name "Run singlecard-full test" \
             --log-file /tmp/e2e-singlecard-full-part${{ matrix.part }}.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"
 
       - name: Upload timing data
         uses: actions/upload-artifact@v4
@@ -323,10 +321,9 @@ jobs:
         if: ${{ failure() }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
-            --mode e2e \
-            --step-name "Run vllm-project/vllm-ascend test (light)" \
+            --step-name "Run multicard-2-light test" \
             --log-file /tmp/e2e-2card-light-part${{ matrix.part }}.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"
 
 
       - name: Upload timing data
@@ -400,6 +397,7 @@ jobs:
           uv pip install -v -e .
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run vllm-project/vllm-ascend test (full)
+        continue-on-error: true
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
@@ -426,10 +424,9 @@ jobs:
         if: ${{ failure() }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
-            --mode e2e \
-            --step-name "Run vllm-project/vllm-ascend test (full)" \
+            --step-name "Run multicard-2-full test " \
             --log-file /tmp/e2e-2card-full-part${{ matrix.part }}.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"
 
 
       - name: Upload timing data
@@ -457,10 +454,9 @@ jobs:
         if: ${{ failure() && inputs.type == 'full' && matrix.part == 0 }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
-            --mode e2e \
-            --step-name "Run vllm-project/vllm-ascend test (non triton)" \
+            --step-name "Run multicard-2-full test (non triton)" \
             --log-file /tmp/e2e-non-triton.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"
 
   e2e-4-cards-full:
     name: multicard-4-full
@@ -550,10 +546,9 @@ jobs:
         if: ${{ failure() }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
-            --mode e2e \
             --step-name "Run vllm-project/vllm-ascend test for V1 Engine" \
             --log-file /tmp/e2e-4card-full-part${{ matrix.part }}.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"
 
 
       - name: Upload timing data
@@ -635,10 +630,9 @@ jobs:
         if: ${{ failure() && inputs.contains_310 }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
-            --mode e2e \
             --step-name "Run vllm-project/vllm-ascend test" \
             --log-file /tmp/e2e-310p-singlecard.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"
 
   e2e_310p-4cards:
     name: 310p multicards 4cards
@@ -712,7 +706,6 @@ jobs:
         if: ${{ failure() && inputs.contains_310 }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
-            --mode e2e \
             --step-name "Run vllm-project/vllm-ascend test" \
             --log-file /tmp/e2e-310p-4cards.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"

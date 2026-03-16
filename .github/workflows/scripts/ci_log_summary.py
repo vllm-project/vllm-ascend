@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import shutil
@@ -23,12 +24,17 @@ _FAILED_SUMMARY_RE = re.compile(
 _FAILED_PYTEST_RE = re.compile(
     r"FAILED\s+(tests/\S+\.py::\S+)",
 )
+_PYTEST_CASE_PROGRESS_RE = re.compile(r"^(tests/\S+\.py::\S+)\b")
 _PYTEST_START_RE = re.compile(r"pytest\s+-sv\s+(?:[/\w.\-]+/)?(tests/\S+)")
+_RUN_SUITE_START_RE = re.compile(r"\[\d+/\d+\]\s+START\s+(tests/\S+)")
 _PYTEST_FAILURE_HEADER_RE = re.compile(r"^_+\s+test_\S+.*_+$")
+_PYTEST_FAILURES_BANNER_RE = re.compile(r"^=+\s+FAILURES\s+=+$")
+_PYTEST_SUMMARY_BANNER_RE = re.compile(r"^=+\s+short test summary info\s+=+$", re.IGNORECASE)
+_PYTEST_SUMMARY_FAILED_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)")
 
 _CORE_ERROR_RE = re.compile(
     r"(TypeError|AttributeError|ImportError|ModuleNotFoundError"
-    r"|KeyError|NotImplementedError|ValueError|OSError):\s*(.+)",
+    r"|KeyError|NotImplementedError|ValueError|OSError|AssertionError):\s*(.+)",
 )
 
 _WRAPPER_PATTERNS = [
@@ -54,6 +60,11 @@ _ENV_FLAKE_PATTERNS = [
     r"OSError:.*No space left on device",
 ]
 
+_WRAPPER_ASSERTION_PATTERNS = [
+    r"function <function .* failed when called with args .* and kwargs .*",
+    r"assert _exitcode == 0",
+]
+
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _GHA_LOG_PREFIX_RE = re.compile(r"^[^\t]+\t[^\t]+\t")
@@ -62,6 +73,9 @@ _VLLM_LOG_PREFIX_RE = re.compile(
 )
 _PROFILER_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d+\s+-\s+\d+\s+-\s+\S+\s+-\s+[A-Z]+\s+-\s*")
 _VLLM_VERSION_RE = re.compile(r"vLLM\s+\S*\+g([0-9a-f]{7,12})\b")
+_WORKER_PID_PREFIX_RE = re.compile(r"^\([^)]*pid=\d+\)\s*")
+_TEST_CASE_TOKEN_RE = re.compile(r"(tests/\S+\.py::\S+)")
+_MAX_CONTEXT_LINES = 40
 
 
 def gh_api_json(endpoint: str, **params) -> Any:
@@ -108,13 +122,11 @@ def clean_line(line: str) -> str:
     return line
 
 
-def _context_score(context: list[str]) -> tuple[int, int]:
-    first_nonempty = next((line for line in context if line.strip()), "")
-    if first_nonempty.startswith("Traceback (most recent call last):"):
-        return (3, len(context))
-    if _PYTEST_FAILURE_HEADER_RE.match(first_nonempty):
-        return (2, len(context))
-    return (1, len(context))
+def _normalize_error_signature(error_type: str, error_message: str) -> str:
+    normalized = re.sub(r"pid=\d+", "pid=X", error_message)
+    normalized = re.sub(r"0x[0-9a-f]+", "0xXXX", normalized)
+    normalized = re.sub(r"\[Errno \d+\]", "[Errno X]", normalized)
+    return f"{error_type}:{normalized}"
 
 
 def _find_context_start(lines: list[str], error_index: int) -> int:
@@ -136,23 +148,164 @@ def _find_context_start(lines: list[str], error_index: int) -> int:
     return fallback
 
 
+def _strip_worker_prefix(line: str) -> str:
+    return _WORKER_PID_PREFIX_RE.sub("", line)
+
+
+def _extract_worker_prefix(line: str) -> str | None:
+    match = _WORKER_PID_PREFIX_RE.match(line)
+    if not match:
+        return None
+    return match.group(0).strip()
+
+
+def _is_tracebackish_line(line: str) -> bool:
+    stripped = _strip_worker_prefix(line)
+    if not stripped:
+        return True
+    if stripped.startswith("Traceback (most recent call last):"):
+        return True
+    if stripped.startswith("During handling of the above exception"):
+        return True
+    if stripped.startswith("  File ") or stripped.startswith('File "'):
+        return True
+    if stripped.startswith(" ") or stripped.startswith("^"):
+        return True
+    return bool(_CORE_ERROR_RE.search(stripped))
+
+
+def _extract_traceback_block(lines: list[str], error_index: int) -> list[str] | None:
+    candidate_starts = []
+    for j in range(error_index, max(-1, error_index - 200), -1):
+        cleaned_line = clean_line(lines[j])
+        if "Traceback (most recent call last):" in _strip_worker_prefix(cleaned_line):
+            candidate_starts.append(j)
+
+    for start in candidate_starts:
+        block: list[str] = []
+        start_cleaned = clean_line(lines[start])
+        worker_prefix = _extract_worker_prefix(start_cleaned)
+        valid = True
+
+        for j in range(start, error_index + 1):
+            cleaned_line = clean_line(lines[j])
+            if not _is_tracebackish_line(cleaned_line):
+                valid = False
+                break
+
+            current_prefix = _extract_worker_prefix(cleaned_line)
+            if worker_prefix is not None and current_prefix is not None and current_prefix != worker_prefix:
+                valid = False
+                break
+
+            block.append(cleaned_line)
+
+        if valid and block:
+            tracebackish = sum(1 for line in block if _is_tracebackish_line(line))
+            if tracebackish / max(len(block), 1) < 0.8:
+                continue
+            return block
+
+    return None
+
+
+def _compress_context(context: list[str]) -> list[str]:
+    if len(context) <= _MAX_CONTEXT_LINES:
+        return context
+
+    return context[:24] + ["..."] + context[-12:]
+
+
+def _normalize_error_match(error_type: str, error_msg: str) -> tuple[str, str, str, bool]:
+    full_error = f"{error_type}: {error_msg}"
+    if any(re.search(p, full_error) for p in _DOWNSTREAM_PATTERNS):
+        return ("", "", "", False)
+
+    is_env_flake = any(re.search(p, full_error) for p in _ENV_FLAKE_PATTERNS)
+
+    error_msg = re.sub(r"(\\n|\n).*$", "", error_msg)
+    error_msg = re.sub(r"\\['\"]", "'", error_msg)
+    error_msg = error_msg.strip()
+
+    normalized = re.sub(r"pid=\d+", "pid=X", error_msg)
+    normalized = re.sub(r"0x[0-9a-f]+", "0xXXX", normalized)
+    normalized = re.sub(r"\d{4}-\d{2}-\d{2}", "YYYY-MM-DD", normalized)
+    normalized = re.sub(r"\[Errno \d+\]", "[Errno X]", normalized)
+    normalized = re.sub(r"""(?:\\[nr]|['"])+$""", "", normalized).strip()
+    return error_msg, normalized, ("Environment Flake" if is_env_flake else "Code Bug"), True
+
+
+def _extract_pytest_failure_blocks(lines: list[str]) -> list[dict[str, int]]:
+    blocks: list[dict[str, int]] = []
+    in_failures = False
+    current_start = None
+    current_has_terminal = False
+
+    for i, raw_line in enumerate(lines):
+        line = clean_line(raw_line)
+        if _PYTEST_FAILURES_BANNER_RE.match(line):
+            in_failures = True
+            current_start = None
+            current_has_terminal = False
+            continue
+        if not in_failures:
+            continue
+        if _PYTEST_SUMMARY_BANNER_RE.match(line):
+            if current_start is not None:
+                blocks.append({"start_line": current_start, "end_line": i})
+            break
+        if current_start is not None:
+            if line.startswith("E ") or line.startswith("E       ") or re.search(r"tests/\S+\.py:\d+:", line):
+                current_has_terminal = True
+        if _PYTEST_FAILURE_HEADER_RE.match(line):
+            if current_start is None:
+                current_start = i
+                current_has_terminal = False
+                continue
+            if current_has_terminal:
+                blocks.append({"start_line": current_start, "end_line": i})
+                current_start = i
+                current_has_terminal = False
+
+    return blocks
+
+
 def extract_failed_test_files(log_text: str) -> list[str]:
     failed = set()
     cleaned_log_text = _ANSI_RE.sub("", log_text)
+    failed_cases = extract_failed_test_cases(log_text)
 
     for m in _FAILED_INLINE_RE.finditer(cleaned_log_text):
         failed.add(m.group(1).split("::")[0])
     for m in _FAILED_SUMMARY_RE.finditer(cleaned_log_text):
         failed.add(m.group(1).split("::")[0])
-    for m in _FAILED_PYTEST_RE.finditer(cleaned_log_text):
-        failed.add(m.group(1).split("::")[0])
+    for test_case in failed_cases:
+        failed.add(test_case.split("::")[0])
     return sorted(failed)
 
 
 def extract_failed_test_cases(log_text: str) -> list[str]:
+    lines = log_text.splitlines()
     failed = set()
-    cleaned_log_text = _ANSI_RE.sub("", log_text)
+    in_summary = False
 
+    for raw_line in lines:
+        line = clean_line(raw_line)
+        if _PYTEST_SUMMARY_BANNER_RE.match(line):
+            in_summary = True
+            continue
+        if in_summary and line.startswith("="):
+            in_summary = False
+        if not in_summary:
+            continue
+        m = _PYTEST_SUMMARY_FAILED_RE.match(line)
+        if m:
+            failed.add(m.group(1))
+
+    if failed:
+        return sorted(failed)
+
+    cleaned_log_text = _ANSI_RE.sub("", log_text)
     for m in _FAILED_PYTEST_RE.finditer(cleaned_log_text):
         failed.add(m.group(1))
 
@@ -167,7 +320,11 @@ def extract_test_sections(log_text: str) -> list[dict]:
 
     for i, raw_line in enumerate(lines):
         line = clean_line(raw_line)
-        m = _PYTEST_START_RE.search(line)
+        m = _PYTEST_CASE_PROGRESS_RE.search(line)
+        if not m:
+            m = _PYTEST_START_RE.search(line)
+        if not m:
+            m = _RUN_SUITE_START_RE.search(line)
         if m:
             if current_test and current_start is not None:
                 sections.append(
@@ -204,14 +361,10 @@ def extract_error_to_test_mapping(log_text: str) -> dict[str, list[str]]:
         test_name = m.group(1)
         error_type = m.group(2)
         error_msg = m.group(3).strip()
-        base_test = test_name.split("::")[0]
 
-        normalized = re.sub(r"pid=\d+", "pid=X", error_msg)
-        normalized = re.sub(r"0x[0-9a-f]+", "0xXXX", normalized)
-        normalized = re.sub(r"\[Errno \d+\]", "[Errno X]", normalized)
-        sig = f"{error_type}:{normalized}"
+        sig = _normalize_error_signature(error_type, error_msg)
 
-        error_to_tests[sig].add(base_test)
+        error_to_tests[sig].add(test_name)
 
         if error_type == "AssertionError":
             os_err_m = re.search(r"OSError:\s*\[Errno\s+\d+\]\s*(\S+(?:\s+\S+)?)", error_msg)
@@ -219,16 +372,31 @@ def extract_error_to_test_mapping(log_text: str) -> dict[str, list[str]]:
                 os_err_msg = os_err_m.group(1)
                 os_normalized = re.sub(r"\[Errno \d+\]", "[Errno X]", f"[Errno X] {os_err_msg}")
                 os_sig = f"OSError:{os_normalized}"
-                error_to_tests[os_sig].add(base_test)
+                error_to_tests[os_sig].add(test_name)
 
     return {sig: sorted(list(tests)) for sig, tests in error_to_tests.items()}
 
 
-def extract_bad_commit(log_text: str) -> str | None:
+def extract_failed_case_mentions(log_text: str, failed_test_cases: list[str]) -> dict[str, list[int]]:
+    mentions: dict[str, list[int]] = {test_case: [] for test_case in failed_test_cases}
+    if not mentions:
+        return mentions
+
+    lines = log_text.splitlines()
+    for i, raw_line in enumerate(lines):
+        line = clean_line(raw_line)
+        for test_case in _TEST_CASE_TOKEN_RE.findall(line):
+            if test_case in mentions:
+                mentions[test_case].append(i)
+
+    return mentions
+
+
+def extract_bad_commit(log_text: str, *, resolve_remote: bool = True) -> str | None:
     m = _VLLM_VERSION_RE.search(log_text)
     if m:
         short_sha = m.group(1)
-        if shutil.which("gh") is None:
+        if not resolve_remote or shutil.which("gh") is None:
             return short_sha
         try:
             data = gh_api_json(f"/repos/vllm-project/vllm/commits/{short_sha}")
@@ -241,7 +409,7 @@ def extract_bad_commit(log_text: str) -> str | None:
 def extract_root_cause_errors(log_text: str) -> list[dict]:
     errors = []
     lines = log_text.splitlines()
-    sig_to_entries = {}
+    consumed_error_lines: set[int] = set()
 
     for i, raw_line in enumerate(lines):
         line = clean_line(raw_line)
@@ -256,31 +424,59 @@ def extract_root_cause_errors(log_text: str) -> list[dict]:
                     error_msg = m_flake.group(2).strip()
                     error_msg = re.sub(r"(?:\\n|\\r|[\\'\"\n\r])+$", "", error_msg).strip()
                     error_msg = re.sub(r"\\n.*$", "", error_msg).strip()
-                    normalized_msg = re.sub(r"\[Errno \d+\]", "[Errno X]", error_msg)
-                    signature = f"{error_type}:{normalized_msg}"
-
-                    if signature not in sig_to_entries:
-                        sig_to_entries[signature] = {
+                    context = [clean_line(lines[j]) for j in range(max(0, i - 2), min(len(lines), i + 3))]
+                    errors.append(
+                        {
                             "error_type": error_type,
                             "error_message": error_msg,
                             "category": "Environment Flake",
-                            "line_numbers": [],
-                            "best_context": None,
-                            "best_context_score": None,
+                            "context": context,
+                            "line_number": i + 1,
+                            "source": "environment",
                         }
-
-                    sig_to_entries[signature]["line_numbers"].append(i + 1)
-                    context = [clean_line(lines[j]) for j in range(max(0, i - 2), min(len(lines), i + 3))]
-                    score = _context_score(context)
-                    if (
-                        sig_to_entries[signature]["best_context"] is None
-                        or score > sig_to_entries[signature]["best_context_score"]
-                    ):
-                        sig_to_entries[signature]["best_context"] = context
-                        sig_to_entries[signature]["best_context_score"] = score
+                    )
+                    consumed_error_lines.add(i)
                 break
 
+    for block in _extract_pytest_failure_blocks(lines):
+        candidate: tuple[int, str, str, str] | None = None
+        for i in range(block["start_line"], block["end_line"]):
+            line = clean_line(lines[i])
+            if any(wp in line for wp in _WRAPPER_PATTERNS):
+                continue
+            if line.startswith("FAILED tests/"):
+                continue
+
+            m = _CORE_ERROR_RE.search(line)
+            if not m:
+                continue
+
+            error_type = m.group(1)
+            error_msg, _, category, ok = _normalize_error_match(error_type, m.group(2).strip())
+            if not ok:
+                continue
+            candidate = (i, error_type, error_msg, category)
+
+        if candidate is None:
+            continue
+
+        line_index, error_type, error_msg, category = candidate
+        context = [clean_line(lines[j]) for j in range(block["start_line"], line_index + 1)]
+        errors.append(
+            {
+                "error_type": error_type,
+                "error_message": error_msg,
+                "category": category,
+                "context": context,
+                "line_number": line_index,
+                "source": "pytest_failure_block",
+            }
+        )
+        consumed_error_lines.update(range(block["start_line"], block["end_line"]))
+
     for i, raw_line in enumerate(lines):
+        if i in consumed_error_lines:
+            continue
         line = clean_line(raw_line)
 
         if any(wp in line for wp in _WRAPPER_PATTERNS):
@@ -293,52 +489,22 @@ def extract_root_cause_errors(log_text: str) -> list[dict]:
             continue
 
         error_type = m.group(1)
-        error_msg = m.group(2).strip()
-        full_error = f"{error_type}: {error_msg}"
-        if any(re.search(p, full_error) for p in _DOWNSTREAM_PATTERNS):
+        error_msg, normalized, category, ok = _normalize_error_match(error_type, m.group(2).strip())
+        if not ok:
             continue
-
-        is_env_flake = any(re.search(p, full_error) for p in _ENV_FLAKE_PATTERNS)
-
-        error_msg = re.sub(r"(\\n|\n).*$", "", error_msg)
-        error_msg = re.sub(r"\\['\"]", "'", error_msg)
-        error_msg = error_msg.strip()
-
-        normalized = re.sub(r"pid=\d+", "pid=X", error_msg)
-        normalized = re.sub(r"0x[0-9a-f]+", "0xXXX", normalized)
-        normalized = re.sub(r"\d{4}-\d{2}-\d{2}", "YYYY-MM-DD", normalized)
-        normalized = re.sub(r"\[Errno \d+\]", "[Errno X]", normalized)
-        normalized = re.sub(r"""(?:\\[nr]|['"])+$""", "", normalized).strip()
-        signature = f"{error_type}:{normalized}"
-
-        if signature not in sig_to_entries:
-            sig_to_entries[signature] = {
-                "error_type": error_type,
-                "error_message": error_msg,
-                "category": "Environment Flake" if is_env_flake else "Code Bug",
-                "line_numbers": [],
-                "best_context": None,
-                "best_context_score": None,
-            }
-
-        sig_to_entries[signature]["line_numbers"].append(i)
-
-        ctx_start = _find_context_start(lines, i)
-        ctx_end = min(len(lines), i + 1)
-        context = [clean_line(lines[j]) for j in range(ctx_start, ctx_end)]
-        score = _context_score(context)
-        if sig_to_entries[signature]["best_context"] is None or score > sig_to_entries[signature]["best_context_score"]:
-            sig_to_entries[signature]["best_context"] = context
-            sig_to_entries[signature]["best_context_score"] = score
-
-    for entry in sig_to_entries.values():
+        context = _extract_traceback_block(lines, i)
+        if context is None:
+            ctx_start = _find_context_start(lines, i)
+            ctx_end = min(len(lines), i + 1)
+            context = [clean_line(lines[j]) for j in range(ctx_start, ctx_end)]
         errors.append(
             {
-                "error_type": entry["error_type"],
-                "error_message": entry["error_message"],
-                "category": entry["category"],
-                "context": entry["best_context"] or [],
-                "line_number": entry["line_numbers"][0],
+                "error_type": error_type,
+                "error_message": error_msg,
+                "category": category,
+                "context": context,
+                "line_number": i,
+                "source": "general",
             }
         )
 
@@ -397,7 +563,9 @@ def _attach_failed_tests(
     failed_test_files: list[str],
     failed_test_cases: list[str],
 ) -> None:
+    error_to_test_map = extract_error_to_test_mapping(log_text)
     test_sections = extract_test_sections(log_text)
+    failed_case_mentions = extract_failed_case_mentions(log_text, failed_test_cases)
     failed_files_set = set(failed_test_files)
     failed_cases_set = set(failed_test_cases)
     failed_cases_by_file: dict[str, set[str]] = defaultdict(set)
@@ -405,6 +573,9 @@ def _attach_failed_tests(
         failed_cases_by_file[test_case.split("::")[0]].add(test_case)
 
     for err in errors:
+        sig = _normalize_error_signature(err["error_type"], err["error_message"])
+
+        mapped_tests = set(error_to_test_map.get(sig, []))
         err_line = err.get("line_number", 0)
         matched_target = None
         for section in test_sections:
@@ -414,18 +585,44 @@ def _attach_failed_tests(
 
         matched_files = set()
         matched_cases = set()
-        if matched_target:
+        if matched_target and "::" in matched_target and err.get("source") != "pytest_failure_block":
             matched_file = matched_target.split("::")[0]
             if matched_file in failed_files_set:
                 matched_files.add(matched_file)
-            if "::" in matched_target:
-                if matched_target in failed_cases_set:
-                    matched_cases.add(matched_target)
-            else:
-                matched_cases.update(failed_cases_by_file.get(matched_file, set()))
+            if matched_target in failed_cases_set:
+                matched_cases.add(matched_target)
+        else:
+            for test_name in mapped_tests:
+                matched_files.add(test_name.split("::")[0])
+                if "::" in test_name:
+                    matched_cases.add(test_name)
+            if matched_target and err.get("source") != "pytest_failure_block":
+                matched_file = matched_target.split("::")[0]
+                if matched_file in failed_files_set:
+                    matched_files.add(matched_file)
+                if "::" in matched_target:
+                    if matched_target in failed_cases_set:
+                        matched_cases.add(matched_target)
+                else:
+                    matched_cases.update(failed_cases_by_file.get(matched_file, set()))
+
+        if not matched_cases and len(matched_files) == 1:
+            matched_file = next(iter(matched_files))
+            candidate_cases = sorted(failed_cases_by_file.get(matched_file, set()))
+            if candidate_cases:
+                nearest_case = min(
+                    candidate_cases,
+                    key=lambda test_case: min(
+                        (abs(err_line - mention_line) for mention_line in failed_case_mentions.get(test_case, [])),
+                        default=float("inf"),
+                    ),
+                )
+                if failed_case_mentions.get(nearest_case):
+                    matched_cases.add(nearest_case)
 
         err["failed_test_files"] = sorted(matched_files)
         err["failed_test_cases"] = sorted(matched_cases)
+        err["context"] = _compress_context(err.get("context", []))
 
 
 def _dedupe_errors(all_errors: list[dict]) -> list[dict]:
@@ -434,7 +631,7 @@ def _dedupe_errors(all_errors: list[dict]) -> list[dict]:
         sig = f"{err['error_type']}:{err['error_message']}"
         if sig not in seen_sigs:
             seen_sigs[sig] = {
-                "error": err,
+                "error": copy.deepcopy(err),
                 "failed_test_files": set(),
                 "failed_test_cases": set(),
             }
@@ -452,6 +649,72 @@ def _dedupe_errors(all_errors: list[dict]) -> list[dict]:
     return unique_errors
 
 
+def _dedupe_errors_by_scope(errors: list[dict]) -> list[dict]:
+    seen: dict[tuple[Any, ...], dict] = {}
+    for error in errors:
+        key = (
+            error["error_type"],
+            error["error_message"],
+            tuple(error.get("failed_test_files", [])),
+            tuple(error.get("failed_test_cases", [])),
+        )
+        if key not in seen:
+            seen[key] = copy.deepcopy(error)
+            continue
+
+        if error.get("line_number", 0) < seen[key].get("line_number", 0):
+            seen[key] = copy.deepcopy(error)
+
+    return list(seen.values())
+
+
+def _is_wrapper_assertion(error: dict) -> bool:
+    if error.get("error_type") != "AssertionError":
+        return False
+
+    error_message = error.get("error_message", "")
+    context = "\n".join(error.get("context", []))
+    return any(
+        re.search(pattern, error_message) or re.search(pattern, context) for pattern in _WRAPPER_ASSERTION_PATTERNS
+    )
+
+
+def _suppress_wrapper_assertions(errors: list[dict]) -> list[dict]:
+    case_to_specific_errors: dict[str, set[str]] = defaultdict(set)
+    file_to_specific_errors: dict[str, set[str]] = defaultdict(set)
+
+    for error in errors:
+        if _is_wrapper_assertion(error):
+            continue
+        signature = f"{error['error_type']}:{error['error_message']}"
+        for test_case in error.get("failed_test_cases", []):
+            case_to_specific_errors[test_case].add(signature)
+        for test_file in error.get("failed_test_files", []):
+            file_to_specific_errors[test_file].add(signature)
+
+    filtered = []
+    for error in errors:
+        if not _is_wrapper_assertion(error):
+            filtered.append(error)
+            continue
+
+        matched_specific = False
+        for test_case in error.get("failed_test_cases", []):
+            if case_to_specific_errors.get(test_case):
+                matched_specific = True
+                break
+        if not matched_specific:
+            for test_file in error.get("failed_test_files", []):
+                if file_to_specific_errors.get(test_file):
+                    matched_specific = True
+                    break
+
+        if not matched_specific:
+            filtered.append(error)
+
+    return filtered
+
+
 def process_local_log(log_text: str, job_name: str = "local-log") -> dict:
     failed_test_files = extract_failed_test_files(log_text)
     failed_test_cases = extract_failed_test_cases(log_text)
@@ -462,7 +725,9 @@ def process_local_log(log_text: str, job_name: str = "local-log") -> dict:
         failed_test_files=failed_test_files,
         failed_test_cases=failed_test_cases,
     )
-    unique_errors = _dedupe_errors(errors)
+    errors = _suppress_wrapper_assertions(errors)
+    job_errors = _dedupe_errors_by_scope(errors)
+    unique_errors = _dedupe_errors(job_errors)
 
     conclusion = "failure" if failed_test_files or failed_test_cases or unique_errors else "success"
     return {
@@ -470,7 +735,7 @@ def process_local_log(log_text: str, job_name: str = "local-log") -> dict:
         "run_url": None,
         "run_created_at": None,
         "good_commit": get_good_commit(),
-        "bad_commit": extract_bad_commit(log_text),
+        "bad_commit": extract_bad_commit(log_text, resolve_remote=False),
         "total_jobs": 1,
         "failed_jobs_count": 1 if conclusion == "failure" else 0,
         "job_summary": [{"name": job_name, "conclusion": conclusion}],
@@ -480,7 +745,7 @@ def process_local_log(log_text: str, job_name: str = "local-log") -> dict:
                 "job_name": job_name,
                 "failed_test_files": failed_test_files,
                 "failed_test_cases": failed_test_cases,
-                "errors": errors,
+                "errors": job_errors,
             }
         ],
         "failed_test_files": failed_test_files,
@@ -536,7 +801,9 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
             failed_test_files=failed_test_files,
             failed_test_cases=failed_test_cases,
         )
-        all_errors.extend(errors)
+        errors = _suppress_wrapper_assertions(errors)
+        job_scoped_errors = _dedupe_errors_by_scope(errors)
+        all_errors.extend(job_scoped_errors)
 
         job_results.append(
             {
@@ -544,7 +811,7 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
                 "job_name": job_name,
                 "failed_test_files": failed_test_files,
                 "failed_test_cases": failed_test_cases,
-                "errors": errors,
+                "errors": job_scoped_errors,
             }
         )
 
@@ -575,51 +842,86 @@ def analyze_log(log_text: str, job_name: str = "local-log") -> dict:
     return process_local_log(log_text, job_name=job_name)
 
 
-def _format_error_block(error: dict) -> str:
+def _format_error_block(index: int, error: dict) -> list[str]:
     lines = [
-        f"- `{error['error_type']}`: {error['error_message']}",
+        f"{index}. `{error['error_type']}`: {error['error_message']}",
+        f"   Category: `{error['category']}`",
     ]
-    if error.get("failed_test_files"):
-        failed_files = ", ".join(f"`{test}`" for test in error["failed_test_files"])
-        lines.append(f"  Failed test files: {failed_files}")
-    if error.get("failed_test_cases"):
-        failed_cases = ", ".join(f"`{test}`" for test in error["failed_test_cases"])
-        lines.append(f"  Failed test cases: {failed_cases}")
-    context = "\n".join(error.get("context", [])).strip()
+
+    failed_test_files = error.get("failed_test_files", [])
+    if failed_test_files:
+        lines.append("   Failed test files:")
+        lines.extend(f"   - `{test}`" for test in failed_test_files)
+
+    failed_test_cases = error.get("failed_test_cases", [])
+    if failed_test_cases:
+        lines.append("   Failed test cases:")
+        lines.extend(f"   - `{test}`" for test in failed_test_cases)
+
+    context = error.get("context", [])
     if context:
-        lines.append("  Context:")
-        lines.append("  ```text")
-        lines.append("\n".join(f"  {line}" for line in context.splitlines()))
-        lines.append("  ```")
-    return "\n".join(lines)
+        lines.extend(
+            [
+                "   Context:",
+                "   ```text",
+                *[f"   {line}" for line in context],
+                "   ```",
+            ]
+        )
+
+    return lines
+
+
+def render_json(result: dict) -> str:
+    return json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+
+
+def render_llm_json(result: dict) -> str:
+    output_data = {
+        "run_id": result["run_id"],
+        "run_url": result["run_url"],
+        "good_commit": result["good_commit"],
+        "bad_commit": result["bad_commit"],
+        "failed_test_files_count": len(result["failed_test_files"]),
+        "failed_test_cases_count": len(result["failed_test_cases"]),
+        "failed_test_files": result["failed_test_files"],
+        "failed_test_cases": result["failed_test_cases"],
+        "code_bugs": result["code_bugs"],
+        "env_flakes": result["env_flakes"],
+    }
+    return json.dumps(output_data, ensure_ascii=False, indent=2) + "\n"
 
 
 def render_summary(result: dict, *, step_name: str, mode: str) -> str:
     lines = [
         f"## Test Failure Summary: {step_name}",
         "",
+        "### Overview",
+        "",
         f"- Mode: `{mode}`",
-        f"- Failed test files: `{len(result['failed_test_files'])}`",
-        f"- Failed test cases: `{len(result['failed_test_cases'])}`",
-        f"- Distinct issues: `{len(result['distinct_errors'])}`",
-        f"- Code bugs: `{len(result['code_bugs'])}`",
-        f"- Environment flakes: `{len(result['env_flakes'])}`",
     ]
 
     if result.get("run_id") is not None:
         lines.append(f"- Run ID: `{result['run_id']}`")
     if result.get("run_url"):
         lines.append(f"- Run URL: {result['run_url']}")
-    if result.get("good_commit"):
-        lines.append(f"- Good commit: `{result['good_commit']}`")
-    if result.get("bad_commit"):
-        lines.append(f"- Bad commit: `{result['bad_commit']}`")
-    lines.append("")
+    lines.extend(
+        [
+            f"- Failed test files: `{len(result['failed_test_files'])}`",
+            f"- Failed test cases: `{len(result['failed_test_cases'])}`",
+            f"- Distinct issues: `{len(result['distinct_errors'])}`",
+            f"- Code bugs: `{len(result['code_bugs'])}`",
+            f"- Environment flakes: `{len(result['env_flakes'])}`",
+            "",
+        ]
+    )
 
     if result["failed_test_files"]:
         lines.extend(
             [
-                "### Failed Test Files",
+                "### Failed Tests",
+                "",
+                "Files:",
                 "",
                 *[f"- `{test}`" for test in result["failed_test_files"]],
                 "",
@@ -629,23 +931,17 @@ def render_summary(result: dict, *, step_name: str, mode: str) -> str:
     if result["failed_test_cases"]:
         lines.extend(
             [
-                "### Failed Test Cases",
+                "Cases:",
                 "",
                 *[f"- `{test}`" for test in result["failed_test_cases"]],
                 "",
             ]
         )
 
-    if result["code_bugs"]:
-        lines.extend(["### Code Bugs", ""])
-        for error in result["code_bugs"]:
-            lines.append(_format_error_block(error))
-            lines.append("")
-
-    if result["env_flakes"]:
-        lines.extend(["### Environment Flakes", ""])
-        for error in result["env_flakes"]:
-            lines.append(_format_error_block(error))
+    if result["distinct_errors"]:
+        lines.extend(["### Distinct Issues", ""])
+        for index, error in enumerate(result["distinct_errors"], start=1):
+            lines.extend(_format_error_block(index, error))
             lines.append("")
 
     if not result["distinct_errors"]:
@@ -667,12 +963,28 @@ def main() -> None:
     source.add_argument("--log-file", type=Path, help="Path to the local test log file.")
     source.add_argument("--run-id", type=int, help="GitHub Actions run ID to analyze through gh api.")
     parser.add_argument("--repo", default=REPO, help=f"GitHub repo for --run-id mode (default: {REPO}).")
-    parser.add_argument("--mode", required=True, choices=("ut", "e2e"), help="Test mode for the summary.")
-    parser.add_argument("--step-name", required=True, help="Workflow step name shown in the summary.")
     parser.add_argument(
-        "--summary-file",
+        "--mode",
+        default="e2e",
+        choices=("ut", "e2e"),
+        help="Test mode for the summary (default: e2e).",
+    )
+    parser.add_argument(
+        "--step-name",
+        default="Run test",
+        help="Workflow step name shown in the summary (default: Run test).",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("summary", "json", "llm-json"),
+        default="summary",
+        help="Output format (default: summary).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
         default=None,
-        help="Path to GitHub step summary file. If omitted, prints to stdout.",
+        help="Optional output file path. If omitted, prints to stdout.",
     )
     args = parser.parse_args()
 
@@ -682,13 +994,17 @@ def main() -> None:
         log_text = args.log_file.read_text(encoding="utf-8", errors="replace")
         result = process_local_log(log_text, job_name=args.step_name)
 
-    summary = render_summary(result, step_name=args.step_name, mode=args.mode)
-
-    if args.summary_file:
-        with open(args.summary_file, "a", encoding="utf-8") as f:
-            f.write(summary)
+    if args.format == "json":
+        rendered_output = render_json(result)
+    elif args.format == "llm-json":
+        rendered_output = render_llm_json(result)
     else:
-        print(summary, end="")
+        rendered_output = render_summary(result, step_name=args.step_name, mode=args.mode)
+
+    if args.output is not None:
+        args.output.write_text(rendered_output, encoding="utf-8")
+    else:
+        print(rendered_output, end="")
 
 
 if __name__ == "__main__":

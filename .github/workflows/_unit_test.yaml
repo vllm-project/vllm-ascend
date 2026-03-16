@@ -94,7 +94,7 @@ jobs:
             --mode ut \
             --step-name "Run unit test" \
             --log-file /tmp/unit-test.log \
-            --summary-file "$GITHUB_STEP_SUMMARY"
+            --output "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
