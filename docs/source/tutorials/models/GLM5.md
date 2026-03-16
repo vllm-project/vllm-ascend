@@ -1106,7 +1106,7 @@ Before you start, please
                  }
              }'
          ```
-       
+
 Once the preparation is done, you can start the server with the following command on each node:
 
 1. Prefill node 0
