@@ -1035,16 +1035,11 @@ class SpecDecodeBaseProposer(EagleProposer):
             # 2.
             # Recompute the slot mapping based on the new positions and
             # rejection mask.
-            if vllm_version_is("0.17.0"):
-                # Use the first draft attention group's kv_cache_spec for block_size
-                # (all draft layers share the same kv-cache group)
-                assert len(self.draft_attn_groups) > 0
-                block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
-            else:
-                if self.attn_metadata_builder is None:
-                    block_size = self._get_attention_metadata_builder().kv_cache_spec.block_size
-                else:
-                    block_size = self.attn_metadata_builder.kv_cache_spec.block_size
+            # Use the first draft attention group's kv_cache_spec for block_size
+            # (all draft layers share the same kv-cache group)
+            assert len(self.draft_attn_groups) > 0
+            block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
+
             new_slot_mapping = compute_new_slot_mapping(
                 cad=cad,
                 new_positions=self.positions[:total_num_output_tokens],
