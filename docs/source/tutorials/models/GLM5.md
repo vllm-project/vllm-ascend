@@ -614,6 +614,7 @@ Before you start, please
     
         for process in processes:
             process.join()
+   
     ```
    
 2. prepare the script `run_dp_template.sh` on each node.
