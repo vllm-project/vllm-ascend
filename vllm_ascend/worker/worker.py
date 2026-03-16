@@ -283,6 +283,7 @@ class NPUWorker(WorkerBase):
             and self.parallel_config.distributed_executor_backend not in ["ray", "external_launcher"]
             and self.vllm_config.parallel_config.data_parallel_backend != "ray"
             and self.vllm_config.parallel_config.nnodes_within_dp == 1
+            and self.vllm_config.parallel_config.dp_per_domain == 1
         ):
             visible_device_count = torch.npu.device_count() if torch.npu.is_available() else 0
             assert self.parallel_config.local_world_size <= visible_device_count, (
@@ -362,8 +363,15 @@ class NPUWorker(WorkerBase):
 
     def execute_model(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_outputs: "SchedulerOutput | list[SchedulerOutput | None]",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        if isinstance(scheduler_outputs, list):
+            scheduler_output = scheduler_outputs[self.model_runner.cp_rank]
+            if scheduler_output.total_num_scheduled_tokens == 0 and not scheduler_output.none_tokens_in_peer_sched:
+                self.model_runner._dummy_run(1, uniform_decode=True)
+        else:
+            scheduler_output = scheduler_outputs
+
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
@@ -423,7 +431,13 @@ class NPUWorker(WorkerBase):
         return output
 
     @torch.inference_mode()
-    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+    def sample_tokens(self, grammar_outputs: "GrammarOutput | None | list[GrammarOutput | True]") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        if isinstance(grammar_outputs, list):
+            grammar_output = grammar_outputs[self.model_runner.cp_rank]
+            if grammar_output is True:
+                return False
+        else:
+            grammar_output = grammar_outputs
         return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
