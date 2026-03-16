@@ -22,7 +22,7 @@ import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -46,7 +46,7 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
@@ -3176,6 +3176,12 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                    if attn_module.attn_type == AttentionType.DECODER:
+                        try:
+                            kv_cache_dtype = attn_module.quant_method.quant_method.kv_cache_type
+                        except AttributeError:
+                            kv_cache_dtype = attn_module.kv_cache_torch_dtype
+                        spec = replace(spec, dtype=kv_cache_dtype)
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
 

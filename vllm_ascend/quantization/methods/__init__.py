@@ -31,6 +31,7 @@ from typing import Any
 
 # Import base classes
 from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
+from .c8quant import AscendC8KVCacheMethod
 
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
@@ -77,4 +78,5 @@ __all__ = [
     "AscendW4A16FusedMoEMethod",
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
+    "AscendC8KVCacheMethod",
 ]
