@@ -2671,12 +2671,6 @@ class NPUModelRunner(GPUModelRunner):
                     # as it only support the 0-dim of kv_cache is `num_blocks`.
                     # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
                     # and rope head dim.
-                    if self.model_config.use_mla:
-                        head_size = (
-                            self.model_config.hf_text_config.qk_rope_head_dim
-                            + self.model_config.hf_text_config.kv_lora_rank
-                        )
-
                     dsa_k_cache_factor = None
                     dsa_k_cache_size = None
                     if not self.model_config.use_mla:
@@ -2693,11 +2687,12 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         kv_head_dim_list = [
                             self.model_config.hf_text_config.kv_lora_rank,
-                            self.model_config.hf_text_config.qk_rope_head_dim
+                            self.model_config.hf_text_config.qk_rope_head_dim,
                         ]
                         if self.is_kv_consumer and self.vllm_config.quant_config is not None:
-                            k_tensor_split_factor, v_tensor_split_factor = (self.vllm_config.quant_config.
-                                get_kv_quant_split_factor(layer_name, kv_head_dim_list))
+                            k_tensor_split_factor, v_tensor_split_factor = (
+                                self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
+                            )
                         else:
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
 
