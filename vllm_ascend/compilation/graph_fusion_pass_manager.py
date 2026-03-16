@@ -73,11 +73,3 @@ class GraphFusionPassManager:
             from .passes.sequence_parallelism import AscendSequenceParallelismPass
 
             self.passes.append(AscendSequenceParallelismPass(config))
-
-        # GELU replacement pass - needed for models like Whisper that use GELU
-        # which is not natively supported on NPU. Uses torch_npu.npu_gelu
-        # which provides exact GELU computation on NPU devices.
-        if self.ascend_compilation_config.get("replace_gelu", True):
-            from .passes.gelu_replacement_pass import GeluReplacementPass
-
-            self.passes.append(GeluReplacementPass(config))
