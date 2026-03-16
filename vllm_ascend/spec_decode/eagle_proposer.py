@@ -2,7 +2,7 @@
 import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
