@@ -2,7 +2,7 @@
 import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -938,7 +938,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         long_seq_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
-    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, Optional[tuple[Any, Any]]]:
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
