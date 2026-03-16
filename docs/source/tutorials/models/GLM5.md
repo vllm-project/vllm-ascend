@@ -633,9 +633,8 @@ Before you start, please
         export HCCL_SOCKET_IFNAME=$nic_name
 
         export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
+        export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
         export ASCEND_AGGREGATE_ENABLE=1
@@ -669,7 +668,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true, "rot_path": "/mnt/share/rot.safetensors"}' \
+            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -713,9 +712,8 @@ Before you start, please
         export HCCL_SOCKET_IFNAME=$nic_name
 
         export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
+        export OMP_NUM_THREADS=1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
 
         export ASCEND_AGGREGATE_ENABLE=1
@@ -750,7 +748,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true, "rot_path": "/mnt/share/rot.safetensors"}' \
+            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -794,10 +792,9 @@ Before you start, please
     
         #Mooncake
         export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
+        export OMP_NUM_THREADS=1
     
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export VLLM_USE_V1=1
         export HCCL_BUFFSIZE=256
     
     
@@ -833,7 +830,7 @@ Before you start, please
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true, "rot_path": "/mnt/share/rot.safetensors"}' \
+            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -876,10 +873,9 @@ Before you start, please
             
          #Mooncake
          export OMP_PROC_BIND=false
-         export OMP_NUM_THREADS=10
+         export OMP_NUM_THREADS=1
             
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-         export VLLM_USE_V1=1
          export HCCL_BUFFSIZE=256
             
          export ASCEND_AGGREGATE_ENABLE=1
@@ -915,7 +911,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true, "rot_path": "/mnt/share/rot.safetensors"}' \
+             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -958,10 +954,9 @@ Before you start, please
             
          #Mooncake
          export OMP_PROC_BIND=false
-         export OMP_NUM_THREADS=10
+         export OMP_NUM_THREADS=1
             
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-         export VLLM_USE_V1=1
          export HCCL_BUFFSIZE=256
             
          export ASCEND_AGGREGATE_ENABLE=1
@@ -997,7 +992,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true, "rot_path": "/mnt/share/rot.safetensors"}' \
+             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1040,10 +1035,9 @@ Before you start, please
             
          #Mooncake
          export OMP_PROC_BIND=false
-         export OMP_NUM_THREADS=10
+         export OMP_NUM_THREADS=1
             
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-         export VLLM_USE_V1=1
          export HCCL_BUFFSIZE=256
             
          export ASCEND_AGGREGATE_ENABLE=1
@@ -1079,7 +1073,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true, "rot_path": "/mnt/share/rot.safetensors"}' \
+             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
