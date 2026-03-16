@@ -24,6 +24,7 @@ class TestAscendModelSlimConfig(TestBase):
         self.sample_config = {
             "weight": "INT8",
             "fa_quant_type": "C8",
+            "layers.1.fa_k.scale": "C8",
             "layer1.weight": "INT8",
             "layer2.weight": "FLOAT",
             "fused_layer.weight": "FLOAT",
@@ -119,6 +120,9 @@ class TestAscendModelSlimConfig(TestBase):
             # Test with fa_quant_type
             method = self.ascend_config.get_quant_method(
                 attention_layer, ".attn")
+            self.assertIs(method, None)
+            method = self.ascend_config.get_quant_method(
+                attention_layer, "layers.1.attn")
             self.assertIs(method, mock_ascend_kvcache.return_value)
 
     def test_get_quant_method_for_fused_moe(self):

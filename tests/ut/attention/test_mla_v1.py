@@ -807,6 +807,7 @@ class TestAscendMLAImpl(TestBase):
                                   attn_type=None,
                                   kv_sharing_target_layer_name=None,
                                   **kwargs)
+        self.impl.fa_quant_layer = False
 
     def test_init(self):
         self.assertEqual(self.impl.num_heads, 256)
@@ -938,9 +939,9 @@ class TestAscendMLAImpl(TestBase):
 
     @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj")
-    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("torch_npu.npu_fused_infer_attention_score_v2")
     def test_forward_decode_without_graph(self,
-                                          mock_npu_fused_infer_attention_score,
+                                          mock_npu_fused_infer_attention_score_v2,
                                           mock_up_proj,
                                           mock_get_forward_context):
         num_tokens = 100
@@ -956,8 +957,8 @@ class TestAscendMLAImpl(TestBase):
         metadata = MagicMock()
         metadata.decode = MagicMock()
         metadata.decode.block_table = MagicMock()
-        metadata.decode.seq_lens = 10
-        mock_npu_fused_infer_attention_score.return_value = [
+        metadata.decode.actual_seq_lengths = 10
+        mock_npu_fused_infer_attention_score_v2.return_value = [
             torch.randn(num_tokens, self.impl.num_heads,
                         self.impl.kv_lora_rank), None
         ]
@@ -971,7 +972,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[1], self.impl.num_heads)
         self.assertEqual(result.shape[2], self.impl.v_head_dim)
         mock_up_proj.assert_called_once()
-        mock_npu_fused_infer_attention_score.assert_called_once()
+        mock_npu_fused_infer_attention_score_v2.assert_called_once()
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method",
@@ -1103,8 +1104,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
     @patch('vllm_ascend.ascend_forward_context.get_forward_context')
-    @patch("torch_npu.npu_fused_infer_attention_score")
-    def test_forward_decode(self, mock_npu_fused_infer_attention_score,
+    @patch("torch_npu.npu_fused_infer_attention_score_v2")
+    def test_forward_decode(self, mock_npu_fused_infer_attention_score_v2,
                             mock_get_forward_context):
         B = 2
         N = self.impl.num_kv_heads
@@ -1121,11 +1122,11 @@ class TestAscendMLAImpl(TestBase):
         attn_metadata = MagicMock()
         attn_metadata.attn_state = AscendAttentionState.SpecDecoding
         attn_metadata.decode = MagicMock()
-        attn_metadata.decode.actual_seq_lengths_q = MagicMock()
-        attn_metadata.decode.seq_lens_list = MagicMock()
+        attn_metadata.decode.actual_seq_qlen = MagicMock()
+        attn_metadata.decode.actual_seq_kvlen = MagicMock()
         self.impl.enable_kv_nz = True
 
-        mock_npu_fused_infer_attention_score.return_value = [
+        mock_npu_fused_infer_attention_score_v2.return_value = [
             torch.randn(B, N, self.impl.kv_lora_rank), None
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
