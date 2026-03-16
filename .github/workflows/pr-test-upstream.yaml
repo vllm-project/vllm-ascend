@@ -103,6 +103,7 @@ jobs:
               uv pip install -r requirements-dev.txt
               uv pip install -v -e .
               uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
+              uv pip install tblib
 
           - name: Run vllm-project/vllm test
             env:
@@ -112,4 +113,5 @@ jobs:
                 python3 .github/workflows/scripts/run_suite.py \
                   --suite e2e-upstream-singlecard \
                   --auto-partition-id "${{ matrix.part }}" \
-                  --auto-partition-size 1
+                  --auto-partition-size 1 \
+                  --continue-on-error
