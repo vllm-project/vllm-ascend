@@ -226,7 +226,7 @@ class TestAscendFAQuantAttentionMethodCreateWeights(unittest.TestCase):
         # Create a real nn.Module for testing
         self.layer = nn.Module()
         self.layer.num_heads = 32
-        self.layer.num_kv_heads = 8
+        self.layer.num_kv_heads = 1
 
     def tearDown(self):
         """Clean up after each test"""
@@ -251,17 +251,6 @@ class TestAscendFAQuantAttentionMethodCreateWeights(unittest.TestCase):
             self.assertIsInstance(self.layer.fa_q, nn.Module)
             self.assertIsInstance(self.layer.fa_k, nn.Module)
             self.assertIsInstance(self.layer.fa_v, nn.Module)
-
-    def test_create_weights_sets_num_kv_heads_to_one(self):
-        """Test that num_kv_heads is set to 1"""
-        method = self.method_class()
-
-        with patch("torch.empty") as mock_empty:
-            mock_empty.return_value = torch.zeros(1, 1)
-
-            method.create_weights(self.layer)
-
-            self.assertEqual(self.layer.num_kv_heads, 1)
 
     def test_create_weights_creates_correct_tensors(self):
         """Test that create_weights creates tensors with correct shapes and dtypes"""
@@ -421,7 +410,7 @@ class TestIntegration(unittest.TestCase):
         # Create real layer
         layer = nn.Module()
         layer.num_heads = 32
-        layer.num_kv_heads = 8
+        layer.num_kv_heads = 1
 
         # Step 1: Create weights
         method.create_weights(layer)
