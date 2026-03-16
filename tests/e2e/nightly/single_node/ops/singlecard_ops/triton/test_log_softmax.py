@@ -1,7 +1,6 @@
 import torch
 import pytest
 from vllm.triton_utils import triton
-
 from vllm_ascend.worker.v2.sample.logprob import _topk_log_softmax_kernel
 
 

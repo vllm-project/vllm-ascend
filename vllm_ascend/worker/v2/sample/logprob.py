@@ -18,8 +18,8 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
-
 from vllm.triton_utils import tl, triton
+
 
 @triton.jit
 def _topk_log_softmax_kernel(
