@@ -53,17 +53,23 @@ def split_qkv_rmsnorm_mrope_kernel(
     rope_dim: tl.constexpr,
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
-    batch_size_per_vec,
-    batch_size_per_iter_per_vec,
-    cos_sin_batch_per_iter_per_vec,
-    cos_sin_size_batch_per_iter_per_vec,
-    iter_num_per_vec,
-    qk_head_nums_per_iter_per_vec,
-    v_batch_size_per_iter_per_vec,
-    v_iter_num_per_vec,
-    t_batch_offset_end,
-    h_batch_offset_end,
+    core_num: tl.constexpr,
 ):
+    batch_size_per_vec = tl.cdiv(batch_size, core_num)
+    batch_size_per_iter_per_vec = 85*1024/ 2 //(max((num_q_heads+num_kv_heads)*head_size, num_q_heads*rope_dim*3) + rope_dim*7 + (
+            num_q_heads*head_size*4 + num_kv_heads*head_size*2) + num_q_heads*rope_dim*2)
+    batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
+    qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * num_qk_heads
+    iter_num_per_vec = tl.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
+    
+    v_batch_size_per_iter_per_vec = 85 * 1024 / 2 // (kv_size + 1)
+    v_batch_size_per_iter_per_vec = min(v_batch_size_per_iter_per_vec, batch_size_per_vec)
+    v_iter_num_per_vec = tl.cdiv(batch_size_per_vec, v_batch_size_per_iter_per_vec)
+    cos_sin_batch_per_iter_per_vec = batch_size_per_iter_per_vec * 2
+    cos_sin_size_batch_per_iter_per_vec = cos_sin_batch_per_iter_per_vec * half_rope_dim
+    t_batch_offset_end = batch_size * 2 * half_rope_dim
+    h_batch_offset_end = batch_size * 4 * half_rope_dim
+    
     row_pid = tl.program_id(0)
     weight_idx = tl.arange(0, head_size)
     q_rmsnorm_weight = tl.load(q_weight_ptr + weight_idx)
@@ -417,16 +423,7 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim,
         int(half_rope_dim),
         IS_PARTIAL_ROPE,
-        int(batch_size_per_vec),
-        int(batch_size_per_iter_per_vec),
-        int(cos_sin_batch_per_iter_per_vec),
-        int(cos_sin_size_batch_per_iter_per_vec),
-        int(iter_num_per_vec),
-        int(qk_head_nums_per_iter_per_vec),
-        int(v_batch_size_per_iter_per_vec), 
-        int(v_iter_num_per_vec),
-        int(t_batch_offset_end),
-        int(h_batch_offset_end),
+        core_num,
     )
 
     return q_output, k_output, v_output
