@@ -969,6 +969,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 # decode target_hidden_states: remove padding
                 # prefill input_ids: add padding and pcp split
                 # prefill target_hidden_states: pcp split
+                assert query_lens_d is not None
                 num_tokens_d = query_lens_d.sum().item()
                 num_tokens_d_padded = num_tokens_d * self.pcp_size
                 input_ids_d = self.input_ids[:num_tokens_d]
@@ -982,6 +983,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                     mask_len = query_lens_d
                     mask = []
                     for req_id in range(num_decode_reqs):
+                        assert None not in (mask_start_loc, mask_len)
                         mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
                     target_hidden_states_d = target_hidden_states_d_padded[mask]
                 else:
@@ -1069,7 +1071,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 # Use torch.where to avoid DtoH sync from boolean indexing
                 mask = self.is_masked_token_mask[:total_num_output_tokens]
                 torch.where(
-                    mask.unsqueeze(1),
+                    mask.unsqueeze(1), # type: ignore
                     self.parallel_drafting_hidden_state_tensor,
                     self.hidden_states[:total_num_output_tokens],
                     out=self.hidden_states[:total_num_output_tokens],
