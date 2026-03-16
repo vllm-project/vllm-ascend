@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
 
+import math
 import numpy as np
 import torch
 import torch_npu
@@ -182,6 +183,7 @@ class NPUModelRunner310(NPUModelRunner):
 
     def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
+        Override the base class method.
         Initialize the memory buffer for KV cache.
 
         Args:
@@ -197,10 +199,8 @@ class NPUModelRunner310(NPUModelRunner):
             raise ValueError("Deepseek Sparse Attention is not supported for 310P.")
         if self.model_config.use_mla:
             raise ValueError("MLAAttention is not supported for 310P.")
-        # Initialize the memory size for KV cache
-        kv_cache_size = self._calculate_kv_cache_tensors_size(kv_cache_config)
-        # Allocate and reshape KV cache Tensors
-        kv_caches = self._allocate_kv_cache_and_reshape_tensors(kv_cache_config, kv_cache_size)
+        # Initialize the memory buffer for KV cache
+        kv_caches = self._allocate_kv_cache_tensors(kv_cache_config) 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
@@ -211,7 +211,7 @@ class NPUModelRunner310(NPUModelRunner):
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
         return kv_caches
 
-    def _calculate_kv_cache_tensors_size(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:
+    def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache size. The buffer needs to be reshaped to the desired shape before being used by
         the models.
@@ -219,75 +219,53 @@ class NPUModelRunner310(NPUModelRunner):
         Args:
             kv_cache_config: The KV cache config
         Returns:
-            dict[str, int]: A map between layer names to their
-            corresponding memory buffer size.
+            dict[str, torch.Tensor]: A map between layer names to their
+            corresponding memory buffer.
         """
         # init kv cache tensors
-        kv_cache_sizes: dict[str, int] = {}
+        kv_cache: dict[str, torch.Tensor | torch.Tensor | None | None] = {}
+        # get kv cache spec for each layer
+        layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
+        for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
+            for layer_name in group_kv_cache_spec.layer_names:
+                layer_kv_cache_spec[layer_name] = group_kv_cache_spec.kv_cache_spec
+        # Allocate kv cache buffers according to the kv_cache_config and kv_cache_spec
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if "linear_attn" in layer_name and layer_name not in kv_cache_sizes:
-                    # for mamba linear attention
-                    kv_cache_size = kv_cache_tensor.size
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
-                        if "linear_attn" in layer_name_inner:
-                            kv_cache_sizes[layer_name_inner] = kv_cache_size
-                elif "attn" in layer_name and layer_name not in kv_cache_sizes:
-                    kv_tensor_split_factor = 2
-                    kv_tensor_size = int(kv_cache_tensor.size // kv_tensor_split_factor)
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
-                        if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            kv_cache_sizes[layer_name_inner] = kv_tensor_size
-
-        layer_names = set()
-        for group in kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                layer_names.add(layer_name)
-        assert layer_names == set(kv_cache_sizes.keys()), "Some layers are not correctly initialized"
-
-        return kv_cache_sizes
-
-    def _allocate_kv_cache_and_reshape_tensors(
-        self,
-        kv_cache_config: KVCacheConfig,
-        kv_cache_sizes: dict[str, int],
-    ) -> dict[str, torch.Tensor]:
-        """
-        Allocate the KV cache tensors to the desired shape and dtype.
-
-        Args:
-            kv_cache_config: The KV cache config
-            kv_cache_sizes: The KV cache size of each layer
-        Returns:
-            dict[str, torch.Tensor]: A map between layer names to their
-            corresponding memory buffer for KV cache.
-        """
-        kv_caches: dict[str, torch.Tensor] = {}
-        for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
-            attn_backend = group.backend
-            for layer_name in group.layer_names:
-                if layer_name in self.runner_only_attn_layers:
-                    continue
-                if isinstance(kv_cache_spec, AttentionSpec):
-                    kv_tensor_size = kv_cache_sizes[layer_name]
-                    assert kv_tensor_size is not None
-                    sum_page_size_bytes = kv_tensor_size * 2
-                    assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
+                if "linear_attn" in layer_name and layer_name not in kv_cache:
+                    kv_cache_spec = layer_kv_cache_spec[layer_name]
+                    assert isinstance(kv_cache_spec, MambaSpec)
+                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-
-                    if hasattr(attn_backend, "get_supported_kernel_block_sizes") and self.use_hybrid_blocks:
-                        block_size = attn_backend.get_supported_kernel_block_sizes()[0]
-
+                    dtype = kv_cache_spec.dtype
+                    tensor_element_size = torch.tensor([], dtype=dtype).element_size()
+                    tensor = torch.zeros(kv_cache_tensor.size // tensor_element_size, dtype=dtype, device=self.device)
+                    state_tensors = []
+                    target_idx = 0
+                    start_idx = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                        target_shape = (num_blocks, *shape)
+                        target_idx += math.prod(target_shape)
+                        tensor = tensor[start_idx:target_idx].view(target_shape)
+                        start_idx = target_idx
+                        state_tensors.append(tensor)
+                    for layer_name_inner in kv_cache_tensor.shared_by:
+                        if "linear_attn" in layer_name_inner:
+                            kv_cache[layer_name_inner] = state_tensors
+                elif "attn" in layer_name and layer_name not in kv_cache:
+                    kv_cache_spec = layer_kv_cache_spec[layer_name]
+                    assert isinstance(kv_cache_spec, AttentionSpec)
+                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                    assert num_blocks >= kv_cache_config.num_blocks
+                    if kv_cache_spec.block_size * kv_cache_spec.head_size > 16384:
+                        block_size = 64
                         block_size_chunk = kv_cache_spec.block_size // block_size
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                             num_blocks * block_size_chunk,
                             block_size,
                             kv_cache_spec.num_kv_heads,
@@ -297,7 +275,6 @@ class NPUModelRunner310(NPUModelRunner):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                             num_blocks, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
                         )
-                    dtype = kv_cache_spec.dtype
                     k_shape = kv_cache_shape[1:]
                     v_shape = k_shape
                     k_cache = torch_npu.empty_with_format(
@@ -306,34 +283,18 @@ class NPUModelRunner310(NPUModelRunner):
                     v_cache = torch_npu.empty_with_format(
                         size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
                     )
-                    kv_caches[layer_name] = (k_cache, v_cache)
-                elif isinstance(kv_cache_spec, MambaSpec):
-                    tensor_size = kv_cache_sizes[layer_name]
-                    dtype = kv_cache_spec.dtype
-                    tensor_element_size = torch.tensor([], dtype=dtype).element_size()
-                    raw_tensor = torch.zeros(tensor_size // tensor_element_size, dtype=dtype, device=self.device)
-                    assert tensor_size is not None
-                    assert tensor_size % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = tensor_size // kv_cache_spec.page_size_bytes
-                    assert num_blocks >= kv_cache_config.num_blocks
-
-                    state_tensors = []
-                    target_idx = 0
-                    start_idx = 0
-                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                        # normally, there is conv state and ssm state in this loop. And there is only
-                        # a conv state in some special models.
-                        target_shape = (num_blocks, *shape)
-
-                        target_idx += torch.prod(torch.tensor(target_shape)).item()
-                        tensor = raw_tensor[start_idx:target_idx].view(target_shape)
-                        start_idx = target_idx
-                        state_tensors.append(tensor)
-                    kv_caches[layer_name] = state_tensors
-                else:
-                    raise ValueError("Unknown KV cache spec type.")
-
-        return kv_caches
+                    for layer_name_inner in kv_cache_tensor.shared_by:
+                        # shared the kvcache between the self_attn specs in the same group
+                        if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                            kv_cache[layer_name_inner] = (k_cache, v_cache)
+        layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                layer_names.add(layer_name)
+        assert layer_names == set(kv_cache.keys()), "Some layers are not correctly initialized"
+        return kv_cache
 
     # Override this function because of tensor.copy_(other) accuracy issue.
     # TODO: This override will be removed after tensor.copy_(other) accuracy issue is resolved.
