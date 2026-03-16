@@ -2661,103 +2661,116 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
-                if (
-                    "linear_attn" in layer_name or self.hybrid_with_attn_and_mamba
-                ) and layer_name not in kv_cache_raw_tensors:
-                    # for mamba linear attention or attn-linear hybrid
-                    if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-                    else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
-                        tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
 
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache for all shared layers
-                        kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
-                    # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
-                    # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
-                    # as it only support the 0-dim of kv_cache is `num_blocks`.
-                    # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
-                    # and rope head dim.
-                    if self.model_config.use_mla:
-                        head_size = (
-                            self.model_config.hf_text_config.qk_rope_head_dim
-                            + self.model_config.hf_text_config.kv_lora_rank
+            # Separate layers by type for proper sharing
+            linear_attn_layers = [ln for ln in kv_cache_tensor.shared_by if "linear_attn" in ln]
+            normal_attn_layers = [
+                ln for ln in kv_cache_tensor.shared_by if "attn" in ln and "linear_attn" not in ln
+            ]
+
+            # Check if all layers in shared_by are already allocated
+            all_allocated = all(ln in kv_cache_raw_tensors for ln in kv_cache_tensor.shared_by)
+            if all_allocated:
+                continue
+
+            # For hybrid mode or linear_attn layers: allocate single tensor shared by all layers
+            if self.hybrid_with_attn_and_mamba or linear_attn_layers:
+                # Allocate tensor only once for all shared layers
+                if self.vllm_config.kv_transfer_config is None:
+                    tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                else:
+                    cache_size_aligned = kv_cache_tensor.size + alignment
+                    tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                    tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+
+                # Share the same tensor reference for all layers in shared_by
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_cache_raw_tensors[layer_name] = tensor
+            elif normal_attn_layers and not use_mamba:
+                # For normal attention layers: allocate k/v tensors once and share
+                # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
+                # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
+                # as it only support the 0-dim of kv_cache is `num_blocks`.
+                # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
+                # and rope head dim.
+
+                # Use the first normal_attn layer to get the spec
+                first_attn_layer = normal_attn_layers[0]
+
+                if self.model_config.use_mla:
+                    head_size = (
+                        self.model_config.hf_text_config.qk_rope_head_dim
+                        + self.model_config.hf_text_config.kv_lora_rank
+                    )
+
+                if not self.model_config.use_mla:
+                    # for non-mla model, use FullAttentionSpec
+                    k_tensor_split_factor = 2.0
+                    v_tensor_split_factor = 2.0
+                elif self.use_sparse:
+                    # for deepseek v3.2, we split the kv cache according to the corresponding ratio
+                    kv_cache_spec = layer_kv_cache_spec[first_attn_layer]
+                    sparse_kv_cache_ratio = kv_cache_spec.sparse_kv_cache_ratio
+                    k_tensor_split_factor = sparse_kv_cache_ratio[0]
+                    v_tensor_split_factor = sparse_kv_cache_ratio[1]
+                    dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
+                    dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3]
+                else:
+                    # for other deepseek models, use MLAAttentionSpec
+                    k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
+                    v_tensor_split_factor = head_size / self.model_config.hf_text_config.qk_rope_head_dim
+
+                k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
+                v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
+                dsa_k_tensor_size = None
+                dsa_k_scale_tensor_size = None
+                # for deepseek sparse attention
+                if self.use_sparse:
+                    dsa_k_tensor_size = int(kv_cache_tensor.size // dsa_k_tensor_split_factor)
+                if self.use_sparse_c8_indexer:
+                    dsa_k_scale_tensor_size = int(kv_cache_tensor.size // dsa_k_scale_tensor_split_factor)
+
+                # Allocate k/v tensors only once for all shared attn layers
+                if self.vllm_config.kv_transfer_config is None:
+                    k_tensor = torch.zeros(k_tensor_size, dtype=torch.int8, device=self.device)
+                    v_tensor = torch.zeros(v_tensor_size, dtype=torch.int8, device=self.device)
+                    # for deepseek sparse attention
+                    if dsa_k_tensor_size is not None:
+                        dsa_k_tensor = torch.zeros(dsa_k_tensor_size, dtype=torch.int8, device=self.device)
+                    if dsa_k_scale_tensor_size is not None:
+                        dsa_k_scale_tensor = torch.zeros(
+                            dsa_k_scale_tensor_size, dtype=torch.int8, device=self.device
                         )
+                else:
+                    k_tensor = torch.zeros(k_tensor_size + alignment, dtype=torch.int8, device=self.device)
+                    v_tensor = torch.zeros(v_tensor_size + alignment, dtype=torch.int8, device=self.device)
+                    k_tensor = self._align_memory(k_tensor, alignment)[:k_tensor_size]
+                    v_tensor = self._align_memory(v_tensor, alignment)[:v_tensor_size]
+                    # for deepseek sparse attention
+                    if dsa_k_tensor_size is not None:
+                        dsa_k_tensor = torch.zeros(
+                            dsa_k_tensor_size + alignment, dtype=torch.int8, device=self.device
+                        )
+                        dsa_k_tensor = self._align_memory(dsa_k_tensor, alignment)[:dsa_k_tensor_size]
+                    if dsa_k_scale_tensor_size is not None:
+                        dsa_k_scale_tensor = torch.zeros(
+                            dsa_k_scale_tensor_size + alignment, dtype=torch.int8, device=self.device
+                        )
+                        dsa_k_scale_tensor = self._align_memory(
+                            dsa_k_scale_tensor, alignment
+                        )[:dsa_k_scale_tensor_size]
 
-                    if not self.model_config.use_mla:
-                        # for non-mla model, use FullAttentionSpec
-                        k_tensor_split_factor = 2.0
-                        v_tensor_split_factor = 2.0
-                    elif self.use_sparse:
-                        # for deepseek v3.2, we split the kv cache according to the corresponding ratio
-                        kv_cache_spec = layer_kv_cache_spec[layer_name]
-                        sparse_kv_cache_ratio = kv_cache_spec.sparse_kv_cache_ratio
-                        k_tensor_split_factor = sparse_kv_cache_ratio[0]
-                        v_tensor_split_factor = sparse_kv_cache_ratio[1]
-                        dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
-                        dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3]
-                    else:
-                        # for other deepseek models, use MLAAttentionSpec
-                        k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
-                        v_tensor_split_factor = head_size / self.model_config.hf_text_config.qk_rope_head_dim
-
-                    k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
-                    v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
-                    dsa_k_tensor_size = None
-                    dsa_k_scale_tensor_size = None
-                    #### for deepseek sparse attention
+                # Share the same k/v tensor references for all normal attn layers
+                for layer_name in normal_attn_layers:
                     if self.use_sparse:
-                        dsa_k_tensor_size = int(kv_cache_tensor.size // dsa_k_tensor_split_factor)
-                    if self.use_sparse_c8_indexer:
-                        dsa_k_scale_tensor_size = int(kv_cache_tensor.size // dsa_k_scale_tensor_split_factor)
-
-                    # for other attentions, e.g., self_attn, sliding window attn
-                    if self.vllm_config.kv_transfer_config is None:
-                        k_tensor = torch.zeros(k_tensor_size, dtype=torch.int8, device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size, dtype=torch.int8, device=self.device)
-                        #### for deepseek sparse attention
-                        if dsa_k_tensor_size is not None:
-                            dsa_k_tensor = torch.zeros(dsa_k_tensor_size, dtype=torch.int8, device=self.device)
-                        if dsa_k_scale_tensor_size is not None:
-                            dsa_k_scale_tensor = torch.zeros(
-                                dsa_k_scale_tensor_size, dtype=torch.int8, device=self.device
+                        if self.use_sparse_c8_indexer:
+                            kv_cache_raw_tensors[layer_name] = (
+                                k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
                             )
+                        else:
+                            kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor, dsa_k_tensor)
                     else:
-                        k_tensor = torch.zeros(k_tensor_size + alignment, dtype=torch.int8, device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size + alignment, dtype=torch.int8, device=self.device)
-                        k_tensor = self._align_memory(k_tensor, alignment)[:k_tensor_size]
-                        v_tensor = self._align_memory(v_tensor, alignment)[:v_tensor_size]
-                        #### for deepseek sparse attention
-                        if dsa_k_tensor_size is not None:
-                            dsa_k_tensor = torch.zeros(
-                                dsa_k_tensor_size + alignment, dtype=torch.int8, device=self.device
-                            )
-                            dsa_k_tensor = self._align_memory(dsa_k_tensor, alignment)[:dsa_k_tensor_size]
-                        if dsa_k_scale_tensor_size is not None:
-                            dsa_k_scale_tensor = torch.zeros(
-                                dsa_k_scale_tensor_size + alignment, dtype=torch.int8, device=self.device
-                            )
-                            dsa_k_scale_tensor = self._align_memory(
-                                dsa_k_scale_tensor, alignment
-                            )[:dsa_k_scale_tensor_size]
-
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the attn kvcache for all shared layers
-                        if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            if self.use_sparse:
-                                if self.use_sparse_c8_indexer:
-                                    kv_cache_raw_tensors[layer_name_inner] = (
-                                        k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
-                                    )
-                                else:
-                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor)
-                            else:
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
+                        kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
