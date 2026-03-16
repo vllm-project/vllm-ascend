@@ -118,7 +118,7 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 --no-enable-prefix-caching \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---additional-config '{"enable_cpu_binding":true}'
+--additional-config '{"enable_cpu_binding":true}' \
 --async-scheduling
 ```
 
@@ -127,7 +127,7 @@ vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
 
 The parameters are explained as follows:
 
-- `--data-parallel-size` 1 and `--tensor-parallel-size` 16 are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
+- `--data-parallel-size` 1 and `--tensor-parallel-size` 2 are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
 - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:

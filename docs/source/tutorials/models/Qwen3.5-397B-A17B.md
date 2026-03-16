@@ -120,7 +120,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --no-enable-prefix-caching \
 --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
---additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
+--additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}' \
 --async-scheduling
 ```
 
@@ -231,7 +231,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --data-parallel-rpc-port 13389 \
 --seed 1024 \
 --tensor-parallel-size 8 \
---served-model-name qwen3 \
+--served-model-name qwen3.5 \
 --max-num-seqs 16 \
 --max-model-len 32768 \
 --max-num-batched-tokens 4096 \
