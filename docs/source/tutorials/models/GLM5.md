@@ -1167,7 +1167,7 @@ python load_balance_proxy_server_example.py \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
-      $node_d0_ip1 \
+      $node_d0_ip \
       $node_d0_ip \
       $node_d1_ip \
       $node_d1_ip \
