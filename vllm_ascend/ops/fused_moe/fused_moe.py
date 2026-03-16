@@ -161,7 +161,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # and provide dummy scales (w1_scale, w2_scale). This is required because:
         # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
         # inputs in a list format.
-        # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically 
+        # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
         # incorrect. The ideal solution is to pass None. However, if the underlying
         # dispatch_ffn_combine C++ operator does not support None for the scale argument
         # (due to signature constraints), we are forced to use a placeholder empty tensor.
