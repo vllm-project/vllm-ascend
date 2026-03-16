@@ -37,7 +37,6 @@ class AscendFAQuantAttentionMethod:
             setattr(layer, name, torch.nn.Module())
         params_dict = {}
         dtype = torch.get_default_dtype()
-        layer.num_kv_heads = 1
         params_dict["fa_q.scale"] = torch.empty((layer.num_heads, 1), dtype=dtype)
         params_dict["fa_k.scale"] = torch.empty((layer.num_kv_heads, 1), dtype=dtype)
         params_dict["fa_v.scale"] = torch.empty((layer.num_kv_heads, 1), dtype=dtype)
