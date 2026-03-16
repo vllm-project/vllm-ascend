@@ -182,4 +182,3 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 - **Q: How to handle OOM or unstable startup?**
 
   A: Reduce `--max-num-seqs` and `--max-num-batched-tokens` first. If needed, reduce concurrency and load-testing pressure (e.g., `max-concurrency` / `num-prompts`).
-
