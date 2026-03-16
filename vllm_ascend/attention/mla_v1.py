@@ -408,6 +408,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ):
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
 
+    def get_num_actual_tokens_pcp_padded(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ):
+        return common_attn_metadata.num_actual_tokens
+
     def build(
         self,
         common_prefix_len: int,
@@ -444,7 +450,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if self.num_decodes > 0:
             decode_metadata = self.build_decode_metadata(common_prefix_len, common_attn_metadata)
         return self.metadata_cls(  # type: ignore
-            num_actual_tokens_pcp_padded=self.num_actual_tokens,
+            num_actual_tokens_pcp_padded=self.get_num_actual_tokens_pcp_padded(common_attn_metadata),
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=self.num_actual_tokens,
             query_lens=self.query_lens.tolist(),
@@ -1094,6 +1100,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 chunked_context=prefill_metadata.chunked_context,
                 chunk_idx=i,
                 toks=toks,
+                num_dycp_reqs = attn_metadata.num_dycp_reqs
             )
             kv_c_normed = kv_c_normed.squeeze()
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
