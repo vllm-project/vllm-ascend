@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group, get_decode_context_model_parallel_world_size, get_pcp_group
+from vllm.distributed import get_dcp_group, get_decode_context_model_parallel_world_size, get_pcp_group, get_dycp_group
 
 
 @dataclass
@@ -119,6 +119,44 @@ def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) 
     return attn_out_lse
 
 
+def _npu_update_dycp_attn(num_dycp_reqs, attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:
+    assert num_dycp_reqs > 0, "num_dycp_reqs should be greater than 0"
+    dycp_group = get_dycp_group().device_group
+    softmax_lse = softmax_lse.to(torch.float32)[:num_dycp_reqs]
+    attn_output = attn_output.to(torch.float32)[:num_dycp_reqs]
+
+    # Get DYCP group info and tensor dimensions
+    dycp_size = get_dycp_group().world_size
+    S = num_dycp_reqs
+    H = attn_output.shape[1]
+    D = attn_output.shape[2]
+
+    # Concat out & lse: [S, H, D] + [S, H, 1] -> [S, H, D+1]
+    attn_out_lse = torch.cat([attn_output, softmax_lse], dim=-1)
+
+    # AllGather within DYCP group: [S, H, D+1] -> [dycp_size * S, H, D+1]
+    attn_out_lse = dycp_group.all_gather(attn_out_lse.contiguous(), dim=0)
+
+    # Reshape: [dycp_size * S, H, D+1] -> [dycp_size, S, H, D+1]
+    attn_out_lse = attn_out_lse.view(dycp_size, S, H, D + 1)
+
+    # Split out and lse
+    out_flat, lse_flat = torch.split(attn_out_lse, [D, 1], dim=-1)
+
+    # Flatten for npu_attention_update: out [N, S*H, D], lse [N, S*H]
+    out_flat = out_flat.flatten(1, 2)
+    lse_flat = lse_flat.flatten(1, -1)
+
+    # Unbind to list and merge via npu_attention_update
+    out_list = out_flat.unbind(0)
+    lse_list = lse_flat.unbind(0)
+    attn_out, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
+
+    # Reshape back: [S*H, D] -> [S, H, D]
+    attn_out = attn_out.view(S, H, D)
+    return attn_out
+
+
 def _npu_attention_update(head_size, attn_out_lse: torch.Tensor) -> torch.Tensor:
     pcp_size = get_pcp_group().world_size
     dcp_size = get_decode_context_model_parallel_world_size()
@@ -146,3 +184,4 @@ def _npu_attention_update(head_size, attn_out_lse: torch.Tensor) -> torch.Tensor
     attn_out, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
     attn_out = attn_out.view(-1, H, D)
     return attn_out
+

@@ -196,6 +196,9 @@ class AscendMLAMetadata:
     prefill: AscendMLAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
 
+    # num dycp reqs
+    num_dycp_reqs: int = 0
+
     def __post_init__(self):
         pass
         # supported_head_sizes = AscendMLABackend.get_supported_head_sizes()

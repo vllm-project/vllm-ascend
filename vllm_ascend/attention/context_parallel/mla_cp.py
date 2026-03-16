@@ -5,13 +5,14 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_dcp_group,
+    get_dcp_group, get_dycp_group,
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
     get_pcp_group,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -36,6 +37,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     CPChunkedContextMetadata,
     _npu_attention_update,
     _process_attn_out_lse,
+    _npu_update_dycp_attn,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
@@ -67,6 +69,12 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
+        try:
+            self.dycp_size = get_dycp_group().world_size
+            self.dycp_rank = get_dycp_group().rank_in_group
+        except AssertionError:
+            self.dycp_size = 1
+            self.dycp_rank = 0
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
@@ -147,7 +155,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp
         assert num_computed_tokens_of_pcp_dcp is not None
         local_context_lens_allranks = torch.tensor(num_computed_tokens_of_pcp_dcp[self.num_decodes_flatten :]).reshape(
-            -1, self.dcp_size * self.pcp_size
+            -1, self.dcp_size * self.pcp_size * self.dycp_size
         )
         # Note(qcs): The max local context lengths
         # padded to `cp_local_block_size`.
@@ -290,11 +298,19 @@ class AscendMlaCPImpl(AscendMLAImpl):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
+        try:
+            self.dycp_size = get_dycp_group().world_size
+            self.dycp_rank = get_dycp_group().rank_in_group
+        except AssertionError:
+            self.dycp_size = 1
+            self.dycp_rank = 0
+
     @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,
         num_tokens,
+        num_dycp_reqs,
         vllm_config=None,
         speculative_config=None,
         num_dcp_pcp_tokens=None,
@@ -333,7 +349,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 ) = param
 
                 decode_meta = forward_context.attn_metadata[key].decode
-                seq_len = decode_meta.cp_seq_len
+                if num_dycp_reqs > 0:
+                    seq_len = decode_meta.seq_lens
+                else:
+                    seq_len = decode_meta.cp_seq_len
                 if isinstance(seq_len, torch.Tensor):
                     seq_len = seq_len.tolist()
                 actual_seq_lengths_kv = seq_len
@@ -615,7 +634,19 @@ class AscendMlaCPImpl(AscendMLAImpl):
         dequant_scale_q_nope=None,
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
+        num_dycp_reqs = attn_metadata.num_dycp_reqs
         assert decode_meta is not None
+        if num_dycp_reqs > 0:
+            seq_lens = decode_meta.seq_lens
+            dycp_seq_lens = get_dcp_local_seq_lens(
+                self.seq_lens[:num_dycp_reqs],
+                self.dycp_size,
+                self.dycp_rank,
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            )
+            seq_lens[:num_dycp_reqs] = dycp_seq_lens
+        else:
+            seq_lens = decode_meta.cp_seq_len
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
@@ -651,7 +682,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
             sparse_mode = 0
             spec_attn_mask = None
-
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
@@ -666,7 +696,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             "block_table": decode_meta.block_table,
             "block_size": block_size,
             "actual_seq_lengths": actual_seq_lengths,
-            "actual_seq_lengths_kv": decode_meta.cp_seq_len,
+            "actual_seq_lengths_kv": seq_lens,
             "softmax_lse_flag": True,
         }
 
@@ -736,6 +766,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
+        if num_dycp_reqs > 0:
+            attn_output[:num_dycp_reqs] = _npu_update_dycp_attn(num_dycp_reqs, attn_output, softmax_lse)
+            return self._v_up_proj(attn_output)
         attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
         attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
