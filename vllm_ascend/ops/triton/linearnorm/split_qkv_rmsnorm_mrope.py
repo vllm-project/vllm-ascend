@@ -24,7 +24,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-@triton.jit(do_not_specialize=["num_tokens",
+@triton.jit(do_not_specialize=["batch_size_per_iter_per_vec",
                                "front_core_num",
                                "num_tokens_each_front_core",
                                "num_tokens_each_tail_core"])
@@ -54,11 +54,9 @@ def split_qkv_rmsnorm_mrope_kernel(
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
     core_num: tl.constexpr,
+    batch_size_per_iter_per_vec: tl.constexpr,
 ):
     batch_size_per_vec = tl.cdiv(batch_size, core_num)
-    batch_size_per_iter_per_vec = 85*1024/ 2 //(max((num_q_heads+num_kv_heads)*head_size, num_q_heads*rope_dim*3) + rope_dim*7 + (
-            num_q_heads*head_size*4 + num_kv_heads*head_size*2) + num_q_heads*rope_dim*2)
-    batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
     qk_head_nums_per_iter_per_vec = batch_size_per_iter_per_vec * num_qk_heads
     iter_num_per_vec = tl.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
     
@@ -423,7 +421,7 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim,
         int(half_rope_dim),
         IS_PARTIAL_ROPE,
-        core_num,
+        batch_size_per_iter_per_vec,
     )
 
     return q_output, k_output, v_output
