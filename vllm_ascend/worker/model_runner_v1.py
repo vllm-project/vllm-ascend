@@ -2721,6 +2721,7 @@ class NPUModelRunner(GPUModelRunner):
                         dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3]
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
+                        assert k_dim > 0 and v_dim > 0
                         total_dim = k_dim + v_dim
                         k_tensor_split_factor = total_dim / k_dim
                         v_tensor_split_factor = total_dim / v_dim
