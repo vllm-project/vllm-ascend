@@ -1,7 +1,5 @@
 # MiniMax-M2.5
 
-> If you are deploying on **A2**, a dual-node setup is required. For detailed instructions, see [Deployment_Guide_A2](./Deployment_Guide_A2.md).
-
 ## Introduction
 
 MiniMax‑M2.5 is MiniMax’s flagship large language model, reinforced for high‑value scenarios such as code generation, agentic tool calling/search, and complex office workflows, with an emphasis on reasoning efficiency and end‑to‑end speed on challenging tasks.
@@ -182,4 +180,3 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 - **Q: How to handle OOM or unstable startup?**
 
   A: Reduce `--max-num-seqs` and `--max-num-batched-tokens` first. If needed, reduce concurrency and load-testing pressure (e.g., `max-concurrency` / `num-prompts`).
-  
