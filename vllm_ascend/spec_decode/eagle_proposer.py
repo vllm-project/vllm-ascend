@@ -489,6 +489,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             num_decode_reqs=num_decode_reqs,
         )
         if self.pcp_size * self.dcp_size > 1:
+            assert long_seq_args is not None
             query_lens_d, ori_token_indices_to_sample = long_seq_args
         assert self.runner is not None
         if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
