@@ -120,6 +120,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
+            layer_name=f"{prefix}.attn",
         )
 
         original_process_weights = self.mla_attn.process_weights_after_loading
