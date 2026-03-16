@@ -1071,7 +1071,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 # Use torch.where to avoid DtoH sync from boolean indexing
                 mask = self.is_masked_token_mask[:total_num_output_tokens]
                 torch.where(
-                    mask.unsqueeze(1), # type: ignore
+                    mask.unsqueeze(1),  # type: ignore
                     self.parallel_drafting_hidden_state_tensor,
                     self.hidden_states[:total_num_output_tokens],
                     out=self.hidden_states[:total_num_output_tokens],
