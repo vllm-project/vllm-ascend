@@ -17,8 +17,10 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
+import contextlib
 import copy
 import gc
+from collections.abc import Generator
 from types import NoneType
 
 import torch
@@ -37,7 +39,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import MemoryProfilingResult, MemorySnapshot
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -72,6 +74,45 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+
+@contextlib.contextmanager
+def npu_memory_profiling(
+    baseline_snapshot: MemorySnapshot,
+    weights_memory: int = 0,
+) -> Generator[MemoryProfilingResult, None, None]:
+    """NPU-safe variant of `memory_profiling()`.
+
+    Upstream vLLM switched to `torch.accelerator.empty_cache()`, but that path
+    is not backend-safe on torch-npu yet. Keep Ascend on the native NPU memory
+    APIs here so memory profiling does not touch the unsupported accelerator
+    allocator path.
+    """
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats(baseline_snapshot.device_)
+
+    result = MemoryProfilingResult(
+        before_create=baseline_snapshot,
+        weights_memory=weights_memory,
+    )
+
+    result.before_profile.measure()
+
+    yield result
+
+    gc.collect()
+    torch.npu.empty_cache()
+
+    result.after_profile.measure()
+
+    diff_profile = result.after_profile - result.before_profile
+    diff_from_create = result.after_profile - result.before_create
+    result.torch_peak_increase = diff_profile.torch_peak
+    result.non_torch_increase = diff_from_create.non_torch_memory
+    result.profile_time = diff_profile.timestamp
+
+    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory
 
 
 class NPUWorker(WorkerBase):
@@ -336,7 +377,7 @@ class NPUWorker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
+        with npu_memory_profiling(
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
