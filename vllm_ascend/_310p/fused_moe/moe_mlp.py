@@ -18,6 +18,8 @@
 import torch
 import torch_npu
 
+from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
+
 
 def quant_apply_mlp(
     hidden_states: torch.Tensor,
@@ -66,17 +68,20 @@ def unquant_apply_mlp(
     return hidden_states
 
 
-def unified_apply_mlp(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    group_list: torch.Tensor,
-    w1_scale: torch.Tensor | None = None,
-    w2_scale: torch.Tensor | None = None,
-    group_list_type: int = 1,
-    with_quant: bool = False,
-) -> torch.Tensor:
-    if with_quant:
+def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
+    hidden_states = request.hidden_states
+    w1 = request.weights.w1
+    w2 = request.weights.w2
+    w1_scale = request.weights.w1_scale
+    w2_scale = request.weights.w2_scale
+    group_list = request.group_list
+    group_list_type = request.group_list_type
+    assert isinstance(w1, torch.Tensor)
+    assert isinstance(w2, torch.Tensor)
+
+    if request.quant.is_quant:
+        assert isinstance(w1_scale, torch.Tensor)
+        assert isinstance(w2_scale, torch.Tensor)
         assert w1_scale is not None and w2_scale is not None
         return quant_apply_mlp(
             hidden_states=hidden_states,
@@ -87,7 +92,11 @@ def unified_apply_mlp(
             group_list=group_list,
             group_list_type=group_list_type,
         )
-    else:
-        return unquant_apply_mlp(
-            hidden_states=hidden_states, w1=w1, w2=w2, group_list=group_list, group_list_type=group_list_type
-        )
+
+    return unquant_apply_mlp(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        group_list=group_list,
+        group_list_type=group_list_type,
+    )

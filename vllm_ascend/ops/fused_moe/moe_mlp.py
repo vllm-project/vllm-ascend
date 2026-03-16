@@ -27,6 +27,7 @@ from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -95,27 +96,17 @@ def quant_apply_mlp(
     w2_offset: torch.Tensor | None = None,
     fusion: bool = False,
     dynamic_eplb: bool = False,
-    **kwargs,
+    use_mxfp_quant: bool = False,
+    act_quant_type: torch.dtype = torch.float8_e4m3fn,
+    weight_quant_type: torch.dtype | None = None,
+    scale_type: torch.dtype | None = None,
+    per_token_scale_type: torch.dtype | None = None,
+    use_bf16: bool = True,
 ) -> torch.Tensor:
-    # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
-    # quantization modes will be consolidated into a dataclass in a follow-up.
-    use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
-    act_quant_type = torch.float8_e4m3fn
-    weight_quant_type = None
-    scale_type = None
-    per_token_scale_type = None
-    use_bf16 = True
-
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
 
     if use_mxfp_quant:
-        act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
-        weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
-        scale_type = kwargs.get("scale_type")
-        per_token_scale_type = kwargs.get("per_token_scale_type")
-        use_bf16 = kwargs.get("use_bf16", True)
-
         ensure_mxfp8_moe_available("MXFP MoE MLP path")
 
         if w1_scale_bias is not None or w2_scale_bias is not None:
@@ -393,34 +384,31 @@ def unquant_apply_mlp(
     return hidden_states
 
 
-def unified_apply_mlp(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor | list[torch.Tensor],
-    w2: torch.Tensor | list[torch.Tensor],
-    group_list: torch.Tensor,
-    w1_scale: list[torch.Tensor] | None = None,
-    w2_scale: list[torch.Tensor] | None = None,
-    activation: str | None = None,
-    w1_bias: torch.Tensor = None,
-    w2_bias: torch.Tensor = None,
-    dynamic_scale: torch.Tensor = None,
-    group_list_type: int = 1,
-    w1_scale_bias: torch.Tensor = None,
-    w2_scale_bias: torch.Tensor = None,
-    w1_offset: torch.Tensor | None = None,
-    w2_offset: torch.Tensor | None = None,
-    topk_scales: torch.Tensor | None = None,
-    with_quant: bool = False,
-    fusion: bool = False,
-    need_trans: bool = True,
-    dynamic_eplb: bool = False,
-    **kwargs,
-) -> torch.Tensor:
+def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
     """
     Unified MoE MLP entry.
-    Quant path is dispatched by DeviceOperator with explicit quant-type flags.
+    Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
     """
-    if not with_quant:
+    hidden_states = request.hidden_states
+    group_list = request.group_list
+    group_list_type = request.group_list_type
+    dynamic_scale = request.dynamic_scale
+    topk_scales = request.topk_scales
+    w1 = request.weights.w1
+    w2 = request.weights.w2
+    w1_bias = request.weights.w1_bias
+    w2_bias = request.weights.w2_bias
+    w1_scale = request.weights.w1_scale
+    w2_scale = request.weights.w2_scale
+    w1_scale_bias = request.weights.w1_scale_bias
+    w2_scale_bias = request.weights.w2_scale_bias
+    w1_offset = request.weights.w1_offset
+    w2_offset = request.weights.w2_offset
+    activation = request.mlp.activation
+    need_trans = request.mlp.need_trans
+    dynamic_eplb = request.mlp.dynamic_eplb
+
+    if not request.quant.is_quant:
         return unquant_apply_mlp(
             hidden_states=hidden_states,
             w1=w1,
@@ -435,13 +423,8 @@ def unified_apply_mlp(
         )
 
     assert w1_scale is not None and w2_scale is not None
-    # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
-    # quantization modes will be consolidated into a dataclass in a follow-up.
-    act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
-    weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
-    scale_type = kwargs.get("scale_type")
-    per_token_scale_type = kwargs.get("per_token_scale_type")
-    use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
+    kernel = request.kernel
+
     return quant_apply_mlp(
         hidden_states=hidden_states,
         w1=w1,
@@ -455,12 +438,12 @@ def unified_apply_mlp(
         w2_scale_bias=w2_scale_bias,
         w1_offset=w1_offset,
         w2_offset=w2_offset,
-        fusion=fusion,
+        fusion=kernel.fusion,
         dynamic_eplb=dynamic_eplb,
-        act_quant_type=act_quant_type,
-        weight_quant_type=weight_quant_type,
-        scale_type=scale_type,
-        per_token_scale_type=per_token_scale_type,
-        use_mxfp_quant=use_mxfp_quant,
-        use_bf16=kwargs.get("use_bf16", True),
+        use_mxfp_quant=kernel.use_mxfp_quant,
+        act_quant_type=kernel.act_quant_type,
+        weight_quant_type=kernel.weight_quant_type,
+        scale_type=kernel.scale_type,
+        per_token_scale_type=kernel.per_token_scale_type,
+        use_bf16=kernel.use_bf16,
     )
