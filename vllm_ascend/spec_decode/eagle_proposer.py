@@ -938,7 +938,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         long_seq_metadata=None,
         num_prefill_reqs=0,
         num_decode_reqs=0,
-    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, Optional[tuple[Any, Any]]]:
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
