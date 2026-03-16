@@ -94,11 +94,54 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 6. File: platform/patch_fusion_matcher_compat_ops.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `torch.ops._C.rms_norm`, `torch.ops._C.fused_add_rms_norm`,
+#    Why:
+#       upstream vLLM initializes fusion matcher global operators at import time.
+#       On Ascend environment these symbols may be absent and cause import failure.
+#    How：
+#       inject placeholders only when the symbols are missing so import can continue.
+#    Related PR (if no, explain why):
+#       temporary compatibility patch before upstream adjustment is merged.
+#    Future Plan:
+#       remove this patch once upstream no longer requires these global symbols or
+#       provides a backend-safe initialization path.
+#
+# ** 7. File: platform/patch_minimax_m2_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.model.ModelConfig._verify_quantization`
+#    Why:
+#       MiniMax-M2 fp8 checkpoints on NPU may fail upstream quantization validation.
+#       vllm-ascend needs to disable fp8 quantization and load bf16 dequantized
+#       weights in worker-side patches instead.
+#    How：
+#       Monkey-patch `_verify_quantization` and intercept platform quantization
+#       verification to force `cfg.quantization=None` for MiniMax-M2 fp8 on NPU.
+#    Related PR (if no, explain why):
+#       No, upstream behavior differs across versions and needs discussion.
+#    Future Plan:
+#       Remove this patch once upstream supports MiniMax-M2 fp8 on NPU or provides
+#       a backend-safe validation / override mechanism.
+#
+#   2. `vllm.config.model.ModelConfig._verify_cuda_graph`
+#    Why:
+#       For MiniMax-M2 on NPU with ACL graph capture enabled, HCCL op expansion
+#       mode affects graph shape coverage. Users may forget to set it.
+#    How：
+#       If user doesn't set it, set `HCCL_OP_EXPANSION_MODE=AIV` for this model
+#       and log a warning when a different value is detected.
+#    Related PR (if no, explain why):
+#       No, this is an environment-specific tuning knob.
+#    Future Plan:
+#       Remove this patch if upstream provides an official NPU graph-capture
+#       guidance / auto-configuration path for HCCL.
+#
 # * Worker Patch:
 # ===============
 #
-# ** 1. File: worker/patch_distributed.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ** 1. File: worker/patch_distributed.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
 #    Why:
 #       vllm doesn't support all_to_all for GroupCoordinator.
@@ -112,7 +155,7 @@
 #       Remove this patch when the refactor of all2all manager is done.
 #       Remove this patch when vLLM support all_reduce as customop.
 #
-# ** 3. File: worker/patch_multimodal_merge.py**
+# ** 2. File: worker/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
 #    Why:
@@ -124,9 +167,10 @@
 #    Future Plan:
 #       Identify this pattern in torch-npu and remove this patch.
 #
-# ** 4. File: worker/patch_roberta.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.bert `
+# ** 3. File: worker/patch_bert.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.bert._encode_token_type_ids`
+#      `vllm.model_executor.models.bert._decode_token_type_ids`
 #    Why:
 #       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
 #    How：
@@ -136,7 +180,7 @@
 #    Future Plan:
 #       Revert this when CANN support shift aclnn operation
 #
-# ** 5. File: worker/patch_triton.py**
+# ** 4. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
@@ -149,7 +193,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 6. File: worker/patch_qwen3_next_mtp.py**
+# ** 5. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -162,7 +206,22 @@
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** 7. File: worker/patch_module.py**
+# ** 6. File: worker/patch_rejection_sampler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.rejection_sampler`
+#    Why:
+#       - some functions from `rejection_sampler` are not supported or slow on npu.
+#    How：
+#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
+#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
+#    Related PR (if no, explain why):
+#       Let vLLM support triton ops dispatch.
+#    Future Plan:
+#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
+#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
+#       2. make these functions as costom op, then remove AscendRejectionSampler
+#
+## ** 7. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
@@ -178,23 +237,7 @@
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
-# ** 8. File: worker/patch_rejection_sampler.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.rejection_sampler`
-#    Why:
-#       - some functions from `rejection_sampler` are not supported or slow on npu.
-#    How：
-#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
-#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/874
-#       https://github.com/vllm-project/vllm/pull/4849
-#    Future Plan:
-#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
-#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
-#       2. make these functions as costom op, then remove AscendRejectionSampler
-#
-# ** 9.File: worker/patch_qwen3_next.py**
+# ** 8. File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
 #    Why:
@@ -206,9 +249,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 10. File: worker/patch_qwen3_next.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#   2. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
 #    Why:
 #       triton ops fused_recurrent_gated_delta_rule and fused_gdn_gating in vLLM perform not good on NPU.
 #    How：
@@ -218,7 +259,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-#   2. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#   3. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
 #    Why:
 #       The Qwen3Next GatedDeltaNet _forward_core cannot directly add custom operators.
 #    How：
@@ -228,7 +269,17 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 11. File: worker/patch_v2_eagle.py**
+# ** 9. File: worker/patch_huanyuan_vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.processors.hunyuan_vl.HunYuanVLProcessor.__call__`
+#    Why:
+#       The `add_special_tokens` parameter is not supported by default in the processor.
+#    How：
+#       Remove the `add_special_tokens` parameter from kwargs before calling the original method.
+#    Future Plan:
+#       Remove this patch when vLLM aligns with the latest processor implementation.
+#
+# ** 10. File: worker/patch_v2_eagle.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
 #    Why:
@@ -240,7 +291,7 @@
 #    Future Plan:
 #       Remove this patch when cann fix the gather bug.
 #
-# ** 12. File: worker/patch_unquantized_gemm.py**
+# ** 11. File: worker/patch_unquantized_gemm.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.utils.default_unquantized_gemm`
 #    Why:
@@ -250,7 +301,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the operator as customop.
 #
-# ** 13. File: worker/patch_npugraph_ex_triton.py**
+# ** 12. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torchair.core._concrete_graph.ValuePack`,
 #      `torchair.npu_fx_compiler._unpack_meta`,
@@ -263,7 +314,8 @@
 #       https://gitcode.com/Ascend/torchair/pull/2575
 #    Future Plan:
 #       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
-# ** 14. File: worker/patch_v2_uva.py**
+#
+# ** 13. File: worker/patch_v2_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.states.UvaBuffer`
 #    Why:
@@ -272,3 +324,185 @@
 #       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
+#
+# ** 14. File: worker/patch_kimi_k25.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.kimi_k25_vit.Learnable2DInterpPosEmbDivided_fixed.forward`
+#    Why:
+#       The forward method uses interpolate with ops not supported on NPU.
+#    How：
+#       Replace with a new forward that uses CPU for interpolate when shape mismatch,
+#       and use get_rope_shape to handle the rope shape interpolation.
+#    Future Plan:
+#       Remove this patch when vLLM aligns with the latest main.
+#
+# ** 15. File: worker/patch_routed_experts_capturer.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.init_buffer`
+#    Why:
+#       The `_device_buffer` initialization in vLLM uses `device="cuda"` hardcoded,
+#       which doesn't work on NPU.
+#    How：
+#       Replace `device="cuda"` with `device=current_platform.device_name` to support NPU.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/34336
+#    Future Plan:
+#       Remove this patch when vLLM merges the PR.
+# ** 16. File: worker/patch_draft_quarot.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM.load_weights`
+#    Why:
+#       vllm-ascend reused the loading logic of drafter model from vllm,
+#       but vllm doesn't need to apply to Ascend quantization.
+#    How：
+#       Dynamically replace the `load_weights` function at runtime,
+#       and fix `target_config` into the new implementation with a closure.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/36225
+#    Future Plan:
+#       Remove this patch when vLLM merges the PR.
+#
+# ** 17. File: worker/patch_minimax_m2.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
+#    Why:
+#       In TP mode, MiniMax-M2 MoE needs a backend-aware reduction path to avoid
+#       unnecessary communication / maintain correctness on NPU.
+#    How：
+#       Replace the forward to call `experts.maybe_all_reduce_tensor_model_parallel`
+#       when `tp_size > 1`.
+#    Related PR (if no, explain why):
+#       No, model-specific behavior.
+#    Future Plan:
+#       Move this behavior upstream once a generic MoE reduce hook exists.
+#
+#   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.__init__`
+#    Why:
+#       When total kv heads < TP world size, kv head replication happens and k_norm
+#       weights should be sharded to match the replication layout.
+#    How：
+#       Add `num_kv_head_replicas` and create sharded `k_norm` via
+#       `MiniMaxText01RMSNormTP(..., weight_shard_world_size=total_num_kv_heads, ...)`.
+#    Related PR (if no, explain why):
+#       No, depends on Ascend kernel behavior and TP layout.
+#    Future Plan:
+#       Remove this patch if upstream implements kv-head-aware norm sharding.
+#
+#   3. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.load_weights`
+#    Why:
+#       MiniMax-M2 fp8 checkpoints may store fp8 weights with per-block inverse
+#       scales. On NPU we load bf16 weights by dequantizing at load time.
+#    How：
+#       Inject fp8 dequant helpers and wrap `load_weights` to convert fp8 weight +
+#       `weight_scale_inv` pairs into bf16 blocks before delegating to upstream.
+#    Related PR (if no, explain why):
+#       No, fp8 load format and backend constraints are model/backend specific.
+#    Future Plan:
+#       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
+#
+# ** 18. File: worker/patch_minimax_m2_linear_attn.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.__init__`
+#      `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.weight_loader`
+#    Why:
+#       MiniMax-M2 linear attention RMSNorm needs weight sharding that can follow
+#       TP layout (and sometimes kv-head replication) on NPU.
+#    How：
+#       Override `__init__` to parameterize weight shard world/rank and install a
+#       sharded `weight_loader` implementation.
+#    Related PR (if no, explain why):
+#       No, upstream API surface differs across versions.
+#    Future Plan:
+#       Remove this patch when upstream exposes stable sharding hooks for this layer.
+#
+#   2. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.forward_qk`
+#      (or older `_normalize_qk`)
+#    Why:
+#       q/k norm for linear attention is performance-sensitive. On NPU, a fused
+#       rms_norm kernel is faster and TP needs a global rstd correction.
+#    How：
+#       Replace q/k normalization with NPU rms_norm fast path and TP-global rstd
+#       correction; fall back to upstream implementation on non-NPU.
+#    Related PR (if no, explain why):
+#       No, backend-specific optimization.
+#    Future Plan:
+#       Remove this patch when upstream adds a backend dispatch path for q/k norm.
+#
+# ** 19. File: worker/patch_qwen3_5.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
+#    Why:
+#       The class Qwen3_5GatedDeltaNet reuse the `_forward_core` method of Qwen3NextGatedDeltaNet,
+#       but the ascendC ops of Qwen3NextGatedDeltaNet do not support ssm_state with float32 format.
+#    How：
+#       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
+#    Future Plan:
+#       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#
+# ** 20. File: worker/patch_cudagraph.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.cudagraph_dispatcher.CudagraphDispatcher._create_padded_batch_descriptor`
+#    Why:
+#       vllm's FULL mode will cause error, we use a patch to avoid it.
+#       After that, FULL can be enable now.
+#    How：
+#       Dynamically replace the `_create_padded_batch_descriptor` function at runtime,
+#       and change the condition of if.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/34880
+#    Future Plan:
+#       Remove this patch when vLLM merges the PR.
+#
+# ** 21. File: worker/patch_deepseek_mtp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name` and
+#      `vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name`
+#    Why:
+#       When GLM5 uses rotary quant in vllm-ascend, the MTP layer needs to load an extra weight
+#       named `rot.weight`.
+#    How：
+#       If weight name starts with `rot`, return `layer_id + i` like other tensors in MTP layer.
+#    Related PR (if no, explain why):
+#       Rotary quant is a unique feature of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+#   2. `vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer`
+#    Why:
+#       When GLM5 uses rotary quant in vllm-ascend, the `previous_hidden_states` does not .
+#    How：
+#       If the target model uses rotary quant, a new linear operation is added before `ehnorm`.
+#    Related PR (if no, explain why):
+#       Rotary quant is a unique feature of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+#   3. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP._rewrite_spec_layer_name`
+#    Why:
+#       Rename `rot.weight` to match the format of weights in `DeepSeekMTP`.
+#    How：
+#       If the weight name is `rot`, rename it to `model.layers.{spec_layer}.rot.weight`.
+#    Related PR (if no, explain why):
+#       Rotary quant is a unique feature of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+# ** 22. File: worker/patch_mamba_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
+#    Why:
+#       Oringnal batch_memcpy_kernel implemented in vLLM might encounter bugs when running on
+#       Ascend hardwares.
+#    How：
+#       patch to fix related bugs.
+#    Future Plan:
+#       Remove this patch when:
+#       (1) oringnal batch_memcpy_kernel can run on Ascend hardware.
+#       or
+#       (2) design a dispatch mechanism for batch_memcpy_kernel.
+#   2. `vllm.v1.worker.mamba_utils.batch_memcpy = batch_memcpy`
+#    Why:
+#       vLLM use BLOCK_SIZE 1024 for batch_memcpy_kernel. This results in suboptimal performance
+#       on Ascend hardwares.
+#    How：
+#       patch to change BLOCK_SIZE to 8192.
+#    Future Plan:
+#       Remove this patch when:
+#       design a dispatch mechanism for batch_memcpy_kernel.

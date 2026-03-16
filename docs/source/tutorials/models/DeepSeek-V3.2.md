@@ -21,7 +21,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now.
 - `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### Verify Multi-node Communication(Optional)
 
@@ -140,6 +140,7 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
@@ -157,6 +158,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
 ```
@@ -197,6 +199,7 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
@@ -217,6 +220,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -244,6 +248,7 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
@@ -266,6 +271,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -297,11 +303,11 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_CONNECT_TIMEOUT=120
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
-
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
@@ -321,8 +327,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48]}' \
---speculative-config '{"num_speculative_tokens": 2, "method": "deepseek_mtp"}'
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
+--additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
 ```
 
@@ -350,11 +357,11 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_CONNECT_TIMEOUT=120
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
-
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --host 0.0.0.0 \
@@ -376,8 +383,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42,45,48]}' \
---speculative-config '{"num_speculative_tokens": 2, "method": "deepseek_mtp"}'
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48]}' \
+--additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
 ```
 
@@ -390,7 +398,7 @@ We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environm
 
 Before you start, please
 
-1. prepare the script `launch_online_dp.py` on each node.
+1. prepare the script `launch_online_dp.py` on each node:
 
     ```python
     import argparse
@@ -830,6 +838,37 @@ python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-s
 python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
 ```
 
+### Request Forwarding
+
+To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+
+```shell
+unset http_proxy
+unset https_proxy
+
+python load_balance_proxy_server_example.py \
+    --port 8000 \
+    --host 0.0.0.0 \
+    --prefiller-hosts \
+       141.61.39.105 \
+       141.61.39.113 \
+    --prefiller-ports \
+       9100 \
+       9100 \
+    --decoder-hosts \
+      141.61.39.117 \
+      141.61.39.117 \
+      141.61.39.117 \
+      141.61.39.117 \
+      141.61.39.181 \
+      141.61.39.181 \
+      141.61.39.181 \
+      141.61.39.181 \
+    --decoder-ports \
+      9100 9101 9102 9103 \
+      9100 9101 9102 9103 \
+```
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
@@ -905,7 +944,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 ## Function Call

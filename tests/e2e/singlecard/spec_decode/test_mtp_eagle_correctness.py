@@ -120,7 +120,6 @@ def test_deepseek_mtp_correctness(model_name: str, num_speculative_tokens: int,
     del spec_llm
 
 
-@pytest.mark.skip(reason="Failed with CANN8.5, fix me")
 @pytest.mark.parametrize("model_name", MODELS_EAGLE)
 @pytest.mark.parametrize("model_name_main", MODELS_MAIN)
 @pytest.mark.parametrize("num_speculative_tokens", [1, 2])
@@ -169,11 +168,10 @@ def test_llama_qwen3_eagle_correctness(
                         "draft_tensor_parallel_size":
                         draft_tensor_parallel_size,
                         "max_model_len": 128,
-                        "draft_vocab_size": 128256,
                     },
                     compilation_config=CompilationConfig(
-                        cudagraph_mode="FULL_DECODE_ONLY",
-                        cudagraph_capture_sizes=[12])) as llm:
+                        cudagraph_mode="FULL",
+                        cudagraph_capture_sizes=[5, 12])) as llm:
         spec_outputs = llm.generate(example_prompts, sampling_params)
         cleanup_dist_env_and_memory()
         del llm

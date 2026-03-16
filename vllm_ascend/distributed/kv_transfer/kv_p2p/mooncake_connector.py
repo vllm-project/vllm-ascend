@@ -1316,20 +1316,20 @@ class MooncakeConnectorWorker:
         """
         prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
-            choosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
-            remote_handshake_port_list = [[x + meta.remote_port for x in choosen_rank_list]]
+            chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
+            remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
             local_block_ids_list, remote_block_ids_list = [meta.local_block_ids], [meta.remote_block_ids]
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
         def context_parallel_parameters_check():
             assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
-            if not self.use_mla:
+            if not (self.use_mla or self.use_sparse):
                 p_node_heads_per_rank = math.ceil(self.num_key_value_heads / prefill_tp_size)
                 d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
                 assert d_node_heads_per_rank % p_node_heads_per_rank == 0
 
         def get_kv_head_groups(tp_size):
-            if self.use_mla:
+            if self.use_mla or self.use_sparse:
                 kv_head_groups = []
                 kv_head_ids = [0]
                 kv_head_groups.append(tuple(kv_head_ids))
@@ -1563,8 +1563,8 @@ class MooncakeConnectorWorker:
                             ),
                         )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
-                choosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
-                remote_handshake_port_list = [[x + meta.remote_port] for x in choosen_rank_list]
+                chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
+                remote_handshake_port_list = [[x + meta.remote_port] for x in chosen_rank_list]
                 for i in range(tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
                     remote_host, remote_engine_id = self._get_remote_host_info_by_port(
@@ -1651,8 +1651,8 @@ class MooncakeConnectorWorker:
             or self.use_sparse
         ):
             tp_ori_data = tp_ori_data.reshape(-1, num_groups)
-            choosen_group = tp_ori_data[:, [rand_group_index]]
-            flattened = choosen_group.reshape(-1).tolist()
+            chosen_group = tp_ori_data[:, [rand_group_index]]
+            flattened = chosen_group.reshape(-1).tolist()
             tp_sampled_nums = [
                 flattened[i : i + tp_num_need_pulls] for i in range(0, len(flattened), tp_num_need_pulls)
             ]

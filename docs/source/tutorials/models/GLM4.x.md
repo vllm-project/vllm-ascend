@@ -2,9 +2,9 @@
 
 ## Introduction
 
-GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are foundational models specifically designed for agent applications
+GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are foundational models specifically designed for agent applications.
 
-The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`
+The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -25,7 +25,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm do not support GLM4.6 mtp in October, so we do not provide mtp version. And last month, it supported, you can use the following quantization scheme to add mtp weights to Quantized weights.
 - `Method of Quantify`: [quantization scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209). You can use these methods to quantify the model.
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### Installation
 
@@ -43,7 +43,7 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
 docker run --rm \
 --name $NAME \
 --net=host \
@@ -98,7 +98,7 @@ vllm serve /weight/glm4.5_w8a8_with_float_mtp \
   --gpu-memory-utilization 0.9 \
   --speculative-config '{"num_speculative_tokens": 1, "model":"/weight/glm4.5_w8a8_with_float_mtp", "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --async-scheduling \
+  --async-scheduling
 ```
 
 **Notice:**
@@ -109,7 +109,103 @@ The parameters are explained as follows:
 
 ### Multi-node Deployment
 
-Not recommended to deploy multi-node on Atlas 800 A2 (64G * 8).
+Although the former tutorial said "Not recommended to deploy multi-node on Atlas 800 A2 (64G × 8)", but if you insist to deploy GLM-4.x model on multi-node like 2 × Atlas 800 A2 (64G × 8), run the following scripts on two nodes respectively.
+
+**Node 0**
+
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+export VLLM_USE_MODELSCOPE=True
+
+vllm serve ZhipuAI/GLM-4.7 \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --data-parallel-size 4 \
+    --data-parallel-size-local 2 \
+    --data-parallel-address $local_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 4 \
+    --seed 1024 \
+    --async-scheduling \
+    --max-num-seqs 16 \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 4096 \
+    --gpu-memory-utilization 0.92 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --speculative-config {"num_speculative_tokens":3,"method":"mtp"} \
+    --compilation-config {"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"} \
+    --trust-remote-code \
+    --served-model-name glm47
+
+```
+
+**Node 1**
+
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxxx"
+local_ip="xxxx"
+node0_ip="xxxx" # same as the local_IP address in node 0
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+export VLLM_USE_MODELSCOPE=True
+
+vllm serve ZhipuAI/GLM-4.7 \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --headless \
+    --data-parallel-size 4 \
+    --data-parallel-size-local 2 \
+    --data-parallel-start-rank 2 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 4 \
+    --seed 1024 \
+    --async-scheduling \
+    --max-num-seqs 16 \
+    --max-model-len 16384 \
+    --max-num-batched-tokens 4096 \
+    --gpu-memory-utilization 0.92 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --speculative-config {"num_speculative_tokens":3,"method":"mtp"} \
+    --compilation-config {"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"} \
+    --trust-remote-code \
+    --served-model-name glm47
+```
 
 ### Prefill-Decode Disaggregation
 

@@ -23,7 +23,8 @@ from vllm_ascend._310p.attention.attention_mask import AttentionMaskBuilder310
 
 class TestAttentionMaskBuilder310(TestBase):
     def setUp(self):
-        self.attention_mask_builder = AttentionMaskBuilder310(torch.device("cpu"))
+        self.max_seqlen = 4096
+        self.attention_mask_builder = AttentionMaskBuilder310(torch.device("cpu"), self.max_seqlen)
 
     def test_get_attention_mask_310_for_pooling_model(self):
         model_config = MagicMock()
@@ -36,7 +37,7 @@ class TestAttentionMaskBuilder310(TestBase):
         mock_format_cast.side_effect = lambda x, y: x
         model_config = MagicMock()
         attn_mask = self.attention_mask_builder.get_attention_mask(model_config)
-        self.assertEqual(attn_mask.shape, (1, 128, 2048, 16))
+        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
         self.assertEqual(attn_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
 
     @patch("torch_npu.npu_format_cast")
@@ -47,7 +48,7 @@ class TestAttentionMaskBuilder310(TestBase):
 
         sliding_window = 128
         swa_mask = self.attention_mask_builder.get_swa_mask(torch.float16, sliding_window)
-        self.assertEqual(swa_mask.shape, (1, 128, 2048, 16))
+        self.assertEqual(swa_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
         self.assertEqual(swa_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
         self.assertEqual(swa_mask[0][0][-1][0], torch.tensor(float("-inf"), dtype=torch.float16))
 
@@ -58,4 +59,4 @@ class TestAttentionMaskBuilder310(TestBase):
         attn_metadata.query_start_loc = torch.tensor([0, 1, 5])
         attn_metadata.seq_lens = torch.tensor([7, 4])
         attn_mask = self.attention_mask_builder.get_splitfuse_mask(attn_metadata, torch.device("cpu"))
-        self.assertEqual(attn_mask.shape, (1, 128, 16, 16))
+        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, 16, 16))

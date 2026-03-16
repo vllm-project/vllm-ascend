@@ -21,8 +21,8 @@ from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
-from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend._310p.quantization.modelslim_config import AscendModelSlimConfig310
 
 
 class TestAscendModelSlimConfig310(TestBase):
@@ -70,6 +70,7 @@ class TestAscendModelSlimConfig310(TestBase):
         fused_moe_layer = MagicMock(spec=FusedMoE)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
         fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
+        fused_moe_layer.moe_config.moe_backend = "auto"
         fused_moe_layer.moe_config.moe_parallel_config = MagicMock(spec=FusedMoEParallelConfig)
         fused_moe_layer.moe_config.moe_parallel_config.use_ep = True
         fused_moe_layer.moe_config.moe_parallel_config.dp_size = 1

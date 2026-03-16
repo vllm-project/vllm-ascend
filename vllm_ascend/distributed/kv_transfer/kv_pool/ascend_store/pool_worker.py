@@ -140,11 +140,6 @@ class KVPoolWorker:
         backend_module = importlib.import_module(backend_path)
         real_backend = getattr(backend_module, backend_name)
 
-        # be removed later
-        if self.backend == "mooncake":
-            self.head_or_tp_rank = self.tp_rank
-            self.put_step = 1
-
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config
         )
@@ -572,7 +567,7 @@ class KVPoolWorker:
             # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return start
+            return 0
         return end
 
     def lookup_scheduler(
@@ -629,7 +624,7 @@ class KVPoolWorker:
         # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return start
+            return 0
         return end
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:

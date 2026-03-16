@@ -50,9 +50,17 @@ jobs:
 
     - name: Install vllm-ascend dev (conditional)
       if: steps.filter.outputs.lint_tracker == 'true'
+      env:
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
       run: |
+        pip install uv
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-        pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+        pip install uc-manager
+        uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
     - name: Run pre-commit
       env:
@@ -68,7 +76,6 @@ jobs:
       run: |
         PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
         export PYTHONPATH
-        env
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         # Run mypy for Python 3.10, 3.11, 3.12 manually
         # Note: We are now separating mypy from pre-commit hooks for performance reasons.
