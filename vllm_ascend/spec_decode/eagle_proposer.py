@@ -559,6 +559,8 @@ class SpecDecodeBaseProposer(EagleProposer):
                 common_attn_metadata.num_reqs = num_reqs_padded
                 common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
                 common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
+                common_attn_metadata.seq_lens = self.runner.seq_lens.gpu[:num_reqs_padded]
+                common_attn_metadata.seq_lens_cpu = self.runner.seq_lens.cpu[:num_reqs_padded]
         else:
             num_input_tokens = num_tokens
 
