@@ -2826,7 +2826,6 @@ class NPUModelRunner(GPUModelRunner):
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                             num_blocks, kv_cache_spec.block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
                         )
-                    dtype = kv_cache_spec.dtype
                     if not self.model_config.use_mla:
                         k_shape = kv_cache_shape[1:]
                         v_shape = k_shape
@@ -2861,7 +2860,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_spec.num_kv_heads,
                             index_head_dim,
                         )
-                        dsa_k_cache = raw_dsa_k_tensor.view(dtype).view(dsa_k_cache_shape)
+                        dsa_k_cache = raw_dsa_k_tensor.view(kv_cache_spec.dtype).view(dsa_k_cache_shape)
                         kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
@@ -3142,22 +3141,17 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=self.kv_cache_dtype,
                         cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                     )
+                elif getattr(attn_module.impl, "fa_quant_layer", False):
+                    head_size = attn_module.head_size + attn_module.qk_rope_head_dim
+                    kv_cache_spec[layer_name] = MLAAttentionSpec(
+                        block_size=self.block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=head_size,
+                        dtype=attn_module.impl.dtype,
+                        cache_dtype_str=None,
+                    )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
-                    assert isinstance(spec, MLAAttentionSpec)
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
-                    if getattr(attn_module.impl, "fa_quant_layer", False):
-                        head_size = attn_module.head_size + attn_module.qk_rope_head_dim
-                        dtype, cache_dtype_str = attn_module.impl.dtype, None
-                    else:
-                        head_size, dtype, cache_dtype_str = spec.head_size, spec.dtype, spec.cache_dtype_str
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
-                        block_size=spec.block_size,
-                        num_kv_heads=spec.num_kv_heads,
-                        head_size=head_size,
-                        dtype=dtype,
-                        cache_dtype_str=cache_dtype_str,
-                    )
 
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
