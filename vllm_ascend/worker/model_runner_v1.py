@@ -2806,7 +2806,6 @@ class NPUModelRunner(GPUModelRunner):
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
@@ -2905,8 +2904,8 @@ class NPUModelRunner(GPUModelRunner):
                             num_kv_heads,
                             v_dim,
                         ]
-                    k_cache = raw_k_tensor.view(kv_cache_spec.dtype).view(k_shape)
-                    v_cache = raw_v_tensor.view(kv_cache_spec.dtype).view(v_shape)
+                    k_cache = raw_k_tensor.view(current_kv_cache_spec.dtype).view(k_shape)
+                    v_cache = raw_v_tensor.view(current_kv_cache_spec.dtype).view(v_shape)
 
                     if self.use_sparse:
                         dsa_k_cache_shape = (
@@ -2921,8 +2920,8 @@ class NPUModelRunner(GPUModelRunner):
                             # dsa_k_scale
                             dsa_k_scale_cache_shape = (
                                 num_blocks,
-                                kv_cache_spec.block_size,
-                                kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.block_size,
+                                current_kv_cache_spec.num_kv_heads,
                                 1,
                             )
                             assert raw_dsa_k_scale_tensor is not None
@@ -2934,7 +2933,7 @@ class NPUModelRunner(GPUModelRunner):
                             kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
                         else:
                             # dsa_k
-                            dsa_k_cache = raw_dsa_k_tensor.view(kv_cache_spec.dtype).view(dsa_k_cache_shape)
+                            dsa_k_cache = raw_dsa_k_tensor.view(current_kv_cache_spec.dtype).view(dsa_k_cache_shape)
                             kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
