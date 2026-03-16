@@ -6,16 +6,20 @@ import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MLAAttentionImpl  # type: ignore
+from vllm.v1.attention.backend import (
+    AttentionBackend,  # type: ignore
+    AttentionCGSupport,
+    MLAAttentionImpl,
+)
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
@@ -44,12 +48,7 @@ from vllm_ascend.ops.layer_shard_linear import (
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
-from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_ND,
-    get_weight_prefetch_method,
-    maybe_trans_nz,
-    weak_ref_tensors,
-)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -113,6 +112,7 @@ class ChunkedContextMetadata:
     workspace: torch.Tensor
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
+    chunk_actual_seq_lengths_kv_list: list[list[int]]
 
 
 @dataclass
@@ -132,6 +132,7 @@ class AscendMLAPrefillMetadata:
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     pcp_metadata: AscendPCPMetadata | None = None
+    actual_seq_lengths_q: list[int] | None = None
 
 
 @dataclass
@@ -448,7 +449,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             num_decodes=self.num_decodes,
             num_decode_tokens=self.num_decode_tokens,
             num_prefills=self.num_prefills,
-            attn_mask=self.attn_mask_builder.get_final_mla_mask(self.model_config),
+            attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             attn_state=common_attn_metadata.attn_state,
             prefill=prefill_metadata,
             decode=decode_metadata,
@@ -487,6 +488,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
         self.cu_seq_lens_cpu = torch.zeros(self.num_chunks, self.num_prefills + 1, dtype=torch.int32, pin_memory=True)
         torch.cumsum(self.chunk_seq_lens, dim=1, out=self.cu_seq_lens_cpu[:, 1:], dtype=torch.int32)
+        chunk_actual_seq_lengths_kv_list = [
+            torch.cumsum(self.chunk_seq_lens[i], dim=0).tolist() for i in range(self.num_chunks)
+        ]
         return ChunkedContextMetadata(
             cu_seq_lens=self.cu_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True),
             starts=chunk_starts.pin_memory().to(self.device, non_blocking=True),
@@ -495,6 +499,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             chunk_seq_lens=self.chunk_seq_lens,
             chunk_seq_lens_npu=self.chunk_seq_lens.npu(),
             workspace=self.chunked_prefill_workspace,
+            chunk_actual_seq_lengths_kv_list=chunk_actual_seq_lengths_kv_list,
         )
 
     def get_block_table_size(self, common_attn_metadata: AscendCommonAttentionMetadata, build_metadata_step: int):
@@ -528,9 +533,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         prefill_input_positions = input_positions[tokens_start:]
         cos, sin = get_cos_and_sin_mla(prefill_input_positions)
+        prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
+        actual_seq_lengths_q = torch.cumsum(prefill_query_lens, dim=0).tolist()
         return AscendMLAPrefillMetadata(
-            attn_mask=self.attn_mask_builder.get_final_mla_mask(self.model_config),
-            query_lens=self.query_lens[reqs_start:].to(torch.int32),
+            attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
+            query_lens=prefill_query_lens,
             seq_lens=self.seq_lens,
             context_lens=self.seq_lens[reqs_start:],
             input_positions=prefill_input_positions,
@@ -541,6 +548,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             chunked_context=chunked_context_metadata,
             sin=sin,
             cos=cos,
+            actual_seq_lengths_q=actual_seq_lengths_q,
         )
 
     def build_decode_metadata(
@@ -737,7 +745,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        if forward_context.is_draft_model:
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
@@ -769,12 +777,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     softmax_lse,
                 ) = param
                 seq_lens_list = forward_context.attn_metadata[key].decode.seq_lens_list
-                if speculative_config and speculative_config.method == "mtp" and not forward_context.is_draft_model:
+                if speculative_config and speculative_config.method == "mtp" and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
                     actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
-                elif forward_context.is_draft_model:
+                elif _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = forward_context.attn_metadata[key].decode.actual_seq_lengths_q
                     block_table = forward_context.attn_metadata[key].decode.block_table
                     # TODO: This is a hack and should be fixed in the future.
@@ -888,8 +896,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 post_process_after_loading_for_shard_weight_series(layer)
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
-        kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
-        q_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()  # type: ignore[union-attr]
+        assert self.fused_qkv_a_proj is not None
+        assert self.q_a_layernorm is not None
+        assert self.kv_a_layernorm is not None
+        kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()
+        q_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
         kv_a_proj_wt = trans_rope_weight(kv_a_proj_wt, self.qk_rope_head_dim)
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
@@ -991,17 +1002,18 @@ class AscendMLAImpl(MLAAttentionImpl):
             return prefix_output, prefix_lse
 
         iters = len(prefill_metadata.chunked_context.seq_tot)
-
-        current_seq_len = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+
+        actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
+
+        chunk_outputs = []
+        chunk_lses = []
+
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-            # chunk_seq_lens will be padded when pcp&dcp
-            context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[i]
-            seq_len = torch.stack([current_seq_len, context_seq_len])
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
             k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
@@ -1027,27 +1039,61 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
-            mask = attn_metadata.attn_mask
-            torch_npu.atb.npu_ring_mla(
-                q_nope=q_nope,
-                q_rope=q_pe,
-                k_nope=k_nope,
-                k_rope=k_pe,
-                value=v,
-                mask=mask,
-                seqlen=seq_len,
-                head_num=self.num_heads,
-                kv_head_num=self.num_heads,
-                pre_out=prefix_output,
-                prev_lse=prefix_lse,
-                qk_scale=self.scale,
-                kernel_type="kernel_type_high_precision",
-                mask_type="no_mask",
-                input_layout="type_bsnd",
-                calc_type="calc_type_default",
-                output=prefix_output,
-                softmax_lse=prefix_lse,
+            actual_seq_lengths_kv = prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list[i]
+
+            chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
+                q_nope,
+                k_nope,
+                v,
+                query_rope=q_pe,
+                key_rope=k_pe,
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_heads,
+                input_layout="TND",
+                atten_mask=None,
+                sparse_mode=0,
+                scale=self.scale,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                softmax_lse_flag=True,
+                actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
             )
+            chunk_outputs.append(chunk_out)
+            chunk_lses.append(chunk_lse)
+
+        if len(chunk_outputs) > 0:
+            num_tokens = q_nope.size(0)
+            D = self.v_head_dim
+            H = self.num_heads
+
+            # Normalize prefix output/lse to [num_tokens, H, D] and [num_tokens, H, 1]
+            prefix_output = prefix_output.to(torch.float32)
+            prefix_lse = prefix_lse.to(torch.float32)
+            if prefix_lse.dim() == 2:
+                prefix_lse = prefix_lse.transpose(0, 1).unsqueeze(-1)
+
+            # Concat output and lse: [num_tokens, H, D+1]
+            all_out_lse = [torch.cat([prefix_output, prefix_lse], dim=-1)]
+            for chunk_out, chunk_lse in zip(chunk_outputs, chunk_lses):
+                chunk_out = chunk_out.to(torch.float32)
+                chunk_lse = chunk_lse.to(torch.float32)
+                if chunk_lse.dim() == 2:
+                    chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
+                all_out_lse.append(torch.cat([chunk_out, chunk_lse], dim=-1))
+
+            # Stack and split: [N, num_tokens, H, D+1]
+            all_out_lse = torch.stack(all_out_lse, dim=0)
+            N = all_out_lse.size(0)
+            out_flat, lse_flat = torch.split(all_out_lse, [D, 1], dim=-1)
+
+            # Flatten and unbind for npu_attention_update
+            out_list = out_flat.view(N, num_tokens * H, D).unbind(0)
+            lse_list = lse_flat.view(N, num_tokens * H).unbind(0)
+
+            output_final, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
+            return output_final.view(num_tokens, H, D), None
+
         return prefix_output, prefix_lse
 
     def _forward_prefill(
@@ -1063,33 +1109,54 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert attn_metadata.prefill is not None
         assert len(kv_c_and_k_pe_cache) > 1
         num_tokens = q_nope.size(0)
+        prefill_meta = attn_metadata.prefill
+
+        actual_seq_lengths_q = prefill_meta.actual_seq_lengths_q
+        actual_seq_lengths_kv = actual_seq_lengths_q.copy()
+
+        # FIA with TND layout only supports bfloat16, convert if needed
+        original_dtype = q_nope.dtype
+        need_dtype_convert = original_dtype != torch.bfloat16
+        if need_dtype_convert:
+            q_nope = q_nope.to(torch.bfloat16)
+            q_pe = q_pe.to(torch.bfloat16)
+            k_nope = k_nope.to(torch.bfloat16)
+            k_pe = k_pe.to(torch.bfloat16)
+            value = value.to(torch.bfloat16)
+
         attn_output = torch.empty(num_tokens, self.num_heads, self.v_head_dim, dtype=q_nope.dtype, device=q_nope.device)
         attn_lse = torch.empty(self.num_heads, num_tokens, dtype=torch.float32, device=q_nope.device)
-        torch_npu.atb.npu_ring_mla(
-            q_nope=q_nope,
-            q_rope=q_pe,
-            k_nope=k_nope,
-            k_rope=k_pe,
-            value=value,
-            mask=attn_metadata.attn_mask,
-            seqlen=attn_metadata.prefill.query_lens,
-            head_num=self.num_heads,
-            kv_head_num=self.num_heads,
-            pre_out=None,
-            prev_lse=None,
-            qk_scale=self.scale,
-            kernel_type="kernel_type_high_precision",
-            mask_type="mask_type_triu",
-            input_layout="type_bsnd",
-            calc_type="calc_type_first_ring",
-            output=attn_output,
-            softmax_lse=attn_lse,
-        )
+
+        common_kwargs = {
+            "query_rope": q_pe,
+            "key_rope": k_pe,
+            "num_heads": self.num_heads,
+            "num_key_value_heads": self.num_heads,
+            "input_layout": "TND",
+            "atten_mask": prefill_meta.attn_mask,
+            "sparse_mode": 3,
+            "scale": self.scale,
+            "antiquant_mode": 0,
+            "antiquant_scale": None,
+            "block_table": None,
+            "block_size": 0,
+            "softmax_lse_flag": True,
+            "actual_seq_lengths": actual_seq_lengths_q,
+            "actual_seq_lengths_kv": actual_seq_lengths_kv,
+        }
+
+        attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(q_nope, k_nope, value, **common_kwargs)
+
         attn_output, attn_lse = self._compute_prefill_context(
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
         )
 
         attn_output = attn_output.reshape([num_tokens, self.num_heads * self.v_head_dim])
+
+        # Convert back to original dtype if needed
+        if need_dtype_convert:
+            attn_output = attn_output.to(original_dtype)
+
         return attn_output
 
     def exec_kv_decode(
@@ -1100,6 +1167,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
+        assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
         S = 1
@@ -1127,6 +1195,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
+        assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
         S = 1
@@ -1243,12 +1312,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths,
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
-        forward_context: ForwardContext = get_forward_context()
-        if forward_context.is_draft_model:
+        if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if forward_context.capturing:
+        if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
@@ -1261,7 +1329,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs
                 )
-                if forward_context.is_draft_model:
+                if _EXTRA_CTX.is_draft_model:
                     update_draft_graph_params_workspaces(num_tokens, workspace)
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)
@@ -1493,7 +1561,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
 
-        forward_context = get_forward_context()
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
         assert (
             attn_metadata.num_decodes is not None
@@ -1505,7 +1572,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
-        o_proj_input_shape = (forward_context.num_tokens, self.num_heads * self.v_head_dim)
+        o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess

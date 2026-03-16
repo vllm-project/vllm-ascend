@@ -57,7 +57,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-|v0.16.0rc1| 最新RC版本 |请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)了解更多|
+|v0.17.0rc1| 最新RC版本 |请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)了解更多|
 |v0.13.0| 最新正式/稳定版本 |[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.13.0/quick_start.html) and [安装指南](https://docs.vllm.ai/projects/ascend/en/v0.13.0/installation.html)了解更多|
 
 ## 贡献
@@ -80,7 +80,7 @@ vllm-ascend有主干分支和开发分支。
 
 | 分支         | 状态         | 备注                  |
 |------------|------------|---------------------|
-| main       | Maintained | 基于vLLM main分支和vLLM最新版本（v0.16.0）CI看护   |
+| main       | Maintained | 基于vLLM main分支和vLLM最新版本（v0.17.0）CI看护   |
 | v0.7.1-dev | Unmaintained | 只允许文档修复 |
 | v0.7.3-dev | Maintained | 基于vLLM v0.7.3版本CI看护, 只允许Bug修复，不会再发布新版本 |
 | v0.9.1-dev | Maintained | 基于vLLM v0.9.1版本CI看护 |
