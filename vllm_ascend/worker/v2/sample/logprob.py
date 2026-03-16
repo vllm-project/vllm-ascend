@@ -63,9 +63,8 @@ def _topk_log_softmax_kernel(
     o = logits - max_val - lse
     tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
-def compute_token_logprobs(
-    logits: torch.Tensor, token_ids: torch.Tensor
-) -> torch.Tensor:
+
+def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
     batch_size, vocab_size = logits.shape
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
