@@ -126,7 +126,6 @@ from vllm_ascend.utils import (
     is_moe_model,
     lmhead_tp_enable,
     set_weight_prefetch_method,
-    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -230,16 +229,6 @@ class NPUModelRunner(GPUModelRunner):
         vllm_config.scheduler_config.max_num_batched_tokens += max_pcp_pad_tokens
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
-
-        # patch for vllm#35552
-        # self.cudagraph_batch_sizes sorts in ascending order.
-        if (
-            self.compilation_config.cudagraph_capture_sizes
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
-        else:
-            self.cudagraph_batch_sizes = []
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -408,15 +397,14 @@ class NPUModelRunner(GPUModelRunner):
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
 
-        if vllm_version_is("0.17.0"):
-            # self.cudagraph_batch_sizes sorts in ascending order.
-            if (
-                self.compilation_config.cudagraph_capture_sizes
-                and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            ):
-                self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
-            else:
-                self.cudagraph_batch_sizes = []
+        # self.cudagraph_batch_sizes sorts in ascending order.
+        if (
+            self.compilation_config.cudagraph_capture_sizes
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        else:
+            self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
 
@@ -2575,14 +2563,13 @@ class NPUModelRunner(GPUModelRunner):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
-        if vllm_version_is("0.17.0"):
-            # TODO: refactor the logic of attention
-            # Initialize drafter attention group initialization
-            if self.speculative_config and (
-                self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
-            ):
-                assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
-                self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
+        # TODO: refactor the logic of attention
+        # Initialize drafter attention group initialization
+        if self.speculative_config and (
+            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+        ):
+            assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
+            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
@@ -3069,43 +3056,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
-
-        # Initialize drafter attention backend
-        if self.speculative_config and (
-            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
-        ):
-            from vllm.v1.spec_decode.draft_model import DraftModelProposer
-            from vllm.v1.spec_decode.eagle import EagleProposer
-
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
-            # Get kernel_block_sizes for the drafter
-            kernel_block_sizes = self._get_kernel_block_sizes(kv_cache_config)
-            self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
-
-    def _get_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> list[list[int]]:
-        """Get kernel_block_sizes for each kv_cache_group."""
-        kernel_block_sizes = []
-        for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
-            elif isinstance(kv_cache_spec, AttentionSpec):
-                try:
-                    attn_groups = self.attn_groups[kv_cache_group_id]
-                except IndexError:
-                    attn_groups = None
-                if attn_groups and self.use_hybrid_blocks:
-                    backend = attn_groups[0].backend
-                    supported_sizes = backend.get_supported_kernel_block_sizes()
-                    kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
-                else:
-                    kernel_block_size_list = [self.cache_config.block_size]
-                kernel_block_sizes.append(kernel_block_size_list)
-            else:
-                kernel_block_sizes.append([0])
-        return kernel_block_sizes
 
     def calculate_reorder_batch_threshold(self) -> None:
         """
