@@ -510,7 +510,7 @@ if __name__ == "__main__":
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
+We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environment with 1P1D for better performance.
 
 Before you start, please
 
@@ -522,7 +522,7 @@ Before you start, please
     import os
     import subprocess
     import sys
-    
+
     def parse_args():
         parser = argparse.ArgumentParser()
         parser.add_argument(
@@ -568,7 +568,7 @@ Before you start, please
             help="Starting port for the engine."
         )
         return parser.parse_args()
-    
+
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
@@ -579,7 +579,7 @@ Before you start, please
     dp_address = args.dp_address
     dp_rpc_port = args.dp_rpc_port
     vllm_start_port = args.vllm_start_port
-    
+
     def run_command(visible_devices, dp_rank, vllm_engine_port):
         command = [
             "bash",
@@ -593,13 +593,13 @@ Before you start, please
             str(tp_size),
         ]
         subprocess.run(command, check=True)
-    
+
     if __name__ == "__main__":
         template_path = "./run_dp_template.sh"
         if not os.path.exists(template_path):
             print(f"Template file {template_path} does not exist.")
             sys.exit(1)
-    
+
         processes = []
         num_cards = dp_size_local * tp_size
         for i in range(dp_size_local):
@@ -611,12 +611,12 @@ Before you start, please
                                                     vllm_engine_port))
             processes.append(process)
             process.start()
-    
+
         for process in processes:
             process.join()
-   
+
     ```
-   
+
 2. prepare the script `run_dp_template.sh` on each node.
 
     1. Prefill node 0
