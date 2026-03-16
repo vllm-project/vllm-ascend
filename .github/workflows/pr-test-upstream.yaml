@@ -104,7 +104,7 @@ jobs:
               uv pip install -v -e .
               uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
-          - name: Run vllm-project/vllm-ascend test
+          - name: Run vllm-project/vllm test
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
