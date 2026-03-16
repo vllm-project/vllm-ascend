@@ -510,7 +510,7 @@ if __name__ == "__main__":
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node environment with 1P1D for better performance.
+We'd like to show the deployment guide of `GLM-5` on multi-node environment with 1P1D for better performance.
 
 Before you start, please
 
