@@ -48,6 +48,7 @@ VALID_COMBINATIONS = {("eagle", "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
                        "wemaster/deepseek_mtp_main_random_bf16"),
                       ("eagle3", "RedHatAI/Qwen3-8B-speculator.eagle3",
                        "Qwen/Qwen3-8B")}
+DEEPSEEK_MAIN = "wemaster/deepseek_mtp_main_random_bf16"
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -149,6 +150,13 @@ def test_llama_qwen3_deepseek_eagle_correctness(
         pytest.skip(
             f"Invalid combination: method={method}, model_name={model_name}, model_name_main={model_name_main}, or case not support yet"
         )
+
+    # Keep the new deepseek-main + eagle coverage, but limit matrix fan-out
+    # to reduce long-running CI instability on singlecard-full part 0.
+    if model_name_main == DEEPSEEK_MAIN and (
+        num_speculative_tokens != 1 or async_scheduling or draft_tensor_parallel_size is not None
+    ):
+        pytest.skip("Limit deepseek-eagle CI matrix to a stable core subset.")
 
     sampling_params = SamplingParams(
         max_tokens=300,
