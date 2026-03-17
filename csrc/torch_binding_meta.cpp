@@ -567,6 +567,28 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+at::Tensor cache_by_group_pre(
+    const at::Tensor &slotMappingNpu,
+    at::IntArrayRef slotMappingList,
+    int64_t blockSize)
+{
+    auto s_size = slotMappingNpu.sizes();
+    at::Tensor ret = at::empty({s_size[0]}, slotMappingNpu.options());
+    return ret;
+
+}
+
+void reshape_and_cache_by_group(
+    const at::Tensor &keyIn,
+    const at::Tensor &keyCacheIn,
+    const at::Tensor &groupInfo,
+    int64_t blockSize)
+{
+    return;
+
+}
+
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -616,5 +638,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // reshape_and_cache_by_group
+    ops.impl("cache_by_group_pre", &vllm_ascend::meta::cache_by_group_pre);
+    ops.impl("reshape_and_cache_by_group", &vllm_ascend::meta::reshape_and_cache_by_group);
 }
 }

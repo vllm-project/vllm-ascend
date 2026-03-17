@@ -29,6 +29,7 @@
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
+#include "reshape_and_cache_by_group/reshape_and_cache_by_group_torch_adpt.h"
 #include "apply_top_k_top_p_custom/apply_top_k_top_p_custom_torch_adpt.h"
 #include "batch_matmul_transpose/batch_matmul_transpose_torch_adpt.h"
 #include "dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
@@ -931,4 +932,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
+    ops.def(
+        "cache_by_group_pre(Tensor slotMappingNpu, int[2] slotMappingList =[], int blockSize=0) -> Tensor"
+    );
+    ops.impl("cache_by_group_pre", torch::kPrivateUse1, &vllm_ascend::cache_by_group_pre);
+
+    ops.def(
+        "reshape_and_cache_by_group(Tensor keyIn, Tensor keyCacheIn, Tensor groupInfo, int blockSize=0) -> ()"
+    );
+    ops.impl("reshape_and_cache_by_group", torch::kPrivateUse1, &vllm_ascend::reshape_and_cache_by_group);
 }

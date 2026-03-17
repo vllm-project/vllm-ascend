@@ -77,6 +77,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # For a detailed introduction to the parameters and the differences and applicable scenarios
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
+    # reshape optim
+    "VLLM_ASCEND_ENABLE_RESHAPE_OPTIM": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_RESHAPE_OPTIM", "0"))),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0"))),
     # buffer size for gate up prefetch
