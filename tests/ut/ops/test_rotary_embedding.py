@@ -109,8 +109,8 @@ class TestForwardOot:
         )
         assert result is expected_output
 
-    @patch("your_module.torch.ops.vllm.npu_rotary_embedding")
-    @patch("your_module._EXTRA_CTX")
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
     def test_neox_style_override_true(self, mock_ctx, mock_npu_op, make_embedding):
         """is_neox_style_override=True wins over self.is_neox_style=False."""
         mock_ctx.is_draft_model = False
@@ -126,8 +126,8 @@ class TestForwardOot:
         # Verify the override was forwarded correctly
         assert mock_npu_op.call_args[0][-1] is True  # last positional arg = is_neox_style
 
-    @patch("your_module.torch.ops.vllm.npu_rotary_embedding")
-    @patch("your_module._EXTRA_CTX")
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
     def test_neox_style_override_false(self, mock_ctx, mock_npu_op, make_embedding):
         """is_neox_style_override=False wins over self.is_neox_style=True."""
         mock_ctx.is_draft_model = False
@@ -141,8 +141,8 @@ class TestForwardOot:
 
         assert mock_npu_op.call_args[0][-1] is False
 
-    @patch("your_module.torch.ops.vllm.npu_rotary_embedding")
-    @patch("your_module._EXTRA_CTX")
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
     def test_neox_style_override_none_uses_self(self, mock_ctx, mock_npu_op, make_embedding):
         """When override is None, self.is_neox_style is used unchanged."""
         mock_ctx.is_draft_model = False
@@ -156,9 +156,9 @@ class TestForwardOot:
 
         assert mock_npu_op.call_args[0][-1] is True
 
-    @patch("your_module.torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    @patch("your_module.torch.ops.vllm.npu_rotary_embedding")
-    @patch("your_module._EXTRA_CTX")
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
     def test_gather_unpad_called_when_all_conditions_met(
         self, mock_ctx, mock_npu_op, mock_gather, make_embedding
     ):
@@ -186,9 +186,9 @@ class TestForwardOot:
         (True,  False, True),   # flash_comm disabled
         (True,  True,  False),  # use_mtp disabled
     ])
-    @patch("your_module.torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    @patch("your_module.torch.ops.vllm.npu_rotary_embedding")
-    @patch("your_module._EXTRA_CTX")
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
     def test_gather_unpad_skipped_unless_all_conditions_met(
         self, mock_ctx, mock_npu_op, mock_gather,
         is_draft_model, flash_comm, use_mtp, make_embedding,
@@ -207,8 +207,8 @@ class TestForwardOot:
         # Original positions tensor is passed through untouched
         assert mock_npu_op.call_args[0][0] is positions
 
-    @patch("your_module.torch.ops.vllm.npu_rotary_embedding")
-    @patch("your_module._EXTRA_CTX")
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
     def test_offsets_parameter_accepted(self, mock_ctx, mock_npu_op, make_embedding):
         """forward_oot should accept an offsets tensor without raising."""
         mock_ctx.is_draft_model = False
