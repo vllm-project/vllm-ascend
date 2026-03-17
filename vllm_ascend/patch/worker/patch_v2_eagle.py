@@ -21,14 +21,7 @@ import vllm
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("v0.16.0"):
-    from vllm.v1.worker.gpu.spec_decode.eagle import prepare_eagle_decode, prepare_eagle_inputs
-else:
-    from vllm.v1.worker.gpu.spec_decode.eagle.speculator import prepare_eagle_decode, prepare_eagle_inputs
-
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import prepare_eagle_decode, prepare_eagle_inputs
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
@@ -153,7 +146,7 @@ def propose(
 
     # FIXME(woosuk): This is UNSAFE!!
     attn_metadata = build_attn_metadata(
-        attn_metadata_builders=self.attn_metadata_builders,
+        attn_groups=self.attn_groups,
         num_reqs=num_reqs,
         num_tokens=num_reqs,
         query_start_loc_gpu=query_start_loc,
@@ -175,7 +168,4 @@ def propose(
     return self.draft_tokens[:num_reqs]
 
 
-if vllm_version_is("v0.16.0"):
-    vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose = propose
-else:
-    vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator.propose = propose
+vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator.propose = propose

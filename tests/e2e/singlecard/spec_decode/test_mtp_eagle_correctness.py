@@ -170,8 +170,8 @@ def test_llama_qwen3_eagle_correctness(
                         "max_model_len": 128,
                     },
                     compilation_config=CompilationConfig(
-                        cudagraph_mode="FULL_DECODE_ONLY",
-                        cudagraph_capture_sizes=[12])) as llm:
+                        cudagraph_mode="FULL",
+                        cudagraph_capture_sizes=[5, 12])) as llm:
         spec_outputs = llm.generate(example_prompts, sampling_params)
         cleanup_dist_env_and_memory()
         del llm

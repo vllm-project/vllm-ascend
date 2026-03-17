@@ -119,11 +119,9 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=(torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]), None, 0)), \
         patch('vllm_ascend.ops.fused_moe.fused_moe.get_forward_context',
             return_value=mock_forward_context_obj), \
-        patch('vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context',
+        patch('vllm_ascend.ascend_forward_context.get_forward_context',
             return_value=mock_forward_context_obj), \
         patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3), \
-        patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context',
-                return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher',
               return_value=None), \
         patch('vllm_ascend.ops.fused_moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher',
@@ -298,7 +296,7 @@ class TestUnifiedApplyMLP(TestBase):
 
     @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method',
            return_value=MagicMock())
-    @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.utils.get_ascend_device_type',
            return_value=AscendDeviceType.A3)
     @patch('torch_npu.npu_grouped_matmul')
@@ -407,7 +405,7 @@ class TestUnifiedApplyMLP(TestBase):
     @patch('vllm_ascend.ops.fused_moe.moe_mlp.HAS_TRITON', False)
     @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method',
            return_value=MagicMock())
-    @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
@@ -513,7 +511,7 @@ class TestUnifiedApplyMLP(TestBase):
 
     @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_weight_prefetch_method",
            return_value=MagicMock())
-    @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_swiglu")
     @patch("torch_npu.npu_grouped_matmul_swiglu_quant")
