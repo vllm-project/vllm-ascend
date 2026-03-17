@@ -234,7 +234,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A2}:
         num_experts = vllm_config.model_config.get_num_experts()
-        ep_world_size = vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        )
         num_experts_per_device = num_experts // ep_world_size
         if num_experts_per_device <= 16:
             moe_comm_type = MoECommType.MC2

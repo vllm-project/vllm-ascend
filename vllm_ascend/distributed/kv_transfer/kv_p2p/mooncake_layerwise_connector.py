@@ -1495,7 +1495,7 @@ class MooncakeLayerwiseConnectorWorker:
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
             if self.current_layer >= self.total_layers:
                 self.current_layer += 1
-                return 
+                return
             # get reshape and cache event
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
