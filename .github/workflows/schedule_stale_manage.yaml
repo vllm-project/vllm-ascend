@@ -14,7 +14,6 @@ jobs:
     steps:
       - uses: actions/stale@v10
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
           # Process issues with the 'resolved' label
           any-of-labels: 'resolved'
 
@@ -22,9 +21,9 @@ jobs:
           days-before-stale: 7
           stale-issue-label: 'stale'
           stale-issue-message: |
-            This issue has been marked as "resolved" but has not received any feedback for some time, so it is now labeled as "stale". 
-            If you believe this is in error, please update the issue to remove the "stale" label. 
-            Stale issues will be automatically closed if no further activity occurs within 14 days.
+            This issue has been marked as `resolved` but has not received any feedback for some time, so it is now labeled as `stale`. 
+            If you feel this was a mistake, please leave a comment to have the `stale` label removed. 
+            `Stale` issues will automatically be closed after 14 days of inactivity.
 
           # Close stale issues after a period of inactivity
           days-before-close: 14
@@ -50,9 +49,9 @@ jobs:
           days-before-stale: 7
           stale-issue-label: 'stale'
           stale-issue-message: |
-            Hello, to more accurately locate and resolve the issue, we need you to provide the relevant information mentioned above. 
-            If there are no further updates within 14 days, we will temporarily close this issue. 
-            Thank you for your understanding and cooperation.
+            This issue has been marked as `awaiting-feedback` but has not received any feedback for some time, so it is now labeled as `stale`. 
+            To more accurately locate and resolve the issue, we need you to provide the relevant information mentioned above. 
+            `Stale` issues will automatically be closed after 14 days of inactivity.
 
           # Close stale issues after a period of inactivity
           days-before-close: 14
