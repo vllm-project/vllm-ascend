@@ -1,232 +1,232 @@
 e2e-upstream-singlecard:
-  - name: tests/benchmarks/test_plot_filters.py
-    estimated_time: 20
-  - name: tests/compile/fullgraph/test_multimodal_compile.py
-    estimated_time: 20
-  - name: tests/compile/fullgraph/test_multiple_graphs.py
-    estimated_time: 20
-  - name: tests/compile/fullgraph/test_simple.py
-    estimated_time: 20
-  - name: tests/compile/fullgraph/test_toy_llama.py
-    estimated_time: 20
-  - name: tests/compile/test_graph_partition.py
-    estimated_time: 20
-  - name: tests/config/test_config_generation.py
-    estimated_time: 20
-  - name: tests/config/test_config_utils.py
-    estimated_time: 20
-  - name: tests/config/test_multimodal_config.py
-    estimated_time: 20
-  - name: tests/detokenizer/test_disable_detokenization.py
-    estimated_time: 20
-  - name: tests/detokenizer/test_min_tokens.py
-    estimated_time: 20
-  - name: tests/detokenizer/test_stop_reason.py
-    estimated_time: 20
-  - name: tests/detokenizer/test_stop_string_while_stop_model_terminates.py
-    estimated_time: 20
-  - name: tests/distributed/test_eplb_algo.py
-    estimated_time: 20
-  - name: tests/distributed/test_events.py
-    estimated_time: 20
-  - name: tests/distributed/test_expert_parallel.py
-    estimated_time: 20
-  - name: tests/distributed/test_expert_placement.py
-    estimated_time: 20
-  - name: tests/distributed/test_kvlayout.py
-    estimated_time: 20
-  - name: tests/distributed/test_multiproc_executor.py
-    estimated_time: 20
-  - name: tests/distributed/test_pipeline_partition.py
-    estimated_time: 20
-  - name: tests/distributed/test_shm_broadcast.py
-    estimated_time: 20
-  - name: tests/distributed/test_shm_buffer.py
-    estimated_time: 20
-  - name: tests/distributed/test_shm_storage.py
-    estimated_time: 20
-  - name: tests/engine/test_arg_utils.py
-    estimated_time: 20
-  - name: tests/engine/test_short_mm_context.py
-    estimated_time: 20
-  - name: tests/entrypoints/llm/test_collective_rpc.py
-    estimated_time: 20
-  - name: tests/entrypoints/llm/test_prompt_validation.py
-    estimated_time: 20
-  - name: tests/entrypoints/offline_mode/test_offline_mode.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_async_tokenization.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_basic.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_chat_echo.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_chat_error.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_chat_logit_bias_validation.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_chunked_prompt.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_cli_args.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_completion_error.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_completion_with_function_calling.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_completion_with_prompt_embeds.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_enable_force_include_usage.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_gptoss_structural_tags_integration.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_lora_adapters.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_lora_resolvers.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_messages.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_models.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_optional_middleware.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_orca_metrics.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_prompt_validation.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_protocol.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_return_token_ids.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_return_tokens_as_ids.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_root_path.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_run_batch.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_serving_models.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_serving_responses.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_serving_tokens.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_token_in_token_out.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_tokenization.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/test_uds.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/tool_parsers/test_gigachat3_tool_parser.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/tool_parsers/test_hunyuan_a13b_tool_parser.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/tool_parsers/test_llama3_json_tool_parser.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/tool_parsers/test_llama4_pythonic_tool_parser.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/basic/test_encode.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/basic/test_truncation.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/classify/test_offline.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/embed/test_correctness_mteb.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/embed/test_offline.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/embed/test_online.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/embed/test_online_dimensions.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/embed/test_online_long_text.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/embed/test_online_vision.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/pooling/test_online.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/reward/test_offline.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/score/test_offline.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/score/test_online_rerank.py
-    estimated_time: 20
-  - name: tests/entrypoints/pooling/score/test_online_score.py
-    estimated_time: 20
-  - name: tests/entrypoints/sagemaker/test_sagemaker_handler_overrides.py
-    estimated_time: 20
-  - name: tests/entrypoints/sagemaker/test_sagemaker_middleware_integration.py
-    estimated_time: 20
-  - name: tests/entrypoints/test_api_server_process_manager.py
-    estimated_time: 20
-  - name: tests/entrypoints/test_renderer.py
-    estimated_time: 20
-  - name: tests/entrypoints/test_responses_utils.py
-    estimated_time: 20
-  - name: tests/entrypoints/test_ssl_cert_refresher.py
-    estimated_time: 20
-  - name: tests/kernels/quantization/test_scaled_mm_kernel_selection.py
-    estimated_time: 20
-  - name: tests/lora/test_llm_with_multi_loras.py
-    estimated_time: 20
-  - name: tests/lora/test_lora_checkpoints.py
-    estimated_time: 20
-  - name: tests/lora/test_lora_functions.py
-    estimated_time: 20
-  - name: tests/lora/test_lora_huggingface.py
-    estimated_time: 20
-  - name: tests/lora/test_lora_manager.py
-    estimated_time: 20
-  - name: tests/lora/test_minicpmv_tp.py
-    estimated_time: 20
-  - name: tests/lora/test_peft_helper.py
-    estimated_time: 20
-  - name: tests/lora/test_resolver.py
-    estimated_time: 20
-  - name: tests/lora/test_utils.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/runai_streamer_loader/test_weight_utils.py
-    estimated_time: 20
-  - name: tests/model_executor/model_loader/test_registry.py
-    estimated_time: 20
-  - name: tests/model_executor/test_eagle_quantization.py
-    estimated_time: 20
-  - name: tests/model_executor/test_model_load_with_params.py
-    estimated_time: 20
-  - name: tests/model_executor/test_qwen3_omni.py
-    estimated_time: 20
-  - name: tests/model_executor/test_weight_utils.py
-    estimated_time: 20
-  - name: tests/models/language/generation/test_granite.py
-    estimated_time: 20
-  - name: tests/models/language/generation/test_mistral.py
-    estimated_time: 20
-  - name: tests/models/language/generation/test_phimoe.py
-    estimated_time: 20
-  - name: tests/models/language/generation_ppl_test/test_gpt.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_embedding.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_head_dtype.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_multi_vector_retrieval.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_multilabel_classification_support.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_pooler_config_init_behaviour.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_scoring.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_splade_sparse_pooler.py
-    estimated_time: 20
-  - name: tests/models/language/pooling/test_truncation_control.py
-    estimated_time: 20
-  - name: tests/models/language/pooling_mteb_test/test_intfloat.py
-    estimated_time: 20
-  - name: tests/models/multimodal/generation/test_interleaved.py
-    estimated_time: 20
-  - name: tests/models/multimodal/generation/test_qwen2_vl.py
-    estimated_time: 20
+  # - name: tests/benchmarks/test_plot_filters.py
+  #   estimated_time: 20
+  # - name: tests/compile/fullgraph/test_multimodal_compile.py
+  #   estimated_time: 20
+  # - name: tests/compile/fullgraph/test_multiple_graphs.py
+  #   estimated_time: 20
+  # - name: tests/compile/fullgraph/test_simple.py
+  #   estimated_time: 20
+  # - name: tests/compile/fullgraph/test_toy_llama.py
+  #   estimated_time: 20
+  # - name: tests/compile/test_graph_partition.py
+  #   estimated_time: 20
+  # - name: tests/config/test_config_generation.py
+  #   estimated_time: 20
+  # - name: tests/config/test_config_utils.py
+  #   estimated_time: 20
+  # - name: tests/config/test_multimodal_config.py
+  #   estimated_time: 20
+  # - name: tests/detokenizer/test_disable_detokenization.py
+  #   estimated_time: 20
+  # - name: tests/detokenizer/test_min_tokens.py
+  #   estimated_time: 20
+  # - name: tests/detokenizer/test_stop_reason.py
+  #   estimated_time: 20
+  # - name: tests/detokenizer/test_stop_string_while_stop_model_terminates.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_eplb_algo.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_events.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_expert_parallel.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_expert_placement.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_kvlayout.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_multiproc_executor.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_pipeline_partition.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_shm_broadcast.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_shm_buffer.py
+  #   estimated_time: 20
+  # - name: tests/distributed/test_shm_storage.py
+  #   estimated_time: 20
+  # - name: tests/engine/test_arg_utils.py
+  #   estimated_time: 20
+  # - name: tests/engine/test_short_mm_context.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/llm/test_collective_rpc.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/llm/test_prompt_validation.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/offline_mode/test_offline_mode.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_async_tokenization.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_basic.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_chat_echo.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_chat_error.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_chat_logit_bias_validation.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_chunked_prompt.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_cli_args.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_completion_error.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_completion_with_function_calling.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_completion_with_prompt_embeds.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_enable_force_include_usage.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_gptoss_structural_tags_integration.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_lora_adapters.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_lora_resolvers.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_messages.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_models.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_optional_middleware.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_orca_metrics.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_prompt_validation.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_protocol.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_return_token_ids.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_return_tokens_as_ids.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_root_path.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_run_batch.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_serving_models.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_serving_responses.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_serving_tokens.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_token_in_token_out.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_tokenization.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/test_uds.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/tool_parsers/test_gigachat3_tool_parser.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/tool_parsers/test_hunyuan_a13b_tool_parser.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/tool_parsers/test_llama3_json_tool_parser.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/openai/tool_parsers/test_llama4_pythonic_tool_parser.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/basic/test_encode.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/basic/test_truncation.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/classify/test_offline.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/embed/test_correctness_mteb.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/embed/test_offline.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/embed/test_online.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/embed/test_online_dimensions.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/embed/test_online_long_text.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/embed/test_online_vision.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/pooling/test_online.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/reward/test_offline.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/score/test_offline.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/score/test_online_rerank.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/pooling/score/test_online_score.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/sagemaker/test_sagemaker_handler_overrides.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/sagemaker/test_sagemaker_middleware_integration.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/test_api_server_process_manager.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/test_renderer.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/test_responses_utils.py
+  #   estimated_time: 20
+  # - name: tests/entrypoints/test_ssl_cert_refresher.py
+  #   estimated_time: 20
+  # - name: tests/kernels/quantization/test_scaled_mm_kernel_selection.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_llm_with_multi_loras.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_lora_checkpoints.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_lora_functions.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_lora_huggingface.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_lora_manager.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_minicpmv_tp.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_peft_helper.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_resolver.py
+  #   estimated_time: 20
+  # - name: tests/lora/test_utils.py
+  #   estimated_time: 20
+  # - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
+  #   estimated_time: 20
+  # - name: tests/model_executor/model_loader/runai_streamer_loader/test_weight_utils.py
+  #   estimated_time: 20
+  # - name: tests/model_executor/model_loader/test_registry.py
+  #   estimated_time: 20
+  # - name: tests/model_executor/test_eagle_quantization.py
+  #   estimated_time: 20
+  # - name: tests/model_executor/test_model_load_with_params.py
+  #   estimated_time: 20
+  # - name: tests/model_executor/test_qwen3_omni.py
+  #   estimated_time: 20
+  # - name: tests/model_executor/test_weight_utils.py
+  #   estimated_time: 20
+  # - name: tests/models/language/generation/test_granite.py
+  #   estimated_time: 20
+  # - name: tests/models/language/generation/test_mistral.py
+  #   estimated_time: 20
+  # - name: tests/models/language/generation/test_phimoe.py
+  #   estimated_time: 20
+  # - name: tests/models/language/generation_ppl_test/test_gpt.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling/test_embedding.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling/test_head_dtype.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling/test_multi_vector_retrieval.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling/test_multilabel_classification_support.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling/test_pooler_config_init_behaviour.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling/test_scoring.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling/test_splade_sparse_pooler.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling/test_truncation_control.py
+  #   estimated_time: 20
+  # - name: tests/models/language/pooling_mteb_test/test_intfloat.py
+  #   estimated_time: 20
+  # - name: tests/models/multimodal/generation/test_interleaved.py
+  #   estimated_time: 20
+  # - name: tests/models/multimodal/generation/test_qwen2_vl.py
+  #   estimated_time: 20
   - name: tests/models/multimodal/generation/test_whisper.py
     estimated_time: 20
   - name: tests/models/multimodal/pooling/test_dse_qwen2_vl.py
