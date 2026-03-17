@@ -79,7 +79,38 @@ def make_embedding(patch_init_side_effects):
     return _factory
 
 
-class TestForwardOot:
+@pytest.fixture()
+def make_yarn_embedding(patch_init_side_effects):
+    """
+    Factory for AscendYaRNRotaryEmbedding with parent __init__ suppressed.
+    patch_init_side_effects is the same autouse fixture as before.
+    """
+    def _factory(is_neox_style: bool = True):
+        with patch("vllm_ascend.ops.rotary_embedding.YaRNScalingRotaryEmbedding.__init__") as mock_parent_init:
+            mock_parent_init.return_value = None
+            from vllm_ascend.ops.rotary_embedding import AscendYaRNRotaryEmbedding
+
+            emb = AscendYaRNRotaryEmbedding.__new__(AscendYaRNRotaryEmbedding)
+            emb.head_size = HEAD_SIZE
+            emb.rotary_dim = ROTARY_DIM
+            emb.is_neox_style = is_neox_style
+            emb.cos_sin_cache = torch.zeros(MAX_POS, ROTARY_DIM)
+            AscendYaRNRotaryEmbedding.__init__(
+                emb,
+                head_size=HEAD_SIZE,
+                rotary_dim=ROTARY_DIM,
+                max_position_embeddings=MAX_POS,
+                base=BASE,
+                is_neox_style=is_neox_style,
+                scaling_factor=1.0,
+                dtype=DTYPE,
+            )
+        return emb
+
+    return _factory
+
+
+class TestAscendEmbeddingForwardOOT:
 
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -204,3 +235,60 @@ class TestForwardOot:
         mock_gather.assert_not_called()
         # Original positions tensor is passed through untouched
         assert mock_npu_op.call_args[0][0] is positions
+
+
+class TestAscendYaRNRotaryEmbeddingForwardOOT:
+
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_delegates_to_ascend_rotary_forward_oot(self, mock_delegate, make_yarn_embedding):
+        """forward_oot must delegate to AscendRotaryEmbedding.forward_oot."""
+        expected = MagicMock()
+        mock_delegate.return_value = expected
+
+        emb = make_yarn_embedding()
+        positions, query, key = _make_tensors()
+
+        result = emb.forward_oot(positions, query, key)
+
+        mock_delegate.assert_called_once_with(emb, positions, query, key, None, None)
+        assert result is expected
+
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_return_value_passed_through(self, mock_delegate, make_yarn_embedding):
+        """Return value from the delegate is returned unchanged."""
+        sentinel = (torch.randn(SEQ_LEN, HEAD_SIZE), torch.randn(SEQ_LEN, HEAD_SIZE))
+        mock_delegate.return_value = sentinel
+
+        emb = make_yarn_embedding()
+        positions, query, key = _make_tensors()
+
+        result = emb.forward_oot(positions, query, key)
+
+        assert result is sentinel
+
+    @pytest.mark.parametrize("override", [True, False])
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_is_neox_style_override_forwarded(self, mock_delegate, override, make_yarn_embedding):
+        """is_neox_style_override must be forwarded verbatim, both True and False."""
+        mock_delegate.return_value = MagicMock()
+
+        emb = make_yarn_embedding()
+        positions, query, key = _make_tensors()
+
+        emb.forward_oot(positions, query, key, is_neox_style_override=override)
+
+        _, call_args, _ = mock_delegate.mock_calls[0]
+        assert call_args[5] is override  # 6th positional arg
+
+    @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
+    def test_all_args_forwarded_together(self, mock_delegate, make_yarn_embedding):
+        """Smoke test: all args passed simultaneously are all forwarded correctly."""
+        mock_delegate.return_value = MagicMock()
+
+        emb = make_yarn_embedding()
+        positions, query, key = _make_tensors()
+        offsets = torch.ones(SEQ_LEN, dtype=torch.long)
+
+        emb.forward_oot(positions, query, key, offsets=offsets, is_neox_style_override=False)
+
+        mock_delegate.assert_called_once_with(emb, positions, query, key, offsets, False)
