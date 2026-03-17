@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Kimi-K2.5`(Quantized version for w4a8): [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
+- `Kimi-K2.5-w4a8`(Quantized version for w4a8): [Download model weight](https://modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -74,7 +74,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-- Quantized model `Kimi-K2.5-w8a8-mtp-QuaRot` can be deployed on 1 Atlas 800 A3 (64G × 16).
+- Quantized model `Kimi-K2.5-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16).
 
 Run the following script to execute online inference.
 
@@ -98,15 +98,20 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export VLLM_USE_V1=1
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_MLAPO=1
 
-vllm serve /weights/Kimi-K2.5-w8a8-mtp-QuaRot \
+vllm serve /weights/Kimi-K2.5-w4a8 \
 --host 0.0.0.0 \
 --port 8015 \
 --data-parallel-size 4 \
 --tensor-parallel-size 4 \
 --quantization ascend \
 --seed 1024 \
---served-model-name deepseek_v3 \
+--served-model-name kimi_k25 \
 --enable-expert-parallel \
 --async-scheduling \
 --max-num-seqs 16 \
@@ -114,9 +119,11 @@ vllm serve /weights/Kimi-K2.5-w8a8-mtp-QuaRot \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
---compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+--gpu-memory-utilization 0.9 \
+--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"multistream_overlap_shared_expert":true}' \
+--mm-processor-cache-type shm \
+--mm-encoder-tp-mode data
 ```
 
 **Notice:**
@@ -130,7 +137,7 @@ The parameters are explained as follows:
 
 ### Multi-node Deployment
 
-- `Kimi-K2.5-w8a8-mtp-QuaRot`: require at least 2 Atlas 800 A2 (64G × 8).
+- `Kimi-K2.5-w4a8`: require at least 2 Atlas 800 A2 (64G × 8).
 
 Run the following scripts on two nodes respectively.
 
@@ -162,8 +169,11 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
+export VLLM_USE_V1=1
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_MLAPO=1
 
-vllm serve /weights/Kimi-K2.5-w8a8-mtp-QuaRot \
+vllm serve /weights/Kimi-K2.5-w4a8 \
 --host 0.0.0.0 \
 --port 8004 \
 --data-parallel-size 4 \
@@ -173,7 +183,7 @@ vllm serve /weights/Kimi-K2.5-w8a8-mtp-QuaRot \
 --tensor-parallel-size 4 \
 --quantization ascend \
 --seed 1024 \
---served-model-name deepseek_v3 \
+--served-model-name kimi_k25 \
 --enable-expert-parallel \
 --async-scheduling \
 --max-num-seqs 16 \
@@ -181,9 +191,11 @@ vllm serve /weights/Kimi-K2.5-w8a8-mtp-QuaRot \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
---compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+--gpu-memory-utilization 0.9 \
+--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"multistream_overlap_shared_expert":true}' \
+--mm-processor-cache-type shm \
+--mm-encoder-tp-mode data
 ```
 
 **Node 1**
@@ -214,8 +226,11 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
+export VLLM_USE_V1=1
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_MLAPO=1
 
-vllm serve /weights/Kimi-K2.5-w8a8-mtp-QuaRot \
+vllm serve /weights/Kimi-K2.5-w4a8 \
 --host 0.0.0.0 \
 --port 8004 \
 --headless \
@@ -227,7 +242,7 @@ vllm serve /weights/Kimi-K2.5-w8a8-mtp-QuaRot \
 --tensor-parallel-size 4 \
 --quantization ascend \
 --seed 1024 \
---served-model-name deepseek_v3 \
+--served-model-name kimi_k25 \
 --enable-expert-parallel \
 --async-scheduling \
 --max-num-seqs 16 \
@@ -235,9 +250,11 @@ vllm serve /weights/Kimi-K2.5-w8a8-mtp-QuaRot \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --no-enable-prefix-caching \
---gpu-memory-utilization 0.92 \
---speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
---compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+--gpu-memory-utilization 0.9 \
+--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"multistream_overlap_shared_expert":true}' \
+--mm-processor-cache-type shm \
+--mm-encoder-tp-mode data
 ```
 
 ### Prefill-Decode Disaggregation
