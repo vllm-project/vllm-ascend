@@ -118,21 +118,15 @@ class AttentionMaskBuilder310:
         """
         Retrieves the appropriate attention mask based on the model configuration.
 
-        It explicitly checks for 'pooling' runner types which are not supported
-        on 310P hardware.
+        Returns a causal mask for all runner types, including pooling models.
+        The 910 backend also uses a causal mask for pooling.
 
         Args:
             model_config: Configuration object containing runner details.
 
         Returns:
-            torch.Tensor: The causal attention mask.
-
-        Raises:
-            NotImplementedError: If the runner_type is 'pooling'.
+            torch.Tensor: The causal attention mask in ACL_FORMAT_FRACTAL_NZ.
         """
-        if getattr(model_config, "runner_type", None) == "pooling":
-            # TODO: pooling model will be supported soon.
-            raise NotImplementedError("310P does not support runner_type='pooling'")
         return self._get_causal_mask(self.max_seqlen)
 
     def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:

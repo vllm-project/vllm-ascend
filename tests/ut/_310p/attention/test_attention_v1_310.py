@@ -200,6 +200,32 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
         mock_paged_attention.assert_called_once()
 
+    @patch("torch_npu._npu_flash_attention")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_forward_encoder_attention_310(self, mock_get_forward_context, mock_npu_flash_attention):
+        """Test _forward_encoder_attention uses _npu_flash_attention for pooling models."""
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_mask = torch.zeros(1, 1, 10, 10)
+        metadata.seq_lens = torch.tensor([10])
+        metadata.num_actual_tokens = 10
+        metadata.num_decodes = 0
+        metadata.num_prefills = 10
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+
+        self.impl._forward_encoder_attention(query, key, value, metadata, output)
+
+        mock_npu_flash_attention.assert_called_once()
+        call_kwargs = mock_npu_flash_attention.call_args
+        self.assertEqual(call_kwargs.kwargs["num_heads"], 8)
+        self.assertEqual(call_kwargs.kwargs["num_kv_heads"], 8)
+        self.assertEqual(call_kwargs.kwargs["scale_value"], 1.0)
+
     def test_forward_mtp_310(self):
         query = torch.randn(4, 8 * 64)
         key, value = None, None

@@ -160,6 +160,8 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
 # - FP32: never convert
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+    if weight.is_meta:
+        return weight
     if not _should_trans_nz(weight):
         return weight
     return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)

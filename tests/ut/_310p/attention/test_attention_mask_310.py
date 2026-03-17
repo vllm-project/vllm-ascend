@@ -26,11 +26,16 @@ class TestAttentionMaskBuilder310(TestBase):
         self.max_seqlen = 4096
         self.attention_mask_builder = AttentionMaskBuilder310(torch.device("cpu"), self.max_seqlen)
 
-    def test_get_attention_mask_310_for_pooling_model(self):
+    @patch("torch_npu.npu_format_cast")
+    def test_get_attention_mask_310_for_pooling_model(self, mock_format_cast):
+        """Pooling models should get a causal mask (same as regular models)."""
+        mock_format_cast.side_effect = lambda x, y: x
         model_config = MagicMock()
         model_config.runner_type = "pooling"
-        with self.assertRaises(NotImplementedError):
-            self.attention_mask_builder.get_attention_mask(model_config)
+        attn_mask = self.attention_mask_builder.get_attention_mask(model_config)
+        self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
+        # Should contain -inf values (causal mask), not all zeros
+        self.assertTrue(torch.isinf(attn_mask).any())
 
     @patch("torch_npu.npu_format_cast")
     def test_get_attention_mask_310(self, mock_format_cast):
