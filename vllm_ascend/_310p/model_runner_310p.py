@@ -27,11 +27,19 @@ from vllm.config import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    EncoderOnlyAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 
@@ -261,8 +269,14 @@ class NPUModelRunner310(NPUModelRunner):
                     assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    if kv_cache_spec.block_size * kv_cache_spec.head_size > 16384:
-                        block_size = 64
+                    # Page attention operation on 310P limits block_size * head_size <= 128 * 128
+                    supported_sizes = [
+                        support_size
+                        for support_size in self.attn_backend.get_supported_kernel_block_sizes()
+                        if support_size * kv_cache_spec.head_size <= 16384
+                    ]
+                    if supported_sizes:
+                        block_size = supported_sizes[0]
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                             num_blocks * block_size_chunk,
@@ -389,3 +403,70 @@ class NPUModelRunner310(NPUModelRunner):
             index=draft_tokens_index_tensor,
             src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
+
+    def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Re-initialize the input batch if the block sizes are different from
+        `[self.cache_config.block_size]`. This usually happens when there
+        are multiple KV cache groups.
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+        """
+        block_sizes = [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
+        ]
+
+        # Generate kernel_block_sizes that matches each block_size
+        # For attention backends that support virtual block splitting,
+        # use the supported block sizes from the backend
+        # For other backends (like Mamba), use [0] (no splitting)
+        self.kernel_block_sizes = []
+        for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
+            elif isinstance(kv_cache_spec, AttentionSpec):
+                try:
+                    attn_groups = self.attn_groups[kv_cache_group_id]
+                except IndexError:
+                    attn_groups = None
+                backend = attn_groups[0].backend
+                # Page attention operation on 310P limits block_size * head_size <= 128 * 128
+                supported_sizes = [
+                    support_size
+                    for support_size in backend.get_supported_kernel_block_sizes()
+                    if support_size * kv_cache_spec.head_size <= 16384
+                ]
+                kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
+                self.kernel_block_sizes.append(kernel_block_size_list)
+            else:
+                self.kernel_block_sizes.append([0])
+
+        if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
+            assert self.cache_config.cpu_offload_gb == 0, (
+                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                "for more details."
+            )
+            self.input_batch = NPUInputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=block_sizes,
+                is_spec_decode=bool(self.vllm_config.speculative_config),
+                logitsprocs=self.input_batch.logitsprocs,
+                is_pooling_model=self.is_pooling_model,
+                num_speculative_tokens=(
+                    self.vllm_config.speculative_config.num_speculative_tokens
+                    if self.vllm_config.speculative_config
+                    else 0
+                ),
+                kernel_block_sizes=self.kernel_block_sizes,
+            )
