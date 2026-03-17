@@ -113,9 +113,9 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize singlecard-light failure
-        if: ${{ failure() }}
+        if: ${{ always() }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary.py \
+          python3 .github/workflows/scripts/ci_log_summary_v2.py \
             --step-name "Run singlecard-light test" \
             --log-file /tmp/e2e-singlecard-light-part${{ matrix.part }}.log \
             --output "$GITHUB_STEP_SUMMARY"
@@ -217,9 +217,9 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize singlecard-full failure
-        if: ${{ failure() }}
+        if: ${{ always() }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary.py \
+          python3 .github/workflows/scripts/ci_log_summary_v2.py \
             --step-name "Run singlecard-full test" \
             --log-file /tmp/e2e-singlecard-full-part${{ matrix.part }}.log \
             --output "$GITHUB_STEP_SUMMARY"
@@ -318,9 +318,9 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-2-light failure
-        if: ${{ failure() }}
+        if: ${{ always() }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary.py \
+          python3 .github/workflows/scripts/ci_log_summary_v2.py \
             --step-name "Run multicard-2-light test" \
             --log-file /tmp/e2e-2card-light-part${{ matrix.part }}.log \
             --output "$GITHUB_STEP_SUMMARY"
@@ -421,9 +421,9 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-2-full failure
-        if: ${{ failure() }}
+        if: ${{ always() }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary.py \
+          python3 .github/workflows/scripts/ci_log_summary_v2.py \
             --step-name "Run multicard-2-full test " \
             --log-file /tmp/e2e-2card-full-part${{ matrix.part }}.log \
             --output "$GITHUB_STEP_SUMMARY"
@@ -451,9 +451,9 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize non-triton failure
-        if: ${{ failure() && inputs.type == 'full' && matrix.part == 0 }}
+        if: ${{ always() && inputs.type == 'full' && matrix.part == 0 }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary.py \
+          python3 .github/workflows/scripts/ci_log_summary_v2.py \
             --step-name "Run multicard-2-full test (non triton)" \
             --log-file /tmp/e2e-non-triton.log \
             --output "$GITHUB_STEP_SUMMARY"
@@ -543,9 +543,9 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-4-full failure
-        if: ${{ failure() }}
+        if: ${{ always() }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary.py \
+          python3 .github/workflows/scripts/ci_log_summary_v2.py \
             --step-name "Run vllm-project/vllm-ascend test for V1 Engine" \
             --log-file /tmp/e2e-4card-full-part${{ matrix.part }}.log \
             --output "$GITHUB_STEP_SUMMARY"
@@ -627,9 +627,9 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize 310p singlecard failure
-        if: ${{ failure() && inputs.contains_310 }}
+        if: ${{ always() && inputs.contains_310 }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary.py \
+          python3 .github/workflows/scripts/ci_log_summary_v2.py \
             --step-name "Run vllm-project/vllm-ascend test" \
             --log-file /tmp/e2e-310p-singlecard.log \
             --output "$GITHUB_STEP_SUMMARY"
@@ -703,9 +703,9 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize 310p multicards failure
-        if: ${{ failure() && inputs.contains_310 }}
+        if: ${{ always() && inputs.contains_310 }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary.py \
+          python3 .github/workflows/scripts/ci_log_summary_v2.py \
             --step-name "Run vllm-project/vllm-ascend test" \
             --log-file /tmp/e2e-310p-4cards.log \
             --output "$GITHUB_STEP_SUMMARY"

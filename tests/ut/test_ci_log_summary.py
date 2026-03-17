@@ -35,6 +35,7 @@ _______________________ test_feature _______________________
 E       TypeError: bad shape
 
 tests/ut/sample/test_feature.py:10: TypeError
+=========================== short test summary info ============================
 FAILED tests/ut/sample/test_feature.py::test_feature - TypeError: bad shape
 """.strip()
 
@@ -60,6 +61,8 @@ FAILED tests/ut/sample/test_feature.py::test_feature - TypeError: bad shape
     assert len(result["code_bugs"]) == 1
     assert result["code_bugs"][0]["failed_test_files"] == ["tests/ut/sample/test_feature.py"]
     assert result["code_bugs"][0]["failed_test_cases"] == ["tests/ut/sample/test_feature.py::test_feature"]
+    assert result["code_bugs"][0]["error_failed_test_files_count"] == 1
+    assert result["code_bugs"][0]["error_failed_test_cases_count"] == 1
     assert "Run unit test" in summary
     assert "tests/ut/sample/test_feature.py::test_feature" in summary
     assert "TypeError" in summary
@@ -87,13 +90,28 @@ AttributeError: backend missing
         mode="e2e",
     )
 
-    assert result["failed_test_files"] == ["tests/e2e/test_case.py"]
+    assert result["failed_test_files"] == []
     assert result["failed_test_cases"] == []
-    assert result["job_results"][0]["errors"][0]["failed_test_files"] == ["tests/e2e/test_case.py"]
+    assert result["job_results"][0]["errors"][0]["failed_test_files"] == []
     assert result["job_results"][0]["errors"][0]["failed_test_cases"] == []
+    assert result["job_results"][0]["errors"][0]["error_failed_test_files_count"] == 0
+    assert result["job_results"][0]["errors"][0]["error_failed_test_cases_count"] == 0
     assert len(result["code_bugs"]) == 1
     assert "backend missing" in summary
-    assert "tests/e2e/test_case.py" in summary
+
+
+def test_wrapper_failure_lines_do_not_create_failed_tests_without_pytest_summary():
+    module = load_ci_log_summary_module()
+    log_text = """
+2026-03-03T15:41:37Z pytest -sv /workspace/tests/e2e/test_case.py::test_case
+FAILED tests/e2e/test_case.py::test_case - TypeError: boom
+✗ FAILED: tests/e2e/test_case.py::test_case returned exit code 1
+""".strip()
+
+    result = module.analyze_log(log_text)
+
+    assert result["failed_test_files"] == []
+    assert result["failed_test_cases"] == []
 
 
 def test_run_suite_start_line_maps_root_cause_to_failed_case():
@@ -113,6 +131,8 @@ def test_run_suite_start_line_maps_root_cause_to_failed_case():
     assert result["code_bugs"][0]["error_type"] == "TypeError"
     assert result["code_bugs"][0]["failed_test_files"] == ["tests/e2e/test_case.py"]
     assert result["code_bugs"][0]["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
+    assert result["code_bugs"][0]["error_failed_test_files_count"] == 1
+    assert result["code_bugs"][0]["error_failed_test_cases_count"] == 1
 
 
 def test_extract_failed_tests_handles_ansi_wrapped_failed_lines():
@@ -132,6 +152,7 @@ def test_extract_failed_files_and_cases_are_separated():
     module = load_ci_log_summary_module()
     log_text = """
 2026-03-03T15:41:37Z pytest -sv /workspace/tests/e2e/test_case.py::test_case
+=========================== short test summary info ============================
 FAILED tests/e2e/test_case.py::test_case - TypeError: boom
 ✗ FAILED: tests/e2e/test_case.py::test_case returned exit code 1
 """.strip()
@@ -142,6 +163,24 @@ FAILED tests/e2e/test_case.py::test_case - TypeError: boom
     assert result["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
 
 
+def test_failed_summary_assert_payload_maps_embedded_root_cause():
+    module = load_ci_log_summary_module()
+    log_text = """
+2026-03-03T15:41:37Z pytest -sv /workspace/tests/e2e/test_case.py::test_case
+2026-03-03T15:41:45Z =========================== short test summary info ============================
+2026-03-03T15:41:46Z FAILED tests/e2e/test_case.py::test_case - assert "worker crashed with TypeError: backend missing"
+2026-03-03T15:41:47Z [1/1] FAILED (exit code 1)  tests/e2e/test_case.py::test_case  (12s)
+""".strip()
+
+    result = module.analyze_log(log_text)
+
+    assert result["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
+    assert result["code_bugs"][0]["error_type"] == "TypeError"
+    assert result["code_bugs"][0]["error_message"] == "backend missing"
+    assert result["code_bugs"][0]["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
+    assert result["code_bugs"][0]["error_failed_test_cases_count"] == 1
+
+
 def test_context_prefers_traceback_start():
     module = load_ci_log_summary_module()
     log_text = """
@@ -150,6 +189,7 @@ Traceback (most recent call last):
   File "/tmp/sample.py", line 1, in <module>
     raise TypeError("boom")
 TypeError: boom
+=========================== short test summary info ============================
 FAILED tests/e2e/test_case.py::test_case - TypeError: boom
 """.strip()
 
@@ -169,6 +209,7 @@ _________________________ test_auto_fit_max_model_len __________________________
 >       vllm_config = VllmConfig(model_config=model_config)
 E       AttributeError: 'CompilationConfig' object has no attribute 'compile_ranges_split_points'
 
+=================================== short test summary info ===================================
 FAILED tests/e2e/test_auto_fit.py::test_auto_fit_max_model_len - AttributeError: 'CompilationConfig' object has no attribute 'compile_ranges_split_points'
 """.strip()
 
@@ -185,6 +226,7 @@ def test_context_strips_github_actions_prefixes():
     log_text = """
 e2e-test / singlecard-full (0)\tUNKNOWN STEP\t2026-03-12T08:56:45.0947989Z _________________________ test_auto_fit_max_model_len __________________________
 e2e-test / singlecard-full (0)\tUNKNOWN STEP\t2026-03-12T08:56:45.0976375Z E           AttributeError: 'CompilationConfig' object has no attribute 'compile_ranges_split_points'
+=========================== short test summary info ============================
 FAILED tests/e2e/test_auto_fit.py::test_auto_fit_max_model_len - AttributeError: 'CompilationConfig' object has no attribute 'compile_ranges_split_points'
 """.strip()
 
@@ -466,6 +508,8 @@ def test_main_supports_llm_json_format(tmp_path):
     assert parsed["failed_test_cases_count"] == 1
     assert parsed["failed_test_files_count"] == 1
     assert parsed["code_bugs"][0]["error_type"] == "AttributeError"
+    assert parsed["code_bugs"][0]["error_failed_test_files_count"] == 1
+    assert parsed["code_bugs"][0]["error_failed_test_cases_count"] == 1
 
 
 def test_main_defaults_mode_and_step_name_for_summary(tmp_path):
@@ -636,6 +680,65 @@ def test_main_supports_json_format_with_output_file(tmp_path):
     assert parsed["code_bugs"][0]["error_type"] == "AttributeError"
 
 
+def test_main_skips_summary_stdout_when_no_failures(tmp_path):
+    module = load_ci_log_summary_module()
+    log_file = tmp_path / "sample.log"
+    log_file.write_text(
+        "2026-03-03T15:41:37Z pytest -sv tests/e2e/test_case.py\n"
+        "=========================== 1 passed in 0.10s ===========================\n",
+        encoding="utf-8",
+    )
+
+    argv = [
+        "ci_log_summary.py",
+        "--log-file",
+        str(log_file),
+    ]
+
+    stdout = io.StringIO()
+    old_argv = module.sys.argv
+    try:
+        module.sys.argv = argv
+        with redirect_stdout(stdout):
+            module.main()
+    finally:
+        module.sys.argv = old_argv
+
+    assert stdout.getvalue() == ""
+
+
+def test_main_skips_summary_output_file_when_no_failures(tmp_path):
+    module = load_ci_log_summary_module()
+    log_file = tmp_path / "sample.log"
+    summary_file = tmp_path / "summary.md"
+    log_file.write_text(
+        "2026-03-03T15:41:37Z pytest -sv tests/e2e/test_case.py\n"
+        "=========================== 1 passed in 0.10s ===========================\n",
+        encoding="utf-8",
+    )
+    summary_file.write_text("existing-summary\n", encoding="utf-8")
+
+    argv = [
+        "ci_log_summary.py",
+        "--log-file",
+        str(log_file),
+        "--output",
+        str(summary_file),
+    ]
+
+    stdout = io.StringIO()
+    old_argv = module.sys.argv
+    try:
+        module.sys.argv = argv
+        with redirect_stdout(stdout):
+            module.main()
+    finally:
+        module.sys.argv = old_argv
+
+    assert stdout.getvalue() == ""
+    assert summary_file.read_text(encoding="utf-8") == "existing-summary\n"
+
+
 def test_process_run_matches_extract_style_shape():
     module = load_ci_log_summary_module()
 
@@ -688,6 +791,71 @@ FAILED tests/e2e/test_case.py::test_case - AttributeError: backend missing
         {"name": "job-fail", "conclusion": "failure"},
     ]
     assert result["job_results"][0]["job_name"] == "job-fail"
+    assert result["failed_test_files"] == ["tests/e2e/test_case.py"]
+    assert result["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
+    assert result["code_bugs"][0]["error_type"] == "AttributeError"
+
+
+def test_process_run_includes_success_jobs_with_failed_logs_and_skips_skipped_jobs():
+    module = load_ci_log_summary_module()
+
+    run_info = {
+        "html_url": "https://example.test/runs/789",
+        "created_at": "2026-03-12T01:02:03Z",
+    }
+    jobs = {
+        "jobs": [
+            {"id": 21, "name": "job-skipped", "status": "completed", "conclusion": "skipped"},
+            {"id": 22, "name": "job-success-no-failures", "status": "completed", "conclusion": "success"},
+            {"id": 23, "name": "job-success-with-failures", "status": "completed", "conclusion": "success"},
+            {"id": 24, "name": "job-fail", "status": "completed", "conclusion": "failure"},
+        ]
+    }
+    success_log = """
+2026-03-03T15:41:37Z pytest -sv tests/e2e/test_case.py
+=========================== 1 passed in 0.10s ===========================
+""".strip()
+    failing_log = """
+2026-03-03T15:41:37Z pytest -sv tests/e2e/test_case.py
+______________________________ test_case ______________________________
+
+    def test_case():
+>       raise AttributeError("backend missing")
+E       AttributeError: backend missing
+
+FAILED tests/e2e/test_case.py::test_case - AttributeError: backend missing
+""".strip()
+
+    def fake_json(endpoint: str, **params):
+        if endpoint.endswith("/actions/runs/789"):
+            return run_info
+        if endpoint.endswith("/actions/runs/789/jobs"):
+            return jobs
+        raise AssertionError((endpoint, params))
+
+    def fake_raw(endpoint: str) -> str:
+        if endpoint.endswith("/actions/jobs/22/logs"):
+            return success_log
+        if endpoint.endswith("/actions/jobs/23/logs"):
+            return failing_log
+        if endpoint.endswith("/actions/jobs/24/logs"):
+            return failing_log
+        raise AssertionError(endpoint)
+
+    module.gh_api_json = fake_json
+    module.gh_api_raw = fake_raw
+    module.get_good_commit = lambda: "abc1234"
+
+    result = module.process_run(789)
+
+    assert result["failed_jobs_count"] == 2
+    assert result["job_summary"] == [
+        {"name": "job-skipped", "conclusion": "skipped"},
+        {"name": "job-success-no-failures", "conclusion": "success"},
+        {"name": "job-success-with-failures", "conclusion": "success"},
+        {"name": "job-fail", "conclusion": "failure"},
+    ]
+    assert [job["job_name"] for job in result["job_results"]] == ["job-success-with-failures", "job-fail"]
     assert result["failed_test_files"] == ["tests/e2e/test_case.py"]
     assert result["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
     assert result["code_bugs"][0]["error_type"] == "AttributeError"

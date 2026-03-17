@@ -14,16 +14,6 @@ from typing import Any
 
 REPO = "vllm-project/vllm-ascend"
 
-_FAILED_INLINE_RE = re.compile(
-    r"FAILED:\s+(tests/\S+\.py(?:::\S+)?)\s+.*(?:exit code|returned)",
-)
-_FAILED_SUMMARY_RE = re.compile(
-    r"^\s+(tests/\S+\.py(?:::\S+)?)\s+\(exit code",
-    re.MULTILINE,
-)
-_FAILED_PYTEST_RE = re.compile(
-    r"FAILED\s+(tests/\S+\.py::\S+)",
-)
 _PYTEST_CASE_PROGRESS_RE = re.compile(r"^(tests/\S+\.py::\S+)\b")
 _PYTEST_START_RE = re.compile(r"pytest\s+-sv\s+(?:[/\w.\-]+/)?(tests/\S+)")
 _RUN_SUITE_START_RE = re.compile(r"\[\d+/\d+\]\s+START\s+(tests/\S+)")
@@ -31,6 +21,7 @@ _PYTEST_FAILURE_HEADER_RE = re.compile(r"^_+\s+test_\S+.*_+$")
 _PYTEST_FAILURES_BANNER_RE = re.compile(r"^=+\s+FAILURES\s+=+$")
 _PYTEST_SUMMARY_BANNER_RE = re.compile(r"^=+\s+short test summary info\s+=+$", re.IGNORECASE)
 _PYTEST_SUMMARY_FAILED_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)")
+_FAILED_SUMMARY_PAYLOAD_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)\s+-\s+(.+)")
 
 _CORE_ERROR_RE = re.compile(
     r"(TypeError|AttributeError|ImportError|ModuleNotFoundError"
@@ -271,44 +262,15 @@ def _extract_pytest_failure_blocks(lines: list[str]) -> list[dict[str, int]]:
 
 
 def extract_failed_test_files(log_text: str) -> list[str]:
-    failed = set()
-    cleaned_log_text = _ANSI_RE.sub("", log_text)
-    failed_cases = extract_failed_test_cases(log_text)
-
-    for m in _FAILED_INLINE_RE.finditer(cleaned_log_text):
-        failed.add(m.group(1).split("::")[0])
-    for m in _FAILED_SUMMARY_RE.finditer(cleaned_log_text):
-        failed.add(m.group(1).split("::")[0])
-    for test_case in failed_cases:
-        failed.add(test_case.split("::")[0])
-    return sorted(failed)
+    return sorted({test_case.split("::")[0] for test_case in extract_failed_test_cases(log_text)})
 
 
 def extract_failed_test_cases(log_text: str) -> list[str]:
-    lines = log_text.splitlines()
     failed = set()
-    in_summary = False
-
-    for raw_line in lines:
-        line = clean_line(raw_line)
-        if _PYTEST_SUMMARY_BANNER_RE.match(line):
-            in_summary = True
-            continue
-        if in_summary and line.startswith("="):
-            in_summary = False
-        if not in_summary:
-            continue
+    for line in _iter_pytest_summary_lines(log_text):
         m = _PYTEST_SUMMARY_FAILED_RE.match(line)
         if m:
             failed.add(m.group(1))
-
-    if failed:
-        return sorted(failed)
-
-    cleaned_log_text = _ANSI_RE.sub("", log_text)
-    for m in _FAILED_PYTEST_RE.finditer(cleaned_log_text):
-        failed.add(m.group(1))
-
     return sorted(failed)
 
 
@@ -349,21 +311,33 @@ def extract_test_sections(log_text: str) -> list[dict]:
     return sections
 
 
-def extract_error_to_test_mapping(log_text: str) -> dict[str, list[str]]:
-    cleaned_log_text = _ANSI_RE.sub("", log_text)
-    failed_pytest_re = re.compile(
-        r"FAILED\s+(tests/\S+?)\s+-\s+(TypeError|AttributeError|ImportError|ModuleNotFoundError|KeyError|NotImplementedError|ValueError|OSError|RuntimeError|AssertionError):\s*(.+)"
-    )
+def _iter_pytest_summary_lines(log_text: str) -> list[str]:
+    lines = log_text.splitlines()
+    summary_lines: list[str] = []
+    in_summary = False
 
+    for raw_line in lines:
+        line = clean_line(raw_line)
+        if _PYTEST_SUMMARY_BANNER_RE.match(line):
+            in_summary = True
+            continue
+        if in_summary and line.startswith("="):
+            in_summary = False
+        if in_summary:
+            summary_lines.append(line)
+
+    return summary_lines
+
+
+def extract_error_to_test_mapping(log_text: str) -> dict[str, list[str]]:
     error_to_tests = defaultdict(set)
 
-    for m in failed_pytest_re.finditer(cleaned_log_text):
-        test_name = m.group(1)
-        error_type = m.group(2)
-        error_msg = m.group(3).strip()
-
+    for line in _iter_pytest_summary_lines(log_text):
+        extracted = _extract_failed_summary_embedded_error(line)
+        if extracted is None:
+            continue
+        test_name, error_type, error_msg, _category = extracted
         sig = _normalize_error_signature(error_type, error_msg)
-
         error_to_tests[sig].add(test_name)
 
         if error_type == "AssertionError":
@@ -445,6 +419,11 @@ def extract_root_cause_errors(log_text: str) -> list[dict]:
             if any(wp in line for wp in _WRAPPER_PATTERNS):
                 continue
             if line.startswith("FAILED tests/"):
+                embedded = _extract_failed_summary_embedded_error(line)
+                if embedded is None:
+                    continue
+                _test_name, error_type, error_msg, category = embedded
+                candidate = (i, error_type, error_msg, category)
                 continue
 
             m = _CORE_ERROR_RE.search(line)
@@ -482,6 +461,20 @@ def extract_root_cause_errors(log_text: str) -> list[dict]:
         if any(wp in line for wp in _WRAPPER_PATTERNS):
             continue
         if line.startswith("FAILED tests/"):
+            embedded = _extract_failed_summary_embedded_error(line)
+            if embedded is None:
+                continue
+            _test_name, error_type, error_msg, category = embedded
+            errors.append(
+                {
+                    "error_type": error_type,
+                    "error_message": error_msg,
+                    "category": category,
+                    "context": [line],
+                    "line_number": i,
+                    "source": "failed_summary_payload",
+                }
+            )
             continue
 
         m = _CORE_ERROR_RE.search(line)
@@ -509,6 +502,26 @@ def extract_root_cause_errors(log_text: str) -> list[dict]:
         )
 
     return errors
+
+
+def _extract_failed_summary_embedded_error(line: str) -> tuple[str, str, str, str] | None:
+    summary_match = _FAILED_SUMMARY_PAYLOAD_RE.match(line)
+    if not summary_match:
+        return None
+
+    test_name = summary_match.group(1)
+    payload = summary_match.group(2).strip()
+
+    m = _CORE_ERROR_RE.search(payload)
+    if not m:
+        return None
+
+    error_type = m.group(1)
+    payload_error_msg = re.sub(r"""(?:\\[nr]|['"])+$""", "", m.group(2).strip()).strip()
+    error_msg, _normalized, category, ok = _normalize_error_match(error_type, payload_error_msg)
+    if not ok:
+        return None
+    return test_name, error_type, error_msg, category
 
 
 def get_good_commit() -> str | None:
@@ -645,6 +658,8 @@ def _dedupe_errors(all_errors: list[dict]) -> list[dict]:
         err = data["error"]
         err["failed_test_files"] = sorted(list(data["failed_test_files"]))
         err["failed_test_cases"] = sorted(list(data["failed_test_cases"]))
+        err["error_failed_test_files_count"] = len(err["failed_test_files"])
+        err["error_failed_test_cases_count"] = len(err["failed_test_cases"])
         unique_errors.append(err)
     return unique_errors
 
@@ -665,7 +680,11 @@ def _dedupe_errors_by_scope(errors: list[dict]) -> list[dict]:
         if error.get("line_number", 0) < seen[key].get("line_number", 0):
             seen[key] = copy.deepcopy(error)
 
-    return list(seen.values())
+    deduped = list(seen.values())
+    for error in deduped:
+        error["error_failed_test_files_count"] = len(error.get("failed_test_files", []))
+        error["error_failed_test_cases_count"] = len(error.get("failed_test_cases", []))
+    return deduped
 
 
 def _is_wrapper_assertion(error: dict) -> bool:
@@ -763,7 +782,7 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
         per_page="100",
     )
     all_jobs = all_jobs_data.get("jobs", [])
-    failed_jobs = [j for j in all_jobs if j.get("conclusion") == "failure"]
+    candidate_jobs = [j for j in all_jobs if j.get("status") == "completed" and j.get("conclusion") != "skipped"]
 
     good_commit = get_good_commit()
     bad_commit = None
@@ -772,18 +791,19 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
     all_errors = []
     job_results = []
 
-    for job in failed_jobs:
+    for job in candidate_jobs:
         job_id = job["id"]
         job_name = job["name"]
         log_text = gh_api_raw(f"/repos/{repo}/actions/jobs/{job_id}/logs")
         if not log_text:
-            job_results.append(
-                {
-                    "job_id": job_id,
-                    "job_name": job_name,
-                    "error": "Failed to download log",
-                }
-            )
+            if job.get("conclusion") == "failure":
+                job_results.append(
+                    {
+                        "job_id": job_id,
+                        "job_name": job_name,
+                        "error": "Failed to download log",
+                    }
+                )
             continue
 
         if bad_commit is None:
@@ -791,9 +811,6 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
 
         failed_test_files = extract_failed_test_files(log_text)
         failed_test_cases = extract_failed_test_cases(log_text)
-        all_failed_test_files.extend(failed_test_files)
-        all_failed_test_cases.extend(failed_test_cases)
-
         errors = extract_root_cause_errors(log_text)
         _attach_failed_tests(
             log_text,
@@ -803,6 +820,13 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
         )
         errors = _suppress_wrapper_assertions(errors)
         job_scoped_errors = _dedupe_errors_by_scope(errors)
+
+        has_failure_signal = bool(failed_test_files or failed_test_cases or job_scoped_errors)
+        if not has_failure_signal and job.get("conclusion") != "failure":
+            continue
+
+        all_failed_test_files.extend(failed_test_files)
+        all_failed_test_cases.extend(failed_test_cases)
         all_errors.extend(job_scoped_errors)
 
         job_results.append(
@@ -827,7 +851,7 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
         "good_commit": good_commit,
         "bad_commit": bad_commit,
         "total_jobs": len(all_jobs),
-        "failed_jobs_count": len(failed_jobs),
+        "failed_jobs_count": len(job_results),
         "job_summary": [{"name": j["name"], "conclusion": j.get("conclusion", "unknown")} for j in all_jobs],
         "job_results": job_results,
         "failed_test_files": unique_failed_test_files,
@@ -890,6 +914,10 @@ def render_llm_json(result: dict) -> str:
         "env_flakes": result["env_flakes"],
     }
     return json.dumps(output_data, ensure_ascii=False, indent=2) + "\n"
+
+
+def has_summary_content(result: dict) -> bool:
+    return bool(result["failed_test_files"] or result["failed_test_cases"] or result["distinct_errors"])
 
 
 def render_summary(result: dict, *, step_name: str, mode: str) -> str:
@@ -999,6 +1027,8 @@ def main() -> None:
     elif args.format == "llm-json":
         rendered_output = render_llm_json(result)
     else:
+        if not has_summary_content(result):
+            return
         rendered_output = render_summary(result, step_name=args.step_name, mode=args.mode)
 
     if args.output is not None:
