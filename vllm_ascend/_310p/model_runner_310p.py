@@ -17,9 +17,9 @@
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager, nullcontext
 
-import math
 import numpy as np
 import torch
 import torch_npu
@@ -27,7 +27,7 @@ from vllm.config import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec, MambaSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
@@ -201,7 +201,7 @@ class NPUModelRunner310(NPUModelRunner):
         if self.model_config.use_mla:
             raise ValueError("MLAAttention is not supported for 310P.")
         # Initialize the memory buffer for KV cache
-        kv_caches = self._allocate_kv_cache_tensors(kv_cache_config) 
+        kv_caches = self._allocate_kv_cache_tensors(kv_cache_config)
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
@@ -237,19 +237,19 @@ class NPUModelRunner310(NPUModelRunner):
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 if "linear_attn" in layer_name and layer_name not in kv_cache:
-                    kv_cache_spec = layer_kv_cache_spec[layer_name]
-                    assert isinstance(kv_cache_spec, MambaSpec)
-                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                    cache_spec = layer_kv_cache_spec[layer_name]
+                    assert isinstance(cache_spec, MambaSpec)
+                    assert kv_cache_tensor.size % cache_spec.page_size_bytes == 0
+                    num_blocks = kv_cache_tensor.size // cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                    raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
-                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                    for shape, dtype in zip(cache_spec.shapes, cache_spec.dtypes):
                         target_shape = (num_blocks, *shape)
                         target_idx += math.prod(target_shape) * get_dtype_size(dtype)
-                        tensor = tensor[start_idx:target_idx].view(dtype).view(target_shape)
+                        tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
                     for layer_name_inner in kv_cache_tensor.shared_by:

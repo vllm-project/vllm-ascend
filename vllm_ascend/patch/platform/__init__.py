@@ -16,11 +16,11 @@
 
 import os
 
-from vllm_ascend.utils import is_310p
-
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_fusion_matcher_compat_ops  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
+from vllm_ascend.utils import is_310p
+
 if not is_310p():
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 else:
