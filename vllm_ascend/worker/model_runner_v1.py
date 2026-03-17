@@ -32,7 +32,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group

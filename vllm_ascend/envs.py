@@ -113,6 +113,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
+    # Whether to enable RFork elastic fast load.
+    "VLLM_RFORK_ENABLED": lambda: bool(int(os.getenv("VLLM_RFORK_ENABLED", "0"))),
+    # RFork planner URL, for example: http://127.0.0.1:1223
+    "RFORK_SCHEDULER_URL": lambda: os.getenv("RFORK_SCHEDULER_URL", None),
+    # RFork seed key separator.
+    "RFORK_SEED_KEY_SEPARATOR": lambda: os.getenv("RFORK_SEED_KEY_SEPARATOR", "$"),
     # use fused op transpose_kv_cache_by_block, default is True
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
