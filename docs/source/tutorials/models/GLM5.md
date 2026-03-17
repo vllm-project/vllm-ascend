@@ -366,8 +366,8 @@ A2 PD hybrid deployment(2 Nodes): Run the following scripts on two nodes respect
 nic_name="xxx"
 local_ip="xx.xx.xx.xx"
 
-export VLLM_ASCEND_ENABLE_MLAPO=1 # 开启MLAPO
-export VLLM_ASCEND_ENABLE_NZ=1	  # 开启量化
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_ENABLE_NZ=1
 
 export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -421,8 +421,8 @@ nic_name="xxx"
 local_ip="xx.xx.xx.xx"
 node0_ip="xx.xx.xx.xx"
 
-export VLLM_ASCEND_ENABLE_MLAPO=1 # 开启MLAPO
-export VLLM_ASCEND_ENABLE_NZ=1	  # 开启量化
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_ENABLE_NZ=1
 
 export HCCL_OP_EXPANSION_MODE="AIV"
 
