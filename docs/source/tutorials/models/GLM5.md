@@ -787,7 +787,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
+            --additional-config '{"enable_npugraph_ex": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -867,7 +867,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
+            --additional-config '{"enable_npugraph_ex": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -950,7 +950,7 @@ Before you start, please
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-            --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
+            --additional-config '{"enable_npugraph_ex": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -1031,7 +1031,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
+             --additional-config '{"enable_npugraph_ex": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1112,7 +1112,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
+             --additional-config '{"enable_npugraph_ex": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1193,7 +1193,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"enable_npugraph_ex": true, "fuse_qknorm_rope": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
+             --additional-config '{"enable_npugraph_ex": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable" : true}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
