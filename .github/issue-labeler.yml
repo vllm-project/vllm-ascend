@@ -1,4 +1,3 @@
-# Add/remove 'critical' label if issue contains the words 'urgent' or 'critical'
 core-features:
   - '/((pd|(prefill[- ]?decode))\s+disaggregation|kv cache pool|aclgraph|async scheduler|cpu binding|quantization)/i'
 pd-disaggregation:
