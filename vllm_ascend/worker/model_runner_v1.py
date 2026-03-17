@@ -117,6 +117,7 @@ from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.utils import (
+    calc_split_factor,
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
@@ -758,11 +759,11 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.copy_to_gpu()
 
         self.seq_lens.np[:num_reqs] = self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
+        self.seq_lens.cpu[num_reqs:].fill_(0)
         self.seq_lens.copy_to_gpu()
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
-        self.seq_lens.gpu[num_reqs:].fill_(0)
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens, cu_num_tokens)
@@ -2722,9 +2723,16 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
-                        total_dim = k_dim + v_dim
-                        k_tensor_split_factor = total_dim / k_dim
-                        v_tensor_split_factor = total_dim / v_dim
+                        kv_head_dim_list = [
+                            k_dim,
+                            v_dim,
+                        ]
+                        if self.is_kv_consumer and self.vllm_config.quant_config is not None:
+                            k_tensor_split_factor, v_tensor_split_factor = (
+                                self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
+                            )
+                        else:
+                            k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
 
                     k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                     v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
@@ -2905,8 +2913,13 @@ class NPUModelRunner(GPUModelRunner):
                             num_kv_heads,
                             v_dim,
                         ]
-                    k_cache = raw_k_tensor.view(current_kv_cache_spec.dtype).view(k_shape)
-                    v_cache = raw_v_tensor.view(current_kv_cache_spec.dtype).view(v_shape)
+                    k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
+                    if self.is_kv_consumer and self.vllm_config.quant_config is not None:
+                        k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
+                            layer_name, current_kv_cache_spec.dtype, self.model_config
+                        )
+                    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
+                    v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
 
                     if self.use_sparse:
                         dsa_k_cache_shape = (
@@ -3223,12 +3236,17 @@ class NPUModelRunner(GPUModelRunner):
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     assert isinstance(spec, MLAAttentionSpec)
                     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    if getattr(attn_module.impl, "fa_quant_layer", False):
+                        head_size = attn_module.head_size + attn_module.qk_rope_head_dim
+                        dtype, cache_dtype_str = attn_module.impl.dtype, None
+                    else:
+                        head_size, dtype, cache_dtype_str = spec.head_size, spec.dtype, spec.cache_dtype_str
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=spec.block_size,
                         num_kv_heads=spec.num_kv_heads,
-                        head_size=spec.head_size,
-                        dtype=spec.dtype,
-                        cache_dtype_str=spec.cache_dtype_str,
+                        head_size=head_size,
+                        dtype=dtype,
+                        cache_dtype_str=cache_dtype_str,
                     )
 
             elif isinstance(attn_module, MambaBase):

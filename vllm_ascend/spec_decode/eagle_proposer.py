@@ -217,6 +217,8 @@ class SpecDecodeBaseProposer(EagleProposer):
                 self.model.config.image_token_index = model.config.image_token_id
             elif self.get_model_name(model) == "PixtralForConditionalGeneration":
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
+            elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
+                self.model.config.image_token_index = model.config.media_placeholder_token_id
             else:
                 self.model.config.image_token_index = model.config.image_token_index
             target_language_model = model.get_language_model()
@@ -559,6 +561,8 @@ class SpecDecodeBaseProposer(EagleProposer):
                 common_attn_metadata.num_reqs = num_reqs_padded
                 common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
                 common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
+                common_attn_metadata.seq_lens = self.runner.seq_lens.gpu[:num_reqs_padded]
+                common_attn_metadata.seq_lens_cpu = self.runner.seq_lens.cpu[:num_reqs_padded]
         else:
             num_input_tokens = num_tokens
 
