@@ -43,8 +43,7 @@ class MiniMaxCrossHeadQKNormRopePattern(BasePattern):
       q, k, v, qk_var = minimax_qkv_crosshead_norm_rope(...)
     """
 
-    def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads,
-                 rotary_dim, eps=1e-6):
+    def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, rotary_dim, eps=1e-6):
         super().__init__(vllm_config, eps)
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -56,14 +55,10 @@ class MiniMaxCrossHeadQKNormRopePattern(BasePattern):
     def get_inputs(self):
         T = 5
         max_position_embeddings = 16384
-        qkv = torch.empty(T, self.q_size + 2 * self.kv_size,
-                          dtype=torch.bfloat16, device="npu")
-        q_weight = torch.empty(self.q_size, dtype=torch.bfloat16,
-                               device="npu")
-        k_weight = torch.empty(self.kv_size, dtype=torch.bfloat16,
-                               device="npu")
-        cos_sin_cache = torch.empty(max_position_embeddings, self.rotary_dim,
-                                    dtype=torch.bfloat16, device="npu")
+        qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
+        q_weight = torch.empty(self.q_size, dtype=torch.bfloat16, device="npu")
+        k_weight = torch.empty(self.kv_size, dtype=torch.bfloat16, device="npu")
+        cos_sin_cache = torch.empty(max_position_embeddings, self.rotary_dim, dtype=torch.bfloat16, device="npu")
         positions = torch.ones(T, dtype=torch.int64, device="npu")
         return [qkv, q_weight, k_weight, cos_sin_cache, positions]
 
@@ -75,20 +70,17 @@ class MiniMaxCrossHeadQKNormRopePattern(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            q, k, v = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q = q.contiguous()
             k = k.contiguous()
 
             # Cross-head RMSNorm (flat, not reshaped per-head)
-            q_norm_out, _ = torch.ops.npu.npu_rms_norm(
-                q, q_weight, self.eps)
-            k_norm_out, _ = torch.ops.npu.npu_rms_norm(
-                k, k_weight, self.eps)
+            q_norm_out, _ = torch.ops.npu.npu_rms_norm(q, q_weight, self.eps)
+            k_norm_out, _ = torch.ops.npu.npu_rms_norm(k, k_weight, self.eps)
 
             q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
-                positions, q_norm_out, k_norm_out, cos_sin_cache,
-                self.head_dim, self.rotary_dim, True)
+                positions, q_norm_out, k_norm_out, cos_sin_cache, self.head_dim, self.rotary_dim, True
+            )
 
             return q_rope, k_rope, v
 
@@ -102,19 +94,18 @@ class MiniMaxCrossHeadQKNormRopePattern(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            q, k, v, qk_var = \
-                torch.ops.vllm.minimax_qkv_crosshead_norm_rope(
-                    qkv=qkv,
-                    cos_sin_cache=cos_sin_cache,
-                    positions=positions,
-                    q_weight=q_weight,
-                    k_weight=k_weight,
-                    q_hidden_size=self.q_size,
-                    kv_hidden_size=self.kv_size,
-                    head_dim=self.head_dim,
-                    eps=self.eps,
-                    rotary_dim=self.rotary_dim,
-                )
+            q, k, v, qk_var = torch.ops.vllm.minimax_qkv_crosshead_norm_rope(
+                qkv=qkv,
+                cos_sin_cache=cos_sin_cache,
+                positions=positions,
+                q_weight=q_weight,
+                k_weight=k_weight,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+                head_dim=self.head_dim,
+                eps=self.eps,
+                rotary_dim=self.rotary_dim,
+            )
             return q, k, v
 
         return replacement
@@ -154,8 +145,7 @@ class MiniMaxCrossHeadQKNormRopeTPPattern(BasePattern):
       k = k * (rsqrt(qk_reduced[:,1] + eps) / rsqrt(qk_var[:,1] + eps)).to(dtype)
     """
 
-    def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads,
-                 rotary_dim, tp_world, eps=1e-6):
+    def __init__(self, vllm_config, head_dim, num_heads, num_kv_heads, rotary_dim, tp_world, eps=1e-6):
         super().__init__(vllm_config, eps)
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -168,14 +158,10 @@ class MiniMaxCrossHeadQKNormRopeTPPattern(BasePattern):
     def get_inputs(self):
         T = 5
         max_position_embeddings = 16384
-        qkv = torch.empty(T, self.q_size + 2 * self.kv_size,
-                          dtype=torch.bfloat16, device="npu")
-        q_weight = torch.empty(self.q_size, dtype=torch.bfloat16,
-                               device="npu")
-        k_weight = torch.empty(self.kv_size, dtype=torch.bfloat16,
-                               device="npu")
-        cos_sin_cache = torch.empty(max_position_embeddings, self.rotary_dim,
-                                    dtype=torch.bfloat16, device="npu")
+        qkv = torch.empty(T, self.q_size + 2 * self.kv_size, dtype=torch.bfloat16, device="npu")
+        q_weight = torch.empty(self.q_size, dtype=torch.bfloat16, device="npu")
+        k_weight = torch.empty(self.kv_size, dtype=torch.bfloat16, device="npu")
+        cos_sin_cache = torch.empty(max_position_embeddings, self.rotary_dim, dtype=torch.bfloat16, device="npu")
         positions = torch.ones(T, dtype=torch.int64, device="npu")
         return [qkv, q_weight, k_weight, cos_sin_cache, positions]
 
@@ -190,15 +176,12 @@ class MiniMaxCrossHeadQKNormRopeTPPattern(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            q, k, v = qkv.split(
-                [self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q = q.contiguous()
             k = k.contiguous()
 
-            q_norm_out, q_inv_rms = torch.ops.npu.npu_rms_norm(
-                q, q_weight, eps)
-            k_norm_out, k_inv_rms = torch.ops.npu.npu_rms_norm(
-                k, k_weight, eps)
+            q_norm_out, q_inv_rms = torch.ops.npu.npu_rms_norm(q, q_weight, eps)
+            k_norm_out, k_inv_rms = torch.ops.npu.npu_rms_norm(k, k_weight, eps)
 
             # TP correction
             q_local_inv_rms = q_inv_rms.to(torch.float32)
@@ -226,8 +209,8 @@ class MiniMaxCrossHeadQKNormRopeTPPattern(BasePattern):
                 k_global_rstd / k_local_rstd).to(k_norm_out.dtype)
 
             q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
-                positions, q_corrected, k_corrected, cos_sin_cache,
-                self.head_dim, self.rotary_dim, True)
+                positions, q_corrected, k_corrected, cos_sin_cache, self.head_dim, self.rotary_dim, True
+            )
 
             return q_rope, k_rope, v
 
@@ -244,19 +227,18 @@ class MiniMaxCrossHeadQKNormRopeTPPattern(BasePattern):
             cos_sin_cache: torch.Tensor,
             positions: torch.Tensor,
         ):
-            q, k, v, qk_var = \
-                torch.ops.vllm.minimax_qkv_crosshead_norm_rope(
-                    qkv=qkv,
-                    cos_sin_cache=cos_sin_cache,
-                    positions=positions,
-                    q_weight=q_weight,
-                    k_weight=k_weight,
-                    q_hidden_size=self.q_size,
-                    kv_hidden_size=self.kv_size,
-                    head_dim=self.head_dim,
-                    eps=eps,
-                    rotary_dim=self.rotary_dim,
-                )
+            q, k, v, qk_var = torch.ops.vllm.minimax_qkv_crosshead_norm_rope(
+                qkv=qkv,
+                cos_sin_cache=cos_sin_cache,
+                positions=positions,
+                q_weight=q_weight,
+                k_weight=k_weight,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+                head_dim=self.head_dim,
+                eps=eps,
+                rotary_dim=self.rotary_dim,
+            )
 
             # TP correction after fused kernel
             # (valid because RoPE is linear: RoPE(q*s) = s*RoPE(q))
