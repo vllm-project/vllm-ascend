@@ -831,6 +831,7 @@ class NPUModelRunner(GPUModelRunner):
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
             # For chunked prefills, use -1 as mask rather than 0, as guided
             # decoding may rollback speculative tokens.
+            new_schedule_reqs = [x.req_id for x in scheduler_output.scheduled_new_reqs]
             num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
             for (
                 req_id,
@@ -838,13 +839,16 @@ class NPUModelRunner(GPUModelRunner):
             ) in scheduler_output.scheduled_spec_decode_tokens.items():
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 num_draft_tokens[req_idx] = len(draft_token_ids)
-                num_decode_draft_tokens[req_idx] = (
-                    len(draft_token_ids)
-                    if (
-                        self.input_batch.num_computed_tokens_cpu[req_idx] >= self.input_batch.num_prompt_tokens[req_idx]
+                if req_id in new_schedule_reqs:
+                    num_decode_draft_tokens[req_idx] = len(draft_token_ids)
+                else:
+                    num_decode_draft_tokens[req_idx] = (
+                        len(draft_token_ids)
+                        if (
+                            self.input_batch.num_computed_tokens_cpu[req_idx] >= self.input_batch.num_prompt_tokens[req_idx]
+                        )
+                        else -1
                     )
-                    else -1
-                )
 
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens,
