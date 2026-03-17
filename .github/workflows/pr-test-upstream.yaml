@@ -49,8 +49,9 @@ jobs:
         runs-on: linux-aarch64-a2b3-1
         strategy:
           fail-fast: false
+          max-parallel: 1
           matrix:
-            part: [0]
+            part: [0, 1, 2]
             vllm: [v0.17.0]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
