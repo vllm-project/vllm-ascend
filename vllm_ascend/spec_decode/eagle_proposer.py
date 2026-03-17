@@ -1615,7 +1615,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return last_hidden_states, positions, hidden_states
 
 
-class AscendEagleProposer(SpecDecodeBaseProposer):
+class AscendEagleProposer(AscendSpecDecodeBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
