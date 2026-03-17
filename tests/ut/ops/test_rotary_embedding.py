@@ -45,7 +45,7 @@ def patch_init_side_effects():
     with (
         patch("vllm_ascend.ops.rotary_embedding._record_cos_sin_cache"),
         patch("vllm_ascend.ops.rotary_embedding._record_cos_and_sin_cache_interleaved"),
-        patch("vllm.config.get_current_vllm_config") as mock_cfg,
+        patch("vllm_ascend.ops.rotary_embedding.get_current_vllm_config") as mock_cfg,
     ):
         # Default: speculative_config is None → use_mtp = False
         mock_cfg.return_value.speculative_config = None
