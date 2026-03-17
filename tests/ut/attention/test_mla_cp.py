@@ -792,7 +792,7 @@ class TestAscendMLAImpl(TestBase):
             self.impl.pcp_size = 1
             assert out.shape == (NUM_TOKENS, num_heads, self.impl.kv_lora_rank)
 
-    @patch('torch_npu.atb.npu_ring_mla')
+    @patch('torch.ops.npu.npu_fused_infer_attention_score')
     def test_attention_with_mask_and_nomask_with_dcp_pcp(
             self, mock_npu_ring_mla):
         num_heads = self.impl.num_heads
@@ -909,7 +909,7 @@ class TestAscendMLAImpl(TestBase):
             self.impl.dcp_size = 1
             self.impl.pcp_size = 1
 
-    @patch('torch_npu.atb.npu_ring_mla')
+    @patch('torch.ops.npu.npu_fused_infer_attention_score')
     def test_forward_prefill_cp_with_dcp_pcp(self, mock_npu_ring_mla):
 
         def mock_attention_with_nomask_and_mask(
@@ -917,7 +917,8 @@ class TestAscendMLAImpl(TestBase):
                 k_pe: torch.Tensor, value: torch.Tensor,
                 kv_mask_idx: torch.Tensor, kv_nomask_idx: torch.Tensor,
                 attn_mask_seqlens: torch.Tensor,
-                attn_nomask_seqlens: torch.Tensor, mask: torch.Tensor):
+                attn_nomask_seqlens: torch.Tensor, mask: torch.Tensor,
+                attn_metadata):
             mock_output = torch.randn(q_nope.shape[0],
                                       self.impl.num_heads,
                                       self.impl.v_head_dim,
