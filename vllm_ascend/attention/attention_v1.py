@@ -377,6 +377,47 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
         self.sinks = sinks
+        self._c8_block_arange_cache: dict[tuple[str, int], torch.Tensor] = {}
+        self._c8_dense_buffer_cache: dict[tuple[str, str, str], torch.Tensor] = {}
+        self._c8_seq_lens_tensor_cache: dict[tuple[str, tuple[int, ...]], torch.Tensor] = {}
+
+    def _get_c8_block_arange(self, max_num_blocks: int, device: torch.device) -> torch.Tensor:
+        key = (str(device), max_num_blocks)
+        cached = self._c8_block_arange_cache.get(key)
+        if cached is None:
+            cached = torch.arange(max_num_blocks, device=device)
+            self._c8_block_arange_cache[key] = cached
+        return cached
+
+    def _get_c8_dense_buffer(
+        self,
+        name: str,
+        num_tokens: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        key = (name, str(device), str(dtype))
+        buf = self._c8_dense_buffer_cache.get(key)
+        if buf is None or buf.shape[0] < num_tokens:
+            buf = torch.empty(
+                (num_tokens, self.num_kv_heads, self.head_size),
+                dtype=dtype,
+                device=device,
+            )
+            self._c8_dense_buffer_cache[key] = buf
+        return buf[:num_tokens]
+
+    def _get_c8_seq_lens_tensor(
+        self,
+        seq_lens: list[int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        key = (str(device), tuple(seq_lens))
+        cached = self._c8_seq_lens_tensor_cache.get(key)
+        if cached is None:
+            cached = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+            self._c8_seq_lens_tensor_cache[key] = cached
+        return cached
 
     @staticmethod
     def update_graph_params(
@@ -389,7 +430,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         draft_attn_metadatas=None,
     ):
         if using_paged_attention(num_tokens, vllm_config):
-            # Paged Attention update logic
             if forward_context.is_draft_model:
                 graph_params = get_draft_graph_params()
             else:
@@ -441,7 +481,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     torch.npu.graph_task_update_end(update_stream)
                     event.record(update_stream)
         else:
-            # FIA update logic
             if forward_context.is_draft_model:
                 graph_params = get_draft_graph_params()
                 attn_metadata = draft_attn_metadatas
@@ -1006,20 +1045,120 @@ class AscendAttentionBackendImpl(AttentionImpl):
             int8  =  round(float / scale + offset)
             float = (int8  - offset) * scale
         """
-        block_size = key.shape[1]
-        gathered_key: list[torch.Tensor] = []
-        gathered_val: list[torch.Tensor] = []
-        for i, seq_len in enumerate(seq_lens):
-            num_blocks = (seq_len + block_size - 1) // block_size
-            bids = block_table[i, :num_blocks]
-            k = key[bids].reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
-            v = value[bids].reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
-            gathered_key.append(k)
-            gathered_val.append(v)
+        total_kv_tokens = int(sum(seq_lens))
+        dense_k: torch.Tensor
+        dense_v: torch.Tensor
 
-        # [total_kv_tokens, num_kv_heads, head_dim] INT8
-        dense_k = torch.cat(gathered_key, dim=0)
-        dense_v = torch.cat(gathered_val, dim=0)
+        def _legacy_gather_int8() -> tuple[torch.Tensor, torch.Tensor]:
+            block_size = key.shape[1]
+            gathered_key: list[torch.Tensor] = []
+            gathered_val: list[torch.Tensor] = []
+            for i, seq_len in enumerate(seq_lens):
+                num_blocks = (seq_len + block_size - 1) // block_size
+                bids = block_table[i, :num_blocks]
+                k = key[bids].reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
+                v = value[bids].reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
+                gathered_key.append(k)
+                gathered_val.append(v)
+            return torch.cat(gathered_key, dim=0), torch.cat(gathered_val, dim=0)
+
+        if key.dtype == torch.int8 or value.dtype == torch.int8:
+            # C8 INT8 KV: gather + dequant. Ultra-fast path for uniform decode (1 tok/seq).
+            try:
+                block_size = key.shape[1]
+                num_seqs = len(seq_lens)
+                # Ultra-fast: 1 token per seq, 1 block each. Direct index, no intermediates.
+                if total_kv_tokens == num_seqs and block_table.shape[1] >= 1:
+                    bids = block_table[:num_seqs, 0]
+                    dense_k = self._get_c8_dense_buffer("k", total_kv_tokens, key.dtype, key.device)
+                    dense_v = self._get_c8_dense_buffer("v", total_kv_tokens, value.dtype, value.device)
+                    dense_k.copy_(key[bids, 0, :].view(num_seqs, self.num_kv_heads, self.head_size))
+                    dense_v.copy_(value[bids, 0, :].view(num_seqs, self.num_kv_heads, self.head_size))
+                else:
+                    # General path: batched gather + copy.
+                    seq_lens_tensor = self._get_c8_seq_lens_tensor(seq_lens, block_table.device)
+                    num_blocks_per_seq = (seq_lens_tensor + block_size - 1) // block_size
+                    max_num_blocks = int(num_blocks_per_seq.max().item())
+                    active_tables = block_table[:, :max_num_blocks]
+                    first_num_blocks = int(num_blocks_per_seq[0].item())
+                    if bool(torch.all(num_blocks_per_seq == first_num_blocks)):
+                        flat_bids = active_tables[:, :first_num_blocks].reshape(-1)
+                    else:
+                        block_mask = self._get_c8_block_arange(max_num_blocks, block_table.device).unsqueeze(0) < (
+                            num_blocks_per_seq.unsqueeze(1)
+                        )
+                        flat_bids = active_tables[block_mask]
+                    gathered_key_all = key[flat_bids].reshape(-1, self.num_kv_heads, self.head_size)
+                    gathered_val_all = value[flat_bids].reshape(-1, self.num_kv_heads, self.head_size)
+                    dense_k = self._get_c8_dense_buffer("k", total_kv_tokens, key.dtype, key.device)
+                    dense_v = self._get_c8_dense_buffer("v", total_kv_tokens, value.dtype, value.device)
+                    if max_num_blocks == 1 and total_kv_tokens == num_seqs:
+                        dense_k.copy_(gathered_key_all[::block_size])
+                        dense_v.copy_(gathered_val_all[::block_size])
+                    else:
+                        block_cursor = 0
+                        token_cursor = 0
+                        for i in range(num_seqs):
+                            valid_tokens = seq_lens[i]
+                            if valid_tokens == 0:
+                                continue
+                            num_blocks = int(num_blocks_per_seq[i].item())
+                            token_start = block_cursor * block_size
+                            token_end = token_start + valid_tokens
+                            out_end = token_cursor + valid_tokens
+                            dense_k[token_cursor:out_end] = gathered_key_all[token_start:token_end]
+                            dense_v[token_cursor:out_end] = gathered_val_all[token_start:token_end]
+                            block_cursor += num_blocks
+                            token_cursor = out_end
+            except Exception:
+                dense_k, dense_v = _legacy_gather_int8()
+        else:
+            # Fast path: use paged cache load to avoid Python-side gather/cat.
+            # Fall back to the legacy implementation if op constraints are not met.
+            try:
+                # atb paged_cache_load expects cumulative sequence lengths.
+                cu_seq_lens = torch.empty(
+                    (len(seq_lens) + 1,), dtype=torch.int32, device=key.device
+                )
+                cu_seq_lens[0] = 0
+                cu_seq_lens[1:] = torch.tensor(
+                    seq_lens, dtype=torch.int32, device=key.device
+                ).cumsum(dim=0)
+                # Decode path uses per-request local block tables from slot 0.
+                seq_starts = torch.zeros(
+                    (len(seq_lens),), dtype=torch.int32, device=key.device
+                )
+                dense_k = torch.empty(
+                    (total_kv_tokens, self.num_kv_heads, self.head_size),
+                    dtype=key.dtype,
+                    device=key.device,
+                )
+                dense_v = torch.empty(
+                    (total_kv_tokens, self.num_kv_heads, self.head_size),
+                    dtype=value.dtype,
+                    device=value.device,
+                )
+                key_for_load = key
+                value_for_load = value
+                if key.dim() == 3:
+                    key_for_load = key.view(
+                        key.shape[0], key.shape[1], self.num_kv_heads, self.head_size
+                    )
+                if value.dim() == 3:
+                    value_for_load = value.view(
+                        value.shape[0], value.shape[1], self.num_kv_heads, self.head_size
+                    )
+                torch_npu.atb.npu_paged_cache_load(
+                    key_for_load,
+                    value_for_load,
+                    block_table.to(dtype=torch.int32),
+                    cu_seq_lens,
+                    seq_starts=seq_starts,
+                    key=dense_k,
+                    value=dense_v,
+                )
+            except Exception:
+                dense_k, dense_v = _legacy_gather_int8()
 
         # scale/offset shape: [1, num_kv_heads, head_dim] float32
         # scale is the dequantization scale: x = (q - offset) * scale
@@ -1077,8 +1216,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         fused INT8 dequantization + attention internally.  The dequant scales
         are passed as flat 1-D tensors (TP-sharded, on NPU) via _prepare_c8_scales.
         """
-        # Ensure scales are prepared on the correct device.  _quantize_kv_to_int8
-        # normally does this, but key/value may be None on certain decode steps.
         self._prepare_c8_scales(layer, query.device)
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata
@@ -1093,9 +1230,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key = key[:num_tokens]
             value = value[:num_tokens]
 
-        # The current CANN version does not support INT8 K/V in FIA V2
-        # (TransposeKvCacheByBlock fails for INT8 blockIDs; CheckFAIQKV rejects
-        # mixed dtypes). Dequantize INT8 K/V to float16 before calling FIA V2.
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            actual_seq_qlen = (
+                torch.tensor(
+                    [1] * len(attn_metadata.seq_lens_list), dtype=torch.int32
+                )
+                .cumsum(dim=0)
+            )
+
         if key.dtype == torch.int8:
             if block_table is not None:
                 # Paged INT8 KV cache: gather blocks then dequantize.
@@ -1120,15 +1263,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                        layer._c8_k_scale).to(query.dtype)
                 value = ((value.float() - layer._c8_v_offset) *
                          layer._c8_v_scale).to(query.dtype)
-
-        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
-        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            actual_seq_qlen = (
-                torch.tensor(
-                    [1] * len(attn_metadata.seq_lens_list), dtype=torch.int32
-                )
-                .cumsum(dim=0)
-            )
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
             query,
@@ -1175,7 +1309,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
 

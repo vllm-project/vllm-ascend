@@ -325,6 +325,7 @@ class NPUModelRunner(GPUModelRunner):
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
 
         self.use_aclgraph = self._use_aclgraph()
+        self._disable_full_cudagraph_for_c8 = False
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
@@ -1725,6 +1726,7 @@ class NPUModelRunner(GPUModelRunner):
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
             and not self.use_sparse
+            and isinstance(self.model, ACLGraphWrapper)
         ):
             assert positions is not None
             update_full_graph_params(
@@ -1844,7 +1846,9 @@ class NPUModelRunner(GPUModelRunner):
             if not force_eager
             else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
         )
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
+        c8_decode_batch = self._disable_full_cudagraph_for_c8 and max_num_scheduled_tokens <= self.decode_threshold
+        disable_full = use_cascade_attn or has_encoder_output or c8_decode_batch
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, disable_full)
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
@@ -2183,7 +2187,8 @@ class NPUModelRunner(GPUModelRunner):
             max_num_scheduled_tokens=max_query_len,
             use_cascade_attn=False,
             allow_microbatching=allow_microbatching,
-            force_eager=is_profile or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+            force_eager=is_profile
+            or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
             # `force_uniform_decode` is used for cudagraph capture; because for
             # capturing mixed prefill-decode batches, we sometimes use
             # num_tokens == num_reqs which looks like a uniform decode batch to the
@@ -2205,6 +2210,8 @@ class NPUModelRunner(GPUModelRunner):
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
         else:
+            if self._disable_full_cudagraph_for_c8 and cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                cudagraph_runtime_mode = _cudagraph_mode
             assert cudagraph_runtime_mode == _cudagraph_mode, (
                 f"Cudagraph runtime mode mismatch in dummy_run. "
                 f"Expected {_cudagraph_mode}, but got {cudagraph_runtime_mode}."
@@ -2417,6 +2424,11 @@ class NPUModelRunner(GPUModelRunner):
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            has_c8_kv_cache = any(
+                getattr(module, "c8_kv_cache_enabled", False)
+                for module in self.model.modules()
+            )
+            self._disable_full_cudagraph_for_c8 = has_c8_kv_cache
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
 
