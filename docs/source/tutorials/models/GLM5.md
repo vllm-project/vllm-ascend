@@ -17,8 +17,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 ### Model Weight
 
 - `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
-- `GLM-5-w4a8`(Quantized version without MTP quant): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
-- `GLM-5-w4a8`(Quantized version with MTP quant): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8-mtp-QuaRot).
+- `GLM-5-w4a8`: [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
+- `GLM-5-w8a8`: [Download model weight](https://ai.gitcode.com/Eco-Tech/GLM-5-w8a8/tree/main).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantify the model naively.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
