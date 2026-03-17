@@ -358,7 +358,7 @@ def triton_split_qkv_rmsnorm_mrope(
 # normalized_values_tmp: x * num_q_heads * head_size * 2
 # x: x * num_q_heads * rope_dim * 2 +  x * num_q_heads * rope_dim
 
-    batch_size_per_iter_per_vec = 70*1024/qkv.element_size()//(max((num_q_heads+num_kv_heads)*head_size, num_q_heads*rope_dim*3) + rope_dim*7 + (
+    batch_size_per_iter_per_vec = 80*1024/qkv.element_size()//(max((num_q_heads+num_kv_heads)*head_size, num_q_heads*rope_dim*3) + rope_dim*7 + (
             num_q_heads*head_size*4 + num_kv_heads*head_size*2) + num_q_heads*rope_dim*2)
 
     # batch_size_per_iter_per_vec = min(batch_size_per_iter_per_vec, batch_size_per_vec)
@@ -390,7 +390,7 @@ def triton_split_qkv_rmsnorm_mrope(
                            dtype=qkv.dtype)
     
     v_batch_size_per_iter_per_vec = 85 * 1024 / torch.bfloat16.itemsize // (kv_size + 1)
-    v_batch_size_per_iter_per_vec = min(v_batch_size_per_iter_per_vec, batch_size_per_vec)
+    # v_batch_size_per_iter_per_vec = min(v_batch_size_per_iter_per_vec, batch_size_per_vec)
     v_iter_num_per_vec = triton.cdiv(batch_size_per_vec, v_batch_size_per_iter_per_vec)
 
     grid = (min(core_num,batch_size), 1)
