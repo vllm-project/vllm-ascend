@@ -25,6 +25,7 @@ import torch
 import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.logger import logger
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 
@@ -241,16 +242,14 @@ class NPUModelRunner310(NPUModelRunner):
                     assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    dtype = kv_cache_spec.dtype
-                    tensor_element_size = torch.tensor([], dtype=dtype).element_size()
-                    tensor = torch.zeros(kv_cache_tensor.size // tensor_element_size, dtype=dtype, device=self.device)
+                    tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         target_shape = (num_blocks, *shape)
-                        target_idx += math.prod(target_shape)
-                        tensor = tensor[start_idx:target_idx].view(target_shape)
+                        target_idx += math.prod(target_shape) * get_dtype_size(dtype)
+                        tensor = tensor[start_idx:target_idx].view(dtype).view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
                     for layer_name_inner in kv_cache_tensor.shared_by:
@@ -277,6 +276,7 @@ class NPUModelRunner310(NPUModelRunner):
                         )
                     k_shape = kv_cache_shape[1:]
                     v_shape = k_shape
+                    dtype = kv_cache_spec.dtype
                     k_cache = torch_npu.empty_with_format(
                         size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
                     )
