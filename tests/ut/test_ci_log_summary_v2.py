@@ -48,7 +48,7 @@ def test_v2_is_independent_from_ci_log_summary_module():
     assert "ci_log_summary_base" not in source
 
 
-def test_v2_falls_back_to_pytest_failure_block():
+def test_v2_uses_summary_error_with_failure_block_context():
     module = load_ci_log_summary_v2_module()
     log_text = """
 2026-03-03T15:41:37Z pytest -sv tests/e2e/test_auto_fit.py
@@ -67,6 +67,7 @@ FAILED tests/e2e/test_auto_fit.py::test_auto_fit_max_model_len - AttributeError:
 
     assert result["failed_test_cases"] == ["tests/e2e/test_auto_fit.py::test_auto_fit_max_model_len"]
     assert result["code_bugs"][0]["error_type"] == "AttributeError"
+    assert result["code_bugs"][0]["source"] == "case_summary_payload"
     assert result["code_bugs"][0]["context"][0].startswith("_________________________ test_auto_fit_max_model_len")
 
 
@@ -86,6 +87,63 @@ def test_v2_falls_back_to_summary_payload_for_failed_case():
     assert result["code_bugs"][0]["context"] == [
         'FAILED tests/e2e/test_case.py::test_case - assert "worker crashed with TypeError: backend missing"'
     ]
+
+
+def test_v2_extracts_timeout_expired_from_embedded_summary_payload():
+    module = load_ci_log_summary_v2_module()
+    log_text = """
+2026-03-03T15:41:37Z pytest -sv /workspace/tests/e2e/test_case.py::test_case
+2026-03-03T15:41:45Z =========================== short test summary info ============================
+2026-03-03T15:41:46Z FAILED tests/e2e/test_case.py::test_case - assert "worker crashed with subprocess.TimeoutExpired: command timed out after 300 seconds"
+""".strip()
+
+    result = module.analyze_log(log_text)
+
+    assert result["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
+    assert result["code_bugs"][0]["error_type"] == "subprocess.TimeoutExpired"
+    assert result["code_bugs"][0]["error_message"] == "command timed out after 300 seconds"
+    assert result["code_bugs"][0]["source"] == "case_summary_payload"
+
+
+def test_v2_matches_parameterized_failure_block_header_for_summary_context():
+    module = load_ci_log_summary_v2_module()
+    log_text = """
+2026-03-03T15:41:37Z [1/1] START  tests/e2e/compile/test_case.py
+2026-03-03T15:41:45Z =================================== FAILURES ===================================
+2026-03-03T15:41:46Z _____________ test_case[True-1e-05-257-64-dtype0] ______________
+2026-03-03T15:41:47Z >       build_config()
+2026-03-03T15:41:48Z E       AttributeError: 'CompilationConfig' object has no attribute 'compile_ranges_split_points'
+2026-03-03T15:41:49Z =================================== short test summary info ===================================
+2026-03-03T15:41:50Z FAILED tests/e2e/compile/test_case.py::test_case[True-1e-05-257-64-dtype0] - AttributeError: 'CompilationConfig' object has no attribute 'compile_ranges_split_points'
+2026-03-03T15:41:51Z [1/1] FAILED (exit code 1)  tests/e2e/compile/test_case.py  (30s)
+""".strip()
+
+    result = module.analyze_log(log_text)
+
+    assert result["code_bugs"][0]["source"] == "case_summary_payload"
+    assert result["code_bugs"][0]["context"][0].startswith(
+        "_____________ test_case[True-1e-05-257-64-dtype0] ______________"
+    )
+    assert any("AttributeError:" in line for line in result["code_bugs"][0]["context"])
+
+
+def test_v2_does_not_treat_type_ignore_as_traceback_error():
+    module = load_ci_log_summary_v2_module()
+    log_text = """
+2026-03-03T15:41:37Z [1/1] START  tests/e2e/test_case.py::test_case
+2026-03-03T15:41:40Z Traceback (most recent call last):
+2026-03-03T15:41:41Z   File "/tmp/sample.py", line 1, in <module>
+2026-03-03T15:41:42Z     self.worker.init_device()  # type: ignore
+2026-03-03T15:41:43Z TypeError: backend missing
+2026-03-03T15:41:45Z =========================== short test summary info ============================
+2026-03-03T15:41:46Z FAILED tests/e2e/test_case.py::test_case - RuntimeError: Engine core initialization failed. See root cause above.
+""".strip()
+
+    result = module.analyze_log(log_text)
+
+    assert result["code_bugs"][0]["error_type"] == "TypeError"
+    assert result["code_bugs"][0]["error_message"] == "backend missing"
+    assert result["code_bugs"][0]["context"][-1] == "TypeError: backend missing"
 
 
 def test_v2_drops_errors_when_no_short_summary_exists():
@@ -137,6 +195,53 @@ def test_v2_falls_back_to_summary_exception_when_no_core_error_exists():
     assert result["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
     assert result["code_bugs"][0]["error_type"] == "vllm.v1.engine.exceptions.EngineDeadError"
     assert result["code_bugs"][0]["source"] == "case_summary_payload"
+
+
+def test_v2_uses_failure_block_context_for_summary_timeout_expired():
+    module = load_ci_log_summary_v2_module()
+    log_text = """
+2026-03-03T15:41:37Z [1/1] START  tests/e2e/test_external_launcher.py
+2026-03-03T15:41:45Z =================================== FAILURES ===================================
+2026-03-03T15:41:46Z ______________ test_qwen3_external_launcher_with_sleepmode_level2 ______________
+2026-03-03T15:41:47Z def test_qwen3_external_launcher_with_sleepmode_level2():
+2026-03-03T15:41:48Z >           raise TimeoutExpired(cmd, timeout)
+2026-03-03T15:41:49Z E           subprocess.TimeoutExpired: Command '['python', 'offline_external_launcher.py']' timed out after 300 seconds
+2026-03-03T15:41:50Z /usr/local/python3.11.14/lib/python3.11/subprocess.py:1253: TimeoutExpired
+2026-03-03T15:41:51Z =========================== short test summary info ============================
+2026-03-03T15:41:52Z FAILED tests/e2e/test_external_launcher.py::test_qwen3_external_launcher_with_sleepmode_level2 - subprocess.TimeoutExpired: Command '['python', 'offline_external_launcher.py']' timed out after 300 seconds
+2026-03-03T15:41:53Z [1/1] FAILED (exit code 1)  tests/e2e/test_external_launcher.py  (300s)
+""".strip()
+
+    result = module.analyze_log(log_text)
+
+    assert result["failed_test_cases"] == [
+        "tests/e2e/test_external_launcher.py::test_qwen3_external_launcher_with_sleepmode_level2"
+    ]
+    assert result["code_bugs"][0]["error_type"] == "subprocess.TimeoutExpired"
+    assert result["code_bugs"][0]["source"] == "case_summary_payload"
+    assert result["code_bugs"][0]["context"][0].startswith(
+        "______________ test_qwen3_external_launcher_with_sleepmode_level2 ______________"
+    )
+    assert any("E           subprocess.TimeoutExpired:" in line for line in result["code_bugs"][0]["context"])
+
+
+def test_v2_uses_summary_payload_in_final_fallback_instead_of_unknown_failure():
+    module = load_ci_log_summary_v2_module()
+    log_text = """
+2026-03-03T15:41:37Z [1/1] START  tests/e2e/test_case.py::test_case
+2026-03-03T15:41:45Z =========================== short test summary info ============================
+2026-03-03T15:41:46Z FAILED tests/e2e/test_case.py::test_case - worker crashed before traceback was captured
+""".strip()
+
+    result = module.analyze_log(log_text)
+
+    assert result["failed_test_cases"] == ["tests/e2e/test_case.py::test_case"]
+    assert result["code_bugs"][0]["source"] == "case_summary_fallback"
+    assert result["code_bugs"][0]["error_type"] == "SummaryFailure"
+    assert result["code_bugs"][0]["error_message"] == "worker crashed before traceback was captured"
+    assert result["code_bugs"][0]["context"] == [
+        "FAILED tests/e2e/test_case.py::test_case - worker crashed before traceback was captured"
+    ]
 
 
 def test_v2_uses_test_session_starts_as_invocation_boundary():
