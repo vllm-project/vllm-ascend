@@ -23,7 +23,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
 - `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm do not support GLM4.6 mtp in October, so we do not provide mtp version. And last month, it supported, you can use the following quantization scheme to add mtp weights to Quantized weights.
-- `GLM-4.7-w8a8`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8/summary). We do not yet provide quantization for GLM4.7 mtp. If you need to use the mtp weights, please manually deploy them by following Step 3.5 and Step 4 in the `Method of Quantify`.
+- `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp-floatmtp/summary).
 - `Method of Quantify`: [quantization scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209). You can use these methods to quantify the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -91,7 +91,7 @@ export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve /weight/glm4.7_w8a8_with_float_mtp \
+vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --data-parallel-size 2 \
   --tensor-parallel-size 8 \
   --enable-expert-parallel \
@@ -104,7 +104,7 @@ vllm serve /weight/glm4.7_w8a8_with_float_mtp \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --speculative-config '{"num_speculative_tokens": 3, "model":"/weight/glm4.7_w8a8_with_float_mtp", "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'\
 ```
@@ -143,7 +143,7 @@ export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve /weight/glm4.7_w8a8_with_float_mtp \
+vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --host 0.0.0.0 \
   --port 8004 \
   --data-parallel-size 2 \
@@ -165,7 +165,7 @@ vllm serve /weight/glm4.7_w8a8_with_float_mtp \
   --reasoning-parser glm45 \
   --tool-call-parser glm47 \
   --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "model":"/weight/glm4.7_w8a8_with_float_mtp", "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
@@ -195,7 +195,7 @@ export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve /weight/glm4.7_w8a8_with_float_mtp \
+vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --host 0.0.0.0 \
   --port 8004 \
   --headless \
@@ -218,7 +218,7 @@ vllm serve /weight/glm4.7_w8a8_with_float_mtp \
   --reasoning-parser glm45 \
   --tool-call-parser glm47 \
   --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "model":"/weight/glm4.7_w8a8_with_float_mtp", "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
@@ -360,7 +360,7 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-        vllm serve /weight/glm4.7_w8a8_with_float_mtp \
+        vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -378,7 +378,7 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "model":"/weight/glm4.7_w8a8_with_float_mtp", "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
@@ -426,7 +426,7 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-        vllm serve /weight/glm4.7_w8a8_with_float_mtp \
+        vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -444,7 +444,7 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "model":"/weight/glm4.7_w8a8_with_float_mtp", "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
@@ -493,7 +493,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        vllm serve /weight/glm4.7_w8a8_with_float_mtp \
+        vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -511,7 +511,7 @@ Before you start, please
             --async-scheduling \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "model":"/weight/glm4.7_w8a8_with_float_mtp", "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -564,7 +564,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        vllm serve /weight/glm4.7_w8a8_with_float_mtp \
+        vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -582,7 +582,7 @@ Before you start, please
             --async-scheduling \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "model":"/weight/glm4.7_w8a8_with_float_mtp", "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
@@ -718,7 +718,7 @@ vllm bench serve \
   --prefix-repetition-num-prefixes 1 \
   --ignore-eos \
   --model glm \
-  --tokenizer /weight/glm4.7_w8a8_with_float_mtp \
+  --tokenizer Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --seed 1000 \
   --host 0.0.0.0 \
   --port 8000 \
