@@ -238,7 +238,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
         )
         num_experts_per_device = num_experts // ep_world_size
-        if num_experts_per_device <= 16:
+        if num_experts_per_device <= 16 and num_tokens <= mc2_tokens_capacity:
             moe_comm_type = MoECommType.MC2
         else:
             moe_comm_type = MoECommType.ALLGATHER
