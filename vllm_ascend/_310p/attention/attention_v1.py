@@ -34,6 +34,9 @@ from vllm_ascend.attention.attention_v1 import (
     AscendMetadata,
 )
 
+# ATB mask_type for full causal mask (MASK_TYPE_NORM)
+_MASK_TYPE_NORM = 1
+
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend310(AscendAttentionBackend):
@@ -86,6 +89,19 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     optimized for the Ascend 310P architecture.
     """
 
+    _use_v2: bool | None = None
+    # Shared mask builder instance, set on first pooling forward call.
+    _pooling_mask_builder: AttentionMaskBuilder310 | None = None
+
+    @classmethod
+    def _check_v2_available(cls) -> bool:
+        """Lazily detect whether _npu_flash_attention_v2 is available."""
+        if cls._use_v2 is None:
+            cls._use_v2 = (hasattr(torch_npu, 'atb')
+                           and hasattr(torch_npu.atb,
+                                       '_npu_flash_attention_v2'))
+        return cls._use_v2
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -96,22 +112,46 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     ) -> torch.Tensor:
         """Encoder (non-causal) attention for pooling/embedding models on 310P.
 
-        Uses _npu_flash_attention instead of npu_fusion_attention because
-        310P does not support internal format tensors with npu_fusion_attention.
+        When attn_mask is None (pooling with deferred mask), generates a
+        per-batch mask sized to the longest sequence. This avoids the ~2GB
+        upfront allocation of a full max_model_len mask.
+
+        Falls back to pre-allocated mask for non-pooling models.
         """
         seq_len = attn_metadata.seq_lens
         mask = attn_metadata.attn_mask
-        torch_npu._npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            mask=mask,
-            seq_len=seq_len,
-            scale_value=self.scale,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=output,
-        )
+
+        # For pooling models, mask is None — generate per-batch
+        if mask is None:
+            max_seq = int(seq_len.max().item())
+            if self._pooling_mask_builder is None:
+                AscendAttentionBackendImpl310._pooling_mask_builder = (
+                    AttentionMaskBuilder310(query.device,
+                                            AttentionMaskBuilder310.max_seqlen))
+            mask = self._pooling_mask_builder.get_pooling_mask(max_seq)
+
+        if self._check_v2_available():
+            torch_npu.atb._npu_flash_attention_v2(
+                query, key, value, seq_len,
+                mask=mask,
+                mask_type=_MASK_TYPE_NORM,
+                scale_value=self.scale,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=output,
+            )
+        else:
+            torch_npu._npu_flash_attention(
+                query=query,
+                key=key,
+                value=value,
+                mask=mask,
+                seq_len=seq_len,
+                scale_value=self.scale,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=output,
+            )
         return output
 
     def forward_paged_attention(
@@ -181,17 +221,28 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             seq_len[-1] += delta
 
         mask = attn_metadata.attn_mask
-        torch_npu._npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            mask=mask,
-            seq_len=seq_len,
-            scale_value=self.scale,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=output,
-        )
+        if self._check_v2_available():
+            torch_npu.atb._npu_flash_attention_v2(
+                query, key, value, seq_len,
+                mask=mask,
+                mask_type=_MASK_TYPE_NORM,
+                scale_value=self.scale,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=output,
+            )
+        else:
+            torch_npu._npu_flash_attention(
+                query=query,
+                key=key,
+                value=value,
+                mask=mask,
+                seq_len=seq_len,
+                scale_value=self.scale,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=output,
+            )
         return output
 
     def forward_chunked_prefill_310(self, query, attn_metadata, output):
