@@ -232,7 +232,7 @@ class NPUModelRunner310(NPUModelRunner):
             corresponding memory buffer.
         """
         # init kv cache tensors
-        kv_cache: dict[str, torch.Tensor | torch.Tensor | None | None] = {}
+        kv_cache: dict[str, list[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]] = {}
         # get kv cache spec for each layer
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
         for group_kv_cache_spec in kv_cache_config.kv_cache_groups:
@@ -433,16 +433,16 @@ class NPUModelRunner310(NPUModelRunner):
             elif isinstance(kv_cache_spec, AttentionSpec):
                 try:
                     attn_groups = self.attn_groups[kv_cache_group_id]
+                    backend = attn_groups[0].backend
+                    # Page attention operation on 310P limits block_size * head_size <= 128 * 128
+                    supported_sizes = [
+                        support_size
+                        for support_size in backend.get_supported_kernel_block_sizes()
+                        if support_size * kv_cache_spec.head_size <= 16384
+                    ]
+                    kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
                 except IndexError:
-                    attn_groups = None
-                backend = attn_groups[0].backend
-                # Page attention operation on 310P limits block_size * head_size <= 128 * 128
-                supported_sizes = [
-                    support_size
-                    for support_size in backend.get_supported_kernel_block_sizes()
-                    if support_size * kv_cache_spec.head_size <= 16384
-                ]
-                kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
+                    kernel_block_size_list = [self.cache_config.block_size]
                 self.kernel_block_sizes.append(kernel_block_size_list)
             else:
                 self.kernel_block_sizes.append([0])
