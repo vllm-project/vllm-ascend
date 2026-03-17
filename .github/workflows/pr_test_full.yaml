@@ -83,5 +83,4 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       contains_310: false
-      type: full
-      continue_on_error: true    
+      type: full 
