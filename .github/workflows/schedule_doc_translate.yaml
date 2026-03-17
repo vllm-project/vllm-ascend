@@ -15,13 +15,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Auto Translate
+name: Auto Doc Translate
 
 on:
-  pull_request:
-    types: [opened]
-    branches: [main]
-    paths: ['docs/source/**/*.md']
+  schedule:
+    - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       target_branch:
@@ -31,40 +29,26 @@ on:
         type: string
 
 concurrency:
-  group: translation-${{ github.event.pull_request.number || github.ref }}
+  group: translation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   translate:
     runs-on: linux-amd64-cpu-8-hk
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       !startsWith(github.head_ref, 'auto-pr/doc-translate-'))
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     permissions:
       contents: read
-      pull-requests: write
-      issues: write
     env:
       UPSTREAM_REPO: vllm-project/vllm-ascend
-      IS_PR: ${{ github.event_name == 'pull_request' }}
     steps:
-      - name: Checkout repository (workflow_dispatch)
-        if: env.IS_PR == 'false'
+      - name: Checkout repository
         uses: actions/checkout@v6.0.1
         with:
           repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
           ref: main
 
-      - name: Checkout PR branch
-        if: env.IS_PR == 'true'
-        uses: actions/checkout@v6.0.1
-        with:
-          fetch-depth: 0
-
       - name: Setup git and branch
-        if: env.IS_PR == 'false'
         run: |
           TARGET_BRANCH="${{ inputs.target_branch || 'main' }}"
           echo "TARGET_BRANCH=${TARGET_BRANCH}" >> $GITHUB_ENV
@@ -94,32 +78,10 @@ jobs:
       - name: Detect PO files to translate
         id: detect
         run: |
-          if [ "${{ env.IS_PR }}" == "true" ]; then
-            changed_md=$(git diff --name-only --diff-filter=ACMR \
-              ${{ github.event.pull_request.base.sha }} \
-              ${{ github.sha }} \
-              -- 'docs/source/**/*.md' || true)
-
-            [ -z "$changed_md" ] && echo "has_changes=false" >> $GITHUB_OUTPUT && exit 0
-
-            echo "Changed MD files:"
-            echo "$changed_md"
-
-            po_files=""
-            while IFS= read -r md; do
-              [ -z "$md" ] && continue
-              po=$(echo "$md" | sed 's|^docs/source/|docs/source/locale/zh_CN/LC_MESSAGES/|; s|\.md$|.po|')
-              if [ -f "$po" ]; then
-                echo "  $md -> $po"
-                [ -z "$po_files" ] && po_files="$po" || po_files="$po_files,$po"
-              fi
-            done <<< "$changed_md"
-          else
-            git config --global --add safe.directory "$GITHUB_WORKSPACE"
-            tracked=$(git diff --name-only --diff-filter=ACMUX || true)
-            untracked=$(git ls-files --others --exclude-standard || true)
-            po_files=$(printf "%s\n%s" "$tracked" "$untracked" | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
-          fi
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          tracked=$(git diff --name-only --diff-filter=ACMUX || true)
+          untracked=$(git ls-files --others --exclude-standard || true)
+          po_files=$(printf "%s\n%s" "$tracked" "$untracked" | grep '\.po$' | tr '\n' ',' | sed 's/,$//' || true)
 
           if [ -z "$po_files" ]; then
             echo "No PO files to translate"
@@ -160,11 +122,7 @@ jobs:
             [ -n "$file" ] && [ -f "$file" ] && {
               count=$((count + 1))
               file_list="${file_list}- <code>${file}</code>"$'\n'
-              if [ "${{ env.IS_PR }}" == "true" ]; then
-                cp "$file" /tmp/translated_po_files/
-              else
-                git add "$file"
-              fi
+              git add "$file"
             }
           done <<< "$success_files"
 
@@ -176,7 +134,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Commit and push
-        if: env.IS_PR == 'false' && steps.detect.outputs.has_changes == 'true'
+        if: steps.detect.outputs.has_changes == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
@@ -186,7 +144,7 @@ jobs:
           git push -f origin "${{ env.BRANCH_NAME }}"
 
       - name: Create PR in upstream
-        if: env.IS_PR == 'false' && steps.detect.outputs.has_changes == 'true'
+        if: steps.detect.outputs.has_changes == 'true'
         uses: actions/github-script@v8
         env:
           FILE_LIST: ${{ steps.results.outputs.file_list }}
@@ -212,59 +170,4 @@ jobs:
               if (error.message.includes('A pull request already exists')) {
                 core.warning('PR already exists');
               } else { throw error; }
-            }
-
-      - name: Upload translated PO files
-        if: env.IS_PR == 'true' && steps.detect.outputs.has_changes == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: translated-po-files-pr${{ github.event.pull_request.number }}
-          path: /tmp/translated_po_files/
-          retention-days: 30
-
-      - name: Comment on PR
-        if: env.IS_PR == 'true' && steps.detect.outputs.has_changes == 'true'
-        uses: actions/github-script@v8
-        env:
-          FILE_LIST: ${{ steps.results.outputs.file_list }}
-          FILE_COUNT: ${{ steps.results.outputs.file_count }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ARTIFACT_NAME: translated-po-files-pr${{ github.event.pull_request.number }}
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const { FILE_LIST, FILE_COUNT, RUN_URL, ARTIFACT_NAME } = process.env;
-            const body = [
-              '## Auto-Translation Complete\n',
-              'Translated **' + FILE_COUNT + '** PO file(s) for the markdown changes in this PR:\n',
-              FILE_LIST,
-              '### Download Translated Files\n',
-              '**[Download artifacts from workflow run](' + RUN_URL + ')**\n',
-              'Artifact name: `' + ARTIFACT_NAME + '`\n',
-              '### How to add translations to this PR\n',
-              '1. Click the download link above',
-              '2. Download the `' + ARTIFACT_NAME + '` artifact (zip file)',
-              '3. Extract the PO files and place them in the correct paths under `docs/source/locale/zh_CN/LC_MESSAGES/`',
-              '4. Commit and push to this PR branch\n',
-              '---',
-              '*Auto-generated by [translation workflow](' + RUN_URL + ')*',
-            ].join('\n');
-
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const botComment = comments.find(c =>
-              c.user.type === 'Bot' && c.body.includes('Auto-Translation Complete')
-            );
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                comment_id: botComment.id, body: body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: context.issue.number, body: body,
-              });
             }
