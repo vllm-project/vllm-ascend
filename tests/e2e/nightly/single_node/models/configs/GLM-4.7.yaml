@@ -35,7 +35,7 @@ _server_cmd: &server_cmd
   - "--gpu-memory-utilization"
   - "0.9"
   - "--speculative-config"
-  - '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}'
+  - '{"num_speculative_tokens": 3, "method":"mtp"}'
   - "--additional-config"
   - '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 
@@ -63,13 +63,5 @@ test_cases:
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}'
-    benchmarks:
-      <<: *benchmarks
-
-  - name: "GLM-4.7-TP8-DP2-eager"
-    model: "Eco-Tech/GLM-4.7-W8A8-floatmtp"
-    envs:
-      <<: *envs
-    server_cmd: *server_cmd
     benchmarks:
       <<: *benchmarks
