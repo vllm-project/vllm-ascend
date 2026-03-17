@@ -506,3 +506,39 @@
 #       Rotary quant is a unique feature of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
+# ** 22. File: worker/patch_mamba_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
+#    Why:
+#       Oringnal batch_memcpy_kernel implemented in vLLM might encounter bugs when running on
+#       Ascend hardwares.
+#    How：
+#       patch to fix related bugs.
+#    Future Plan:
+#       Remove this patch when:
+#       (1) oringnal batch_memcpy_kernel can run on Ascend hardware.
+#       or
+#       (2) design a dispatch mechanism for batch_memcpy_kernel.
+#   2. `vllm.v1.worker.mamba_utils.batch_memcpy = batch_memcpy`
+#    Why:
+#       vLLM use BLOCK_SIZE 1024 for batch_memcpy_kernel. This results in suboptimal performance
+#       on Ascend hardwares.
+#    How：
+#       patch to change BLOCK_SIZE to 8192.
+#    Future Plan:
+#       Remove this patch when:
+#       design a dispatch mechanism for batch_memcpy_kernel.
+#
+# ** 23. File: worker/patch_weight_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
+#    Why:
+#       The C8 weight quantized by modelslim will modify the model structure,
+#       and the scale and offset required for kvcache quantization will increase.
+#       In addition, the names of the quantization parameters are different from
+#       those in the community.
+#    How：
+#       we have enhanced the maybe_remap_kv_scale_name function.
+#    Future Plan:
+#       The maybe_remap_kv_scale_name function of the community is reconstructed to support
+#       multiple backends.

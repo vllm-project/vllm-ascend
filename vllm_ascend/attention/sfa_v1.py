@@ -1063,7 +1063,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 slot_mapping=slot_mapping,
                 num_input_tokens=num_input_tokens,
             )
-            k_li = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
@@ -1177,6 +1177,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             )  # b, s, n, d
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == 4
+                assert k_li_scale is not None
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[3].view(-1, k_li_scale.shape[-1]),
                     slot_mapping.view(-1, 1),
