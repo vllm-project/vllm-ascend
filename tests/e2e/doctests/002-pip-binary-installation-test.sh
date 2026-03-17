@@ -29,14 +29,10 @@ function install_system_packages() {
     fi
 }
 
-function config_pip_mirror() {
-    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-}
 
 function install_binary_test() {
 
     install_system_packages
-    config_pip_mirror
     create_vllm_venv
 
     PIP_VLLM_VERSION=$(get_version pip_vllm_version)
@@ -45,7 +41,7 @@ function install_binary_test() {
     _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
 
     # Setup extra-index-url for x86 & torch_npu dev version
-    pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/
 
     # The vLLM version already in pypi, we install from pypi.
     pip install vllm=="${PIP_VLLM_VERSION}"
