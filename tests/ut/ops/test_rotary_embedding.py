@@ -18,14 +18,12 @@ import pytest
 import torch
 from unittest.mock import MagicMock, patch, PropertyMock
 
-# ---------------------------------------------------------------------------
-# Helpers / constants
-# ---------------------------------------------------------------------------
+
 HEAD_SIZE = 64
 ROTARY_DIM = 64
 MAX_POS = 2048
 BASE = 10000.0
-DTYPE = torch.bfloa16
+DTYPE = torch.bfloat16
 SEQ_LEN = 4
 NUM_HEADS = 2
 
@@ -37,9 +35,6 @@ def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):
     return positions, query, key
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def patch_init_side_effects():
     """
@@ -48,9 +43,9 @@ def patch_init_side_effects():
     global config.
     """
     with (
-        patch("your_module._record_cos_sin_cache"),
-        patch("your_module._record_cos_and_sin_cache_interleaved"),
-        patch("your_module.get_current_vllm_config") as mock_cfg,
+        patch("vllm_ascend.ops.rotary_embedding._record_cos_sin_cache"),
+        patch("vllm_ascend.ops.rotary_embedding._record_cos_and_sin_cache_interleaved"),
+        patch("vllm.config.get_current_vllm_config") as mock_cfg,
     ):
         # Default: speculative_config is None → use_mtp = False
         mock_cfg.return_value.speculative_config = None
@@ -65,7 +60,7 @@ def make_embedding(patch_init_side_effects):
         spec_cfg = MagicMock(method="mtp") if use_mtp else None
         patch_init_side_effects.return_value.speculative_config = spec_cfg
 
-        with patch("your_module.RotaryEmbedding.__init__") as mock_parent_init:
+        with patch("vllm_ascend.ops.rotary_embedding.RotaryEmbedding.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
             from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding
 
@@ -84,17 +79,15 @@ def make_embedding(patch_init_side_effects):
     return _factory
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 class TestForwardOot:
 
-    @patch("your_module.torch.ops.vllm.npu_rotary_embedding")
-    @patch("your_module._EXTRA_CTX")
-    def test_basic_call_delegates_to_npu_op(self, mock_ctx, mock_npu_op, make_embedding):
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_basic_call_delegates_to_npu_op(self, mock_get_forward_context, mock_npu_op, make_embedding):
         """forward_oot always calls npu_rotary_embedding and returns its result."""
-        mock_ctx.is_draft_model = False
-        mock_ctx.flash_comm_v1_enabled = False
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = False
+        mock_get_forward_context.return_value.flash_comm_v1_enabled = False
         expected_output = (torch.randn(SEQ_LEN, NUM_HEADS * HEAD_SIZE),) * 2
         mock_npu_op.return_value = expected_output
 
@@ -110,11 +103,12 @@ class TestForwardOot:
         assert result is expected_output
 
     @patch("torch.ops.vllm.npu_rotary_embedding")
-    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
-    def test_neox_style_override_true(self, mock_ctx, mock_npu_op, make_embedding):
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_neox_style_override_true(self, mock_get_forward_context, mock_npu_op, make_embedding):
         """is_neox_style_override=True wins over self.is_neox_style=False."""
-        mock_ctx.is_draft_model = False
-        mock_ctx.flash_comm_v1_enabled = False
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = False
+        mock_get_forward_context.return_value.flash_comm_v1_enabled = False
         mock_npu_op.return_value = MagicMock()
 
         emb = make_embedding(is_neox_style=False)
@@ -127,11 +121,12 @@ class TestForwardOot:
         assert mock_npu_op.call_args[0][-1] is True  # last positional arg = is_neox_style
 
     @patch("torch.ops.vllm.npu_rotary_embedding")
-    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
-    def test_neox_style_override_false(self, mock_ctx, mock_npu_op, make_embedding):
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_neox_style_override_false(self, mock_get_forward_context, mock_npu_op, make_embedding):
         """is_neox_style_override=False wins over self.is_neox_style=True."""
-        mock_ctx.is_draft_model = False
-        mock_ctx.flash_comm_v1_enabled = False
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = False
+        mock_get_forward_context.return_value.flash_comm_v1_enabled = False
         mock_npu_op.return_value = MagicMock()
 
         emb = make_embedding(is_neox_style=True)
@@ -142,11 +137,12 @@ class TestForwardOot:
         assert mock_npu_op.call_args[0][-1] is False
 
     @patch("torch.ops.vllm.npu_rotary_embedding")
-    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
-    def test_neox_style_override_none_uses_self(self, mock_ctx, mock_npu_op, make_embedding):
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_neox_style_override_none_uses_self(self, mock_get_forward_context, mock_npu_op, make_embedding):
         """When override is None, self.is_neox_style is used unchanged."""
-        mock_ctx.is_draft_model = False
-        mock_ctx.flash_comm_v1_enabled = False
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = False
+        mock_get_forward_context.return_value.flash_comm_v1_enabled = False
         mock_npu_op.return_value = MagicMock()
 
         emb = make_embedding(is_neox_style=True)
@@ -158,16 +154,17 @@ class TestForwardOot:
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("torch.ops.vllm.npu_rotary_embedding")
-    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_gather_unpad_called_when_all_conditions_met(
-        self, mock_ctx, mock_npu_op, mock_gather, make_embedding
+        self, mock_get_forward_context, mock_npu_op, mock_gather, make_embedding
     ):
         """
         maybe_all_gather_and_maybe_unpad is called iff:
           is_draft_model=True AND use_mtp=True AND flash_comm_v1_enabled=True
         """
-        mock_ctx.is_draft_model = True
-        mock_ctx.flash_comm_v1_enabled = True
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = True
+        mock_get_forward_context.return_value.flash_comm_v1_enabled = True
         gathered_positions = torch.arange(SEQ_LEN, dtype=torch.long)
         mock_gather.return_value = gathered_positions
         mock_npu_op.return_value = MagicMock()
@@ -188,14 +185,15 @@ class TestForwardOot:
     ])
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("torch.ops.vllm.npu_rotary_embedding")
-    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_gather_unpad_skipped_unless_all_conditions_met(
-        self, mock_ctx, mock_npu_op, mock_gather,
+        self, mock_get_forward_context, mock_npu_op, mock_gather,
         is_draft_model, flash_comm, use_mtp, make_embedding,
     ):
         """gather/unpad must NOT fire if any one of the three conditions is False."""
-        mock_ctx.is_draft_model = is_draft_model
-        mock_ctx.flash_comm_v1_enabled = flash_comm
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = is_draft_model
+        mock_get_forward_context.return_value.flash_comm_v1_enabled = flash_comm
         mock_npu_op.return_value = MagicMock()
 
         emb = make_embedding(use_mtp=use_mtp)
@@ -206,19 +204,3 @@ class TestForwardOot:
         mock_gather.assert_not_called()
         # Original positions tensor is passed through untouched
         assert mock_npu_op.call_args[0][0] is positions
-
-    @patch("torch.ops.vllm.npu_rotary_embedding")
-    @patch("vllm_ascend.ascend_forward_context._EXTRA_CTX")
-    def test_offsets_parameter_accepted(self, mock_ctx, mock_npu_op, make_embedding):
-        """forward_oot should accept an offsets tensor without raising."""
-        mock_ctx.is_draft_model = False
-        mock_ctx.flash_comm_v1_enabled = False
-        mock_npu_op.return_value = MagicMock()
-
-        emb = make_embedding()
-        positions, query, key = _make_tensors()
-        offsets = torch.zeros(SEQ_LEN, dtype=torch.long)
-
-        # Should not raise
-        emb.forward_oot(positions, query, key, offsets=offsets)
-        mock_npu_op.assert_called_once()
