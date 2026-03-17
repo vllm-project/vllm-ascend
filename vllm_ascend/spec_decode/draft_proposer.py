@@ -6,12 +6,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
 
-from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
+from vllm_ascend.spec_decode.eagle_proposer import AscendSpecDecodeBaseProposer
 
 logger = init_logger(__name__)
 
 
-class AscendDraftModelProposer(SpecDecodeBaseProposer):
+class AscendDraftModelProposer(AscendSpecDecodeBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
