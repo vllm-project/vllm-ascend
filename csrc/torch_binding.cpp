@@ -1236,6 +1236,40 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+std::tuple<at::Tensor, at::Tensor> swi_glu_dynamic_quant(
+    const at::Tensor &x,
+    const c10::optional<at::Tensor> &smooth_scales,
+    const c10::optional<at::Tensor> &offsets,
+    const c10::optional<at::Tensor> &group_index,
+    bool activate_left,
+    const std::string &quant_mode,
+    int64_t group_list_type,
+    int64_t dst_type)
+{
+    TORCH_CHECK(x.dim() >= 2, "Input x must have at least 2 dimensions, got ", x.dim());
+    TORCH_CHECK(x.size(-1) % 2 == 0, "Last dimension of x must be even, got ", x.size(-1));
+
+    // Output y: same shape as x except last dim is halved
+    auto x_sizes = x.sizes().vec();
+    x_sizes.back() /= 2;
+
+    auto y_dtype = at::kChar;  // int8
+    at::Tensor y = at::empty(x_sizes, x.options().dtype(y_dtype));
+
+    // Scale: shape is x's shape without the last dimension
+    auto scale_sizes = x.sizes().vec();
+    scale_sizes.pop_back();
+    at::Tensor scale = at::empty(scale_sizes, x.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(aclnnSwiGluDynamicQuant,
+                  x, smooth_scales, offsets, group_index,
+                  activate_left, quant_mode,
+                  group_list_type, dst_type,
+                  y, scale);
+
+    return std::make_tuple(y, scale);
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
@@ -1403,4 +1437,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd, Tensor x)"
         );
     ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
+
+    // SwiGluDynamicQuant
+    ops.def(
+        "swi_glu_dynamic_quant(Tensor x, "
+        "Tensor? smooth_scales=None, "
+        "Tensor? offsets=None, "
+        "Tensor? group_index=None, "
+        "*, "
+        "bool activate_left=False, "
+        "str quant_mode='dynamic', "
+        "int group_list_type=0, "
+        "int dst_type=2) -> (Tensor y, Tensor scale)");
+    ops.impl("swi_glu_dynamic_quant", torch::kPrivateUse1, &vllm_ascend::swi_glu_dynamic_quant);
 }

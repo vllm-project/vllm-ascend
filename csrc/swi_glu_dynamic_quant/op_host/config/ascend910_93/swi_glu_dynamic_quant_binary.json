@@ -1,0 +1,539 @@
+{
+  "op_type": "SwiGluDynamicQuant",
+  "op_list": [
+      {
+          "bin_filename": "SwiGluDynamicQuant_float16_int8",
+          "inputs": [
+              {
+                  "name": "x",
+                  "index": 0,
+                  "dtype": "float16",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "smooth_scales",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "offsets",
+                  "index": 2,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "group_index",
+                  "index": 3,
+                  "dtype": "int32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "outputs": [
+              {
+                  "name": "y",
+                  "index": 0,
+                  "dtype": "int8",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "scale",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "attrs": [
+              {
+                  "name": "activate_left",
+                  "dtype": "bool",
+                  "value": false
+              },
+              {
+                  "name": "quant_mode",
+                  "dtype": "string",
+                  "value": "static"
+              },
+              {
+                  "name": "group_list_type",
+                  "dtype": "int",
+                  "value": 0
+              },
+              {
+                  "name": "dst_type",
+                  "dtype": "int",
+                  "value": 2
+              }
+          ]
+      },
+      {
+          "bin_filename": "SwiGluDynamicQuant_bfloat16_int8",
+          "inputs": [
+              {
+                  "name": "x",
+                  "index": 0,
+                  "dtype": "bfloat16",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "smooth_scales",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "offsets",
+                  "index": 2,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "group_index",
+                  "index": 3,
+                  "dtype": "int32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "outputs": [
+              {
+                  "name": "y",
+                  "index": 0,
+                  "dtype": "int8",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "scale",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "attrs": [
+              {
+                  "name": "activate_left",
+                  "dtype": "bool",
+                  "value": false
+              },
+              {
+                  "name": "quant_mode",
+                  "dtype": "string",
+                  "value": "dynamic"
+              },
+              {
+                  "name": "group_list_type",
+                  "dtype": "int",
+                  "value": 0
+              },
+              {
+                  "name": "dst_type",
+                  "dtype": "int",
+                  "value": 2
+              }
+          ]
+      },
+      {
+          "bin_filename": "SwiGluDynamicQuant_float32_int8",
+          "inputs": [
+              {
+                  "name": "x",
+                  "index": 0,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "smooth_scales",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "offsets",
+                  "index": 2,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "group_index",
+                  "index": 3,
+                  "dtype": "int32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "outputs": [
+              {
+                  "name": "y",
+                  "index": 0,
+                  "dtype": "int8",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "scale",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "attrs": [
+              {
+                  "name": "activate_left",
+                  "dtype": "bool",
+                  "value": false
+              },
+              {
+                  "name": "quant_mode",
+                  "dtype": "string",
+                  "value": "static"
+              },
+              {
+                  "name": "group_list_type",
+                  "dtype": "int",
+                  "value": 0
+              },
+              {
+                  "name": "dst_type",
+                  "dtype": "int",
+                  "value": 2
+              }
+          ]
+      },
+      {
+          "bin_filename": "SwiGluDynamicQuant_float16_int4",
+          "inputs": [
+              {
+                  "name": "x",
+                  "index": 0,
+                  "dtype": "float16",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "smooth_scales",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "offsets",
+                  "index": 2,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "group_index",
+                  "index": 3,
+                  "dtype": "int32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "outputs": [
+              {
+                  "name": "y",
+                  "index": 0,
+                  "dtype": "int4",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "scale",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "attrs": [
+              {
+                  "name": "activate_left",
+                  "dtype": "bool",
+                  "value": false
+              },
+              {
+                  "name": "quant_mode",
+                  "dtype": "string",
+                  "value": "static"
+              },
+              {
+                  "name": "group_list_type",
+                  "dtype": "int",
+                  "value": 0
+              },
+              {
+                  "name": "dst_type",
+                  "dtype": "int",
+                  "value": 2
+              }
+          ]
+      },
+      {
+          "bin_filename": "SwiGluDynamicQuant_bfloat16_int4",
+          "inputs": [
+              {
+                  "name": "x",
+                  "index": 0,
+                  "dtype": "bfloat16",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "smooth_scales",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "offsets",
+                  "index": 2,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "group_index",
+                  "index": 3,
+                  "dtype": "int32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "outputs": [
+              {
+                  "name": "y",
+                  "index": 0,
+                  "dtype": "int4",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "scale",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "attrs": [
+              {
+                  "name": "activate_left",
+                  "dtype": "bool",
+                  "value": false
+              },
+              {
+                  "name": "quant_mode",
+                  "dtype": "string",
+                  "value": "dynamic"
+              },
+              {
+                  "name": "group_list_type",
+                  "dtype": "int",
+                  "value": 0
+              },
+              {
+                  "name": "dst_type",
+                  "dtype": "int",
+                  "value": 2
+              }
+          ]
+      },
+      {
+          "bin_filename": "SwiGluDynamicQuant_float32_int4",
+          "inputs": [
+              {
+                  "name": "x",
+                  "index": 0,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "smooth_scales",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "offsets",
+                  "index": 2,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "group_index",
+                  "index": 3,
+                  "dtype": "int32",
+                  "format": "ND",
+                  "paramType": "optional",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "outputs": [
+              {
+                  "name": "y",
+                  "index": 0,
+                  "dtype": "int4",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              },
+              {
+                  "name": "scale",
+                  "index": 1,
+                  "dtype": "float32",
+                  "format": "ND",
+                  "paramType": "required",
+                  "shape": [
+                      -2
+                  ]
+              }
+          ],
+          "attrs": [
+              {
+                  "name": "activate_left",
+                  "dtype": "bool",
+                  "value": false
+              },
+              {
+                  "name": "quant_mode",
+                  "dtype": "string",
+                  "value": "static"
+              },
+              {
+                  "name": "group_list_type",
+                  "dtype": "int",
+                  "value": 0
+              },
+              {
+                  "name": "dst_type",
+                  "dtype": "int",
+                  "value": 2
+              }
+          ]
+      }
+  ]
+}

@@ -416,6 +416,33 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
+std::tuple<at::Tensor, at::Tensor> swi_glu_dynamic_quant_meta(
+    const at::Tensor &x,
+    const c10::optional<at::Tensor> &smooth_scales,
+    const c10::optional<at::Tensor> &offsets,
+    const c10::optional<at::Tensor> &group_index,
+    bool activate_left,
+    c10::string_view quant_mode,
+    int64_t group_list_type,
+    int64_t dst_type)
+{
+    TORCH_CHECK(x.dim() >= 2, "Input x must have at least 2 dimensions, got ", x.dim());
+    TORCH_CHECK(x.size(-1) % 2 == 0, "Last dimension of x must be even, got ", x.size(-1));
+
+    // Output y: same shape as x except last dim is halved
+    auto x_sizes = x.sizes().vec();
+    x_sizes.back() /= 2;
+
+    at::Tensor y = at::empty(x_sizes, x.options().dtype(at::kChar));
+
+    // Scale: shape is x's shape without the last dimension
+    auto scale_sizes = x.sizes().vec();
+    scale_sizes.pop_back();
+    at::Tensor scale = at::empty(scale_sizes, x.options().dtype(at::kFloat));
+
+    return std::make_tuple(y, scale);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -454,5 +481,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
+    // SwiGluDynamicQuant
+    ops.impl("swi_glu_dynamic_quant", &vllm_ascend::meta::swi_glu_dynamic_quant_meta);
 }
 }
