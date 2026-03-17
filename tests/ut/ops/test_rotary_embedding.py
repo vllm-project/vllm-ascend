@@ -14,9 +14,13 @@
 #
 
 
+import inspect
 import pytest
 import torch
 from unittest.mock import MagicMock, patch, PropertyMock
+
+from vllm.model_executor.layers.rotary_embedding import YaRNScalingRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import AscendYaRNRotaryEmbedding
 
 
 HEAD_SIZE = 64
@@ -292,3 +296,84 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         emb.forward_oot(positions, query, key, offsets=offsets, is_neox_style_override=False)
 
         mock_delegate.assert_called_once_with(emb, positions, query, key, offsets, False)
+
+    def test_parent_init_signature_has_not_changed(self):
+        """
+        Fail loudly if YaRNScalingRotaryEmbedding.__init__ adds, removes, or
+        renames parameters, so a developer knows to update AscendYaRNRotaryEmbedding
+        accordingly.
+        """
+        parent_sig = inspect.signature(YaRNScalingRotaryEmbedding.__init__)
+        parent_params = set(parent_sig.parameters) - {"self"}
+
+        EXPECTED_PARENT_PARAMS = {
+            "head_size",
+            "rotary_dim",
+            "max_position_embeddings",
+            "base",
+            "is_neox_style",
+            "scaling_factor",
+            "dtype",
+            "extrapolation_factor",
+            "attn_factor",
+            "beta_fast",
+            "beta_slow",
+            # add any other known params here
+        }
+
+        added   = parent_params - EXPECTED_PARENT_PARAMS
+        removed = EXPECTED_PARENT_PARAMS - parent_params
+
+        assert not added, (
+            f"YaRNScalingRotaryEmbedding.__init__ added new parameter(s): {added}. "
+            f"Check whether AscendYaRNRotaryEmbedding.__init__ needs to forward them."
+        )
+        assert not removed, (
+            f"YaRNScalingRotaryEmbedding.__init__ removed parameter(s): {removed}. "
+            f"Update EXPECTED_PARENT_PARAMS in this test to reflect the new signature."
+        )
+
+    def test_child_forwards_all_parent_params(self):
+        """
+        Every parameter accepted by the parent __init__ must either be accepted
+        by the child __init__ or explicitly documented as intentionally dropped.
+        """
+        parent_params = set(inspect.signature(YaRNScalingRotaryEmbedding.__init__).parameters) - {"self"}
+        child_params  = set(inspect.signature(AscendYaRNRotaryEmbedding.__init__).parameters)  - {"self"}
+
+        # Params the child intentionally drops or handles differently
+        KNOWN_OMISSIONS: set[str] = set()
+
+        not_forwarded = parent_params - child_params - KNOWN_OMISSIONS
+        assert not not_forwarded, (
+            f"These parent __init__ params are not present in the child signature: {not_forwarded}. "
+            f"Either add them to AscendYaRNRotaryEmbedding.__init__ or add to KNOWN_OMISSIONS."
+        )
+
+    def test_extra_kwargs_covers_all_keyword_only_parent_params(self):
+        """
+        The keyword-only params passed via extra_kwargs in AscendYaRNRotaryEmbedding.__init__
+        must exactly match the keyword-only params of the parent __init__.
+        """
+        parent_sig = inspect.signature(YaRNScalingRotaryEmbedding.__init__)
+        parent_kw_only = {
+            name
+            for name, param in parent_sig.parameters.items()
+            if param.kind == inspect.Parameter.KEYWORD_ONLY
+        }
+
+        # These are the keys AscendYaRNRotaryEmbedding currently puts in extra_kwargs
+        EXTRA_KWARGS_KEYS = {
+            "extrapolation_factor",
+            "attn_factor",
+            "beta_fast",
+            "beta_slow",
+            "apply_yarn_scaling",
+            "truncate",
+        }
+
+        missing_from_extra_kwargs = parent_kw_only - EXTRA_KWARGS_KEYS
+        assert not missing_from_extra_kwargs, (
+            f"Parent has new keyword-only param(s) not in extra_kwargs: {missing_from_extra_kwargs}. "
+            f"Add them to AscendYaRNRotaryEmbedding.__init__ and extra_kwargs."
+        )
