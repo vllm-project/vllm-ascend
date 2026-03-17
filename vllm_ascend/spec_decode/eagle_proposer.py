@@ -606,7 +606,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        if vllm_version_is("0.17.0"): 
+        if vllm_version_is("0.17.0"):
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
         else:
