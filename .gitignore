@@ -217,3 +217,7 @@ csrc/output/
 /full-pd
 
 /vllm
+
+# local dev docs (do not push)
+C8_DEV_NOTES.md
+docs/c8-graph-mode-debug.md
