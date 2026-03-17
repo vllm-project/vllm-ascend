@@ -18,16 +18,14 @@ from collections.abc import Callable
 
 import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
 from vllm_ascend.quantization.methods.base import QuantType
-from vllm_ascend.utils import vllm_version_is
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -93,7 +91,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
         topk_weights = topk_weights.to(x.dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
@@ -153,25 +151,22 @@ class AscendFusedMoE310(FusedMoE):
         self.quant_type = self.get_quant_type()
 
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
-        if not vllm_version_is("0.16.0"):
-            self.runner = self._init_runner()
+        self.runner = self._init_runner()
 
-    if not vllm_version_is("0.16.0"):
+    def _init_runner(self):
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        def _init_runner(self):
-            from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-
-            return AscendMoERunner(
-                layer=self,
-                moe_config=self.moe_config,
-                router=self.router,
-                routed_input_transform=self._routed_input_transform,
-                gate=self.gate,
-                shared_experts=self.shared_experts,
-                quant_method=self.quant_method,
-                reduce_results=self.reduce_results,
-                enable_dbo=self.vllm_config.parallel_config.enable_dbo,
-            )
+        return AscendMoERunner(
+            layer=self,
+            moe_config=self.moe_config,
+            router=self.router,
+            routed_input_transform=self._routed_input_transform,
+            gate=self.gate,
+            shared_experts=self.shared_experts,
+            quant_method=self.quant_method,
+            reduce_results=self.reduce_results,
+            enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+        )
 
     def init_experts_map(self, moe_config):
         """
@@ -222,9 +217,8 @@ class AscendFusedMoE310(FusedMoE):
     ) -> torch.Tensor:
         assert self.quant_method is not None
         assert self.routed_scaling_factor == 1.0, "routed_scaling_factor != 1.0 is not supported."
-        forward_context = get_forward_context()
 
-        hidden_states, router_logits, _, context_metadata = forward_context.moe_comm_method.prepare(
+        hidden_states, router_logits, _, context_metadata = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states, router_logits=router_logits, quant_type=self.quant_type
         )
 
@@ -246,7 +240,7 @@ class AscendFusedMoE310(FusedMoE):
             apply_router_weight_on_input=self.apply_router_weight_on_input,
         )
 
-        routed_out = forward_context.moe_comm_method.finalize(
+        routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata,

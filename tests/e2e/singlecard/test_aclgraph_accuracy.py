@@ -85,8 +85,8 @@ CASE_DS_FULL_DECODE_ONLY = LLMTestCase(
     prompts=PROMPTS_LONG,
     golden_answers=[
         "\n\nSelect an assignment template",
-        "\n\nI'm not sure how to approach this problem. I'm not sure if I should use the law of total probability or if I should use",
-        "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x$ be the common root of the equations",
+        "\n\nI'm not sure how to approach this problem. I'm thinking that the area of the triangle is $1/2$ times the area",
+        "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x = \\alpha$ be the common root",
     ],
 )
 
@@ -106,8 +106,8 @@ CASE_DS_EX = LLMTestCase(
     prompts=PROMPTS_LONG,
     golden_answers=[
         "\n\nSelect an assignment template",
-        "\n\nI'm not sure how to approach this problem. I'm not sure if I should use the law of total probability or if I should use",
-        "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x$ be the common root of the equations",
+        "\n\nI'm not sure how to approach this problem. I'm thinking that the area of the triangle is $1/2$ times the area",
+        "\n\n## Answer\n\n$a + b + c = 0$\n\nSolution\n\nLet $x = \\alpha$ be the common root",
     ],
 )
 
