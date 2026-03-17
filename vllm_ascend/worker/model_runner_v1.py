@@ -279,6 +279,11 @@ class NPUModelRunner(GPUModelRunner):
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
+        # dsa c8
+        self.use_sparse_c8_indexer = self.ascend_config.enable_sparse_c8
+        if self.use_sparse_c8_indexer:
+            self.c8_k_cache_dtype = torch.int8
+            self.c8_k_scale_cache_dtype = torch.float16
         from vllm_ascend.utils import vllm_version_is
 
         if vllm_version_is("0.17.0"):
