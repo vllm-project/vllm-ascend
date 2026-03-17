@@ -17,9 +17,9 @@ public:
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Input("blockIDs")
             .ParamType(REQUIRED)
-            .DataTypeList({ge::DT_INT64})
-            .FormatList({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
+            .DataType({ge::DT_INT64, ge::DT_INT64})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("blockSize").Int();
         this->Attr("headNum").Int();
         this->Attr("headDim").Int();
