@@ -165,6 +165,42 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
 ```
 
+- Quantized model `glm-5-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+
+Run the following script to execute online inference.
+
+```{code-block} bash
+   :substitutions:
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export VLLM_ASCEND_ENABLE_MLAPO=1
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
+--host 0.0.0.0 \
+--port 8077 \
+--data-parallel-size 1 \
+--tensor-parallel-size 16 \
+--enable-expert-parallel \
+--seed 1024 \
+--served-model-name glm-5 \
+--max-num-seqs 8 \
+--max-model-len 40960 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--gpu-memory-utilization 0.95 \
+--quantization ascend \
+--enable-chunked-prefill \
+--enable-prefix-caching \
+--async-scheduling \
+--additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
+```
+
 ::::
 ::::{tab-item} A2 series
 :sync: A2
@@ -202,42 +238,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-```
-
-- Quantized model `glm-5-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
-
-Run the following script to execute online inference.
-
-```{code-block} bash
-   :substitutions:
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_MLAPO=1
-
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 1 \
---tensor-parallel-size 16 \
---enable-expert-parallel \
---seed 1024 \
---served-model-name glm-5 \
---max-num-seqs 8 \
---max-model-len 40960 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---quantization ascend \
---enable-chunked-prefill \
---enable-prefix-caching \
---async-scheduling \
---additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}' 
 ```
 
 ::::
