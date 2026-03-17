@@ -69,6 +69,11 @@ class GraphFusionPassManager:
 
             self.passes.append(MulsAddFusionPass(config))
 
+        if self.ascend_compilation_config.get("fuse_minimax_qknorm_rope", True):
+            from .passes.minimax_qknorm_rope_pass import MiniMaxQKNormRopeFusionPass
+
+            self.passes.append(MiniMaxQKNormRopeFusionPass(config))
+
         if config.compilation_config.pass_config.enable_sp:
             from .passes.sequence_parallelism import AscendSequenceParallelismPass
 

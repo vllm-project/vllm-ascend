@@ -143,3 +143,77 @@ MiniMaxText01RMSNormTP.weight_loader = staticmethod(_patched_weight_loader)
 if _ORIG_QK_METHOD_NAME is not None:
     # Force staticmethod style, as requested.
     setattr(MiniMaxText01RMSNormTP, _ORIG_QK_METHOD_NAME, staticmethod(_patched_qk))
+
+
+# ---------------------------------------------------------------------------
+# Fused Attention Forward: directly call Triton kernel in forward,
+# bypassing FX graph pattern matching (CustomOp makes npu_rms_norm
+# opaque to the FX tracer, so the fusion pass pattern cannot match).
+# ---------------------------------------------------------------------------
+try:
+    import triton  # noqa: F401
+    _HAS_NPU_TRITON = True
+except ImportError:
+    _HAS_NPU_TRITON = False
+
+if _HAS_NPU_TRITON:
+    from vllm.logger import init_logger
+    _minimax_logger = init_logger(__name__)
+    from vllm.model_executor.models.minimax_m2 import MiniMaxM2Attention
+
+    _original_attn_forward = MiniMaxM2Attention.forward
+    _minimax_logger.info(
+        "MiniMax fused QKNorm+RoPE Triton kernel enabled "
+        "(monkey-patched MiniMaxM2Attention.forward)")
+
+    def _fused_attn_forward(
+        self: "MiniMaxM2Attention",
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+
+        # Ensure cos_sin_cache is on the correct device/dtype
+        # (bypassing _rope_forward_oot which normally handles this)
+        cos_sin_cache = self.rotary_emb.cos_sin_cache
+        if cos_sin_cache.device != qkv.device:
+            cos_sin_cache = cos_sin_cache.to(qkv.device)
+            self.rotary_emb.cos_sin_cache = cos_sin_cache
+        if cos_sin_cache.dtype != qkv.dtype:
+            cos_sin_cache = cos_sin_cache.to(qkv.dtype)
+            self.rotary_emb.cos_sin_cache = cos_sin_cache
+
+        q, k, v, qk_var = \
+            torch.ops.vllm.minimax_qkv_crosshead_norm_rope(
+                qkv=qkv,
+                cos_sin_cache=cos_sin_cache,
+                positions=positions,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+                head_dim=self.head_dim,
+                eps=self.q_norm.variance_epsilon,
+                rotary_dim=self.rotary_emb.rotary_dim,
+            )
+
+        # TP correction: fused kernel outputs packed qk_var [batch, 2];
+        # only all_reduce remains as PyTorch op (communication);
+        # the 8 small math ops are fused into a single Triton kernel.
+        if self.q_norm.tp_world > 1:
+            # all_reduce is in-place: must clone before it overwrites local vars
+            qk_reduced = tensor_model_parallel_all_reduce(qk_var.clone())
+            q, k = torch.ops.vllm.minimax_tp_correction(
+                q=q, k=k, qk_var=qk_var,
+                qk_reduced=qk_reduced,
+                tp_world=self.q_norm.tp_world,
+                eps=self.q_norm.variance_epsilon,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+            )
+
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
+
+    MiniMaxM2Attention.forward = _fused_attn_forward
