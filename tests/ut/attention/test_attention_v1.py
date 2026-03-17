@@ -212,7 +212,7 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu.npu_fused_infer_attention_score')
-    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     def test_forward_fused_infer_attention(
             self, mock_get_forward_context,
             mock_npu_fused_infer_attention_score, mock_npu_reshape_and_cache):
@@ -248,7 +248,7 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('vllm_ascend.attention.attention_v1.using_paged_attention')
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu._npu_reshape_and_cache')
-    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     def test_forward_paged_attention(self, mock_get_forward_context,
                                      mock_npu_reshape_and_cache,
                                      mock_paged_attention,
@@ -279,7 +279,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_paged_attention.assert_called_once()
         assert output.shape == (4, 8 * 64)
 
-    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('torch_npu._npu_reshape_and_cache')
     def test_forward_decode_only_swa(self, mock_npu_reshape_and_cache,
@@ -311,7 +311,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8, 64)
 
-    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('torch_npu._npu_reshape_and_cache')

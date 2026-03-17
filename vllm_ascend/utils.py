@@ -267,7 +267,10 @@ def enable_custom_op():
 
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
-    if vllm_is_batch_invariant():
+    # FIXME(linfeng): Currently custom op compilation and execution are partially available
+    # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
+    # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
+    if vllm_is_batch_invariant() or get_ascend_device_type() == AscendDeviceType.A5:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -1073,7 +1076,11 @@ def refresh_block_size(vllm_config):
         return
 
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if model_config.hf_text_config.model_type != "qwen3_next" and cache_config.block_size != 128:
+    if (
+        "qwen3_next" not in model_config.hf_text_config.model_type
+        and "qwen3_5" not in model_config.hf_text_config.model_type
+        and cache_config.block_size != 128
+    ):
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128
@@ -1204,3 +1211,36 @@ def get_rope_dim(vllm_config):
             rope_dim = int(model_config.hf_text_config.rotary_dim)
 
     return rope_dim
+
+
+def calc_split_factor(num_list: list[int]):
+    total = sum(num_list)
+    split_factor_list = []
+    for num in num_list:
+        split_factor_list.append(total / num)
+    return split_factor_list
+
+
+# NOTE: The last two dimensions of ND are transferred to NZ
+def trans_nd_to_nz(cache_tensor: torch.Tensor):
+    assert len(cache_tensor.shape) >= 2
+    batch = cache_tensor.shape[:-2]
+    a, b = cache_tensor.shape[-2], cache_tensor.shape[-1]
+
+    dtype = cache_tensor.dtype
+    if dtype == torch.int8:
+        a0, b0 = 16, 32
+    else:
+        a0, b0 = 16, 16
+
+    nz_shape = list(batch) + [math.ceil(b / b0), math.ceil(a / a0), a0, b0]
+
+    # Generate the axis order for the transpose operation.
+    offset = len(cache_tensor.shape) - 2
+    base = [2, 0, 1, 3]
+    array_trans = [i for i in range(offset)] + [i + offset for i in base]
+    # Perform shape transformation and transpose operation.
+    *_, n1, m1, m0, n0 = nz_shape
+    cache_tensor = cache_tensor.reshape(nz_shape[:-4] + [m1, m0, n1, n0])
+    cache_tensor = cache_tensor.permute(*array_trans)
+    return cache_tensor
