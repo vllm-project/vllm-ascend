@@ -663,9 +663,51 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "deepseek_v3",
+        "model": "kimi_k25",
         "prompt": "The future of AI is",
         "max_completion_tokens": 50,
         "temperature": 0
     }'
 ```
+
+## Accuracy Evaluation
+
+Here are two accuracy evaluation methods.
+
+### Using AISBench
+
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
+
+2. After execution, you can get the result, here is the result of `Kimi-K2.5-w4a8` in `vllm-ascend:v0.17.0rc1` for reference only.
+
+| dataset | version | metric | mode | vllm-api-general-chat | note |
+|----- | ----- | ----- | ----- | -----| ----- |
+| gsm8k | - | accuracy | gen | 94.62 | 1 Atlas 800 A3 (64G × 16) |
+| textvqa | - | accuracy | gen | 80.29 | 1 Atlas 800 A3 (64G × 16) |
+
+## Performance
+
+### Using AISBench
+
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+### Using vLLM Benchmark
+
+Run performance evaluation of `Kimi-K2.5-w4a8` as an example.
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+
+There are three `vllm bench` subcommands:
+
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
+
+Take the `serve` as an example. Run the code as follows.
+
+```shell
+export VLLM_USE_MODELSCOPE=true
+vllm bench serve --model Eco-Tech/Kimi-K2.5-w4a8 --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+```
+
+After about several minutes, you can get the performance evaluation result.
