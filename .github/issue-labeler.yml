@@ -56,11 +56,11 @@ qwen-image:
 minimax:
   - '/(minimax\S*)/i'
 multimodal_understanding:
-  - '/(glm-?4\.\S*v\b|qwen3.5\S*|deepseek-ocr\S*)/i'
+  - '/(glm-?4\.\S*v\b|qwen3\.5\S*|deepseek-ocr\S*)/i'
 glm-4v:
   - '/(glm-?4\.\S*v\b)/i'
 qwen-3.5:
-  - '/(qwen3.5\S*)/i'
+  - '/(qwen3\.5\S*)/i'
 deepseek-ocr:
   - '/(deepseek-ocr\S*)/i'
 audio-model:
