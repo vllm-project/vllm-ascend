@@ -118,6 +118,10 @@ def npugraph_ex_compile(
     config.mode = "reduce-overhead"
     # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
+    # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
+    # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
+    # and cause copy_between_host_and_device error.
+    config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
     if ascend_compilation_config.enable_static_kernel:
         config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
         # According to the cudagraph_capture_size configuration, set the shapes
