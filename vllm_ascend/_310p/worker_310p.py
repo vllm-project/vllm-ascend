@@ -17,7 +17,8 @@
 import torch
 import torch_npu
 from vllm.logger import logger
-from vllm.utils.mem_utils import format_gib, memory_profiling
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import memory_profiling
 
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
@@ -58,7 +59,7 @@ class NPUWorker310(NPUWorker):
         Then, it calculates the free memory that can be used for KV cache in
         bytes.
         """
-
+        GiB = lambda b: b / GiB_bytes
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
@@ -77,8 +78,8 @@ class NPUWorker310(NPUWorker):
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
             "Error in memory profiling. "
-            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {format_gib(free_gpu_memory)} GiB. "
+            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
+            f"current free memory {GiB(free_gpu_memory)} GiB. "
             "This happens when other processes sharing the same container "
             "release GPU memory while vLLM is profiling during initialization. "
             "To fix this, ensure consistent GPU memory allocation or "
@@ -94,7 +95,7 @@ class NPUWorker310(NPUWorker):
         logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB",
-            format_gib(self.available_kv_cache_memory_bytes),
+            GiB(self.available_kv_cache_memory_bytes),
             scope="local",
         )
         return int(self.available_kv_cache_memory_bytes)
