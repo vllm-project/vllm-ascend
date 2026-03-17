@@ -37,38 +37,6 @@ from vllm_ascend.utils import COMPILATION_PASS_KEY, vllm_version_is
 logger = logging.getLogger(__name__)
 
 
-def convert_fake_inputs_to_current_fake_mode(example_inputs: list[Any]) -> list[Any]:
-    """Fix for FakeTensorMode mismatch issue in vllm upgrade
-
-    The piecewise backend now compiles ranges upfront in __init__, which may use
-    fake tensors from graph placeholder nodes that have a different FakeTensorMode
-    than the current tracing context. We need to ensure consistent fake mode.
-    """
-    from torch._guards import detect_fake_mode
-
-    current_fake_mode = detect_fake_mode()
-    if current_fake_mode is not None:
-        # Convert example_inputs to use the current fake mode if they are fake tensors
-        # from a different fake mode
-        converted_inputs = []
-        for inp in example_inputs:
-            if isinstance(inp, torch.Tensor):
-                # Check if this is a fake tensor that needs conversion
-                if hasattr(inp, "fake_mode") and inp.fake_mode is not current_fake_mode:
-                    # Convert to current fake mode
-                    old_fake_mode = inp.fake_mode
-                    converted_inputs.append(current_fake_mode.from_tensor(inp))
-                    logger.debug("Converting fake tensor from fake_mode %s to %s", old_fake_mode, current_fake_mode)
-                else:
-                    converted_inputs.append(inp)
-            else:
-                converted_inputs.append(inp)
-        return converted_inputs
-    else:
-        logger.warning("detect_fake_mode() returned None. FakeTensorMode mismatch fix may not be applied.")
-        return example_inputs
-
-
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
     recursive_compile_fx = functools.partial(compile_fx, inner_compile=inner_compile, decompositions=decompositions)
 
@@ -118,10 +86,11 @@ def npugraph_ex_compile(
     config.mode = "reduce-overhead"
     # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
-    # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
-    # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
-    # and cause copy_between_host_and_device error.
-    config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
+    if not vllm_version_is("0.17.0"):
+        # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
+        # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
+        # and cause copy_between_host_and_device error.
+        config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
     if ascend_compilation_config.enable_static_kernel:
         config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
         # According to the cudagraph_capture_size configuration, set the shapes
@@ -139,13 +108,6 @@ def npugraph_ex_compile(
         config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
     npugraph_ex = torchair.get_npu_backend(compiler_config=config)
-
-    if not vllm_version_is("0.17.0"):
-        # Apply graph fusion passes (including GELU replacement) before torchair compilation
-        # This is needed to replace unsupported operations like aten::gelu with NPU-compatible versions
-        if COMPILATION_PASS_KEY in compiler_config:
-            current_pass_manager = compiler_config[COMPILATION_PASS_KEY]
-            graph = current_pass_manager(graph)
 
     # torch.compile requires the output of the fx graph to be a tuple
     if not graph_returns_tuple(graph):
@@ -180,10 +142,21 @@ class AscendCompiler(CompilerInterface):
         # see https://github.com/pytorch/pytorch/issues/138980
         graph = copy.deepcopy(graph)
 
-        # Fix for FakeTensorMode mismatch issue in vllm upgrade.
-        # Apply once here, so both npugraph_ex_compile and fusion_pass_compile benefit.
         if not vllm_version_is("0.17.0"):
-            example_inputs = convert_fake_inputs_to_current_fake_mode(example_inputs)
+            from torch._guards import detect_fake_mode
+
+            current_fake_mode = detect_fake_mode()
+            if current_fake_mode is not None:
+                example_inputs = [
+                    current_fake_mode.from_tensor(inp)
+                    if (
+                        isinstance(inp, torch.Tensor)
+                        and hasattr(inp, "fake_mode")
+                        and inp.fake_mode is not current_fake_mode
+                    )
+                    else inp
+                    for inp in example_inputs
+                ]
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex:
