@@ -467,6 +467,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return ASCEND_QUANTIZATION_METHOD
         return None
 
+    # TODO: Modify the key values in self.quant_description instead of flipping the hf_to_vllm_mapper
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         """Apply the vLLM model-specific mapper to this quantization config.
 
