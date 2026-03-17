@@ -117,6 +117,7 @@ class ServerState:
         self.host = host
         self.port = port
         self.url = f"http://{host}:{port}/v1"
+        # Auto-completion for ipv6
         try:
             ip = ipaddress.ip_address(self.host)
             if isinstance(ip, ipaddress.IPv6Address):
@@ -255,6 +256,25 @@ class ProxyState:
 proxy_state = None
 
 
+def is_loopback_address(host):
+    """Check if it is a loopback address"""
+    # Localhost
+    if host in ['localhost', 'localhost.localdomain', 'local']:
+        return True
+
+    # 0.0.0.0
+    if host in ['0.0.0.0', '::']:
+        return True
+
+    # Loopback address
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback
+    except ValueError:
+        # If not a valid IP address, it may be a domain name, allow it to pass
+        return False
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
@@ -268,6 +288,9 @@ def parse_args():
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
     )
     args = parser.parse_args()
+    # Loopback address is not allowed for layerwise connector
+    if is_loopback_address(args.host):
+        raise ValueError(f"Loopback address {args.host} is not allowed for layerwise connector")
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
         raise ValueError("Number of prefiller hosts must match number of prefiller ports")
     if len(args.decoder_hosts) != len(args.decoder_ports):
