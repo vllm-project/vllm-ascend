@@ -114,5 +114,5 @@ jobs:
                 python3 .github/workflows/scripts/run_suite.py \
                   --suite e2e-upstream-singlecard \
                   --auto-partition-id "${{ matrix.part }}" \
-                  --auto-partition-size 1 \
+                  --auto-partition-size 3 \
                   --continue-on-error
