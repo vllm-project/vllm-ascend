@@ -118,22 +118,41 @@ class AttentionMaskBuilder310:
         """
         Retrieves the appropriate attention mask based on the model configuration.
 
-        It explicitly checks for 'pooling' runner types which are not supported
-        on 310P hardware.
+        For pooling/embedding models, returns a non-causal (all-zeros) encoder
+        mask. For other models, returns the standard causal mask.
 
         Args:
             model_config: Configuration object containing runner details.
 
         Returns:
-            torch.Tensor: The causal attention mask.
-
-        Raises:
-            NotImplementedError: If the runner_type is 'pooling'.
+            torch.Tensor: The attention mask in ACL_FORMAT_FRACTAL_NZ.
         """
         if getattr(model_config, "runner_type", None) == "pooling":
-            # TODO: pooling model will be supported soon.
-            raise NotImplementedError("310P does not support runner_type='pooling'")
+            return self._get_encoder_mask(self.max_seqlen)
         return self._get_causal_mask(self.max_seqlen)
+
+    def _get_encoder_mask(self, max_seq_len: int) -> torch.Tensor:
+        """Non-causal attention mask for pooling/embedding models.
+
+        Returns an all-zeros mask (no future-token masking) converted to
+        the FRACTAL_NZ format required by 310P NPU kernels.
+
+        Args:
+            max_seq_len (int): The required sequence length.
+
+        Returns:
+            torch.Tensor: The cached encoder mask in ACL_FORMAT_FRACTAL_NZ.
+        """
+        if not hasattr(self, '_encoder_mask_cache') or self._encoder_mask_cache is None:
+            attn_mask = torch.zeros(
+                (max_seq_len, max_seq_len),
+                dtype=torch.float16,
+                device=self.device,
+            )
+            self._encoder_mask_cache = torch_npu.npu_format_cast(
+                nd_to_nz_2d(attn_mask), ACL_FORMAT_FRACTAL_NZ
+            )
+        return self._encoder_mask_cache
 
     def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:
         """
