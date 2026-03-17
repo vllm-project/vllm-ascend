@@ -85,7 +85,8 @@ class NPUWorker310(NPUWorker):
             "isolate vLLM in its own container."
         )
 
-        # Reserved more memory for other operators workspace and other cache
+        # Divide the available memory by 2, to reserved more memory for other operators workspace and other cache
+        # This could avoid OOM with default gpu_memory_utilization
         self.available_kv_cache_memory_bytes = (
             self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
         ) // 2
