@@ -221,6 +221,7 @@
       "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8-Pruning",
       "vllm-ascend/Qwen3-Omni-30B-A3B-Thinking",
       "vllm-ascend/Qwen3-VL-8B-Instruct",
+      "vllm-ascend/Qwen3-VL-8B-Instruct-W8A8",
       "vllm-ascend/TinyLlama-1.1B-Chat-v0.3",
       "vllm-ascend/benchmark",
       "vllm-ascend/ilama-3.2-1B",
