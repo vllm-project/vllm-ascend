@@ -279,6 +279,12 @@ class NPUModelRunner(GPUModelRunner):
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
         self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
+        if self.use_sparse:
+            self.sparse_head_dim = (
+                self.model_config.hf_text_config.kv_lora_rank,
+                self.model_config.hf_text_config.qk_rope_head_dim,
+                self.model_config.hf_text_config.index_head_dim,
+            )
         # dsa c8
         self.use_sparse_c8_indexer = self.ascend_config.enable_sparse_c8
         if self.use_sparse_c8_indexer:
