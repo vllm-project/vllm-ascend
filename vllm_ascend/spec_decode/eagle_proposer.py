@@ -388,7 +388,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                     : num_reqs * self.decode_threshold
                 ]
 
-            builder = self.runner.attn_groups[0][0].get_metadata_builder()
+            builder = self.draft_attn_groups[0].get_metadata_builder()
             # update the tensor's address for each step.
             for draft_step in range(self.num_speculative_tokens):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -598,7 +598,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        builder = self.runner.attn_groups[0][0].get_metadata_builder()
+        builder = self.draft_attn_groups[0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
 
         if self.uses_mrope:

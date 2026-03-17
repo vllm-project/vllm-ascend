@@ -2877,7 +2877,7 @@ class NPUModelRunner(GPUModelRunner):
                             raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
                             raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
                     else:
-                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks,
                             current_kv_cache_spec.block_size,
                             current_kv_cache_spec.num_kv_heads,
