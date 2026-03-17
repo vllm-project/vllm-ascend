@@ -38,9 +38,14 @@ MODELS_EAGLE = [
     "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
     "RedHatAI/Qwen3-8B-speculator.eagle3"
 ]
-MODELS_MAIN = ["LLM-Research/Meta-Llama-3.1-8B-Instruct", "Qwen/Qwen3-8B"]
+MODELS_MAIN = [
+    "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+    "Qwen/Qwen3-8B",
+    "wemaster/deepseek_mtp_main_random_bf16"]
 VALID_COMBINATIONS = {("eagle", "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
                        "LLM-Research/Meta-Llama-3.1-8B-Instruct"),
+                      ("eagle", "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+                       "wemaster/deepseek_mtp_main_random_bf16"),
                       ("eagle3", "RedHatAI/Qwen3-8B-speculator.eagle3",
                        "Qwen/Qwen3-8B")}
 
@@ -127,7 +132,7 @@ def test_deepseek_mtp_correctness(model_name: str, num_speculative_tokens: int,
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
-def test_llama_qwen3_eagle_correctness(
+def test_llama_qwen3_deepseek_eagle_correctness(
         model_name: str, model_name_main: str, num_speculative_tokens: int,
         method: str, disable_padded_drafter_batch: bool,
         async_scheduling: bool, draft_tensor_parallel_size: Union[None, int]):
