@@ -98,7 +98,7 @@ vllm serve /weights/DeepSeek-OCR-2 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
 --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"multistream_overlap_shared_expert":true, "enable_cpu_binding":true}' \
+--additional-config '{"multistream_overlap_shared_expert":true, "enable_cpu_binding":true,"ascend_compilation_config": {"fuse_qknorm_rope": false}}' \
 --mm-processor-cache-gb 0 \
 ```
 
