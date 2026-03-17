@@ -183,19 +183,18 @@ if _HAS_NPU_TRITON:
             cos_sin_cache = cos_sin_cache.to(qkv.dtype)
             self.rotary_emb.cos_sin_cache = cos_sin_cache
 
-        q, k, v, qk_var = \
-            torch.ops.vllm.minimax_qkv_crosshead_norm_rope(
-                qkv=qkv,
-                cos_sin_cache=cos_sin_cache,
-                positions=positions,
-                q_weight=self.q_norm.weight,
-                k_weight=self.k_norm.weight,
-                q_hidden_size=self.q_size,
-                kv_hidden_size=self.kv_size,
-                head_dim=self.head_dim,
-                eps=self.q_norm.variance_epsilon,
-                rotary_dim=self.rotary_emb.rotary_dim,
-            )
+        q, k, v, qk_var = torch.ops.vllm.minimax_qkv_crosshead_norm_rope(
+            qkv=qkv,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            q_weight=self.q_norm.weight,
+            k_weight=self.k_norm.weight,
+            q_hidden_size=self.q_size,
+            kv_hidden_size=self.kv_size,
+            head_dim=self.head_dim,
+            eps=self.q_norm.variance_epsilon,
+            rotary_dim=self.rotary_emb.rotary_dim,
+        )
 
         # TP correction: fused kernel outputs packed qk_var [batch, 2];
         # only all_reduce remains as PyTorch op (communication);
@@ -204,7 +203,9 @@ if _HAS_NPU_TRITON:
             # all_reduce is in-place: must clone before it overwrites local vars
             qk_reduced = tensor_model_parallel_all_reduce(qk_var.clone())
             q, k = torch.ops.vllm.minimax_tp_correction(
-                q=q, k=k, qk_var=qk_var,
+                q=q,
+                k=k,
+                qk_var=qk_var,
                 qk_reduced=qk_reduced,
                 tp_world=self.q_norm.tp_world,
                 eps=self.q_norm.variance_epsilon,
