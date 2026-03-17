@@ -278,30 +278,28 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
-        self.use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-            vllm_config.model_config.hf_text_config, "index_topk"
-        )
-        if self.use_sparse:
-            self.sparse_head_dim = (
-                self.model_config.hf_text_config.kv_lora_rank,
-                self.model_config.hf_text_config.qk_rope_head_dim,
-                self.model_config.hf_text_config.index_head_dim,
-            )
-        # dsa c8
-        self.use_sparse_c8_indexer = self.ascend_config.enable_sparse_c8
-        if self.use_sparse_c8_indexer:
-            self.c8_k_cache_dtype = torch.int8
-            self.c8_k_scale_cache_dtype = torch.float16
+        self.use_sparse = hasattr(self.vllm_config.model_config.hf_text_config, "index_topk")
+        from vllm_ascend.utils import vllm_version_is
 
-        self.attn_backend = get_attn_backend(
-            0,
-            self.dtype,
-            None,
-            self.block_size,
-            use_mla=self.model_config.use_mla,
-            use_sparse=self.use_sparse,
-            use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
-        )
+        if vllm_version_is("0.17.0"):
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse,
+                use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
+            )
+        else:
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse,
+                use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
+            )
 
         try:
             self.dcp_size = get_dcp_group().world_size
