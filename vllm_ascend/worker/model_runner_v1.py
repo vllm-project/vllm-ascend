@@ -2167,7 +2167,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
-            num_dycp_reqs=self.pcp_manager.num_dycp_reqs,
+            num_dycp_reqs=num_reqs_padded if getattr(self, 'pcp_manager', None) is None else self.pcp_manager.num_dycp_reqs,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:

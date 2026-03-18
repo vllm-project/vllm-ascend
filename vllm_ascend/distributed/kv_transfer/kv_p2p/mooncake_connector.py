@@ -1322,7 +1322,6 @@ class MooncakeConnectorWorker:
         In cp/dcp scenario, kv_cache may be split, so we need to pull multiple blocks from multiple remote P node.
         Use this function to calculate remote port and remote block number of each remote P node that we need to pull.
         """
-        # TODO(wangxiaochao): dycp_ranks是否一定有值，需要确认下，即使关闭了动态CP，需要dycp_ranks也要有值
         prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
             chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
@@ -1330,7 +1329,10 @@ class MooncakeConnectorWorker:
             local_block_ids_list, remote_block_ids_list = [meta.local_block_ids], [meta.remote_block_ids]
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
-        # TODO(wangxiaochao): 考虑增加动态CP的开关,如果关闭了动态CP，dycp_ranks也是正常值，此处就可以不感知开关
+        if meta.remote_dycp_ranks == []:
+            meta.remote_dycp_ranks = list(range(meta.remote_pcp_size))
+        if meta.local_dycp_ranks == []:
+            meta.local_dycp_ranks = [0]
         assert len(meta.remote_dycp_ranks) == 1 or len(meta.remote_dycp_ranks) == meta.remote_pcp_size
         assert len(meta.local_dycp_ranks) == 1 or len(meta.local_dycp_ranks) == self.dp_size
         remote_pcp_size = len(meta.remote_dycp_ranks)
@@ -1338,9 +1340,6 @@ class MooncakeConnectorWorker:
         local_pcp_rank = self.dp_rank
         remote_cp_size = remote_pcp_size * meta.remote_dcp_size
         local_cp_size = local_pcp_size * self.dcp_size  # decode pcp is not supported now
-
-        if self.dp_rank not in meta.local_dycp_ranks:
-            return [], [], []
 
         def context_parallel_parameters_check():
             assert remote_cp_size % (local_cp_size) == 0 or local_cp_size % remote_cp_size == 0
