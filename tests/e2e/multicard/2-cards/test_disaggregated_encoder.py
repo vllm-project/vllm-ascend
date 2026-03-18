@@ -34,7 +34,7 @@ TENSOR_PARALLELS = [1]
 async def test_models(model: str, tp_size: int) -> None:
     from vllm_ascend.utils import vllm_version_is
 
-    if vllm_version_is("0.17.0"):
+    if not vllm_version_is("0.17.0"):
         pytest.skip(
             "EPLB output is different without EPLB, see issue: https://github.com/vllm-project/vllm-ascend/issues/7408",
         )
