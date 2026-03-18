@@ -42,6 +42,7 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
+_ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
 class NPUModelRunner310(NPUModelRunner):
@@ -273,7 +274,7 @@ class NPUModelRunner310(NPUModelRunner):
                     supported_sizes = [
                         support_size
                         for support_size in self.attn_backend.get_supported_kernel_block_sizes()
-                        if support_size * kv_cache_spec.head_size <= 16384
+                        if support_size * kv_cache_spec.head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
                     ]
                     if supported_sizes:
                         block_size = supported_sizes[0]
