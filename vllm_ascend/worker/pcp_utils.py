@@ -758,7 +758,7 @@ class PCPManager:
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
         ori_query_lens_cpu = self.query_lens_pcp_full.cpu[:num_reqs_padded]
-        if self.pcp_world_size * self.dcp_world_size > 1:
+        if self.pcp_world_size * self.dcp_world_size * self.dycp_world_size > 1:
             assert num_scheduled_tokens is not None
             decode_context_lens = (
                 input_batch.num_computed_tokens_cpu[: self.num_decode_reqs]

@@ -331,7 +331,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_prefill_cp:
             self.model_config.max_model_len += 2 * self.common_pcp_size * self.max_num_reqs
         max_buffer_num_tokens = self.max_num_tokens
-        if self.common_pcp_size * self.dcp_size > 1:
+        if self.common_pcp_size * self.dcp_size * self.dycp_size > 1:
             max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.common_pcp_size
             self.pcp_manager = PCPManager(
                 self.common_pcp_size,
@@ -443,7 +443,7 @@ class NPUModelRunner(GPUModelRunner):
 
     @property
     def use_cp(self) -> bool:
-        return self.common_pcp_size * self.dcp_size > 1
+        return self.common_pcp_size * self.dcp_size * self.dycp_size > 1
 
     @property
     def use_prefill_cp(self) -> bool:
