@@ -439,7 +439,7 @@ class NPUModelRunner310(NPUModelRunner):
                     supported_sizes = [
                         support_size
                         for support_size in backend.get_supported_kernel_block_sizes()
-                        if support_size * kv_cache_spec.head_size <= 16384
+                        if support_size * kv_cache_spec.head_size <= _ATTENTION_BLOCK_SIZE_LIMIT
                     ]
                     kernel_block_size_list = supported_sizes if supported_sizes else [self.cache_config.block_size]
                 except IndexError:
