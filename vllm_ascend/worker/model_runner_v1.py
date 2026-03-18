@@ -2562,14 +2562,17 @@ class NPUModelRunner(GPUModelRunner):
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
-                    from vllm.model_executor.models.interfaces import supports_eagle3
-                    if not supports_eagle3(self.model):
-                        raise RuntimeError(
-                            "Model does not support EAGLE3 interface but "
-                            "aux_hidden_state_outputs was requested"
-                        )
-                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
-                    self.model.set_aux_hidden_state_layers(aux_layers)
+                    if vllm_version_is("0.17.0"):
+                        self.model.set_aux_hidden_state_layers(self.model.get_eagle3_aux_hidden_state_layers())
+                    else:
+                        from vllm.model_executor.models.interfaces import supports_eagle3
+                        if not supports_eagle3(self.model):
+                            raise RuntimeError(
+                                "Model does not support EAGLE3 interface but "
+                                "aux_hidden_state_outputs was requested"
+                            )
+                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                        self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
