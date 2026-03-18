@@ -1,9 +1,19 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNormGated
 
 from vllm_ascend._310p.ops.layernorm import AscendRMSNormGated310
+
+
+@pytest.fixture(autouse=True)
+def default_vllm_config():
+    mock_config = MagicMock()
+    mock_config.compilation_config.custom_ops = ["all"]
+    with set_current_vllm_config(mock_config):
+        yield mock_config
 
 
 def test_rmsnorm_gated_310_forward_oot_uses_forward_native():
