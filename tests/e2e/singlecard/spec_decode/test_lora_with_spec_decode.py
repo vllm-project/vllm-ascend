@@ -8,7 +8,6 @@ import random
 import numpy as np
 import pytest
 import torch
-
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
@@ -47,7 +46,6 @@ SEED = 42
     ],
 )
 def test_batch_inference_correctness(
-    monkeypatch: pytest.MonkeyPatch,
     model_setup: tuple[str, str, str, str, int],
 ):
     """
@@ -55,71 +53,70 @@ def test_batch_inference_correctness(
     Should be the same and no failure when doing batch inference.
     model_setup: (method, model_name, spec_model_name, lora_path, tp_size)
     """
-    with monkeypatch.context() as m:
-        # Disable randomness
-        torch.manual_seed(SEED)
-        np.random.seed(SEED)
-        random.seed(SEED)
-        torch.use_deterministic_algorithms(True)
+    # Disable randomness
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED)
+    torch.use_deterministic_algorithms(True)
 
-        method, model_name, spec_model_name, lora_path, tp_size = model_setup
-        prompts = [LORA_TEST_PROMPT_MAP[lora_path]] * 100
-        lora_request = LoRARequest("adapter", 1, lora_path)
-        sampling_params = SamplingParams(
-            temperature=0.0, top_p=1.0, top_k=-1, seed=SEED, max_tokens=128
-        )
+    method, model_name, spec_model_name, lora_path, tp_size = model_setup
+    prompts = [LORA_TEST_PROMPT_MAP[lora_path]] * 100
+    lora_request = LoRARequest("adapter", 1, lora_path)
+    sampling_params = SamplingParams(
+        temperature=0.0, top_p=1.0, top_k=-1, seed=SEED, max_tokens=128
+    )
 
-        # without speculative decoding
-        ref_llm = LLM(
-            model=model_name,
-            trust_remote_code=True,
-            tensor_parallel_size=tp_size,
-            max_model_len=2048,
-            max_num_seqs=4,
-            enable_lora=True,
-            max_loras=1,
-            max_cpu_loras=1,
-            max_lora_rank=16,
-        )
-        ref_outputs = ref_llm.generate(
-            prompts, sampling_params, lora_request=lora_request
-        )
-        del ref_llm
+    # without speculative decoding
+    ref_llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        tensor_parallel_size=tp_size,
+        max_model_len=2048,
+        max_num_seqs=4,
+        enable_lora=True,
+        max_loras=1,
+        max_cpu_loras=1,
+        max_lora_rank=16,
+    )
+    ref_outputs = ref_llm.generate(
+        prompts, sampling_params, lora_request=lora_request
+    )
+    del ref_llm
 
-        # speculative decoding
-        lora_spec_llm = LLM(
-            model=model_name,
-            trust_remote_code=True,
-            tensor_parallel_size=tp_size,
-            speculative_config={
-                "method": method,
-                "model": spec_model_name,
-                "num_speculative_tokens": 3,
-                "max_model_len": 2048,
-            },
-            max_model_len=2048,
-            max_num_seqs=4,
-            enable_lora=True,
-            max_loras=1,
-            max_cpu_loras=1,
-            max_lora_rank=16,
-        )
-        lora_spec_outputs = lora_spec_llm.generate(
-            prompts, sampling_params, lora_request=lora_request
-        )
-        del lora_spec_llm
+    # speculative decoding
+    lora_spec_llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        tensor_parallel_size=tp_size,
+        speculative_config={
+            "method": method,
+            "model": spec_model_name,
+            "num_speculative_tokens": 3,
+            "max_model_len": 2048,
+        },
+        max_model_len=2048,
+        max_num_seqs=4,
+        enable_lora=True,
+        max_loras=1,
+        max_cpu_loras=1,
+        max_lora_rank=16,
+    )
+    lora_spec_outputs = lora_spec_llm.generate(
+        prompts, sampling_params, lora_request=lora_request
+    )
+    del lora_spec_llm
 
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, lora_spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
+    matches = 0
+    misses = 0
+    for ref_output, spec_output in zip(ref_outputs, lora_spec_outputs):
+        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+            matches += 1
+        else:
+            misses += 1
+            print(f"ref_output: {ref_output.outputs[0].text}")
+            print(f"spec_output: {spec_output.outputs[0].text}")
 
-        # Heuristic: expect at least 90% of the prompts to match exactly
-        # Upon failure, inspect the outputs to check for inaccuracy.
-        print(f"match ratio: {matches}/{len(ref_outputs)}")
-        assert matches > int(0.90 * len(ref_outputs))
+    # Heuristic: expect at least 90% of the prompts to match exactly
+    # Upon failure, inspect the outputs to check for inaccuracy.
+    print(f"match ratio: {matches}/{len(ref_outputs)}")
+    assert matches > int(0.90 * len(ref_outputs))
