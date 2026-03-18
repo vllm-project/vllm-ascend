@@ -74,10 +74,3 @@ test_cases:
     benchmarks:
       <<: *benchmarks
 
-  - name: "GLM-5-TP16-DP1-eager"
-    model: "Eco-Tech/GLM-5-w4a8"
-    envs:
-      <<: *envs
-    server_cmd: *server_cmd
-    benchmarks:
-      <<: *benchmarks
