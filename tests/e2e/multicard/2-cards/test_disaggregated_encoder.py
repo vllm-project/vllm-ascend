@@ -24,7 +24,7 @@ from tools.send_mm_request import send_image_request
 MODELS = [
     "Qwen/Qwen2.5-VL-7B-Instruct",
 ]
-SHARED_STORAGE_PATH = "/dev/shm/epd/storage"
+SHARED_STORAGE_PATH = "/tmp/shm/epd/storage"
 TENSOR_PARALLELS = [1]
 
 
