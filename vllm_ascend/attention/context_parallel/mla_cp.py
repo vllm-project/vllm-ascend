@@ -122,6 +122,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             ]
             self.slot_mapping[self.num_decode_tokens : self.num_decode_tokens * self.pcp_size].fill_(-1)
         metadata_cls.slot_mapping = self.slot_mapping
+        metadata_cls.num_dycp_reqs = common_attn_metadata.num_dycp_reqs
         return metadata_cls
 
     @classmethod
@@ -585,10 +586,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
         )
         prefill_k_c_normed = kv_c_normed[:num_actual_tokens]
         prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe], dim=-1)
-        if num_dycp_reqs:
-            prefill_kv_c_k_pe = get_dycp_group().all_gather(prefill_kv_c_k_pe, 0)
-        else:
-            prefill_kv_c_k_pe = get_pcp_group().all_gather(prefill_kv_c_k_pe, 0)
+        if num_dycp_reqs > 0:
+            if self.dycp_size > 1:
+                prefill_kv_c_k_pe = get_dycp_group().all_gather(prefill_kv_c_k_pe, 0)
+            else:
+                prefill_kv_c_k_pe = get_pcp_group().all_gather(prefill_kv_c_k_pe, 0)
         prefill_kv_c_k_pe = torch.index_select(
             prefill_kv_c_k_pe, 0, attn_metadata.prefill.pcp_metadata.pcp_allgather_restore_idx
         )
@@ -924,7 +926,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
-        if num_dycp_reqs > 0:
+        if self.dycp_size > 1 and num_dycp_reqs > 0:
             attn_output[:num_dycp_reqs] = _npu_update_dycp_attn(num_dycp_reqs, attn_output, softmax_lse)
             return self._v_up_proj(attn_output)
         attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)

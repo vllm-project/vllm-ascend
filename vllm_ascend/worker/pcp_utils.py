@@ -496,7 +496,7 @@ class PCPManager:
     def get_padded_slot_mapping(self, num_tokens_padded: int, slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
-        dp_tokens = self.pcp_manager.num_dycp_dp_tokens
+        dp_tokens = self.num_dycp_dp_tokens
         assert self.num_scheduled_pcp_tokens_padded is not None
         num_tokens = self.num_scheduled_pcp_tokens_padded.sum()
         pcp_padded_slot_mapping = (
@@ -506,9 +506,9 @@ class PCPManager:
         )
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
-        pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping[: -dp_tokens]
+        pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping[: slot_mapping.shape[0] - dp_tokens]
         pcp_padded_slot_mapping[num_tokens * self.pcp_world_size : num_tokens * self.pcp_world_size + dp_tokens] = slot_mapping[
-            - dp_tokens: ]
+            slot_mapping.shape[0] - dp_tokens: ]
         if self.pcp_use_hybrid_attn:
             return pcp_padded_slot_mapping.clone()
         else:
@@ -523,7 +523,7 @@ class PCPManager:
         from vllm.distributed.parallel_state import get_pcp_group, get_dycp_group
 
         if not self.pcp_use_hybrid_attn:
-            dp_hidden_states = hidden_states[self.num_actual_tokens_pcp_padded // self.pcp_size :]
+            dp_hidden_states = hidden_states[self.num_actual_tokens_pcp_padded // self.pcp_world_size :]
             if self.num_dycp_reqs > 0:
                 if self.dycp_world_size > 1:
                     cp_hidden_states = get_dycp_group().all_gather(
@@ -534,7 +534,7 @@ class PCPManager:
                         hidden_states[:self.num_actual_tokens_pcp_padded //
                                     self.pcp_world_size], 0)
                 cp_hidden_states[: self.num_actual_tokens_pcp_padded] = torch.index_select(
-                    cp_hidden_states, 0, self.pcp_allgather_restore_idx[:cp_hidden_states.shape[0]])
+                    cp_hidden_states, 0, self.pcp_allgather_restore_idx.gpu[:cp_hidden_states.shape[0]])
                 dp_hidden_states = torch.cat([cp_hidden_states, dp_hidden_states])
             hidden_states = dp_hidden_states
 

@@ -698,7 +698,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         total_num_pcp_scheduled_tokens = 0
-        if self.use_prefill_cp > 1:
+        if self.use_prefill_cp:
             num_scheduled_tokens[:num_cp_request], position_pcp = self.pcp_manager.update_tokens_for_pcp(
                 num_scheduled_tokens[:num_cp_request], self.arange_np
             )
@@ -979,7 +979,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # while pcp > 1, decode results may contain padding (from pcp all-gather),
         # update logits_indices after getting draft_token_ids from ori logits_indices
-        if self.use_prefill_cp > 1:
+        if self.use_prefill_cp:
             cu_num_scheduled_tokens = cu_num_scheduled_tokens * self.common_pcp_size - num_pcp_pads
             logits_indices_pcp = np.repeat(cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
             logits_indices_pcp += arange

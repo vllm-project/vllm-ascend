@@ -1022,7 +1022,7 @@ class MooncakeConnectorScheduler:
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
-                local_dycp_ranks=req.dycp_ranks,
+                local_dycp_ranks=req.cp_ranks,
                 num_external_tokens=num_external_tokens,
                 kv_transfer_params=req.kv_transfer_params,
             )
@@ -1078,7 +1078,7 @@ class MooncakeConnectorScheduler:
             remote_dcp_size=self.dcp_size,
             remote_ptp_size=self.tp_size,
             last_token_id=request.output_token_ids[-1],
-            remote_dycp_ranks=request.dycp_ranks,
+            remote_dycp_ranks=request.cp_ranks,
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
         )
