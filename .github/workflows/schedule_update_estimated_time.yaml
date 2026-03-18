@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: '0 2 * * 1'  # Every Monday at 02:00 UTC
   workflow_dispatch:
-  pull_request:
-    branches:
-      - 'main'
-    paths:
-      - '.github/workflows/schedule_update_estimated_time.yaml'
 
 permissions:
   contents: write
@@ -47,6 +42,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.FORK_OWNER }}/vllm-ascend
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Download all timing artifacts
         uses: actions/download-artifact@v4
@@ -91,7 +87,6 @@ jobs:
           fi
 
       - name: Create pull request
-        if: github.event_name != 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
