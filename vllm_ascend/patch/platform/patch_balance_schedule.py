@@ -8,7 +8,7 @@ import vllm
 from vllm.config import ParallelConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.system_utils import decorate_logs, set_process_title
@@ -22,8 +22,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
-
-logger = init_logger(__name__)
 
 
 class BalanceScheduler(Scheduler):
