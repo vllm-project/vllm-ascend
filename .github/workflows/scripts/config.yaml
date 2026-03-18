@@ -55,6 +55,8 @@ e2e-singlecard:
     estimated_time: 1500
   - name: tests/e2e/singlecard/spec_decode/test_v1_spec_decode.py
     estimated_time: 600
+  - name: tests/e2e/singlecard/spec_decode/test_lora_with_spec_decode.py
+    estimated_time: 423
   - name: tests/e2e/singlecard/model_runner_v2/test_basic.py
     estimated_time: 80
     is_skipped: true
