@@ -57,7 +57,7 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "language_model.lm_head.": "lm_head.",
         "language_model.model.": "model.language_model.",
     },
-    "qwen3_vl_text": {
+    "qwen3_vl": {
         "visual.": "model.visual.",
         "language_model.lm_head.": "lm_head.",
         "language_model.model.": "model.language_model.",
