@@ -137,6 +137,28 @@
 #       Remove this patch if upstream provides an official NPU graph-capture
 #       guidance / auto-configuration path for HCCL.
 #
+# ** 8. File: platform/patch_kv_cache_interface.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
+#    Why:
+#       The default `MLAAttentionSpec` is mainly built around `kv_lora_rank`
+#       and `qk_rope_head_dim`. On NPU, we also use this class to describe DSA
+#       models. Unlike the GPU path, where cache management is handled by an
+#       additional indexer module, extending this class directly simplifies the
+#       corresponding `model_runner` implementation on NPU.
+#
+#       This patch also adds Sparse C8 support for DSA models on NPU. As part
+#       of that support, members such as `page_size_bytes` need to be adapted,
+#       so they are overridden here as well to preserve overall readability.
+#    How:
+#       This patch subclasses the original implementation, overrides selected
+#       methods, and adds DSA-specific attributes and helpers with default
+#       values where needed.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/25896
+#    Future Plan:
+#       Remove this patch after the upcoming KV cache spec refactor.
+#
 # * Worker Patch:
 # ===============
 #
@@ -506,3 +528,17 @@
 #    Future Plan:
 #       Remove this patch when:
 #       design a dispatch mechanism for batch_memcpy_kernel.
+#
+# ** 23. File: worker/patch_weight_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
+#    Why:
+#       The C8 weight quantized by modelslim will modify the model structure,
+#       and the scale and offset required for kvcache quantization will increase.
+#       In addition, the names of the quantization parameters are different from
+#       those in the community.
+#    How：
+#       we have enhanced the maybe_remap_kv_scale_name function.
+#    Future Plan:
+#       The maybe_remap_kv_scale_name function of the community is reconstructed to support
+#       multiple backends.

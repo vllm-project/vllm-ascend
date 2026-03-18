@@ -1,6 +1,7 @@
 {
     "models": [
       "AngelSlim/Qwen3-32B_eagle3",
+      "AngelSlim/Qwen3-a3B_eagle3",
       "Anionex/Qwen3-1.7B-W4A8-V1",
       "ArthurZ/ilama-3.2-1B",
       "BAAI/bge-base-en-v1.5",
@@ -207,10 +208,12 @@
       "vllm-ascend/Qwen3-30B-A3B-Puring",
       "vllm-ascend/Qwen3-30B-A3B-W8A8",
       "vllm-ascend/Qwen3-30B-A3B-W8A8-Pruning",
+      "vllm-ascend/Qwen3-30B-A3B-W8A8-QuaRot",
       "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w8a8",
       "vllm-ascend/Qwen3-30B-A3B-Instruct-2507-quantized.w4a8",
       "vllm-ascend/Qwen3-32B-W4A4",
       "vllm-ascend/Qwen3-32B-W8A8",
+      "vllm-ascend/Qwen3-32B-W8A8-QuaRot",
       "vllm-ascend/Qwen3-8B",
       "vllm-ascend/Qwen3-8B-W4A8",
       "vllm-ascend/Qwen3-8B-W8A8",

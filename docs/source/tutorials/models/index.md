@@ -22,6 +22,8 @@ Qwen3-8B-W4A8.md
 Qwen3-32B-W4A4.md
 Qwen3-Next.md
 Qwen3-Omni-30B-A3B-Thinking.md
+Qwen3.5-27B.md
+Qwen3.5-397B-A17B.md
 DeepSeek-V3.1.md
 DeepSeek-V3.2.md
 DeepSeek-R1.md
