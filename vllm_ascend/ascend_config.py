@@ -219,7 +219,6 @@ class AscendConfig:
             if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
                 from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
-                new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
                 new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)

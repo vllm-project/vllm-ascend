@@ -27,15 +27,6 @@ import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
-# Monkey-patch torch.accelerator memory APIs for NPU compatibility.
-# Upstream vLLM (commit 747b068) replaced current_platform.memory_stats()
-# with torch.accelerator.memory_stats(), but torch.accelerator does not
-# properly delegate to NPU. We redirect to torch.npu.* equivalents.
-if hasattr(torch, "npu"):
-    torch.accelerator.memory_stats = torch.npu.memory_stats  # type: ignore[attr-defined]
-    torch.accelerator.memory_reserved = torch.npu.memory_reserved  # type: ignore[attr-defined]
-    torch.accelerator.reset_peak_memory_stats = torch.npu.reset_peak_memory_stats  # type: ignore[attr-defined]
-
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
