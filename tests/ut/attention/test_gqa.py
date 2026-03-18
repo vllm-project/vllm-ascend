@@ -10,7 +10,7 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-from tests.ut.device.attention.utils import (
+from tests.ut.attention.utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
     create_common_attn_metadata,
