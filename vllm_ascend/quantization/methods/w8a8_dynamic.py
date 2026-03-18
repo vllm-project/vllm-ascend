@@ -86,7 +86,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
-            layer.weight_scale,
+            layer.weight_scale_fp32,  # use float32 scale; CANN does not support float16 scale
             pertoken_scale=pertoken_scale,
             bias=bias,
             output_dtype=x.dtype,
