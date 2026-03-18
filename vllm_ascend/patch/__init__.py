@@ -528,3 +528,18 @@
 #    Future Plan:
 #       Remove this patch when:
 #       design a dispatch mechanism for batch_memcpy_kernel.
+# ** 23. File: platform/patch_transformers.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `transformers.models.llama.modeling_llama.LlamaFlashAttention2`
+#    Why:
+#       DeepSeek-V2 and DeepSeek-OCR-2 code (`modeling_deepseekv2.py`) imports 
+#       `LlamaFlashAttention2`. However, transformers >= 4.43.0 removed this class, 
+#       causing ImportError during model loading.
+#    How：
+#       Inject a dummy alias (`LlamaFlashAttention2 = LlamaAttention`) to bypass the 
+#       import check. It won't affect Ascend execution since vLLM uses custom attention backend.
+#    Related PR:
+#       Issue #6692 Verify/Support DeepSeek-OCR-2
+#    Future Plan:
+#       Remove this patch when:
+#       DeepSeek updates their HuggingFace remote code.
