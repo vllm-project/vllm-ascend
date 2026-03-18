@@ -416,7 +416,7 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
-std::tuple<at::Tensor, at::Tensor> swi_glu_dynamic_quant_meta(
+std::tuple<at::Tensor, at::Tensor> npu_swi_glu_dynamic_quant_meta(
     const at::Tensor &x,
     const c10::optional<at::Tensor> &smooth_scales,
     const c10::optional<at::Tensor> &offsets,
@@ -482,6 +482,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // SwiGluDynamicQuant
-    ops.impl("swi_glu_dynamic_quant", &vllm_ascend::meta::swi_glu_dynamic_quant_meta);
+    ops.impl("npu_swi_glu_dynamic_quant", &vllm_ascend::meta::npu_swi_glu_dynamic_quant_meta);
 }
 }

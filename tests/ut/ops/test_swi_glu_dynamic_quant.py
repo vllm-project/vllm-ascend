@@ -239,7 +239,7 @@ class TestSwiGluDynamicQuantNumerical:
 class TestSwiGluDynamicQuantOpRegistration:
     """Test that the operator is properly registered in the torch library."""
 
-    @patch("torch.ops._C_ascend.swi_glu_dynamic_quant")
+    @patch("torch.ops._C_ascend.npu_swi_glu_dynamic_quant")
     def test_op_callable(self, mock_op):
         """Verify the op is callable via torch.ops._C_ascend."""
         mock_op.return_value = (
@@ -248,13 +248,13 @@ class TestSwiGluDynamicQuantOpRegistration:
         )
 
         x = torch.randn(4, 64, dtype=torch.float16)
-        y, scale = torch.ops._C_ascend.swi_glu_dynamic_quant(x)
+        y, scale = torch.ops._C_ascend.npu_swi_glu_dynamic_quant(x)
 
         mock_op.assert_called_once()
         assert y.shape == (4, 32)
         assert scale.shape == (4,)
 
-    @patch("torch.ops._C_ascend.swi_glu_dynamic_quant")
+    @patch("torch.ops._C_ascend.npu_swi_glu_dynamic_quant")
     def test_op_with_optional_args(self, mock_op):
         """Verify optional arguments are passed correctly."""
         mock_op.return_value = (
@@ -266,7 +266,7 @@ class TestSwiGluDynamicQuantOpRegistration:
         smooth_scales = torch.randn(1, 32, dtype=torch.float32)
         group_index = torch.tensor([4], dtype=torch.int32)
 
-        y, scale = torch.ops._C_ascend.swi_glu_dynamic_quant(
+        y, scale = torch.ops._C_ascend.npu_swi_glu_dynamic_quant(
             x,
             smooth_scales=smooth_scales,
             offsets=None,
@@ -278,7 +278,7 @@ class TestSwiGluDynamicQuantOpRegistration:
         )
         mock_op.assert_called_once()
 
-    @patch("torch.ops._C_ascend.swi_glu_dynamic_quant")
+    @patch("torch.ops._C_ascend.npu_swi_glu_dynamic_quant")
     def test_op_default_args(self, mock_op):
         """Verify default argument values work."""
         mock_op.return_value = (
@@ -288,14 +288,14 @@ class TestSwiGluDynamicQuantOpRegistration:
 
         x = torch.randn(4, 64, dtype=torch.float16)
         # Call with only required arg
-        torch.ops._C_ascend.swi_glu_dynamic_quant(x)
+        torch.ops._C_ascend.npu_swi_glu_dynamic_quant(x)
         mock_op.assert_called_once()
 
 
 class TestSwiGluDynamicQuantVsReference:
     """Compare fused op against torch_npu.npu_swiglu + npu_dynamic_quant."""
 
-    @patch("torch.ops._C_ascend.swi_glu_dynamic_quant")
+    @patch("torch.ops._C_ascend.npu_swi_glu_dynamic_quant")
     @patch("torch_npu.npu_dynamic_quant")
     @patch("torch_npu.npu_swiglu")
     def test_fused_vs_separate_output_shapes(
@@ -344,7 +344,7 @@ def run_npu_benchmark():
     """
     On-device benchmark comparing:
       - Reference: torch_npu.npu_swiglu + torch_npu.npu_dynamic_quant (two ops)
-      - Fused: torch.ops._C_ascend.swi_glu_dynamic_quant (single fused op)
+      - Fused: torch.ops._C_ascend.npu_swi_glu_dynamic_quant (single fused op)
 
     Run this directly with: python tests/ut/ops/test_swi_glu_dynamic_quant.py
     """
@@ -406,13 +406,13 @@ def run_npu_benchmark():
         # ---- Fused path: swi_glu_dynamic_quant ----
         # Warmup
         for _ in range(warmup_iters):
-            _ = torch.ops._C_ascend.swi_glu_dynamic_quant(x)
+            _ = torch.ops._C_ascend.npu_swi_glu_dynamic_quant(x)
         torch.npu.synchronize()
 
         # Benchmark
         t0 = time.perf_counter()
         for _ in range(bench_iters):
-            _ = torch.ops._C_ascend.swi_glu_dynamic_quant(x)
+            _ = torch.ops._C_ascend.npu_swi_glu_dynamic_quant(x)
         torch.npu.synchronize()
         fused_time_ms = (time.perf_counter() - t0) / bench_iters * 1000.0
 
@@ -439,7 +439,7 @@ def run_npu_benchmark():
         y_ref, scale_ref = torch_npu.npu_dynamic_quant(swiglu_out)
 
         # Fused
-        y_fused, scale_fused = torch.ops._C_ascend.swi_glu_dynamic_quant(x)
+        y_fused, scale_fused = torch.ops._C_ascend.npu_swi_glu_dynamic_quant(x)
 
         # Compare shapes
         shape_ok = (y_ref.shape == y_fused.shape and

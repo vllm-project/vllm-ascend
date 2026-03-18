@@ -1236,7 +1236,7 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
-std::tuple<at::Tensor, at::Tensor> swi_glu_dynamic_quant(
+std::tuple<at::Tensor, at::Tensor> npu_swi_glu_dynamic_quant(
     const at::Tensor &x,
     const c10::optional<at::Tensor> &smooth_scales,
     const c10::optional<at::Tensor> &offsets,
@@ -1441,7 +1441,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     // SwiGluDynamicQuant
     ops.def(
-        "swi_glu_dynamic_quant(Tensor x, "
+        "npu_swi_glu_dynamic_quant(Tensor x, "
         "Tensor? smooth_scales=None, "
         "Tensor? offsets=None, "
         "Tensor? group_index=None, "
@@ -1450,5 +1450,5 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "str quant_mode='dynamic', "
         "int group_list_type=0, "
         "int dst_type=2) -> (Tensor y, Tensor scale)");
-    ops.impl("swi_glu_dynamic_quant", torch::kPrivateUse1, &vllm_ascend::swi_glu_dynamic_quant);
+    ops.impl("npu_swi_glu_dynamic_quant", torch::kPrivateUse1, &vllm_ascend::npu_swi_glu_dynamic_quant);
 }
