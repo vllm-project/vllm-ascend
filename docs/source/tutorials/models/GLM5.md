@@ -401,7 +401,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"multistream_overlap_shared_expert":true}' \
+--additional-config '{"enable_npugraph_ex": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
@@ -449,7 +449,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.95 \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"multistream_overlap_shared_expert":true}' \
+--additional-config '{"enable_npugraph_ex": true, "fuse_muls_add":true,"multistream_overlap_shared_expert":true}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 ```
 
