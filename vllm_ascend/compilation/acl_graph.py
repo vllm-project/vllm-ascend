@@ -68,6 +68,7 @@ class ACLGraphWrapper:
         cudagraph_options: CUDAGraphOptions | None = None,
     ):
         self.runnable = runnable
+        self._runnable_str = str(runnable)
         self.vllm_config = vllm_config
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
@@ -91,7 +92,7 @@ class ACLGraphWrapper:
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
-        raise AttributeError(f"Attribute {key} not exists in the runnable of aclgraph wrapper: {self.runnable}")
+        raise AttributeError(f"Attribute {key} not exists in the runnable of aclgraph wrapper: {self._runnable_str}")
 
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
