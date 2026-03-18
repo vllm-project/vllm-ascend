@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 
 LORA_TEST_PROMPT_MAP: dict[str, str] = {}
 
-LORA_TEST_PROMPT_MAP["/nas/disk1/qwen-linear-algebra-coder"] = """
+LORA_TEST_PROMPT_MAP["vllm-ascend/qwen-linear-algebra-coder"] = """
 ### INSTRUCTION:
 You are an AI assistant that generates Python code to solve linear
 algebra problems.
