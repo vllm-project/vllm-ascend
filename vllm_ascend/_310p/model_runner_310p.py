@@ -152,6 +152,7 @@ class NPUModelRunner310(NPUModelRunner):
         remove_lora: bool = True,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
+        profile_seq_lens: int | None = None,
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         with temporary_context:
@@ -168,6 +169,7 @@ class NPUModelRunner310(NPUModelRunner):
                 remove_lora=remove_lora,
                 is_graph_capturing=is_graph_capturing,
                 num_active_loras=num_active_loras,
+                profile_seq_lens=profile_seq_lens,
             )
 
     def _check_and_update_cudagraph_mode(
