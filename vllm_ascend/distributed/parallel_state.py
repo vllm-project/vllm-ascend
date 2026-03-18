@@ -81,7 +81,7 @@ def init_ascend_model_parallel(
         num = next((i for i, ranks in enumerate(group_ranks) if local_rank in ranks), None)
         _P_TP = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name=f"p_tp_{num}")
 
-    global _MC2
+    # EP like group ranks
     group_ranks = (
         all_ranks.transpose(1, 2)
         .reshape(
@@ -92,12 +92,19 @@ def init_ascend_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
 
+    global _MC2
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB
         _DYNAMIC_EPLB = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
+        )
+
+    if get_ascend_config().multistream_overlap_gate:
+        global _FC3_QUANT_X
+        _FC3_QUANT_X = init_model_parallel_group(
+            group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
         )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
@@ -217,21 +224,6 @@ def init_ascend_model_parallel(
             # For standard tp, use global tp group_ranks
             tp_group_ranks = all_ranks.view(-1, global_tp_size)
             _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
-
-    if get_ascend_config().multistream_overlap_gate:
-        global _FC3_QUANT_X
-        group_ranks = (
-            all_ranks.transpose(1, 2)
-            .reshape(
-                -1,
-                global_dp_size * global_pcp_size * global_tp_size,
-            )
-            .unbind(0)
-        )
-        group_ranks = [x.tolist() for x in group_ranks]
-        _FC3_QUANT_X = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
-        )
 
 
 def model_parallel_initialized():
