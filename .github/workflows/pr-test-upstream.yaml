@@ -49,15 +49,14 @@ jobs:
         runs-on: linux-aarch64-a2b3-1
         strategy:
           fail-fast: false
-          max-parallel: 1
           matrix:
-            part: [0, 1, 2]
+            part: [0, 1, 2, 3]
             vllm: [v0.17.0]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 0
+            HF_HUB_OFFLINE: 1
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v4
@@ -114,5 +113,5 @@ jobs:
                 python3 .github/workflows/scripts/run_suite.py \
                   --suite e2e-upstream-singlecard \
                   --auto-partition-id "${{ matrix.part }}" \
-                  --auto-partition-size 3 \
+                  --auto-partition-size 4 \
                   --continue-on-error
