@@ -25,7 +25,6 @@ from vllm.config.model import ModelConfig
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
-
 _original_verify_quantization = getattr(ModelConfig, "_verify_quantization", None)
 _original_verify_cuda_graph = getattr(ModelConfig, "_verify_cuda_graph", None)
 

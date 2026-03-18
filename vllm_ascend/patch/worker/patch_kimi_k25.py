@@ -18,7 +18,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.logger import logger
 from vllm.model_executor.models.kimi_k25_vit import Learnable2DInterpPosEmbDivided_fixed, get_rope_shape_decorate
 
 
