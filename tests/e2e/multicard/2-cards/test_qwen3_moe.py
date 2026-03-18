@@ -76,6 +76,12 @@ def test_qwen3_moe_distributed_aiv_tp2():
 
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
+    from vllm_ascend.utils import vllm_version_is
+
+    if not vllm_version_is("0.17.0"):
+        pytest.skip(
+            "EPLB output is different without EPLB, see issue: https://github.com/vllm-project/vllm-ascend/issues/7408",
+        )
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     port = get_open_port()
     compilation_config = json.dumps({"cudagraph_capture_sizes": [8]})
