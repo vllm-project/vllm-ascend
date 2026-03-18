@@ -32,4 +32,5 @@ GLM5.md
 Kimi-K2-Thinking.md
 Kimi-K2.5.md
 PaddleOCR-VL.md
+MiniMax-M2.5.md
 :::
