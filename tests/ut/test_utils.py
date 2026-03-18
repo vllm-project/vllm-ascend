@@ -327,7 +327,19 @@ class TestUtils(TestBase):
             self.assertIs(result, weight)
             assert_nz_cast(weight)
 
-        # Test case 7: non-310P quantized weights still convert by default
+        # Test case 7: Meta tensors are never converted (profiling phase)
+        mock_npu_format_cast.reset_mock()
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        ):
+            weight = torch.empty(32, 64, dtype=torch.float16, device="meta")
+            result = utils.maybe_trans_nz(weight)
+            self.assertIs(result, weight)
+            self.assertTrue(result.is_meta)
+            mock_npu_format_cast.assert_not_called()
+
+        # Test case 8: non-310P quantized weights still convert by default
         mock_npu_format_cast.reset_mock()
         with (
             mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),

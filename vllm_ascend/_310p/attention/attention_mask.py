@@ -36,6 +36,7 @@ class AttentionMaskBuilder310:
         """
         AttentionMaskBuilder310.max_seqlen = max_seqlen
         self.attn_mask_cache = None
+        self._pooling_mask_cache: dict[int, torch.Tensor] = {}
         self.device = device
         self.swa_mask = None
 
@@ -114,25 +115,53 @@ class AttentionMaskBuilder310:
             self.swa_mask = torch_npu.npu_format_cast(nd_to_nz_2d(swa_mask), ACL_FORMAT_FRACTAL_NZ)
         return self.swa_mask
 
-    def get_attention_mask(self, model_config) -> torch.Tensor:
+    def get_pooling_mask(self, max_seq_in_batch: int) -> torch.Tensor:
+        """Get a cached causal mask sized for the current batch.
+
+        For pooling models, we generate masks on demand based on the longest
+        sequence in the batch rather than pre-allocating a full max_model_len
+        mask. Masks are cached by size so repeated batch sizes are free.
+
+        The mask is generated on CPU and reshaped to NZ layout there, then
+        transferred to device. This avoids the ND + NZ double allocation on
+        HBM which would OOM for large sequences (~22k+).
+
+        Args:
+            max_seq_in_batch: Longest sequence length in the current batch.
+
+        Returns:
+            torch.Tensor: Causal mask in ACL_FORMAT_FRACTAL_NZ on device.
+        """
+        if max_seq_in_batch not in self._pooling_mask_cache:
+            # Generate mask and reshape to NZ layout on CPU (host RAM is cheap)
+            mask_cpu = self.gen_causal_additive_mask(
+                max_seq_in_batch, torch.device("cpu"))
+            nz_cpu = nd_to_nz_2d(mask_cpu)
+            # Transfer to device and cast to NZ format
+            nz_device = nz_cpu.to(self.device)
+            self._pooling_mask_cache[max_seq_in_batch] = (
+                torch_npu.npu_format_cast(nz_device, ACL_FORMAT_FRACTAL_NZ))
+        return self._pooling_mask_cache[max_seq_in_batch]
+
+    def get_attention_mask(self, model_config) -> torch.Tensor | None:
         """
         Retrieves the appropriate attention mask based on the model configuration.
 
-        It explicitly checks for 'pooling' runner types which are not supported
-        on 310P hardware.
+        For pooling models, returns None — the mask is generated per-batch in
+        _forward_encoder_attention based on actual sequence lengths, avoiding
+        the ~2GB upfront allocation of a full max_model_len mask.
+
+        For all other models, returns the full causal mask in NZ format.
 
         Args:
             model_config: Configuration object containing runner details.
 
         Returns:
-            torch.Tensor: The causal attention mask.
-
-        Raises:
-            NotImplementedError: If the runner_type is 'pooling'.
+            torch.Tensor | None: The causal attention mask in ACL_FORMAT_FRACTAL_NZ,
+                or None for pooling models (mask generated per-batch).
         """
-        if getattr(model_config, "runner_type", None) == "pooling":
-            # TODO: pooling model will be supported soon.
-            raise NotImplementedError("310P does not support runner_type='pooling'")
+        if model_config.runner_type == "pooling":
+            return None
         return self._get_causal_mask(self.max_seqlen)
 
     def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:

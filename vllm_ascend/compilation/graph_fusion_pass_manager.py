@@ -50,9 +50,11 @@ class GraphFusionPassManager:
         # By default, we enable the graph fusion and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
         if self.ascend_compilation_config.get("fuse_norm_quant", True):
-            from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
+            from vllm_ascend.utils import is_310p
+            if not is_310p():
+                from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
-            self.passes.append(AddRMSNormQuantFusionPass(config))
+                self.passes.append(AddRMSNormQuantFusionPass(config))
 
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass

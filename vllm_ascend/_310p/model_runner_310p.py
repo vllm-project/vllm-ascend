@@ -199,10 +199,18 @@ class NPUModelRunner310(NPUModelRunner):
             raise ValueError("Deepseek Sparse Attention is not supported for 310P.")
         if self.model_config.use_mla:
             raise ValueError("MLAAttention is not supported for 310P.")
-        # Initialize the memory size for KV cache
-        kv_cache_size = self._calculate_kv_cache_tensors_size(kv_cache_config)
-        # Allocate and reshape KV cache Tensors
-        kv_caches = self._allocate_kv_cache_and_reshape_tensors(kv_cache_config, kv_cache_size)
+
+        # Pooling models never decode from KV cache, so allocate minimal
+        # (1-block) caches to save HBM. reshape_and_cache is also skipped
+        # for pooling in the attention forward pass.
+        if self.model_config.runner_type == "pooling":
+            kv_caches = self._allocate_minimal_kv_cache(kv_cache_config)
+        else:
+            # Initialize the memory size for KV cache
+            kv_cache_size = self._calculate_kv_cache_tensors_size(kv_cache_config)
+            # Allocate and reshape KV cache Tensors
+            kv_caches = self._allocate_kv_cache_and_reshape_tensors(kv_cache_config, kv_cache_size)
+
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
@@ -211,6 +219,54 @@ class NPUModelRunner310(NPUModelRunner):
         from vllm.v1.worker.utils import bind_kv_cache
 
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches)
+        return kv_caches
+
+    def _allocate_minimal_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Allocate minimal (1-block) KV caches for pooling models.
+
+        Pooling models only prefill and never decode, so KV caches are never
+        read. We still allocate small tensors so the model's layer references
+        are valid.
+        """
+        kv_caches: dict[str, torch.Tensor] = {}
+        num_blocks = 1
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                        num_blocks,
+                        kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                    )
+                    dtype = kv_cache_spec.dtype
+                    k_shape = kv_cache_shape[1:]
+                    k_cache = torch_npu.empty_with_format(
+                        size=k_shape, dtype=dtype, device=self.device,
+                        acl_format=self._acl_format,
+                    )
+                    v_cache = torch_npu.empty_with_format(
+                        size=k_shape, dtype=dtype, device=self.device,
+                        acl_format=self._acl_format,
+                    )
+                    kv_caches[layer_name] = (k_cache, v_cache)
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    state_tensors = []
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                        target_shape = (num_blocks, *shape)
+                        state_tensors.append(
+                            torch.zeros(target_shape, dtype=dtype, device=self.device)
+                        )
+                    kv_caches[layer_name] = state_tensors
+                else:
+                    raise ValueError("Unknown KV cache spec type.")
         return kv_caches
 
     def _calculate_kv_cache_tensors_size(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:

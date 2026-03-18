@@ -26,19 +26,41 @@ class TestAttentionMaskBuilder310(TestBase):
         self.max_seqlen = 4096
         self.attention_mask_builder = AttentionMaskBuilder310(torch.device("cpu"), self.max_seqlen)
 
-    def test_get_attention_mask_310_for_pooling_model(self):
+    @patch("torch_npu.npu_format_cast")
+    def test_get_attention_mask_310_for_pooling_returns_none(self, mock_format_cast):
+        """Pooling models should get None mask (generated per-batch instead)."""
         model_config = MagicMock()
         model_config.runner_type = "pooling"
-        with self.assertRaises(NotImplementedError):
-            self.attention_mask_builder.get_attention_mask(model_config)
+        attn_mask = self.attention_mask_builder.get_attention_mask(model_config)
+        self.assertIsNone(attn_mask)
+        # No mask allocation should have happened
+        mock_format_cast.assert_not_called()
 
     @patch("torch_npu.npu_format_cast")
     def test_get_attention_mask_310(self, mock_format_cast):
         mock_format_cast.side_effect = lambda x, y: x
         model_config = MagicMock()
+        model_config.runner_type = "generate"
         attn_mask = self.attention_mask_builder.get_attention_mask(model_config)
         self.assertEqual(attn_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
         self.assertEqual(attn_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
+
+    @patch("torch_npu.npu_format_cast")
+    def test_get_pooling_mask_shape_and_caching(self, mock_format_cast):
+        """Per-batch pooling mask should be correctly sized and cached."""
+        mock_format_cast.side_effect = lambda x, y: x
+        mask_256 = self.attention_mask_builder.get_pooling_mask(256)
+        self.assertEqual(mask_256.shape, (1, 256 // 16, 256, 16))
+        self.assertTrue(torch.isinf(mask_256).any())
+
+        # Same size should return cached instance
+        mask_256_again = self.attention_mask_builder.get_pooling_mask(256)
+        self.assertIs(mask_256, mask_256_again)
+
+        # Different size should return different mask
+        mask_512 = self.attention_mask_builder.get_pooling_mask(512)
+        self.assertEqual(mask_512.shape, (1, 512 // 16, 512, 16))
+        self.assertIsNot(mask_256, mask_512)
 
     @patch("torch_npu.npu_format_cast")
     def test_get_swa_mask_310(self, mock_format_cast):

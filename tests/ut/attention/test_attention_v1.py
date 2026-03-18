@@ -348,3 +348,35 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score.assert_called_once()
 
         assert output.shape == (10, 8, 64)
+
+    @patch('torch_npu._npu_flash_attention')
+    @patch('torch_npu._npu_reshape_and_cache')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
+    def test_forward_pooling_skips_reshape_and_cache(
+            self, mock_get_forward_context,
+            mock_npu_reshape_and_cache, mock_npu_flash_attention):
+        """Test that pooling models skip reshape_and_cache."""
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        value = torch.randn(10, 8, 64)
+        kv_cache = torch.empty(2, 5, 128, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.model_runner_type = "pooling"
+        metadata.attn_mask = torch.zeros(1, 1, 10, 10)
+        metadata.seq_lens = torch.tensor([10])
+        metadata.num_actual_tokens = 10
+        metadata.num_decodes = 0
+        metadata.num_prefills = 10
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.causal = False
+        layer = self.layer_no_quant
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        mock_npu_flash_attention.return_value = torch.ones(10, 8, 64)
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata, output)
+
+        mock_npu_reshape_and_cache.assert_not_called()
+        mock_npu_flash_attention.assert_called_once()
+        assert output.shape == (10, 8, 64)
