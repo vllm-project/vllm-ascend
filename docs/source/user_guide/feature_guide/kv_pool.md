@@ -114,7 +114,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
 **master_server_address**: Configured with the IP and port of the master service.  
-**global_segment_size**: Registered memory size per card to the KV Pool.
+**global_segment_size**: Registered memory size per card to the KV Pool. Start with a conservative value such as `1GB` and increase it gradually only if needed. If Mooncake initialization fails intermittently, reduce `global_segment_size` first and retry.
 
 #### 2.Start mooncake_master
 
