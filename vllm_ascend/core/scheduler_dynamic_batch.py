@@ -552,7 +552,7 @@ class SchedulerDynamicBatch(Scheduler):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta = self.connector.build_connector_meta(scheduler_output)
+            meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
         # collect KV cache events from KV cache manager
