@@ -1261,9 +1261,10 @@ std::tuple<at::Tensor, at::Tensor> swi_glu_dynamic_quant(
     scale_sizes.pop_back();
     at::Tensor scale = at::empty(scale_sizes, x.options().dtype(at::kFloat));
 
+    char *quant_mode_ptr = const_cast<char *>(quant_mode.c_str());
     EXEC_NPU_CMD(aclnnSwiGluDynamicQuant,
                   x, smooth_scales, offsets, group_index,
-                  activate_left, quant_mode,
+                  activate_left, quant_mode_ptr,
                   group_list_type, dst_type,
                   y, scale);
 
