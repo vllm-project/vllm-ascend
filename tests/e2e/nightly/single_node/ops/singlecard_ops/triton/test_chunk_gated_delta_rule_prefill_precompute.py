@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import torch
 import pytest
 from vllm.triton_utils import triton
+from vllm.forward_context import override_forward_context
 
 from tests.ut.base import PytestBase
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
@@ -10,6 +13,7 @@ from vllm_ascend.ops.triton.fla.prefill_precompute import (
     VALIDATE_GDN_PREFILL_PRECOMPUTE_ENV,
     build_gdn_prefill_precomputed,
 )
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices, prepare_chunk_offsets
 
 
@@ -34,6 +38,7 @@ class TestChunkGatedDeltaRulePrefillPrecompute(PytestBase):
         num_heads,
         monkeypatch,
     ):
+        init_device_properties_triton()
         cu_seqlens = _make_cu_seqlens(lengths)
         monkeypatch.setenv(VALIDATE_GDN_PREFILL_PRECOMPUTE_ENV, "1")
 
@@ -61,8 +66,9 @@ class TestChunkGatedDeltaRulePrefillPrecompute(PytestBase):
             prepare_chunk_indices(cu_seqlens, expected_cumsum_block_size),
         )
 
-    def test_chunk_gated_delta_rule_prefill_precomputed_matches_legacy_path(self):
+    def test_chunk_gated_delta_rule_prefill_precomputed_matches_legacy_path(self, monkeypatch):
         torch.manual_seed(0)
+        init_device_properties_triton()
 
         lengths = [65, 129, 31]
         total_tokens = sum(lengths)
@@ -87,32 +93,44 @@ class TestChunkGatedDeltaRulePrefillPrecompute(PytestBase):
             dtype=torch.bfloat16,
         ).npu()
 
-        legacy_out, legacy_final_state = chunk_gated_delta_rule(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            initial_state=initial_state.clone(),
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            head_first=False,
-            use_qk_l2norm_in_kernel=True,
+        monkeypatch.setattr(
+            "vllm_ascend.ops.triton.fla.chunk.get_pcp_group",
+            lambda: SimpleNamespace(world_size=1, rank_in_group=0),
         )
+        forward_context = SimpleNamespace(
+            attn_metadata=SimpleNamespace(
+                num_prefills=num_sequences,
+                num_decodes=0,
+            )
+        )
+        with override_forward_context(forward_context):
+            legacy_out, legacy_final_state = chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=initial_state.clone(),
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                head_first=False,
+                use_qk_l2norm_in_kernel=True,
+            )
         precomputed = build_gdn_prefill_precomputed(cu_seqlens, num_v_heads)
-        cached_out, cached_final_state = chunk_gated_delta_rule(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            initial_state=initial_state.clone(),
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            head_first=False,
-            use_qk_l2norm_in_kernel=True,
-            prefill_precomputed=precomputed,
-        )
+        with override_forward_context(forward_context):
+            cached_out, cached_final_state = chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=initial_state.clone(),
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                head_first=False,
+                use_qk_l2norm_in_kernel=True,
+                prefill_precomputed=precomputed,
+            )
 
         assert torch.equal(legacy_out, cached_out)
         assert torch.equal(legacy_final_state, cached_final_state)
