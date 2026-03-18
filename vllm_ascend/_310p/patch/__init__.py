@@ -15,12 +15,5 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# 310P ops initialization
-# This module initializes 310P-specific operations
-# that do not depend on Triton.
-
-# Import and register GDN attention ops
-from vllm_ascend._310p.ops.gdn_attention import register_gdn_attention_ops
-
-# Register the custom ops
-register_gdn_attention_ops()
+# import vllm_ascend._patch.patch_qwen3_next_mtp  # noqa
+import vllm_ascend._310p.patch.patch_qwen3_next

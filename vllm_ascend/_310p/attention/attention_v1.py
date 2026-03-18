@@ -15,9 +15,12 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
 from typing import Any
 
+import torch
 import torch_npu
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
@@ -32,6 +35,52 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendMetadata,
 )
+
+logger = init_logger(__name__)
+_PA310_DEBUG_ONCE_PRINTED = False
+_PA310_PREFLIGHT_ONCE_PRINTED = False
+_PA310_SETUP_FAIL_ONCE_PRINTED = False
+
+
+def _is_rank0_process() -> bool:
+    try:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank() == 0
+    except Exception:
+        pass
+
+    rank_env = os.getenv("RANK")
+    if rank_env is not None:
+        try:
+            return int(rank_env) == 0
+        except ValueError:
+            pass
+
+    local_rank_env = os.getenv("LOCAL_RANK")
+    if local_rank_env is not None:
+        try:
+            return int(local_rank_env) == 0
+        except ValueError:
+            pass
+
+    return True
+
+
+def _pa310_debug_enabled() -> bool:
+    # Default off to avoid noisy multi-rank logs.
+    return os.getenv("VLLM_ASCEND_310P_DEBUG", "0") == "1"
+
+
+def _tensor_meta(name: str, tensor: Any) -> str:
+    if tensor is None:
+        return f"{name}=None"
+    if not isinstance(tensor, torch.Tensor):
+        return f"{name}=<{type(tensor).__name__}>"
+    return (
+        f"{name}(shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+        f"device={tensor.device}, stride={tuple(tensor.stride())}, "
+        f"contiguous={tensor.is_contiguous()})"
+    )
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -85,6 +134,45 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     optimized for the Ascend 310P architecture.
     """
 
+    def _log_pa_inputs_once(
+        self,
+        query: Any,
+        attn_metadata: AscendMetadata,
+        output: Any | None,
+        phase: str,
+    ) -> None:
+        global _PA310_DEBUG_ONCE_PRINTED
+        if not _pa310_debug_enabled() or not _is_rank0_process() or _PA310_DEBUG_ONCE_PRINTED:
+            return
+        _PA310_DEBUG_ONCE_PRINTED = True
+
+        state = getattr(attn_metadata, "attn_state", None)
+        block_tables = getattr(attn_metadata, "block_tables", None)
+        seq_lens = getattr(attn_metadata, "seq_lens", None)
+        slot_mapping = getattr(attn_metadata, "slot_mapping", None)
+
+        logger.warning(
+            "[PA310_DEBUG_ONCE] phase=%s, state=%s, num_heads=%s, num_kv_heads=%s, "
+            "head_size=%s, scale=%s, num_actual_tokens=%s, num_decode_tokens=%s, "
+            "num_prefill_tokens=%s",
+            phase,
+            state,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+            self.scale,
+            getattr(attn_metadata, "num_actual_tokens", None),
+            getattr(attn_metadata, "num_decode_tokens", None),
+            getattr(attn_metadata, "num_prefill_tokens", None),
+        )
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("query", query))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("output", output))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("key_cache", self.key_cache))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("value_cache", self.value_cache))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("block_tables", block_tables))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("seq_lens", seq_lens))
+        logger.warning("[PA310_DEBUG_ONCE] %s", _tensor_meta("slot_mapping", slot_mapping))
+
     def forward_paged_attention(
         self,
         query: Any,
@@ -105,24 +193,89 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         Returns:
             Any: The result of the attention operation.
         """
+        global _PA310_PREFLIGHT_ONCE_PRINTED
+        self._log_pa_inputs_once(
+            query=query,
+            attn_metadata=attn_metadata,
+            output=output,
+            phase="decode_paged_attention",
+        )
         if attn_metadata.seq_lens.device != query.device:
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
                 device=query.device,
                 non_blocking=True,
             )
-
-        torch_npu._npu_paged_attention(
-            query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            num_kv_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale_value=self.scale,
-            block_table=attn_metadata.block_tables,
-            context_lens=attn_metadata.seq_lens,
-            out=output,
-        )
-        return output
+        if (
+            (not _PA310_PREFLIGHT_ONCE_PRINTED)
+            and self.key_cache is not None
+            and self.value_cache is not None
+        ):
+            _PA310_PREFLIGHT_ONCE_PRINTED = True
+            block_table = attn_metadata.block_tables
+            seq_lens_cpu = attn_metadata.seq_lens.to("cpu")
+            num_blocks = int(self.key_cache.shape[0])
+            block_size = int(self.key_cache.shape[2])
+            bt_rows = int(block_table.shape[0])
+            bt_cols = int(block_table.shape[1])
+            bt_min = int(block_table.min().item()) if block_table.numel() > 0 else -1
+            bt_max = int(block_table.max().item()) if block_table.numel() > 0 else -1
+            max_seq = int(seq_lens_cpu.max().item()) if seq_lens_cpu.numel() > 0 else 0
+            max_capacity_by_table = bt_cols * block_size
+            if bt_min < 0 or bt_max >= num_blocks:
+                raise RuntimeError(
+                    "PagedAttention preflight failed: invalid block id range "
+                    f"[{bt_min}, {bt_max}] for num_blocks={num_blocks}."
+                )
+            if max_seq > max_capacity_by_table:
+                raise RuntimeError(
+                    "PagedAttention preflight failed: sequence length exceeds "
+                    f"block-table capacity ({max_seq} > {max_capacity_by_table})."
+                )
+            if _pa310_debug_enabled() and _is_rank0_process():
+                logger.warning(
+                    "[PA310_PREFLIGHT_ONCE] num_blocks=%d block_size=%d "
+                    "block_table_shape=(%d,%d) block_id_range=[%d,%d] "
+                    "max_seq_len=%d max_capacity_by_table=%d num_heads=%d "
+                    "num_kv_heads=%d head_size=%d",
+                    num_blocks,
+                    block_size,
+                    bt_rows,
+                    bt_cols,
+                    bt_min,
+                    bt_max,
+                    max_seq,
+                    max_capacity_by_table,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    self.head_size,
+                )
+        try:
+            torch_npu._npu_paged_attention(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=attn_metadata.block_tables,
+                context_lens=attn_metadata.seq_lens,
+                out=output,
+            )
+            return output
+        except RuntimeError as exc:
+            global _PA310_SETUP_FAIL_ONCE_PRINTED
+            if _is_rank0_process() and not _PA310_SETUP_FAIL_ONCE_PRINTED:
+                _PA310_SETUP_FAIL_ONCE_PRINTED = True
+                logger.error(
+                    "[PA310_SETUP_FAIL] paged_attention setup failed: %s | %s | %s | %s | %s | %s",
+                    str(exc),
+                    _tensor_meta("query", query),
+                    _tensor_meta("key_cache", self.key_cache),
+                    _tensor_meta("value_cache", self.value_cache),
+                    _tensor_meta("block_tables", attn_metadata.block_tables),
+                    _tensor_meta("seq_lens", attn_metadata.seq_lens),
+                )
+            raise
 
     def forward_prefill_310(self, query, key, value, attn_metadata, output):
         """
@@ -178,6 +331,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             attn_metadata (AscendMetadata): Metadata containing start locations and block tables.
             output: The output tensor.
         """
+        self._log_pa_inputs_once(
+            query=query,
+            attn_metadata=attn_metadata,
+            output=output,
+            phase="chunked_prefill_splitfuse",
+        )
         num_actual_tokens = int(attn_metadata.num_actual_tokens)
         query = query[:num_actual_tokens]
         output = output[:num_actual_tokens]

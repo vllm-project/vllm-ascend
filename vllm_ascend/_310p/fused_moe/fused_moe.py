@@ -264,6 +264,10 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
         self._gate = gate
+        # Recreate runner after shared_experts is set. The base __init__
+        # builds runner too early (before _shared_experts exists), which can
+        # wrongly select moe_forward instead of moe_forward_shared.
+        self.runner = self._init_runner()
 
     def forward(
         self,
@@ -288,9 +292,9 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
     def _forward_shared_experts(self, hidden_states: torch.Tensor):
         if self._shared_experts is None:
             return None
-        part1_out = self._shared_experts_part1(hidden_states)
-        shared_out = self._shared_experts_part2(hidden_states, part1_out)
-        return shared_out
+        # Upstream SharedFusedMoE computes shared experts in one module call.
+        # Keep 310P path aligned with the current vLLM interface.
+        return self._shared_experts(hidden_states)
 
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
