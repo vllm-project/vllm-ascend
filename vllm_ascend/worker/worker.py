@@ -365,14 +365,12 @@ class NPUWorker(WorkerBase):
             self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
         )
 
-        logger.debug("requested_memory: %.2f GiB", {GiB(self.requested_memory)})
-        logger.debug("non_kv_cache_memory: %.2f GiB", {GiB(profile_result.non_kv_cache_memory)})
-        logger.debug("init_non_torch_memory: %.2f GiB", {GiB(self.init_non_torch_memory)})
-        logger.debug("non_torch_memory_before_empty_cache: %.2f GiB", {GiB(non_torch_memory_before_empty_cache)})
-        logger.debug("non_torch_memory_increase: %.2f GiB", {GiB(self.non_torch_memory_increase)})
-        logger.debug(
-            "non_torch_memory_cleared_by_empty_cache: %.2f GiB", {GiB(non_torch_memory_cleared_by_empty_cache)}
-        )
+        logger.debug("requested_memory: %.2f GiB", GiB(self.requested_memory))
+        logger.debug("non_kv_cache_memory: %.2f GiB", GiB(profile_result.non_kv_cache_memory))
+        logger.debug("init_non_torch_memory: %.2f GiB", GiB(self.init_non_torch_memory))
+        logger.debug("non_torch_memory_before_empty_cache: %.2f GiB", GiB(non_torch_memory_before_empty_cache))
+        logger.debug("non_torch_memory_increase: %.2f GiB", GiB(self.non_torch_memory_increase))
+        logger.debug("non_torch_memory_cleared_by_empty_cache: %.2f GiB", GiB(non_torch_memory_cleared_by_empty_cache))
         logger.info_once(
             "Available KV cache memory: %.2f GiB",
             GiB(self.available_kv_cache_memory_bytes),
