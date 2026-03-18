@@ -17,7 +17,7 @@ This is the first release candidate of v0.17.0 for vLLM Ascend. Please follow th
 - FlashLB algorithm for EPLB: supports per-step heat collection and multi-stage load balancing for better expert parallelism efficiency. [#6477](https://github.com/vllm-project/vllm-ascend/pull/6477)
 - LoRA with tensor parallel and `--fully-sharded-loras` is now fixed and working. [#6650](https://github.com/vllm-project/vllm-ascend/pull/6650)
 - LMCacheAscendConnector is added as a new KV cache pooling solution for Ascend. [#6882](https://github.com/vllm-project/vllm-ascend/pull/6882)
-- W8A8C8 quantization is now supported for DeepSeek-V3.2 and GLM5 in PD-mix scenario. [#7029](https://github.com/vllm-project/vllm-ascend/pull/7029)
+- W8A8C8 quantization is now supported for DeepSeek-V3.2 in PD-mix scenario. [#7029](https://github.com/vllm-project/vllm-ascend/pull/7029)
 - [Experimental] Minimax-m2.5 model is now supported on Ascend NPU. [#7105](https://github.com/vllm-project/vllm-ascend/pull/7105)
 - [Experimental] Mooncake Layerwise Connector now supports hybrid attention manager with multiple KV cache groups. [#7022](https://github.com/vllm-project/vllm-ascend/pull/7022)
 - [Experimental] Prefix cache is now supported in hybrid model. [#7103](https://github.com/vllm-project/vllm-ascend/pull/7103)
