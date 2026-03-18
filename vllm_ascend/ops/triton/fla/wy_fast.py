@@ -13,6 +13,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from .prefill_precompute import GDNPrefillPrecomputed
 from .utils import prepare_chunk_indices
 
 
@@ -102,12 +103,16 @@ def recompute_w_u_fwd(
     g_cumsum: torch.Tensor,
     A: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
+    prefill_precomputed: GDNPrefillPrecomputed | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, v.shape[-1]
     H = v.shape[-2]
     BT = A.shape[-1]
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if cu_seqlens is not None and prefill_precomputed is not None and BT == 64:
+        chunk_indices = prefill_precomputed.chunk_size_64_indices
+    else:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BK = 64
