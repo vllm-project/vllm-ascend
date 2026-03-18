@@ -38,6 +38,27 @@ from vllm_ascend.utils import enable_sp
 _ORIGINAL_QWEN3_5_MODEL_FORWARD = Qwen3_5Model.forward
 
 
+def _has_qwen35_prefill_metadata(model: Qwen3_5Model) -> bool:
+    forward_context = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is None or not isinstance(attn_metadata, dict):
+        return False
+    if get_pcp_group().world_size > 1:
+        return False
+
+    for layer in islice(model.layers, model.start_layer, model.end_layer):
+        if getattr(layer, "layer_type", None) != "linear_attention":
+            continue
+
+        layer_attn_metadata = attn_metadata.get(layer.linear_attn.prefix)
+        if (
+            isinstance(layer_attn_metadata, GDNAttentionMetadata)
+            and layer_attn_metadata.num_prefills > 0
+        ):
+            return True
+    return False
+
+
 @torch.compiler.disable
 def _prepare_qwen35_prefill_precomputed(model: Qwen3_5Model) -> None:
     forward_context = get_forward_context()
@@ -85,7 +106,10 @@ class AscendQwen3_5Model(Qwen3_5Model):
         intermediate_tensors=None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        _prepare_qwen35_prefill_precomputed(self)
+        forward_context = get_forward_context()
+        forward_context.qwen35_gdn_prefill_precomputed = {}
+        if _has_qwen35_prefill_metadata(self):
+            _prepare_qwen35_prefill_precomputed(self)
         return _ORIGINAL_QWEN3_5_MODEL_FORWARD(
             self,
             input_ids,
