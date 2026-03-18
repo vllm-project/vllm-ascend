@@ -550,7 +550,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
-            --max-num-batched-tokens 32550 \
+            --max-num-batched-tokens 32560 \
             --trust-remote-code \
             --max-num-seqs 64 \
             --gpu-memory-utilization 0.82 \
@@ -559,7 +559,7 @@ Before you start, please
             --no-enable-prefix-caching \
             --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
+            '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "engine_id": "0",
@@ -604,7 +604,6 @@ Before you start, please
         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
@@ -626,7 +625,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
-            --max-num-batched-tokens 32550 \
+            --max-num-batched-tokens 32560 \
             --trust-remote-code \
             --max-num-seqs 64 \
             --gpu-memory-utilization 0.82 \
@@ -635,7 +634,7 @@ Before you start, please
             --no-enable-prefix-caching \
             --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}' \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
+            '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_producer",
             "kv_port": "30000",
             "engine_id": "0",
@@ -712,7 +711,7 @@ Before you start, please
             --async-scheduling \
             --quantization ascend \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
+            '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
             "engine_id": "1",
@@ -789,7 +788,7 @@ Before you start, please
             --no-enable-prefix-caching \
             --quantization ascend \
             --kv-transfer-config \
-            '{"kv_connector": "MooncakeConnectorV1",
+            '{"kv_connector": "MooncakeLayerwiseConnector",
             "kv_role": "kv_consumer",
             "kv_port": "30100",
             "engine_id": "1",
@@ -809,6 +808,7 @@ Before you start, please
         ```
 
 Once the preparation is done, you can start the server with the following command on each node:
+Refer to [Distributed DP Server With Large-Scale Expert Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html) to get the detailed boot method.
 
 1. Prefill node 0
 
@@ -840,15 +840,15 @@ python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-s
 
 ### Request Forwarding
 
-To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
 
 ```shell
 unset http_proxy
 unset https_proxy
 
-python load_balance_proxy_server_example.py \
+python load_balance_proxy_layerwise_server_example.py \
     --port 8000 \
-    --host 0.0.0.0 \
+    --host 141.61.39.105 \
     --prefiller-hosts \
        141.61.39.105 \
        141.61.39.113 \
