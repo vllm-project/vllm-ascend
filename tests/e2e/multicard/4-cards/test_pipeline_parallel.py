@@ -16,7 +16,7 @@
 #
 import pytest
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 
 DS3 = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 MODELS = [
@@ -55,14 +55,14 @@ def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_exec
         vllm_model.generate_greedy(prompts, 64)
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
+@pytest.mark.parametrize("dp_size", DATA_PARALLELS)
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
 @wait_until_npu_memory_free(target_free_percentage=0.6)
-def test_models_pp2_dp2(model: str, tp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
-    with VllmRunner(
+def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_executor_backend: str) -> None:
+    with DPVllmRunner(
         model,
-        tensor_parallel_size=tp_size,
+        data_parallel_size=dp_size,
         pipeline_parallel_size=pp_size,
         cudagraph_capture_sizes=[1, 2, 4],
         distributed_executor_backend=distributed_executor_backend,
@@ -70,4 +70,3 @@ def test_models_pp2_dp2(model: str, tp_size: int, pp_size: int, distributed_exec
         enable_expert_parallel=model in MOE_MODELS,
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, 64)
-
