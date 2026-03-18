@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -11,6 +10,13 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+"""
+Generate CI failure summaries from a local pytest log or a GitHub Actions run.
+Examples:
+    python3 .github/workflows/scripts/ci_log_summary.py --log-file /tmp/unit-test.log --mode ut --step-name "Unit test"
+    python3 .github/workflows/scripts/ci_log_summary.py --run-id 23127187822 --format json
+"""
 
 REPO = "vllm-project/vllm-ascend"
 _RUN_SUITE_START_RE = re.compile(r"\[\d+/\d+\]\s+START\s+(tests/\S+)")
