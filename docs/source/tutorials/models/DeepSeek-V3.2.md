@@ -564,7 +564,6 @@ Before you start, please
             "kv_port": "30000",
             "engine_id": "0",
             "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
                         "prefill": {
                                 "dp_size": 2,
                                 "tp_size": 16
@@ -640,7 +639,6 @@ Before you start, please
             "kv_port": "30000",
             "engine_id": "0",
             "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
                         "prefill": {
                                 "dp_size": 2,
                                 "tp_size": 16
@@ -717,7 +715,6 @@ Before you start, please
             "kv_port": "30100",
             "engine_id": "1",
             "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
                         "prefill": {
                                 "dp_size": 2,
                                 "tp_size": 16
@@ -794,7 +791,6 @@ Before you start, please
             "kv_port": "30100",
             "engine_id": "1",
             "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
                         "prefill": {
                                 "dp_size": 2,
                                 "tp_size": 16
