@@ -30,6 +30,7 @@ from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -48,7 +49,11 @@ VALID_COMBINATIONS = {("eagle", "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
                        "wemaster/deepseek_mtp_main_random_bf16"),
                       ("eagle3", "RedHatAI/Qwen3-8B-speculator.eagle3",
                        "Qwen/Qwen3-8B")}
-DEEPSEEK_MAIN = "wemaster/deepseek_mtp_main_random_bf16"
+VERSION_GATED_COMBINATION = (
+    "eagle",
+    "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+    "wemaster/deepseek_mtp_main_random_bf16",
+)
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -151,12 +156,13 @@ def test_llama_qwen3_deepseek_eagle_correctness(
             f"Invalid combination: method={method}, model_name={model_name}, model_name_main={model_name_main}, or case not support yet"
         )
 
-    # Keep the new deepseek-main + eagle coverage, but limit matrix fan-out
-    # to reduce long-running CI instability on singlecard-full part 0.
-    if model_name_main == DEEPSEEK_MAIN and (
-        num_speculative_tokens != 1 or async_scheduling or draft_tensor_parallel_size is not None
+    if (
+        (method, model_name, model_name_main) == VERSION_GATED_COMBINATION
+        and not vllm_version_is("0.17.0")
     ):
-        pytest.skip("Limit deepseek-eagle CI matrix to a stable core subset.")
+        pytest.skip(
+            "Skip deepseek-main + eagle coverage for non-v0.17.0 vLLM versions."
+        )
 
     sampling_params = SamplingParams(
         max_tokens=300,
