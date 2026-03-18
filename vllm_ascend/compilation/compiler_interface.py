@@ -86,7 +86,7 @@ def npugraph_ex_compile(
     config.mode = "reduce-overhead"
     # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
-    if not vllm_version_is("0.17.0"):
+    if not vllm_version_is("0.17.1"):
         # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
         # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
         # and cause copy_between_host_and_device error.
@@ -142,7 +142,7 @@ class AscendCompiler(CompilerInterface):
         # see https://github.com/pytorch/pytorch/issues/138980
         graph = copy.deepcopy(graph)
 
-        if not vllm_version_is("0.17.0"):
+        if not vllm_version_is("0.17.1"):
             from torch._guards import detect_fake_mode
 
             current_fake_mode = detect_fake_mode()

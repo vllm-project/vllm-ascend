@@ -32,7 +32,7 @@ class NPUOffloadingSpec(OffloadingSpec):
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            if vllm_version_is("0.17.0"):
+            if vllm_version_is("0.17.1"):
                 kv_events_config = self.vllm_config.kv_events_config
                 enable_events = kv_events_config is not None and kv_events_config.enable_kv_cache_events
                 self._manager = LRUOffloadingManager(
@@ -57,7 +57,7 @@ class NPUOffloadingSpec(OffloadingSpec):
         attn_backends: dict[str, type[AttentionBackend]],
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handler:
-            if vllm_version_is("0.17.0"):
+            if vllm_version_is("0.17.1"):
                 self._handler = CpuNpuOffloadingHandler(
                     attn_backends=attn_backends,
                     gpu_block_size=self.gpu_block_size,

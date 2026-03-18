@@ -294,7 +294,7 @@ class NPUModelRunner(GPUModelRunner):
             self.c8_k_scale_cache_dtype = torch.float16
         from vllm_ascend.utils import vllm_version_is
 
-        if vllm_version_is("0.17.0"):
+        if vllm_version_is("0.17.1"):
             self.attn_backend = get_attn_backend(
                 0,
                 self.dtype,
@@ -1389,7 +1389,7 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output,
                 **(
                     {"clear_metadata": clear_kv_metadata}
-                    if vllm_version_is("0.17.0")
+                    if vllm_version_is("0.17.1")
                     else {"defer_finalize": not clear_kv_metadata}
                 ),
             ) as kv_connector_output,
@@ -2564,7 +2564,7 @@ class NPUModelRunner(GPUModelRunner):
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
-                    if vllm_version_is("0.17.0"):
+                    if vllm_version_is("0.17.1"):
                         self.model.set_aux_hidden_state_layers(self.model.get_eagle3_aux_hidden_state_layers())
                     else:
                         from vllm.model_executor.models.interfaces import supports_eagle3
@@ -3059,7 +3059,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
-            if vllm_version_is("0.17.0"):
+            if vllm_version_is("0.17.1"):
                 assert self.cache_config.cpu_offload_gb == 0, (
                     "Cannot re-initialize the input batch when CPU weight "
                     "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501

@@ -185,7 +185,7 @@ class AscendConfig:
     def _get_compile_ranges(compilation_config):
         from vllm_ascend.utils import vllm_version_is
 
-        if vllm_version_is("0.17.0"):
+        if vllm_version_is("0.17.1"):
             return compilation_config.compile_ranges_split_points
         else:
             return compilation_config.compile_ranges_endpoints
@@ -194,7 +194,7 @@ class AscendConfig:
     def _set_compile_ranges(compilation_config, value):
         from vllm_ascend.utils import vllm_version_is
 
-        if vllm_version_is("0.17.0"):
+        if vllm_version_is("0.17.1"):
             compilation_config.compile_ranges_split_points = value
         else:
             compilation_config.compile_ranges_endpoints = value
