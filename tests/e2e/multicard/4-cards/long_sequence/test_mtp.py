@@ -29,6 +29,10 @@ prompts = [
     "The president of United States is", "AI future is"
 ]
 model = "wemaster/deepseek_mtp_main_random_bf16"
+model_eagle3 = {
+    "main": "Qwen/Qwen3-8B",
+    "spec": "RedHatAI/Qwen3-8B-speculator.eagle3",
+}
 
 @wait_until_npu_memory_free()
 def test_pcp_dcp_mtp1_eager():
@@ -137,6 +141,27 @@ def test_dcp_mtp3_full_graph():
             compilation_config={
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "cudagraph_capture_sizes": [4, 8, 16],
+            },
+            async_scheduling=False,
+    ) as runner:
+        runner.generate_greedy(prompts, 32)
+
+
+@wait_until_npu_memory_free()
+def test_pcp_eagle3_eager():
+    with VllmRunner(
+            model_eagle3["main"],
+            max_model_len=1024,
+            tensor_parallel_size=2,
+            enforce_eager=True,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            max_num_batched_tokens=1024,
+            block_size=128,
+            speculative_config={
+                "num_speculative_tokens": 3,
+                "method": "eagle3",
+                "model": model_eagle3["spec"]
             },
             async_scheduling=False,
     ) as runner:
