@@ -92,9 +92,12 @@ class LlamaXliteModel(XliteModel):
 
         vision_config = getattr(vllm_config.model_config.hf_config, "vision_config", None)
         rope_parameters = getattr(hf_config, "rope_parameters", {})
-        config.deepstack_num_level = len(getattr(vision_config, "deepstack_visual_indexes", []))
-        config.mrope_section = rope_parameters.get("mrope_section", [])
-        config.mrope_interleaved = rope_parameters.get("mrope_interleaved", False)
+        if hasattr(config, "deepstack_num_level"):
+            config.deepstack_num_level = len(getattr(vision_config, "deepstack_visual_indexes", []))
+        if hasattr(config, "mrope_section"):
+            config.mrope_section = rope_parameters.get("mrope_section", [])
+        if hasattr(config, "mrope_interleaved"):
+            config.mrope_interleaved = rope_parameters.get("mrope_interleaved", False)
         return config
 
     def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig, config: ModelConfig) -> Model:
