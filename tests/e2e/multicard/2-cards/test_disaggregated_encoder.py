@@ -31,6 +31,9 @@ TENSOR_PARALLELS = [1]
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
+@pytest.skip(
+    reason="EPLB output is different without EPLB, see issue: https://github.com/vllm-project/vllm-ascend/issues/7408"
+)
 async def test_models(model: str, tp_size: int) -> None:
     encode_port = get_open_port()
     pd_port = get_open_port()
