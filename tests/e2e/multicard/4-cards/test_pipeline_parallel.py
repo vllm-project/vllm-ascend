@@ -17,6 +17,7 @@
 import pytest
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.model_utils import check_outputs_equal
 
 DS3 = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 MODELS = [
@@ -35,6 +36,8 @@ prompts = [
     "Hello, my name is",
     "The future of AI is",
 ]
+GOLDEN = [([100000, 17464, 11, 601, 1210, 317, 46462, 608, 245, 4541, 7712, 13, 2682, 6207, 317, 276, 2774, 340, 366, 254, 1608, 2784], 'Hello, my name is***** am a computer expert. My goal is to provide you with the best experience'), ([100000, 549, 3680, 280, 20838, 317, 6464, 11, 548, 359, 487, 82, 441, 1673, 895, 10694, 13, 1733, 20838, 5495, 11106, 276], 'The future of AI is bright, but it’s not without its challenges. As AI technology continues to')]
+
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -52,7 +55,13 @@ def test_models_pp2_tp2(model: str, tp_size: int, pp_size: int, distributed_exec
         gpu_memory_utilization=0.7,
         enable_expert_parallel=model in MOE_MODELS,
     ) as vllm_model:
-        vllm_model.generate_greedy(prompts, 64)
+        outputs = vllm_model.generate_greedy(prompts, 16)
+        check_outputs_equal(
+            outputs_0_lst=outputs,
+            outputs_1_lst=GOLDEN,
+            name_0=f"{model}-tp{tp_size}pp{pp_size}",
+            name_1="GOLDEN",
+        )
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dp_size", DATA_PARALLELS)
@@ -69,4 +78,11 @@ def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_exec
         gpu_memory_utilization=0.7,
         enable_expert_parallel=model in MOE_MODELS,
     ) as vllm_model:
-        vllm_model.generate_greedy(prompts, 64)
+        outputs = vllm_model.generate_greedy(prompts, 16)
+        check_outputs_equal(
+            outputs_0_lst=outputs,
+            outputs_1_lst=GOLDEN,
+            name_0=f"{model}-dp{dp_size}pp{pp_size}",
+            name_1="GOLDEN",
+        )
+        
