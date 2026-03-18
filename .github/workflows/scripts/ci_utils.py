@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ class TestRecord:
     passed: bool
     elapsed: float
     estimated: float
+    error_output: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -60,14 +62,32 @@ def run_tests(
         )
 
         start = time.perf_counter()
-        result = subprocess.run(["pytest", "-sv", "--durations=0", "--color=yes", test.name])
+        env = os.environ.copy()
+        proc = subprocess.Popen(
+            ["pytest", "-sv", "--durations=0", "--color=yes", "--tb=short", test.name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        captured_lines: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            captured_lines.append(line)
+        proc.wait()
         elapsed = time.perf_counter() - start
-        passed = result.returncode == 0
+        passed = proc.returncode == 0
+        error_output = "" if passed else "".join(captured_lines)
 
-        records.append(TestRecord(name=test.name, passed=passed, elapsed=elapsed, estimated=test.estimated_time))
+        records.append(
+            TestRecord(
+                name=test.name, passed=passed, elapsed=elapsed, estimated=test.estimated_time, error_output=error_output
+            )
+        )
 
         color = _Color.GREEN if passed else _Color.RED
-        status = "PASSED" if passed else f"FAILED (exit code {result.returncode})"
+        status = "PASSED" if passed else f"FAILED (exit code {proc.returncode})"
         print(
             f"{color}[{i + 1}/{len(files)}] {status}  {test.name}  ({elapsed:.0f}s){_Color.RESET}",
             flush=True,
@@ -88,6 +108,15 @@ def run_tests(
     for r in records:
         icon = f"{_Color.GREEN}✓{_Color.RESET}" if r.passed else f"{_Color.RED}✗{_Color.RESET}"
         print(f"  {icon} {r.name}  ({r.elapsed:.0f}s)")
+    failed = [r for r in records if not r.passed and r.error_output]
+    if failed:
+        print(f"\n{_Color.RED}{'=' * 60}")
+        print(f"FAILED TEST OUTPUT ({len(failed)} failure(s)){_Color.RESET}")
+        for r in failed:
+            print(f"\n{_Color.RED}{'─' * 60}")
+            print(f"FAILED: {r.name}{_Color.RESET}")
+            print(r.error_output, end="")
+        print(f"{_Color.RED}{'=' * 60}{_Color.RESET}")
     print(flush=True)
 
     return (0 if all_passed else -1), records
