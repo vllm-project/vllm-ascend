@@ -90,7 +90,7 @@ jobs:
       - name: Summarize unit test failure
         if: ${{ always() }}
         run: |
-          python3 .github/workflows/scripts/ci_log_summary_v2.py \
+          python3 .github/workflows/scripts/ci_log_summary.py \
             --mode ut \
             --step-name "Run unit test" \
             --log-file /tmp/unit-test.log \
