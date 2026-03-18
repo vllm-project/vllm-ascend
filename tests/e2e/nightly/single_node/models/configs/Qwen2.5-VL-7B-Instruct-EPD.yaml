@@ -28,7 +28,7 @@ test_cases:
         - "--max-num-seqs"
         - "1"
         - "--ec-transfer-config"
-        - '{"ec_connector_extra_config":{"shared_storage_path":"/tmp/shm/epd/storage"},"ec_connector":"ECExampleConnector","ec_role": "ec_producer"}'
+        - '{"ec_connector_extra_config":{"shared_storage_path":"/dev/shm/epd/storage"},"ec_connector":"ECExampleConnector","ec_role": "ec_producer"}'
       - - "--port"
         - "$PD_PORT"
         - "--model"
@@ -45,7 +45,7 @@ test_cases:
         - "--max-num-seqs"
         - "128"
         - "--ec-transfer-config"
-        - '{"ec_connector_extra_config":{"shared_storage_path":"/tmp/shm/epd/storage"},"ec_connector":"ECExampleConnector","ec_role": "ec_consumer"}'
+        - '{"ec_connector_extra_config":{"shared_storage_path":"/dev/shm/epd/storage"},"ec_connector":"ECExampleConnector","ec_role": "ec_consumer"}'
     epd_proxy_args:
       - "--host"
       - "127.0.0.1"
