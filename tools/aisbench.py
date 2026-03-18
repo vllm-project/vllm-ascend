@@ -309,8 +309,7 @@ def maybe_download_from_modelscope(
                     model_path = snapshot_download(**kwargs, local_files_only=True)
                 except Exception:
                     logging.warning(
-                        "HF_HUB_OFFLINE is set but '%s' was not found in local cache. "
-                        "Falling back to online download.",
+                        "HF_HUB_OFFLINE is set but '%s' was not found in local cache. Falling back to online download.",
                         model,
                     )
                     model_path = snapshot_download(**kwargs, local_files_only=False)
