@@ -12,14 +12,120 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
+
 import torch
 from vllm.distributed import get_pcp_group
 
 from vllm_ascend.platform import ModelConfig
 from vllm_ascend.utils import singleton
 
+logger = logging.getLogger(__name__)
+
+# Default maximum attention mask size (in bytes): 16GB
+# This can be configured via VLLM_ASCEND_MAX_ATTN_MASK_MEMORY environment variable
+DEFAULT_MAX_ATTN_MASK_MEMORY_GB = 16
+
+# Warning threshold: warn when attention mask memory exceeds this value (in GB)
+ATTN_MASK_MEMORY_WARNING_THRESHOLD_GB = 4
+
+
+def _get_max_attn_mask_memory_bytes() -> int:
+    """Get the maximum allowed attention mask memory from environment variable.
+
+    Returns:
+        Maximum allowed memory in bytes.
+    """
+    env_value = os.environ.get("VLLM_ASCEND_MAX_ATTN_MASK_MEMORY")
+    if env_value is not None:
+        try:
+            max_memory_gb = float(env_value)
+            if max_memory_gb <= 0:
+                logger.warning(
+                    "VLLM_ASCEND_MAX_ATTN_MASK_MEMORY must be positive, using default value: %d GB",
+                    DEFAULT_MAX_ATTN_MASK_MEMORY_GB,
+                )
+                max_memory_gb = DEFAULT_MAX_ATTN_MASK_MEMORY_GB
+            return int(max_memory_gb * 1024 * 1024 * 1024)
+        except ValueError:
+            logger.warning(
+                "Invalid VLLM_ASCEND_MAX_ATTN_MASK_MEMORY value: '%s', using default value: %d GB",
+                env_value,
+                DEFAULT_MAX_ATTN_MASK_MEMORY_GB,
+            )
+    return DEFAULT_MAX_ATTN_MASK_MEMORY_GB * 1024 * 1024 * 1024
+
+
+def _estimate_attn_mask_memory(max_seq_len: int, dtype: torch.dtype) -> int:
+    """Estimate the memory required for attention mask tensor.
+
+    Args:
+        max_seq_len: Maximum sequence length.
+        dtype: Data type of the attention mask.
+
+    Returns:
+        Estimated memory in bytes.
+    """
+    element_size = torch.tensor([], dtype=dtype).element_size()
+    # Attention mask shape is (max_seq_len, max_seq_len)
+    num_elements = max_seq_len * max_seq_len
+    return num_elements * element_size
+
+
+def _check_attn_mask_memory(max_seq_len: int, dtype: torch.dtype) -> None:
+    """Check if the attention mask memory requirement is within limits.
+
+    This function estimates the memory required for the attention mask and
+    compares it against the configured maximum. If the estimated memory
+    exceeds the limit, a RuntimeError is raised with a clear error message.
+
+    Args:
+        max_seq_len: Maximum sequence length.
+        dtype: Data type of the attention mask.
+
+    Raises:
+        RuntimeError: If estimated memory exceeds the configured maximum.
+    """
+    estimated_memory = _estimate_attn_mask_memory(max_seq_len, dtype)
+    max_allowed_memory = _get_max_attn_mask_memory_bytes()
+
+    estimated_memory_gb = estimated_memory / (1024 * 1024 * 1024)
+    max_allowed_memory_gb = max_allowed_memory / (1024 * 1024 * 1024)
+
+    # Log warning if memory usage is high but within limits
+    if estimated_memory_gb > ATTN_MASK_MEMORY_WARNING_THRESHOLD_GB:
+        logger.warning(
+            "Attention mask for max_seq_len=%d with dtype=%s requires %.2f GB memory. "
+            "This may cause performance issues or OOM errors on devices with limited memory. "
+            "Consider reducing max_model_len or setting VLLM_ASCEND_MAX_ATTN_MASK_MEMORY "
+            "environment variable to adjust the limit.",
+            max_seq_len,
+            dtype,
+            estimated_memory_gb,
+        )
+
+    if estimated_memory > max_allowed_memory:
+        raise RuntimeError(
+            f"Attention mask memory requirement ({estimated_memory_gb:.2f} GB) exceeds "
+            f"the maximum allowed limit ({max_allowed_memory_gb:.2f} GB). "
+            f"The attention mask has shape ({max_seq_len}, {max_seq_len}) with dtype={dtype}, "
+            f"which requires O(max_model_len^2) memory.\n\n"
+            f"Possible solutions:\n"
+            f"  1. Reduce max_model_len to a smaller value (e.g., --max-model-len 4096)\n"
+            f"  2. Increase the memory limit by setting environment variable:\n"
+            f"     export VLLM_ASCEND_MAX_ATTN_MASK_MEMORY=<memory_in_gb>\n"
+            f"  3. Use a device with more memory\n\n"
+            f"Note: This error prevents a potential TBE subprocess crash that would "
+            f"otherwise produce an unclear error message like "
+            f"'TBE Subprocess[task_distribute] raise error[], main process disappeared!'"
+        )
+
 
 def _generate_attn_mask(max_seq_len, dtype):
+    # Check memory requirement before allocating tensors
+    _check_attn_mask_memory(max_seq_len, dtype)
+
     # Construct lower triangle matrix.
     mask_flag = torch.ones((max_seq_len, max_seq_len), dtype=torch.bool).tril_()
     # Create upper triangle matrix used to mark mask positions.
@@ -44,6 +150,13 @@ class AttentionMaskBuilder:
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
         if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
+            estimated_memory = _estimate_attn_mask_memory(max_seq_len, dtype)
+            logger.debug(
+                "Generating attention mask: max_seq_len=%d, dtype=%s, estimated_memory=%.2f MB",
+                max_seq_len,
+                dtype,
+                estimated_memory / (1024 * 1024),
+            )
             self.attn_mask_cache = _generate_attn_mask(max_seq_len, dtype)
             self._seq_len_cached = max_seq_len
         assert self.attn_mask_cache is not None, "Something is wrong in generate_attn_mask."
