@@ -37,7 +37,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
