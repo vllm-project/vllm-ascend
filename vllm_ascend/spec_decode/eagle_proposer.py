@@ -46,7 +46,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -615,24 +615,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 if not self.parallel_drafting:
                     for draft_step in range(1, self.num_speculative_tokens):
                         per_layer_attn_metadata = dict()
-                        if vllm_version_is("0.17.0"):
-                            for attn_group in self.draft_attn_groups:
-                                common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                                    draft_step,
-                                    attn_metadata,
-                                    common_attn_metadata,
-                                    batch_size,
-                                    num_input_tokens,
-                                    used_update_positions,
-                                    aclgraph_runtime_mode,
-                                    ori_seq_len,
-                                    slot_indices,
-                                    mtp_slot_mapping,
-                                    attn_group=attn_group,
-                                )
-                                for layer_name in self.attn_layer_names:
-                                    per_layer_attn_metadata[layer_name] = attn_metadata
-                        else:
+                        for attn_group in self.draft_attn_groups:
                             common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
                                 draft_step,
                                 attn_metadata,
@@ -644,6 +627,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                                 ori_seq_len,
                                 slot_indices,
                                 mtp_slot_mapping,
+                                attn_group=attn_group,
                             )
                             for layer_name in self.attn_layer_names:
                                 per_layer_attn_metadata[layer_name] = attn_metadata
@@ -653,21 +637,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             if not self.parallel_drafting:
                 for draft_step in range(1, self.num_speculative_tokens):
                     per_layer_attn_metadata = dict()
-                    if vllm_version_is("0.17.0"):
-                        for attn_group in self.draft_attn_groups:
-                            common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                                draft_step,
-                                attn_metadata,
-                                common_attn_metadata,
-                                batch_size,
-                                num_input_tokens,
-                                used_update_positions,
-                                aclgraph_runtime_mode,
-                                attn_group=attn_group,
-                            )
-                            for layer_name in self.attn_layer_names:
-                                per_layer_attn_metadata[layer_name] = attn_metadata
-                    else:
+                    for attn_group in self.draft_attn_groups:
                         common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
                             draft_step,
                             attn_metadata,
@@ -676,6 +646,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                             num_input_tokens,
                             used_update_positions,
                             aclgraph_runtime_mode,
+                            attn_group=attn_group,
                         )
                         for layer_name in self.attn_layer_names:
                             per_layer_attn_metadata[layer_name] = attn_metadata
@@ -1082,16 +1053,11 @@ class SpecDecodeBaseProposer(EagleProposer):
             # 2.
             # Recompute the slot mapping based on the new positions and
             # rejection mask.
-            if vllm_version_is("0.17.0"):
-                # Use the first draft attention group's kv_cache_spec for block_size
-                # (all draft layers share the same kv-cache group)
-                assert len(self.draft_attn_groups) > 0
-                block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
-            else:
-                if self.attn_metadata_builder is None:
-                    block_size = self._get_attention_metadata_builder().kv_cache_spec.block_size
-                else:
-                    block_size = self.attn_metadata_builder.kv_cache_spec.block_size
+            # Use the first draft attention group's kv_cache_spec for block_size
+            # (all draft layers share the same kv-cache group)
+            assert len(self.draft_attn_groups) > 0
+            block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
+
             new_slot_mapping = compute_new_slot_mapping(
                 cad=cad,
                 new_positions=self.positions[:total_num_output_tokens],
@@ -1130,8 +1096,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         attn_group=None,
     ):
         assert draft_step > 0
-        if vllm_version_is("0.17.0"):
-            assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
+        assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
         if draft_step == 1:
@@ -1243,13 +1208,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
 
-        if vllm_version_is("0.17.0"):
-            attn_metadata_builder = attn_group.get_metadata_builder()
-        else:
-            if self.attn_metadata_builder is None:
-                attn_metadata_builder = self._get_attention_metadata_builder()
-            else:
-                attn_metadata_builder = self.attn_metadata_builder
+        attn_metadata_builder = attn_group.get_metadata_builder()
 
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata,
