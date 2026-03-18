@@ -22,6 +22,7 @@ import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
+import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
