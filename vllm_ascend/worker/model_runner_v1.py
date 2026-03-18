@@ -699,17 +699,17 @@ class NPUModelRunner(GPUModelRunner):
 
         total_num_pcp_scheduled_tokens = 0
         if self.use_prefill_cp:
-            num_scheduled_tokens[:num_cp_request], position_pcp = self.pcp_manager.update_tokens_for_pcp(
-                num_scheduled_tokens[:num_cp_request], self.arange_np
+            num_scheduled_tokens[:num_cp_request], position_pcp, position_mask = self.pcp_manager.update_tokens_for_pcp(
+                num_scheduled_tokens, self.arange_np
             )
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             total_num_pcp_scheduled_tokens = sum(num_scheduled_tokens[:num_cp_request])
-            req_indices = np.repeat(self.arange_np[:num_cp_request], num_scheduled_tokens[:num_cp_request])
+            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens[:num_reqs])
             cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
             tmp_positions_np = self.positions.np[:total_num_scheduled_tokens]
             np.add(
-                self.input_batch.num_computed_tokens_cpu[req_indices],
+                self.input_batch.num_computed_tokens_cpu[req_indices: total_num_pcp_scheduled_tokens],
                 position_pcp[:total_num_pcp_scheduled_tokens],
                 out=tmp_positions_np[: total_num_pcp_scheduled_tokens],
             )
@@ -740,6 +740,10 @@ class NPUModelRunner(GPUModelRunner):
             token_indices_tensor,
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
+
+        if self.use_prefill_cp and num_cp_request > 0:
+            self.input_ids.cpu[: total_num_pcp_scheduled_tokens][~position_mask[:total_num_pcp_scheduled_tokens]] = 0
+
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
@@ -913,6 +917,7 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
+            total_num_pcp_scheduled_tokens,
         )
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
@@ -1245,6 +1250,7 @@ class NPUModelRunner(GPUModelRunner):
                     logits_indices,
                     spec_decode_metadata,
                     total_num_scheduled_tokens,
+                    total_num_pcp_scheduled_tokens,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
@@ -1351,6 +1357,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    total_num_pcp_scheduled_tokens=total_num_pcp_scheduled_tokens,
                 )
 
             (
@@ -2062,6 +2069,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        total_num_pcp_scheduled_tokens: int | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -2092,7 +2100,7 @@ class NPUModelRunner(GPUModelRunner):
             if not self.use_cp:
                 return None, block_table_tensor
             return self.pcp_manager.generate_pcp_metadata(
-                num_tokens,
+                total_num_pcp_scheduled_tokens,
                 self.query_lens,
                 self.input_batch,
                 num_scheduled_tokens_np,
@@ -2449,6 +2457,7 @@ class NPUModelRunner(GPUModelRunner):
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
                 num_scheduled_tokens_np=num_scheduled_tokens,
+                total_num_pcp_scheduled_tokens=num_tokens_unpadded,
             )
 
         with self.maybe_dummy_run_with_lora(

@@ -167,7 +167,7 @@ class PCPManager:
     ) -> None:
         self.num_reqs = num_reqs
         self.num_dycp_reqs = num_dycp_reqs
-        is_prefill = num_scheduled_tokens[:num_dycp_reqs] > self.decode_threshold
+        is_prefill = num_scheduled_tokens[:num_reqs] > self.decode_threshold
         if not any(is_prefill):
             first_prefill = num_reqs
         else:
@@ -236,21 +236,28 @@ class PCPManager:
         [0, 9, 1, 2, 10, 11, 12, 13, 3, 4, 5, 6, 14, 15, 16, 17, 7, 8]
         """
 
+        num_pcp_scheduled_tokens = num_scheduled_tokens[: self.num_dycp_reqs]
+
         # DualChunkSwap requires alignment to a multiple of (2 * pcp_world_size).
         # We first pad each request's token count up to that multiple.
-        num_padded_scheduled_tokens = np.ceil(num_scheduled_tokens / (2 * self.pcp_world_size)).astype(np.int32) * (
+        num_padded_scheduled_tokens = np.ceil(num_pcp_scheduled_tokens / (2 * self.pcp_world_size)).astype(np.int32) * (
             2 * self.pcp_world_size
         )
 
         # PCP does not split decode requests. For decode requests, we instead
         # duplicate the scheduled tokens across the pcp_world_size ranks.
         num_padded_scheduled_tokens[: self.num_decode_reqs] = (
-            num_scheduled_tokens[: self.num_decode_reqs] * self.pcp_world_size
+            num_pcp_scheduled_tokens[: self.num_decode_reqs] * self.pcp_world_size
         )
 
         # Record how many pads were added per request (padded - original).
-        self.num_pcp_pads_cpu[: self.num_dycp_reqs] = num_padded_scheduled_tokens - num_scheduled_tokens
+        self.num_pcp_pads_cpu[: self.num_dycp_reqs] = num_padded_scheduled_tokens - num_pcp_scheduled_tokens
         self.num_pcp_pads_cpu[self.num_dycp_reqs : self.num_reqs] = 0
+
+        if self.num_dycp_reqs == 0:
+            self.num_scheduled_pcp_tokens_padded = np.array([], dtype=np.int32)
+            self.total_num_sampled_tokens_pcp = num_scheduled_tokens.sum()
+            return num_pcp_scheduled_tokens, np.array([], dtype=np.int32), None
 
         # cu_padded_tokens: cumulative sum of padded token counts,
         # pcp_padded_arange: per-request arange flattened for padded tokens.
@@ -259,7 +266,7 @@ class PCPManager:
         # Build the mask that marks which positions in the padded allgather buffer
         # correspond to real (unpadded) tokens.
         self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length] = pcp_padded_arange < np.repeat(
-            num_scheduled_tokens, num_padded_scheduled_tokens
+            num_pcp_scheduled_tokens, num_padded_scheduled_tokens
         )
         unpad_mask_decode = self.pcp_unpad_mask_cpu[: self.num_decode_tokens * self.pcp_world_size]
         unpad_mask_decode = unpad_mask_decode.reshape([-1, self.pcp_world_size])
@@ -316,7 +323,7 @@ class PCPManager:
         # same without prefill context parallel.
         if self.num_decode_reqs > 0:
             positions[: self.num_decode_tokens] = self._get_cumsum_and_arange(
-                num_scheduled_tokens[: self.num_decode_reqs], arange_np
+                num_pcp_scheduled_tokens[: self.num_decode_reqs], arange_np
             )[1]
 
         # Build the restore index used after allgather.
@@ -328,7 +335,10 @@ class PCPManager:
         self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
 
         self.pcp_tokens[: self.num_dycp_reqs] = pcp_tokens[: self.num_dycp_reqs]
-        self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_dycp_reqs].sum()
+        self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_dycp_reqs].sum() + num_scheduled_tokens[self.num_dycp_reqs:].sum()
+
+        position_mask = self.pcp_unpad_mask_cpu[all_positions_lst[self.pcp_world_rank]]
+        
 
         if self.pcp_use_hybrid_attn:
             max_scheduled_prefill_tokens = 0
@@ -340,7 +350,7 @@ class PCPManager:
             self.total_pcp_padding_tokens_fla = 0
             # have prefills
             if self.num_reqs - self.num_decode_reqs > 0:
-                prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[self.num_decode_tokens :])
+                prefill_tokens_tensor = torch.Tensor(num_pcp_scheduled_tokens[self.num_decode_tokens :])
                 # [num_prefill_reqs, pcp_world_size, 1] [[3,2]] [[2,2,2,1],[2,1,1,1]]
                 num_prefill_tokens_allranks = (
                     self._get_cp_local_seq_lens(prefill_tokens_tensor, self.pcp_world_size, 1, 1).long().numpy()
@@ -364,7 +374,7 @@ class PCPManager:
                 )
 
                 max_scheduled_prefill_tokens = num_prefill_tokens_allranks[:, 0, 0].sum()
-                num_prefill_tokens = num_scheduled_tokens[self.num_decode_reqs :].sum()
+                num_prefill_tokens = num_pcp_scheduled_tokens[self.num_decode_reqs :].sum()
                 self.total_pcp_padding_tokens_fla = (
                     max_scheduled_prefill_tokens * self.pcp_world_size - num_prefill_tokens
                 )
@@ -439,7 +449,7 @@ class PCPManager:
                     self.num_decode_reqs * self.pcp_world_size :
                 ]
                 # [0] | [0,7]
-                ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[self.num_decode_tokens :]), 1)
+                ori_tokens_start_loc = np.roll(np.cumsum(num_pcp_scheduled_tokens[self.num_decode_tokens :]), 1)
                 ori_tokens_start_loc[0] = 0
                 # [0,1,2] [3,4] | [0,1,7,8] [2,3,9] [4,5,10] [6,11]
                 exit_fa_scatter_indices = positions_linear[self.num_decode_reqs :] + np.repeat(
@@ -465,7 +475,7 @@ class PCPManager:
             self.num_scheduled_pcp_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
             return num_padded_scheduled_tokens, positions_linear
         self.num_scheduled_pcp_tokens_padded = np.array(pcp_tokens[: self.num_dycp_reqs], dtype=np.int32)
-        return pcp_tokens[: self.num_dycp_reqs], positions
+        return pcp_tokens[: self.num_dycp_reqs], positions, position_mask
 
     def get_logits_indices(
         self,
@@ -537,13 +547,7 @@ class PCPManager:
                     cp_hidden_states, 0, self.pcp_allgather_restore_idx.gpu[:cp_hidden_states.shape[0]])
                 dp_hidden_states = torch.cat([cp_hidden_states, dp_hidden_states])
             hidden_states = dp_hidden_states
-
-            restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
-            return torch.index_select(
-                hidden_states,
-                0,
-                restore_idx,
-            )
+            return hidden_states
         else:
             if self.pcp_padded_tokens_fla > 0:
                 hidden_states = F.pad(
