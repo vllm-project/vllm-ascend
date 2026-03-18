@@ -10,7 +10,6 @@
 
 ### KV Pool Parameter Description
 
-
 #### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
 
 | Parameter | Description |
@@ -93,7 +92,6 @@ export PYTHONHASHSEED=0
         ```
 
 ### Environment Variables Description
-
 
 | Hardware | HDK & CANN versions | Export Command | Description |
 | :--- | :--- | :--- | :--- |
