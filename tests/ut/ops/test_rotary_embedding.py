@@ -19,8 +19,8 @@ import pytest
 import torch
 from unittest.mock import MagicMock, patch, PropertyMock
 
-from vllm.model_executor.layers.rotary_embedding import YaRNScalingRotaryEmbedding
-from vllm_ascend.ops.rotary_embedding import AscendYaRNRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (YaRNScalingRotaryEmbedding, RotaryEmbedding)
+from vllm_ascend.ops.rotary_embedding import (AscendYaRNRotaryEmbedding, AscendRotaryEmbedding)
 
 
 HEAD_SIZE = 64
@@ -259,6 +259,17 @@ class TestAscendEmbeddingForwardOOT:
         mock_gather.assert_not_called()
         # Original positions tensor is passed through untouched
         assert mock_npu_op.call_args[0][0] is positions
+    
+    def test_parent_init_signature_has_not_changed(self):
+        """
+        Fail loudly if RotaryEmbedding.__init__ adds, removes, or
+        renames parameters, so a developer knows to update AscendRotaryEmbedding
+        accordingly.
+        """
+        check_parent_init_signature_has_not_changed(
+            RotaryEmbedding.__init__,
+            AscendRotaryEmbedding.__init__
+        )
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:
