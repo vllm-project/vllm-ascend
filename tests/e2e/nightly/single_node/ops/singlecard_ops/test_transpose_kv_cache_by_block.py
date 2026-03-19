@@ -1,3 +1,4 @@
+import gc
 import random
 import unittest
 
@@ -96,6 +97,10 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
                     for i in range (layers):
                         self.assert_tensors_almost_equal(k_caches[i], cloned_k_caches[i], dtype)
                         self.assert_tensors_almost_equal(v_caches[i], cloned_v_caches[i], dtype)
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
+
 
     def assert_tensors_almost_equal(self, actual, expected, dtype):
         """Check if two tensors are approximately equal (considering floating point errors)"""
@@ -135,3 +140,7 @@ class TestTransposeKvCacheByBlock(unittest.TestCase):
 
         self.assertLessEqual(max_diff, atol,
                              f"Absolute error too large: {max_diff} > {atol}")
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
+        

@@ -1,3 +1,4 @@
+import gc
 import torch
 from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule
 from vllm.model_executor.models.qwen3_next import fused_gdn_gating
@@ -64,3 +65,6 @@ def test_triton_fusion_ops():
                                rtol=1e-02,
                                atol=1e-02,
                                equal_nan=True)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
