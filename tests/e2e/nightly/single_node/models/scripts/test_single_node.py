@@ -3,6 +3,8 @@ from typing import Any
 
 import openai
 import pytest
+import subprocess
+import sys
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
@@ -144,6 +146,14 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
+    if config.name == "GLM-5-TP16-DP1-decodegraph":
+        command = [
+            sys.executable,  # 指向当前Python解释器的路径
+            "-m", "pip", "install",
+            f"transformers==5.2.0",
+            "--upgrade"  # 强制升级/安装指定版本
+        ]
+        subprocess.call(command)
     if config.service_mode == "epd":
         with (
             RemoteEPDServer(vllm_serve_args=config.epd_server_cmds, env_dict=config.envs) as _,
