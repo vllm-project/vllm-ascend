@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
-def causal_conv1d_ref_pytorch(
+def causal_conv1d_ref(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
@@ -52,7 +52,7 @@ def causal_conv1d_ref_pytorch(
     return (out, None) if not return_final_states else (out, final_states_out)
 
 
-def causal_conv1d_fn_pytorch(
+def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
@@ -85,13 +85,13 @@ def causal_conv1d_fn_pytorch(
         raise NotImplementedError("activation must be None, silu, or swish")
 
     if query_start_loc is None:
-        raise RuntimeError("causal_conv1d_fn_pytorch requires query_start_loc for varlen inputs.")
+        raise RuntimeError("causal_conv1d_fn requires query_start_loc for varlen inputs.")
     if cache_indices is None:
-        raise RuntimeError("causal_conv1d_fn_pytorch requires cache_indices.")
+        raise RuntimeError("causal_conv1d_fn requires cache_indices.")
     if has_initial_state is None:
-        raise RuntimeError("causal_conv1d_fn_pytorch requires has_initial_state.")
+        raise RuntimeError("causal_conv1d_fn requires has_initial_state.")
     if conv_states is None:
-        raise RuntimeError("causal_conv1d_fn_pytorch requires conv_states.")
+        raise RuntimeError("causal_conv1d_fn requires conv_states.")
 
     if x.stride(-1) != 1:
         x = x.contiguous()
@@ -104,9 +104,9 @@ def causal_conv1d_fn_pytorch(
         elif x.shape[1] == 1:
             x = x.squeeze(1).transpose(0, 1)
         else:
-            raise RuntimeError(f"Unsupported x shape for causal_conv1d_fn_pytorch: {tuple(x.shape)}")
+            raise RuntimeError(f"Unsupported x shape for causal_conv1d_fn: {tuple(x.shape)}")
     if x.dim() != 2:
-        raise RuntimeError(f"Unsupported x ndim for causal_conv1d_fn_pytorch: {x.dim()}")
+        raise RuntimeError(f"Unsupported x ndim for causal_conv1d_fn: {x.dim()}")
 
     feature_dim = x.shape[0]
     if weight.shape[0] != feature_dim and weight.shape[1] == feature_dim:
@@ -115,7 +115,7 @@ def causal_conv1d_fn_pytorch(
     dim, width = weight.shape
     if dim != feature_dim:
         raise RuntimeError(
-            f"causal_conv1d_fn_pytorch: weight dim mismatch, x dim={feature_dim}, weight.shape={tuple(weight.shape)}"
+            f"causal_conv1d_fn: weight dim mismatch, x dim={feature_dim}, weight.shape={tuple(weight.shape)}"
         )
 
     state_len = width - 1
@@ -123,12 +123,12 @@ def causal_conv1d_fn_pytorch(
         conv_states = conv_states.transpose(-1, -2)
     if conv_states.shape[-2] != dim:
         raise RuntimeError(
-            f"causal_conv1d_fn_pytorch: conv_states dim mismatch, "
+            f"causal_conv1d_fn: conv_states dim mismatch, "
             f"expected dim={dim}, conv_states.shape={tuple(conv_states.shape)}"
         )
     if conv_states.shape[-1] < state_len:
         raise RuntimeError(
-            f"causal_conv1d_fn_pytorch: conv_states too short, need >= {state_len}, got {conv_states.shape[-1]}"
+            f"causal_conv1d_fn: conv_states too short, need >= {state_len}, got {conv_states.shape[-1]}"
         )
 
     seqlens = (query_start_loc[1:] - query_start_loc[:-1]).tolist()
@@ -142,7 +142,7 @@ def causal_conv1d_fn_pytorch(
 
         state = conv_states[cache_idx]
         init_state = state[..., :state_len].unsqueeze(0) if bool(has_initial_state[i].item()) else None
-        out_ref, final_state = causal_conv1d_ref_pytorch(
+        out_ref, final_state = causal_conv1d_ref(
             x_s.unsqueeze(0),
             weight,
             bias,
@@ -158,7 +158,7 @@ def causal_conv1d_fn_pytorch(
     return torch.cat(out_chunks, dim=-1)
 
 
-def causal_conv1d_update_pytorch(
+def causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
@@ -201,7 +201,7 @@ def causal_conv1d_update_pytorch(
     dim, width = weight.shape
     if dim != feature_dim:
         raise RuntimeError(
-            f"causal_conv1d_update_pytorch: weight dim mismatch, "
+            f"causal_conv1d_update: weight dim mismatch, "
             f"feature_dim={feature_dim}, weight.shape={tuple(weight.shape)}"
         )
 
@@ -210,14 +210,14 @@ def causal_conv1d_update_pytorch(
         conv_state = conv_state.transpose(-1, -2)
     if conv_state.shape[-2] != dim:
         raise RuntimeError(
-            f"causal_conv1d_update_pytorch: conv_state dim mismatch, "
+            f"causal_conv1d_update: conv_state dim mismatch, "
             f"expected dim={dim}, conv_state.shape={tuple(conv_state.shape)}"
         )
 
     state_len = width - 1
     if conv_state.shape[-1] < state_len:
         raise RuntimeError(
-            f"causal_conv1d_update_pytorch: conv_state too short, need >= {state_len}, got {conv_state.shape[-1]}"
+            f"causal_conv1d_update: conv_state too short, need >= {state_len}, got {conv_state.shape[-1]}"
         )
 
     out = x.clone()
@@ -236,7 +236,7 @@ def causal_conv1d_update_pytorch(
         # seq_tokens: [L, dim] -> [1, dim, L]
         x_ref = seq_tokens.transpose(0, 1).unsqueeze(0)
         init_state = state[..., :state_len].unsqueeze(0)
-        out_ref, final_state = causal_conv1d_ref_pytorch(
+        out_ref, final_state = causal_conv1d_ref(
             x_ref,
             weight,
             bias,
