@@ -54,6 +54,11 @@ VERSION_GATED_COMBINATION = (
     "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
     "wemaster/deepseek_mtp_main_random_bf16",
 )
+EAGER_VALID_COMBINATION = (
+    "eagle",
+    "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
+    "wemaster/deepseek_mtp_main_random_bf16",
+)
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -164,6 +169,12 @@ def test_llama_qwen3_deepseek_eagle_correctness(
             "Skip deepseek-main + eagle coverage for non-v0.17.0 vLLM versions."
         )
 
+    # TODO(slippersss): After supporting graph mode, remove the enforce_eager restriction.
+    if (method, model_name, model_name_main) == EAGER_VALID_COMBINATION:
+        enforce_eager = True
+    else:
+        enforce_eager = False
+
     sampling_params = SamplingParams(
         max_tokens=300,
         temperature=0.0,
@@ -188,6 +199,7 @@ def test_llama_qwen3_deepseek_eagle_correctness(
                         draft_tensor_parallel_size,
                         "max_model_len": 128,
                     },
+                    enforce_eager=enforce_eager,
                     compilation_config=CompilationConfig(
                         cudagraph_mode="FULL",
                         cudagraph_capture_sizes=[5, 12])) as llm:
@@ -203,6 +215,7 @@ def test_llama_qwen3_deepseek_eagle_correctness(
                     max_model_len=4096,
                     seed=1024,
                     async_scheduling=async_scheduling,
+                    enforce_eager=enforce_eager,
                     compilation_config=CompilationConfig(
                         cudagraph_mode="FULL_DECODE_ONLY",
                         cudagraph_capture_sizes=[12])) as llm:
