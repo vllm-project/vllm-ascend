@@ -30,7 +30,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.eagle import EagleProposer, SpecDecodeBaseProposer
+from vllm.v1.spec_decode.eagle import EagleProposer,SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
