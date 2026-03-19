@@ -1599,4 +1599,4 @@ class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
     ):
         EagleProposer.__init__(self, vllm_config, device, runner=runner)
 
-        AscendSpecDecodeBaseProposer.__init__(vllm_config, device, True, runner=runner)
+        AscendSpecDecodeBaseProposer.__init__(self, vllm_config, device, True, runner=runner)
