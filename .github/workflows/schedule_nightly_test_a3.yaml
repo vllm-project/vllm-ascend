@@ -263,7 +263,7 @@ jobs:
             config_file_path: GLM-5.yaml
           - name: glm-4.8-w8a8
             os: linux-aarch64-a3-16
-            config_file_path: GLM-4.7.yaml
+            config_file_path: GLM-4.8.yaml
           - name: glm-4.7-w8a8
             os: linux-aarch64-a3-16
             config_file_path: GLM-4.7.yaml
