@@ -23,12 +23,17 @@ import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
 
 if HAS_TRITON:
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope  # noqa
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
-    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope
+else:
+    import vllm_ascend.ops.split_qkv_rmsnorm_rope  # noqa
 
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import (
+    AscendDeepseekScalingRotaryEmbedding,
+    AscendRotaryEmbedding,
+)
 
 
 class dummyFusionOp:
@@ -49,4 +54,9 @@ def register_dummy_fusion_op() -> None:
     torch.ops._C_ascend.rms_norm_dynamic_per_token_quant = dummyFusionOp(name="rms_norm_dynamic_per_token_quant")
 
 
-__all__ = ["AscendQuickGELU", "AscendSiluAndMul", "AscendRotaryEmbedding", "AscendDeepseekScalingRotaryEmbedding"]
+__all__ = [
+    "AscendQuickGELU",
+    "AscendSiluAndMul",
+    "AscendRotaryEmbedding",
+    "AscendDeepseekScalingRotaryEmbedding",
+]
