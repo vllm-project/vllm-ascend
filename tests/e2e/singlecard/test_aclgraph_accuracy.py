@@ -21,6 +21,7 @@ import os
 
 import pytest
 
+from tests.e2e.conftest import wait_until_npu_memory_free
 from tests.e2e.singlecard.utils import PROMPTS_LONG, PROMPTS_SHORT, LLMTestCase, compare_logprobs
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,7 @@ CASE_DS_EX = LLMTestCase(
 )
 
 
+@wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH])
 def test_piecewise_res_consistency(cur_case: LLMTestCase):
     runner_kwargs = {
@@ -85,6 +87,7 @@ def test_piecewise_res_consistency(cur_case: LLMTestCase):
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=cur_case.prompts)
 
 
+@wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_FULL, CASE_DS_FULL])
 def test_full_res_consistency(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
@@ -97,6 +100,7 @@ def test_full_res_consistency(cur_case: LLMTestCase, monkeypatch):
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=cur_case.prompts)
 
 
+@wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_FULL_DECODE_ONLY, CASE_DS_FULL_DECODE_ONLY])
 def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
@@ -110,6 +114,7 @@ def test_full_decode_only_res_consistency(cur_case: LLMTestCase, monkeypatch):
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=cur_case.prompts)
 
 
+@wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_EX, CASE_DS_EX])
 def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
@@ -126,6 +131,7 @@ def test_npugraph_ex_res_consistency(cur_case: LLMTestCase, monkeypatch):
 # The accuracy has already been verified in the previous test case.
 # This test case is used to check whether the functionality works properly
 # after enabling the static kernel and whether it is uninstalled as expected.
+@wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("cur_case", [CASE_QWEN_EX])
 def test_npugraph_ex_with_static_kernel(cur_case: LLMTestCase, monkeypatch):
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
