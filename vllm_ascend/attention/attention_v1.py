@@ -997,6 +997,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
+
 def adjust_tensor(tensor, desired_size):
     if tensor is None:
         return None
