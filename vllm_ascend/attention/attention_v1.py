@@ -499,8 +499,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     else:
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
-                        block_tables = attn_metadata[key].block_tables
-
+                    ## A5 stricker fia check:Block table 1st dim should match actual_seq_lengths
+                    block_tables = adjust_tensor(block_tables, len(actual_seq_lengths_q))
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
@@ -816,6 +816,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
+            ## A5 stricker fia check:Block table 1st dim should match actual_seq_lengths
+            block_table = adjust_tensor(block_table, len(attn_metadata.actual_seq_lengths_q))
             attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                 query=query,
                 key=key,
@@ -993,3 +995,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
+
+import torch.nn.functional as F
+def adjust_tensor(tensor, desired_size):
+    if tensor is None:
+        return None
+    pad_size = desired_size - tensor.shape[0]
+    if pad_size > 0:
+        pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
+        tensor = F.pad(tensor, pad, mode="constant", value=0)
+    else:
+        tensor=tensor[:desired_size]
+    return tensor
