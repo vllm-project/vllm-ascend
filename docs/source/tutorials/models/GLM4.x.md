@@ -804,9 +804,7 @@ vllm bench serve \
   --max-concurrency 1 \
   --request-rate 1 \
 ```
-
 After about several minutes, you can get the performance evaluation result.
-
 
 ## Best Practices
 
