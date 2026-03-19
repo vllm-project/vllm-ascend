@@ -10,8 +10,13 @@ permissions:
 jobs:
   triage:
     runs-on: ubuntu-latest
+    if: >-
+      contains(github.event.issue.labels.*.name, 'document') ||
+      contains(github.event.issue.labels.*.name, 'installation') ||
+      contains(github.event.issue.labels.*.name, 'usage') ||
+      contains(github.event.issue.labels.*.name, 'bug')
     steps:
-    - uses: github/issue-labeler@v3.4 
+    - uses: github/issue-labeler@v3.4
       with:
         configuration-path: .github/issue-labeler.yml
         enable-versioned-regex: 0
