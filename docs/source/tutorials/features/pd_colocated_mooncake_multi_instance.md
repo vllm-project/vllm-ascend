@@ -185,7 +185,6 @@ The template for the mooncake.json file is as follows:
     "metadata_server": "P2PHANDSHAKE",
     "protocol": "ascend",
     "device_name": "",
-    "use_ascend_direct": true,
     "master_server_address": "<your_server_ip>:50088",
     "global_segment_size": 107374182400
 }
@@ -195,7 +194,6 @@ The template for the mooncake.json file is as follows:
 | --------------| ------------------------| -----------------------------------|
 | metadata_server | P2PHANDSHAKE              | Point-to-point handshake mode  |
 | protocol              | ascend              | Ascend proprietary protocol    |
-| use_ascend_direct     | true                | Enable direct hardware access  |
 | master_server_address | 90.90.100.188:50088(for example) | Master server address|
 | global_segment_size   | 107374182400    | Size per segment (100 GB)      |
 

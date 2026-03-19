@@ -124,7 +124,6 @@ vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
   "kv_port": "30000",
   "engine_id": "0",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 1,
                     "tp_size": 16
@@ -192,7 +191,6 @@ vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
   "kv_port": "30000",
   "engine_id": "1",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 1,
                     "tp_size": 16
