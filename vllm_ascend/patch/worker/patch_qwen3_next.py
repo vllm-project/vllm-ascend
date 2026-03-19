@@ -249,6 +249,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
+                prebuilt_meta=attn_metadata.non_spec_chunked_prefill_meta,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
