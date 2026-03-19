@@ -58,6 +58,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 
+import torch.nn.functional as F
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 
@@ -996,7 +997,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
-import torch.nn.functional as F
 def adjust_tensor(tensor, desired_size):
     if tensor is None:
         return None
