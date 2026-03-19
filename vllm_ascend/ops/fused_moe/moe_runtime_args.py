@@ -13,7 +13,6 @@ from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
 )
 from vllm_ascend.ops.fused_moe.moe_stage_params import (
     MoEMlpKernelParams,
-    MoEMlpParams,
     MoEMxfpParams,
     MoEQuantParams,
     MoEReservedQuantParams,
@@ -27,7 +26,6 @@ __all__ = [
     "MoEMC2RoutingMetadata",
     "MoEMlpComputeInput",
     "MoEMlpKernelParams",
-    "MoEMlpParams",
     "MoEMxfpParams",
     "MoEPrepareOutput",
     "MoEQuantParams",

@@ -26,15 +26,18 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherRoutingMetadata,
     MoEAllToAllRoutingMetadata,
     MoEMC2RoutingMetadata,
-    MoERoutingParams,
     MoEMxfpParams,
     MoEQuantParams,
+    MoERoutingParams,
     MoETokenDispatchInput,
 )
 
 from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
-    AscendDeviceType, TokenDispatcherWithAll2AllV,
-    TokenDispatcherWithAllGather, TokenDispatcherWithMC2)
+    AscendDeviceType,
+    TokenDispatcherWithAll2AllV,
+    TokenDispatcherWithAllGather,
+    TokenDispatcherWithMC2,
+)
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -64,7 +67,6 @@ def build_dispatch_request(
             global_redundant_expert_num=global_redundant_expert_num,
             mc2_mask=None,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            dynamic_eplb=dynamic_eplb,
             pertoken_scale=pertoken_scale,
         ),
         quant=MoEQuantParams(

@@ -4,19 +4,21 @@ import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
-                                                       AlltoAllCommImpl,
-                                                       MC2CommImpl)
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (MoEFusedExpertsInput,
-                                                        MoEAllGatherRoutingMetadata,
-                                                        MoERoutingParams,
-                                                        MoEMlpParams,
-                                                        MoEQuantParams,
-                                                        MoEWeights,
-                                                        MoEPrepareOutput)
+from vllm_ascend.ops.fused_moe.moe_comm_method import (
+    AllGatherCommImpl,
+    AlltoAllCommImpl,
+    MC2CommImpl,
+)
+from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+    MoEAllGatherRoutingMetadata,
+    MoEFusedExpertsInput,
+    MoEPrepareOutput,
+    MoEQuantParams,
+    MoERoutingParams,
+    MoEWeights,
+)
+from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenCombineOutput, MoETokenDispatchOutput
 from vllm_ascend.quantization.methods.base import QuantType
-from vllm_ascend.ops.fused_moe.token_dispatcher import (MoETokenCombineOutput,
-                                                        MoETokenDispatchOutput)
 
 
 class TestMoECommMethod(TestBase):
@@ -244,11 +246,10 @@ class TestMoECommMethod(TestBase):
                 global_redundant_expert_num=0,
                 mc2_mask=None,
                 apply_router_weight_on_input=False,
-                dynamic_eplb=False,
             ),
-            mlp=MoEMlpParams(
-                activation="silu",
-            ),
+            activation="silu",
+            need_trans=False,
+            dynamic_eplb=False,
             quant=MoEQuantParams(),
         ))
 

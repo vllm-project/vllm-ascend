@@ -8,7 +8,6 @@ from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_m
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
     MoEMlpKernelParams,
-    MoEMlpParams,
     MoEMxfpParams,
     MoEQuantParams,
     MoEWeights,
@@ -65,8 +64,10 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 w1_bias=torch.randn(1, 16),
                 w2_bias=torch.randn(1, 8),
             ),
+            activation="silu",
+            need_trans=False,
+            dynamic_eplb=False,
             quant=MoEQuantParams(quant_type=QuantType.NONE),
-            mlp=MoEMlpParams(activation="silu", need_trans=False, dynamic_eplb=False),
             kernel=MoEMlpKernelParams(
                 fusion=False,
                 use_mxfp_quant=False,
@@ -102,11 +103,13 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 w1_scale=[torch.randn(1)],
                 w2_scale=[torch.randn(1)],
             ),
+            activation="silu",
+            need_trans=False,
+            dynamic_eplb=True,
             quant=MoEQuantParams(
                 quant_type=QuantType.MXFP8,
                 mxfp=MoEMxfpParams(use_bf16=False),
             ),
-            mlp=MoEMlpParams(activation="silu", need_trans=False, dynamic_eplb=True),
             kernel=MoEMlpKernelParams(
                 fusion=True,
                 use_mxfp_quant=True,

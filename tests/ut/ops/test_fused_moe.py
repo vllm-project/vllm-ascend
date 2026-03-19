@@ -12,7 +12,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from typing import List, TypedDict
+from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,18 +20,19 @@ import torch
 import torch.nn as nn
 import torch_npu
 from pytest_mock import MockerFixture
+
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (MoEMlpComputeInput,
-                                                        MoEMlpKernelParams,
-                                                        MoEMlpParams,
-                                                        MoEQuantParams,
-                                                        MoEWeights,
-                                                        MoEPrepareOutput)
-from vllm_ascend.ops.fused_moe.moe_mlp import (cumsum_group_list,
-                                               unified_apply_mlp)
+from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
+from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+    MoEMlpComputeInput,
+    MoEMlpKernelParams,
+    MoEPrepareOutput,
+    MoEQuantParams,
+    MoEWeights,
+)
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, adapt_patch
 
@@ -98,12 +99,10 @@ def build_mlp_request(
             w1_offset=w1_offset,
             w2_offset=w2_offset,
         ),
+        activation=activation,
+        need_trans=need_trans,
+        dynamic_eplb=dynamic_eplb,
         quant=MoEQuantParams(quant_type=QuantType.W8A8 if with_quant else QuantType.NONE),
-        mlp=MoEMlpParams(
-            activation=activation,
-            need_trans=need_trans,
-            dynamic_eplb=dynamic_eplb,
-        ),
         kernel=MoEMlpKernelParams(
             fusion=fusion,
             use_mxfp_quant=False,
@@ -270,18 +269,18 @@ def moe_method(mock_dist_env):
 
 class Device(TypedDict):
     device_id: int
-    device_expert: List[int]
+    device_expert: list[int]
 
 
 class Layer(TypedDict):
     layer_id: int
     device_count: int
-    device_list: List[Device]
+    device_list: list[Device]
 
 
 class MockData(TypedDict):
     moe_layer_count: int
-    layer_list: List[Layer]
+    layer_list: list[Layer]
 
 
 class MockQuantMethod(nn.Module):

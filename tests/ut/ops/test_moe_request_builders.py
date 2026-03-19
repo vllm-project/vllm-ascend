@@ -26,7 +26,6 @@ class TestMoERequestBuilders(unittest.TestCase):
             "MoEMC2RoutingMetadata",
             "MoEMlpComputeInput",
             "MoEMlpKernelParams",
-            "MoEMlpParams",
             "MoEMxfpParams",
             "MoEPrepareOutput",
             "MoEQuantParams",
@@ -75,10 +74,10 @@ class TestMoERequestBuilders(unittest.TestCase):
                 self.assertIs(request.hidden_states, hidden_states)
                 self.assertIs(request.topk_weights, topk_weights)
                 self.assertIs(request.topk_ids, topk_ids)
-                self.assertTrue(request.routing.dynamic_eplb)
+                self.assertTrue(request.dynamic_eplb)
                 self.assertTrue(request.routing.apply_router_weight_on_input)
                 self.assertEqual(request.routing.global_redundant_expert_num, 2)
-                self.assertEqual(request.mlp.activation, "gelu")
+                self.assertEqual(request.activation, "gelu")
                 self.assertEqual(request.quant.quant_type, quant_type)
 
     def test_build_fused_experts_input_merges_dense_and_quant_weights(self):

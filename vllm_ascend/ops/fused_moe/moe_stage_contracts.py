@@ -8,7 +8,6 @@ import torch
 
 from vllm_ascend.ops.fused_moe.moe_stage_params import (
     MoEMlpKernelParams,
-    MoEMlpParams,
     MoEQuantParams,
     MoERoutingParams,
 )
@@ -53,8 +52,10 @@ class MoEFusedExpertsInput:
     topk_ids: torch.Tensor
     weights: MoEWeights
     routing: MoERoutingParams
-    mlp: MoEMlpParams
     quant: MoEQuantParams
+    activation: str = "silu"
+    need_trans: bool = False
+    dynamic_eplb: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +122,10 @@ class MoEMlpComputeInput:
     topk_scales: torch.Tensor | None
     weights: MoEWeights
     quant: MoEQuantParams
-    mlp: MoEMlpParams
     kernel: MoEMlpKernelParams
+    activation: str = "silu"
+    need_trans: bool = False
+    dynamic_eplb: bool = False
 
 
 @dataclass(frozen=True, slots=True)

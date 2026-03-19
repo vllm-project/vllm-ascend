@@ -404,9 +404,9 @@ def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
     w2_scale_bias = request.weights.w2_scale_bias
     w1_offset = request.weights.w1_offset
     w2_offset = request.weights.w2_offset
-    activation = request.mlp.activation
-    need_trans = request.mlp.need_trans
-    dynamic_eplb = request.mlp.dynamic_eplb
+    activation = request.activation
+    need_trans = request.need_trans
+    dynamic_eplb = request.dynamic_eplb
 
     if not request.quant.is_quant:
         return unquant_apply_mlp(

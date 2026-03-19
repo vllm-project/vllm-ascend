@@ -8,11 +8,15 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 
 @dataclass(frozen=True, slots=True)
-class MoEReservedQuantParams:
-    """Reserved quant fields for future rollout."""
+class MoERoutingParams:
+    """Routing-stage runtime parameters."""
 
-    round_mode: str = "rint"
-    rollback_quant_config: dict | None = None
+    expert_map: torch.Tensor | None
+    global_redundant_expert_num: int
+    mc2_mask: torch.Tensor | None
+    apply_router_weight_on_input: bool
+    log2phy: torch.Tensor | None = None
+    pertoken_scale: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +28,14 @@ class MoEMxfpParams:
     scale_dtype: torch.dtype | None = None
     per_token_scale_dtype: torch.dtype | None = None
     use_bf16: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class MoEReservedQuantParams:
+    """Reserved quant fields for future rollout."""
+
+    round_mode: str = "rint"
+    rollback_quant_config: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,28 +65,6 @@ class MoEQuantParams:
 
 
 @dataclass(frozen=True, slots=True)
-class MoERoutingParams:
-    """Routing-stage runtime parameters."""
-
-    expert_map: torch.Tensor | None
-    global_redundant_expert_num: int
-    mc2_mask: torch.Tensor | None
-    apply_router_weight_on_input: bool
-    dynamic_eplb: bool
-    log2phy: torch.Tensor | None = None
-    pertoken_scale: torch.Tensor | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MoEMlpParams:
-    """MLP-stage semantic parameters."""
-
-    activation: str = "silu"
-    need_trans: bool = False
-    dynamic_eplb: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class MoEMlpKernelParams:
     """MLP kernel execution parameters."""
 
@@ -88,10 +78,9 @@ class MoEMlpKernelParams:
 
 
 __all__ = [
-    "MoEMlpKernelParams",
-    "MoEMlpParams",
-    "MoEMxfpParams",
-    "MoEQuantParams",
-    "MoEReservedQuantParams",
     "MoERoutingParams",
+    "MoEMxfpParams",
+    "MoEReservedQuantParams",
+    "MoEQuantParams",
+    "MoEMlpKernelParams",
 ]
