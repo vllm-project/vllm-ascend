@@ -216,6 +216,7 @@ class ExecuteModelState(NamedTuple):
     positions: torch.Tensor
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
+    batch_desc: BatchDescriptor
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -1008,6 +1009,7 @@ class NPUModelRunner(GPUModelRunner):
         hidden_states: torch.Tensor,
         aux_hidden_states: torch.Tensor = None,
         sample_hidden_states: torch.Tensor = None,
+        target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
         if not self.drafter:
             # Speculative decoding is not enabled.
@@ -1128,6 +1130,7 @@ class NPUModelRunner(GPUModelRunner):
                 next_token_ids=next_token_ids,
                 token_indices_to_sample=token_indices_to_sample,
                 common_attn_metadata=common_attn_metadata,
+                target_model_batch_desc=target_model_batch_desc,
                 sampling_metadata=sampling_metadata,
                 req_scheduled_tokens=req_scheduled_tokens,
                 long_seq_metadata=long_seq_metadata,
@@ -1470,6 +1473,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions,
                 ec_connector_output,
                 cudagraph_stats,
+                batch_desc,
             )
             self.kv_connector_output = kv_connector_output
         return None
@@ -1512,6 +1516,7 @@ class NPUModelRunner(GPUModelRunner):
             positions,
             ec_connector_output,
             cudagraph_stats,
+            batch_desc,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -1548,6 +1553,7 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states,
                 aux_hidden_states,
                 sample_hidden_states,
+                batch_desc,
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
