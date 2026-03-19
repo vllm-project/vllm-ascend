@@ -709,7 +709,7 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
             tmp_positions_np = self.positions.np[:total_num_scheduled_tokens]
             np.add(
-                self.input_batch.num_computed_tokens_cpu[req_indices: total_num_pcp_scheduled_tokens],
+                self.input_batch.num_computed_tokens_cpu[req_indices[: total_num_pcp_scheduled_tokens]],
                 position_pcp[:total_num_pcp_scheduled_tokens],
                 out=tmp_positions_np[: total_num_pcp_scheduled_tokens],
             )
