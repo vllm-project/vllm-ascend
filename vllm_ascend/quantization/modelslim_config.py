@@ -53,6 +53,20 @@ logger = init_logger(__name__)
 # value: vLLM prefix -> HF prefix mapping (used to convert vLLM layer names to HF format
 # for looking up keys in quant_model_description.json)
 QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
+    "qwen3_vl_moe": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    },
+    "qwen3_vl": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    },
+    "kimi_k25": {
+        "mm_projector.linear_1": "mm_projector.proj.0",
+        "mm_projector.linear_2": "mm_projector.proj.2",
+    },
     "qwen3_omni_moe": {
         "language_model.lm_head.": "thinker.lm_head.",
         "language_model.model.": "thinker.model.",
