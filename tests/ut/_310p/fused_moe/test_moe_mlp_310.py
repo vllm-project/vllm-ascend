@@ -27,7 +27,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 
-def build_request(
+def build_mlp_compute_input_fixture(
     *,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -70,7 +70,7 @@ class TestUnifiedApplyMLP310(TestBase):
         group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
 
         result = unified_apply_mlp(
-            request=build_request(
+            mlp_compute_input=build_mlp_compute_input_fixture(
                 hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,
@@ -125,7 +125,7 @@ class TestUnifiedApplyMLP310(TestBase):
         group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
 
         result = unified_apply_mlp(
-            request=build_request(
+            mlp_compute_input=build_mlp_compute_input_fixture(
                 hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,

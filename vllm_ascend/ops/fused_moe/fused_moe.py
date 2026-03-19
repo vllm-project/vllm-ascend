@@ -182,7 +182,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale = None
 
         final_hidden_states = moe_comm_method.fused_experts(
-            request=build_fused_experts_input(
+            fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,

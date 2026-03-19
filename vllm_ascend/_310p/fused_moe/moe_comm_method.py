@@ -39,8 +39,8 @@ class AllGatherCommImpl310(AllGatherCommImpl):
         super().__init__(moe_config)
         self.use_fusion_ops = False
 
-    def _apply_mlp(self, request: MoEMlpComputeInput) -> torch.Tensor:
-        return unified_apply_mlp(request=request)
+    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+        return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
     def _get_token_dispatcher(self):
         return TokenDispatcherWithAllGather310(

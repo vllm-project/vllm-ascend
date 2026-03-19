@@ -300,8 +300,8 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             pertoken_scale=pertoken_scale,
         )
 
-        request = mock_comm.fused_experts.call_args.kwargs["request"]
-        self.assertEqual(request.activation, "gelu")
-        self.assertTrue(request.routing.apply_router_weight_on_input)
-        self.assertIs(request.routing.mc2_mask, mc2_mask)
-        self.assertIs(request.routing.pertoken_scale, pertoken_scale)
+        fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_experts_input.activation, "gelu")
+        self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
+        self.assertIs(fused_experts_input.routing.mc2_mask, mc2_mask)
+        self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)

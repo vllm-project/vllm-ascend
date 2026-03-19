@@ -384,32 +384,32 @@ def unquant_apply_mlp(
     return hidden_states
 
 
-def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
+def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     """
     Unified MoE MLP entry.
     Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
     """
-    hidden_states = request.hidden_states
-    group_list = request.group_list
-    group_list_type = request.group_list_type
-    dynamic_scale = request.dynamic_scale
-    topk_scales = request.topk_scales
-    w1 = request.weights.w1
-    w2 = request.weights.w2
-    w1_bias = request.weights.w1_bias
-    w2_bias = request.weights.w2_bias
-    w1_scale = request.weights.w1_scale
-    w2_scale = request.weights.w2_scale
-    w1_scale_bias = request.weights.w1_scale_bias
-    w2_scale_bias = request.weights.w2_scale_bias
-    w1_offset = request.weights.w1_offset
-    w2_offset = request.weights.w2_offset
-    activation = request.activation
-    need_trans = request.need_trans
-    dynamic_eplb = request.dynamic_eplb
-    fusion = request.fusion
+    hidden_states = mlp_compute_input.hidden_states
+    group_list = mlp_compute_input.group_list
+    group_list_type = mlp_compute_input.group_list_type
+    dynamic_scale = mlp_compute_input.dynamic_scale
+    topk_scales = mlp_compute_input.topk_scales
+    w1 = mlp_compute_input.weights.w1
+    w2 = mlp_compute_input.weights.w2
+    w1_bias = mlp_compute_input.weights.w1_bias
+    w2_bias = mlp_compute_input.weights.w2_bias
+    w1_scale = mlp_compute_input.weights.w1_scale
+    w2_scale = mlp_compute_input.weights.w2_scale
+    w1_scale_bias = mlp_compute_input.weights.w1_scale_bias
+    w2_scale_bias = mlp_compute_input.weights.w2_scale_bias
+    w1_offset = mlp_compute_input.weights.w1_offset
+    w2_offset = mlp_compute_input.weights.w2_offset
+    activation = mlp_compute_input.activation
+    need_trans = mlp_compute_input.need_trans
+    dynamic_eplb = mlp_compute_input.dynamic_eplb
+    fusion = mlp_compute_input.fusion
 
-    if not request.quant.is_quant:
+    if not mlp_compute_input.quant.is_quant:
         return unquant_apply_mlp(
             hidden_states=hidden_states,
             w1=w1,
@@ -429,11 +429,11 @@ def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
     scale_type = None
     per_token_scale_type = None
     use_bf16 = hidden_states.dtype == torch.bfloat16
-    use_mxfp_quant = request.quant.is_mxfp
+    use_mxfp_quant = mlp_compute_input.quant.is_mxfp
 
     if use_mxfp_quant:
-        mxfp = request.quant.mxfp
-        assert mxfp is not None, "request.quant.mxfp is required when quant_type is MXFP8."
+        mxfp = mlp_compute_input.quant.mxfp
+        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is MXFP8."
         act_quant_type = mxfp.act_quant_type or act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
         scale_type = mxfp.scale_dtype

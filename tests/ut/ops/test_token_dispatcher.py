@@ -41,7 +41,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
 from vllm_ascend.quantization.quant_type import QuantType
 
 
-def build_dispatch_request(
+def build_token_dispatch_input_fixture(
     *,
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -142,7 +142,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
@@ -151,7 +151,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             apply_router_weight_on_input=False,
             pertoken_scale=None,
         )
-        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(request)
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
         self.assertIn("x", kwargs)
         self.assertIn("expert_ids", kwargs)
         self.assertEqual(kwargs["moe_expert_num"], 8)
@@ -165,13 +165,13 @@ class TestTokenDispatcherWithMC2(TestBase):
         with patch("torch_npu.npu_moe_distribute_dispatch_v2",
                    return_value=(torch.randn(10, 128), ) * 5 +
                    (None, None)) as mock_dispatch:
-            request = build_dispatch_request(
+            token_dispatch_input = build_token_dispatch_input_fixture(
                 hidden_states=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 expert_map=expert_map,
             )
-            output = self.dispatcher.token_dispatch(request=request)
+            output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
             mock_dispatch.assert_called_once()
             self.assertEqual(output.group_list_type, 0)  # group_list_type == 0
             self.assertIsInstance(output.routing_metadata, MoEMC2RoutingMetadata)
@@ -245,12 +245,12 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
         )
-        results = self.dispatcher.token_dispatch(request=request)
+        results = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         # Verify npu_moe_init_routing is called
         self.mock_npu_moe_init_routing_custom.assert_called_once()
@@ -267,12 +267,12 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
         )
-        results = self.dispatcher.token_dispatch(request=request)
+        results = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         # Verify npu_moe_init_routing is called
         self.mock_npu_moe_init_routing_custom.assert_called_once()
@@ -297,12 +297,12 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
         )
-        results = self.dispatcher_quant.token_dispatch(request=request)
+        results = self.dispatcher_quant.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.assertEqual(results.group_list_type, 1)
 
@@ -322,13 +322,13 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             quant_type=QuantType.W8A8,
         )
-        results = self.dispatcher_quant.token_dispatch(request=request)
+        results = self.dispatcher_quant.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.assertIsNotNone(results.hidden_states)
         self.assertIsNotNone(results.group_list)
@@ -369,13 +369,13 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7], [0.6], [0.5]])  # topk=1
         topk_ids = torch.tensor([[0], [1], [2]])
 
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             apply_router_weight_on_input=True,
         )
-        results = self.dispatcher.token_dispatch(request=request)
+        results = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
         self.assertEqual(results.hidden_states.shape, (6, 128))
         self.assertIsInstance(results.routing_metadata, MoEAllGatherRoutingMetadata)
 
@@ -485,13 +485,13 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             [0, 1], dtype=torch.int32)
         self.dispatcher.local_expert_indices = [0, 1]
 
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
         )
-        result = self.dispatcher.token_dispatch(request=request)
+        result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.assertIsNotNone(result.hidden_states)
         self.assertIsNotNone(result.group_list)
@@ -535,14 +535,14 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             [0, 1], dtype=torch.int32)
         self.dispatcher.local_expert_indices = [0, 1]
 
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
             quant_type=QuantType.W8A8,
         )
-        result = self.dispatcher.token_dispatch(request=request)
+        result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.assertIsNotNone(result.hidden_states)
         self.assertIsNotNone(result.group_list)
@@ -569,14 +569,14 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             [0, 1], dtype=torch.int32)
         self.dispatcher.local_expert_indices = [0, 1]
 
-        request = build_dispatch_request(
+        token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             expert_map=expert_map,
             quant_type=QuantType.W8A8,
         )
-        result = self.dispatcher.token_dispatch(request=request)
+        result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.assertIsNotNone(result.hidden_states)
         self.assertIsNotNone(result.group_list)

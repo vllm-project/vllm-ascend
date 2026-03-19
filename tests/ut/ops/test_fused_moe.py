@@ -61,7 +61,7 @@ def mock_npu_format_cast(weight_data, format):
     return weight_data
 
 
-def build_mlp_request(
+def build_mlp_compute_input_fixture(
     *,
     hidden_states: torch.Tensor,
     w1: torch.Tensor | list[torch.Tensor],
@@ -396,7 +396,7 @@ class TestUnifiedApplyMLP(TestBase):
         w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
         group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
 
-        result = unified_apply_mlp(request=build_mlp_request(
+        result = unified_apply_mlp(mlp_compute_input=build_mlp_compute_input_fixture(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
@@ -438,7 +438,7 @@ class TestUnifiedApplyMLP(TestBase):
         group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
         topk_scales = torch.randn(10, 1, dtype=torch.float16)
 
-        result = unified_apply_mlp(request=build_mlp_request(
+        result = unified_apply_mlp(mlp_compute_input=build_mlp_compute_input_fixture(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
@@ -496,7 +496,7 @@ class TestUnifiedApplyMLP(TestBase):
         group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
         provided_dynamic_scale = torch.rand(10, 1, dtype=torch.float32)
 
-        result = unified_apply_mlp(request=build_mlp_request(
+        result = unified_apply_mlp(mlp_compute_input=build_mlp_compute_input_fixture(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
@@ -541,7 +541,7 @@ class TestUnifiedApplyMLP(TestBase):
         group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
         topk_scales = torch.randn(10, 1, dtype=torch.float16)
 
-        result = unified_apply_mlp(request=build_mlp_request(
+        result = unified_apply_mlp(mlp_compute_input=build_mlp_compute_input_fixture(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
@@ -603,7 +603,7 @@ class TestUnifiedApplyMLP(TestBase):
         group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
         provided_dynamic_scale = torch.rand(10, 1, dtype=torch.float32)
 
-        result = unified_apply_mlp(request=build_mlp_request(
+        result = unified_apply_mlp(mlp_compute_input=build_mlp_compute_input_fixture(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,

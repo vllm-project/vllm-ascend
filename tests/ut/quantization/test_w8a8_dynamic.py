@@ -155,13 +155,13 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             pertoken_scale=pertoken_scale,
         )
 
-        request = mock_comm.fused_experts.call_args.kwargs["request"]
-        self.assertEqual(request.activation, "gelu")
-        self.assertTrue(request.routing.apply_router_weight_on_input)
-        self.assertIs(request.routing.mc2_mask, mc2_mask)
-        self.assertIs(request.routing.pertoken_scale, pertoken_scale)
-        self.assertIs(request.topk_weights, topk_weights)
-        self.assertIs(request.topk_ids, topk_ids)
+        fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_experts_input.activation, "gelu")
+        self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
+        self.assertIs(fused_experts_input.routing.mc2_mask, mc2_mask)
+        self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)
+        self.assertIs(fused_experts_input.topk_weights, topk_weights)
+        self.assertIs(fused_experts_input.topk_ids, topk_ids)
 
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_flash_common3_context")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
@@ -220,10 +220,10 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         )
 
         mock_select_experts.assert_not_called()
-        request = mock_comm.fused_experts.call_args.kwargs["request"]
-        self.assertEqual(request.activation, "gelu")
-        self.assertTrue(request.routing.apply_router_weight_on_input)
-        self.assertIs(request.routing.mc2_mask, mc2_mask)
-        self.assertIs(request.routing.pertoken_scale, pertoken_scale)
-        self.assertIs(request.topk_weights, topk_weights)
-        self.assertIs(request.topk_ids, topk_ids)
+        fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_experts_input.activation, "gelu")
+        self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
+        self.assertIs(fused_experts_input.routing.mc2_mask, mc2_mask)
+        self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)
+        self.assertIs(fused_experts_input.topk_weights, topk_weights)
+        self.assertIs(fused_experts_input.topk_ids, topk_ids)

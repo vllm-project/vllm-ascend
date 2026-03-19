@@ -67,7 +67,7 @@ class MoETokenDispatcher(ABC, Generic[TMoERoutingMetadata]):
     @abstractmethod
     def token_dispatch(
         self,
-        request: MoETokenDispatchInput,
+        token_dispatch_input: MoETokenDispatchInput,
     ) -> MoETokenDispatchOutput[TMoERoutingMetadata]:
         raise NotImplementedError("Dispatch function not implemented.")
 
@@ -118,14 +118,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
 
     def get_dispatch_mc2_kwargs(
         self,
-        request: MoETokenDispatchInput,
+        token_dispatch_input: MoETokenDispatchInput,
     ):
-        hidden_states = request.hidden_states
-        topk_weights = request.topk_weights
-        topk_ids = request.topk_ids
-        expert_map = request.routing.expert_map
-        global_redundant_expert_num = request.routing.global_redundant_expert_num
-        comm_quant_mode = request.quant.comm_quant_mode
+        hidden_states = token_dispatch_input.hidden_states
+        topk_weights = token_dispatch_input.topk_weights
+        topk_ids = token_dispatch_input.topk_ids
+        expert_map = token_dispatch_input.routing.expert_map
+        global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
+        comm_quant_mode = token_dispatch_input.quant.comm_quant_mode
 
         assert expert_map is not None, "expert_map is required for MC2 token dispatch."
         # NOTE: quant_mode differs by quant feature:
@@ -133,8 +133,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
         # - A5 MXFP8 communication uses quant_mode=4.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
-        elif request.quant.dispatch_with_quant:
-            quant_mode = 4 if self.a5_need_extra_args and request.quant.is_mxfp else 2
+        elif token_dispatch_input.quant.dispatch_with_quant:
+            quant_mode = 4 if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp else 2
         else:
             quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
@@ -163,10 +163,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.a5_need_extra_args and request.quant.is_mxfp:
+        if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp:
             y_dtype = torch.float8_e4m3fn
-            if request.quant.mxfp is not None and request.quant.mxfp.act_quant_type is not None:
-                y_dtype = request.quant.mxfp.act_quant_type
+            if (
+                token_dispatch_input.quant.mxfp is not None
+                and token_dispatch_input.quant.mxfp.act_quant_type is not None
+            ):
+                y_dtype = token_dispatch_input.quant.mxfp.act_quant_type
             stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
         if self.need_expert_scale or self.a5_need_extra_args:
             stage1_kwargs.update(
@@ -180,9 +183,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
 
     def token_dispatch(
         self,
-        request: MoETokenDispatchInput,
+        token_dispatch_input: MoETokenDispatchInput,
     ):
-        kwargs_mc2 = self.get_dispatch_mc2_kwargs(request)
+        kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
             if self.enable_dispatch_v2
@@ -206,14 +209,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
             group_list=expert_token_nums,
             group_list_type=group_list_type,
             routing_metadata=MoEMC2RoutingMetadata(
-                topk_ids=request.topk_ids,
-                topk_weights=request.topk_weights,
-                expert_map=request.routing.expert_map,
+                topk_ids=token_dispatch_input.topk_ids,
+                topk_weights=token_dispatch_input.topk_weights,
+                expert_map=token_dispatch_input.routing.expert_map,
                 ep_recv_counts=ep_recv_counts,
                 tp_recv_counts=tp_recv_counts,
                 assist_info_for_combine=assist_info_for_combine,
                 expand_scales=expand_scales,
-                dispatch_with_quant=request.quant.dispatch_with_quant,
+                dispatch_with_quant=token_dispatch_input.quant.dispatch_with_quant,
             ),
         )
 
@@ -293,19 +296,19 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherRoutingMetadat
 
     def token_dispatch(
         self,
-        request: MoETokenDispatchInput,
+        token_dispatch_input: MoETokenDispatchInput,
     ):
-        with_quant = request.quant.is_int_quant
-        hidden_states = request.hidden_states
-        topk_weights = request.topk_weights
-        topk_ids = request.topk_ids
-        expert_map = request.routing.expert_map
-        pertoken_scale = request.routing.pertoken_scale
-        global_redundant_expert_num = request.routing.global_redundant_expert_num
+        with_quant = token_dispatch_input.quant.is_int_quant
+        hidden_states = token_dispatch_input.hidden_states
+        topk_weights = token_dispatch_input.topk_weights
+        topk_ids = token_dispatch_input.topk_ids
+        expert_map = token_dispatch_input.routing.expert_map
+        pertoken_scale = token_dispatch_input.routing.pertoken_scale
+        global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
 
         num_tokens = hidden_states.shape[:-1].numel()
-        apply_router_weight_on_input = request.routing.apply_router_weight_on_input
+        apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
         if apply_router_weight_on_input:
             assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
@@ -395,12 +398,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllRoutingMetadata]
 
     def token_dispatch(
         self,
-        request: MoETokenDispatchInput,
+        token_dispatch_input: MoETokenDispatchInput,
     ):
-        with_quant = request.quant.is_int_quant
-        hidden_states = request.hidden_states
-        topk_weights = request.topk_weights
-        topk_ids = request.topk_ids
+        with_quant = token_dispatch_input.quant.is_int_quant
+        hidden_states = token_dispatch_input.hidden_states
+        topk_weights = token_dispatch_input.topk_weights
+        topk_ids = token_dispatch_input.topk_ids
 
         (
             permutated_local_input_tokens,

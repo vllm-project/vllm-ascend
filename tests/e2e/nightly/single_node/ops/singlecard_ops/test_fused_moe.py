@@ -135,8 +135,8 @@ def test_token_dispatcher_with_all_gather(
     dispatcher = TokenDispatcherWithAllGather(**dispatcher_kwargs)
 
     apply_router_weight_on_input = False
-    dispatch_output = dispatcher.token_dispatch(
-        request=MoETokenDispatchInput(
+    token_dispatch_output = dispatcher.token_dispatch(
+        token_dispatch_input=MoETokenDispatchInput(
             hidden_states=a,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
@@ -150,10 +150,10 @@ def test_token_dispatcher_with_all_gather(
         )
     )
 
-    sorted_hidden_states = dispatch_output.hidden_states
-    group_list = dispatch_output.group_list
-    group_list_type = dispatch_output.group_list_type
-    routing_metadata = dispatch_output.routing_metadata
+    sorted_hidden_states = token_dispatch_output.hidden_states
+    group_list = token_dispatch_output.group_list
+    group_list_type = token_dispatch_output.group_list_type
+    routing_metadata = token_dispatch_output.routing_metadata
 
     expert_output = apply_mlp(
         hidden_states=sorted_hidden_states,
@@ -218,8 +218,8 @@ def test_token_dispatcher_with_all_gather_quant(
         dispatcher = TokenDispatcherWithAllGather(**dispatcher_kwargs)
 
         apply_router_weight_on_input = False
-        dispatch_output = dispatcher.token_dispatch(
-            request=MoETokenDispatchInput(
+        token_dispatch_output = dispatcher.token_dispatch(
+            token_dispatch_input=MoETokenDispatchInput(
                 hidden_states=a,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -233,10 +233,10 @@ def test_token_dispatcher_with_all_gather_quant(
             )
         )
 
-        routing_metadata = dispatch_output.routing_metadata
+        routing_metadata = token_dispatch_output.routing_metadata
 
-        mlp_request = build_mlp_compute_input(
-            request=build_fused_experts_input(
+        mlp_compute_input = build_mlp_compute_input(
+            fused_experts_input=build_fused_experts_input(
                 hidden_states=a,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -248,10 +248,10 @@ def test_token_dispatcher_with_all_gather_quant(
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
             ),
-            dispatch_result=dispatch_output,
+            token_dispatch_output=token_dispatch_output,
             use_fusion_ops=False,
         )
-        expert_output = unified_apply_mlp(request=mlp_request)
+        expert_output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
         combined_output = dispatcher.token_combine(
             hidden_states=expert_output, routing_metadata=routing_metadata, bias=None
         )

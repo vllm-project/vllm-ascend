@@ -35,13 +35,13 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
 
     def token_dispatch(
         self,
-        request: MoETokenDispatchInput,
+        token_dispatch_input: MoETokenDispatchInput,
     ):
-        hidden_states = request.hidden_states
-        topk_weights = request.topk_weights
-        topk_ids = request.topk_ids
-        expert_map = request.routing.expert_map
-        apply_router_weight_on_input = request.routing.apply_router_weight_on_input
+        hidden_states = token_dispatch_input.hidden_states
+        topk_weights = token_dispatch_input.topk_weights
+        topk_ids = token_dispatch_input.topk_ids
+        expert_map = token_dispatch_input.routing.expert_map
+        apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
         restore_shape = hidden_states.shape
 
         num_tokens = hidden_states.shape[:-1].numel()

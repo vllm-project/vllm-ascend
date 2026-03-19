@@ -87,37 +87,37 @@ def build_fused_experts_input(
 
 def build_token_dispatch_input(
     *,
-    request: MoEFusedExpertsInput,
+    fused_experts_input: MoEFusedExpertsInput,
     topk_ids: torch.Tensor | None = None,
 ) -> MoETokenDispatchInput:
     return MoETokenDispatchInput(
-        hidden_states=request.hidden_states,
-        topk_weights=request.topk_weights,
-        topk_ids=request.topk_ids if topk_ids is None else topk_ids,
-        routing=request.routing,
-        quant=request.quant,
+        hidden_states=fused_experts_input.hidden_states,
+        topk_weights=fused_experts_input.topk_weights,
+        topk_ids=fused_experts_input.topk_ids if topk_ids is None else topk_ids,
+        routing=fused_experts_input.routing,
+        quant=fused_experts_input.quant,
     )
 
 
 def build_mlp_compute_input(
     *,
-    request: MoEFusedExpertsInput,
-    dispatch_result: MoETokenDispatchOutput[TMoERoutingMetadata],
+    fused_experts_input: MoEFusedExpertsInput,
+    token_dispatch_output: MoETokenDispatchOutput[TMoERoutingMetadata],
     use_fusion_ops: bool,
 ) -> MoEMlpComputeInput:
-    if request.quant.is_mxfp and request.quant.mxfp is None:
-        raise ValueError("request.quant.mxfp is required when quant_type is QuantType.MXFP8.")
+    if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
+        raise ValueError("fused_experts_input.quant.mxfp is required when quant_type is QuantType.MXFP8.")
 
     return MoEMlpComputeInput(
-        hidden_states=dispatch_result.hidden_states,
-        group_list=dispatch_result.group_list,
-        group_list_type=dispatch_result.group_list_type,
-        dynamic_scale=dispatch_result.dynamic_scale,
-        topk_scales=dispatch_result.topk_scales,
-        weights=request.weights,
-        quant=request.quant,
-        fusion=request.quant.quant_type in (QuantType.W8A8, QuantType.MXFP8) and use_fusion_ops,
-        activation=request.activation,
-        need_trans=request.need_trans,
-        dynamic_eplb=request.dynamic_eplb,
+        hidden_states=token_dispatch_output.hidden_states,
+        group_list=token_dispatch_output.group_list,
+        group_list_type=token_dispatch_output.group_list_type,
+        dynamic_scale=token_dispatch_output.dynamic_scale,
+        topk_scales=token_dispatch_output.topk_scales,
+        weights=fused_experts_input.weights,
+        quant=fused_experts_input.quant,
+        fusion=fused_experts_input.quant.quant_type in (QuantType.W8A8, QuantType.MXFP8) and use_fusion_ops,
+        activation=fused_experts_input.activation,
+        need_trans=fused_experts_input.need_trans,
+        dynamic_eplb=fused_experts_input.dynamic_eplb,
     )

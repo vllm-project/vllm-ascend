@@ -118,48 +118,49 @@ class MoECommMethod(ABC):
 
     def fused_experts(
         self,
-        request: MoEFusedExpertsInput,
+        fused_experts_input: MoEFusedExpertsInput,
     ):
         # Check constraints
-        assert request.hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.int8]
+        assert fused_experts_input.hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.int8]
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
         before_dispatch_evt = torch.npu.current_stream().record_event()
-        routed_topk_ids = request.topk_ids
-        if request.routing.log2phy is not None:
-            routed_topk_ids = request.routing.log2phy[routed_topk_ids]
+        routed_topk_ids = fused_experts_input.topk_ids
+        if fused_experts_input.routing.log2phy is not None:
+            routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
 
-        dispatch_request = build_token_dispatch_input(
-            request=request,
+        token_dispatch_input = build_token_dispatch_input(
+            fused_experts_input=fused_experts_input,
             topk_ids=routed_topk_ids,
         )
-        dispatch_results = self.token_dispatcher.token_dispatch(request=dispatch_request)
+        token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
-        mlp_request = build_mlp_compute_input(
-            request=request,
-            dispatch_result=dispatch_results,
+        mlp_compute_input = build_mlp_compute_input(
+            fused_experts_input=fused_experts_input,
+            token_dispatch_output=token_dispatch_output,
             use_fusion_ops=self.use_fusion_ops,
         )
 
-        mlp_output = self._apply_mlp(mlp_request)
+        mlp_output = self._apply_mlp(mlp_compute_input)
 
         before_combine_evt = torch.npu.current_stream().record_event()
-        combine_results = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output, routing_metadata=dispatch_results.routing_metadata
+        token_combine_output = self.token_dispatcher.token_combine(
+            hidden_states=mlp_output,
+            routing_metadata=token_dispatch_output.routing_metadata,
         )
 
         return FusedExpertsResult(
-            routed_out=combine_results.routed_out,
+            routed_out=token_combine_output.routed_out,
             before_dispatch_evt=before_dispatch_evt,
             before_combine_evt=before_combine_evt,
-            group_list_type=dispatch_results.group_list_type,
-            expert_tokens=dispatch_results.group_list,
+            group_list_type=token_dispatch_output.group_list_type,
+            expert_tokens=token_dispatch_output.group_list,
         )
 
-    def _apply_mlp(self, request: MoEMlpComputeInput) -> torch.Tensor:
-        return unified_apply_mlp(request=request)
+    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+        return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:
@@ -263,9 +264,9 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def fused_experts(
         self,
-        request: MoEFusedExpertsInput,
+        fused_experts_input: MoEFusedExpertsInput,
     ):
-        assert not (request.weights.w1_scale is None or request.weights.w2_scale is None), (
+        assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )
 
@@ -274,21 +275,21 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         # Apply log2phy if needed
-        topk_ids = request.topk_ids
-        if request.routing.log2phy is not None:
-            topk_ids = request.routing.log2phy[topk_ids]
+        topk_ids = fused_experts_input.topk_ids
+        if fused_experts_input.routing.log2phy is not None:
+            topk_ids = fused_experts_input.routing.log2phy[topk_ids]
 
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-            out = torch.empty_like(request.hidden_states)
+            out = torch.empty_like(fused_experts_input.hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
-                x=request.hidden_states,
-                weight1=request.weights.w1,
-                weight2=request.weights.w2,
+                x=fused_experts_input.hidden_states,
+                weight1=fused_experts_input.weights.w1,
+                weight2=fused_experts_input.weights.w2,
                 expert_idx=topk_ids,
-                scale1=request.weights.w1_scale,
-                scale2=request.weights.w2_scale,
-                probs=request.topk_weights.to(torch.float32),
+                scale1=fused_experts_input.weights.w1_scale,
+                scale2=fused_experts_input.weights.w2_scale,
+                probs=fused_experts_input.topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
                 out=out,
@@ -296,16 +297,16 @@ class FusedMC2CommImpl(MoECommMethod):
             )
             expert_tokens = self.expert_token_nums
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
-            assert request.routing.expert_map is not None, "expert_map cannot be None."
+            assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
-                x=request.hidden_states,
+                x=fused_experts_input.hidden_states,
                 expert_ids=topk_ids,
-                gmm1_permuted_weight=request.weights.w1,
-                gmm1_permuted_weight_scale=request.weights.w1_scale,
-                gmm2_weight=request.weights.w2,
-                gmm2_weight_scale=request.weights.w2_scale,
+                gmm1_permuted_weight=fused_experts_input.weights.w1,
+                gmm1_permuted_weight_scale=fused_experts_input.weights.w1_scale,
+                gmm2_weight=fused_experts_input.weights.w2,
+                gmm2_weight_scale=fused_experts_input.weights.w2_scale,
                 expert_smooth_scales=None,
-                expert_scales=request.topk_weights.to(torch.float32),
+                expert_scales=fused_experts_input.topk_weights.to(torch.float32),
                 group_ep=self.token_dispatcher.moe_all_to_all_group_name,
                 ep_rank_size=self.token_dispatcher.ep_world_size,
                 ep_rank_id=self.token_dispatcher.ep_rank_id,

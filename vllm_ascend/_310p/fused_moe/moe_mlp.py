@@ -68,18 +68,18 @@ def unquant_apply_mlp(
     return hidden_states
 
 
-def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
-    hidden_states = request.hidden_states
-    w1 = request.weights.w1
-    w2 = request.weights.w2
-    w1_scale = request.weights.w1_scale
-    w2_scale = request.weights.w2_scale
-    group_list = request.group_list
-    group_list_type = request.group_list_type
+def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+    hidden_states = mlp_compute_input.hidden_states
+    w1 = mlp_compute_input.weights.w1
+    w2 = mlp_compute_input.weights.w2
+    w1_scale = mlp_compute_input.weights.w1_scale
+    w2_scale = mlp_compute_input.weights.w2_scale
+    group_list = mlp_compute_input.group_list
+    group_list_type = mlp_compute_input.group_list_type
     assert isinstance(w1, torch.Tensor)
     assert isinstance(w2, torch.Tensor)
 
-    if request.quant.is_quant:
+    if mlp_compute_input.quant.is_quant:
         assert isinstance(w1_scale, torch.Tensor)
         assert isinstance(w2_scale, torch.Tensor)
         assert w1_scale is not None and w2_scale is not None

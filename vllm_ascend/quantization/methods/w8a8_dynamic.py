@@ -252,7 +252,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
 
         final_hidden_states = moe_comm_method.fused_experts(
-            request=build_fused_experts_input(
+            fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,

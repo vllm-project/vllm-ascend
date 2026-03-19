@@ -51,7 +51,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
     def test_request_unquant_path(self):
         hidden_states = torch.randn(2, 8)
         expected = torch.randn(2, 8)
-        request = MoEMlpComputeInput(
+        mlp_compute_input = MoEMlpComputeInput(
             hidden_states=hidden_states,
             group_list=torch.tensor([2, 2], dtype=torch.int64),
             group_list_type=1,
@@ -74,7 +74,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
             patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp", return_value=expected) as mock_unquant,
             patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp") as mock_quant,
         ):
-            output = unified_apply_mlp(request=request)
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
         self.assertTrue(output is expected)
         mock_unquant.assert_called_once()
@@ -85,7 +85,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
     def test_request_quant_path(self):
         hidden_states = torch.randn(2, 8)
         expected = torch.randn(2, 8)
-        request = MoEMlpComputeInput(
+        mlp_compute_input = MoEMlpComputeInput(
             hidden_states=hidden_states,
             group_list=torch.tensor([2, 2], dtype=torch.int64),
             group_list_type=1,
@@ -115,7 +115,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
             patch("vllm_ascend.ops.fused_moe.moe_mlp.quant_apply_mlp", return_value=expected) as mock_quant,
             patch("vllm_ascend.ops.fused_moe.moe_mlp.unquant_apply_mlp") as mock_unquant,
         ):
-            output = unified_apply_mlp(request=request)
+            output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
         self.assertTrue(output is expected)
         mock_quant.assert_called_once()
