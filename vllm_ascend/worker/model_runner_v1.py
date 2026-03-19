@@ -292,16 +292,27 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_sparse_c8_indexer:
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16
+        from vllm_ascend.utils import vllm_version_is
 
-        self.attn_backend = get_attn_backend(
-            0,
-            self.dtype,
-            None,
-            self.block_size,
-            use_mla=self.model_config.use_mla,
-            use_sparse=self.use_sparse,
-            use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
-        )
+        if vllm_version_is("0.17.0"):
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse,
+                use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
+            )
+        else:
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse,
+                use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
+            )
 
         try:
             self.dcp_size = get_dcp_group().world_size
@@ -2553,7 +2564,17 @@ class NPUModelRunner(GPUModelRunner):
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
-                    self.model.set_aux_hidden_state_layers(self.model.get_eagle3_aux_hidden_state_layers())
+                    if vllm_version_is("0.17.0"):
+                        self.model.set_aux_hidden_state_layers(self.model.get_eagle3_aux_hidden_state_layers())
+                    else:
+                        from vllm.model_executor.models.interfaces import supports_eagle3
+                        if not supports_eagle3(self.model):
+                            raise RuntimeError(
+                                "Model does not support EAGLE3 interface but "
+                                "aux_hidden_state_outputs was requested"
+                            )
+                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                        self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
