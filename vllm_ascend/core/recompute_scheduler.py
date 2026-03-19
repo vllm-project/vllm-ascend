@@ -27,7 +27,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -41,8 +41,6 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
-
-logger = init_logger(__name__)
 
 
 # `spec_manager_map` in single_type_kv_cache_manager is a module-level dict
