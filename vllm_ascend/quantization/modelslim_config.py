@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 import torch
 from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
@@ -46,8 +46,6 @@ from .methods import get_scheme_class
 
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
-
-logger = init_logger(__name__)
 
 # key: model_type
 # value: vLLM prefix -> HF prefix mapping (used to convert vLLM layer names to HF format
