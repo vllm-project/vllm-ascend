@@ -32,6 +32,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 
 class IndexerWrapper(nn.Module):
@@ -119,6 +120,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
+            layer_name=f"{prefix}.attn",
         )
 
         original_process_weights = self.mla_attn.process_weights_after_loading
@@ -144,7 +146,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        need_gather_q_kv = get_forward_context().flash_comm_v1_enabled
+        need_gather_q_kv = _EXTRA_CTX.flash_comm_v1_enabled
         output_shape = hidden_states.shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)

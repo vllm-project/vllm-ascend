@@ -21,7 +21,7 @@ from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
@@ -147,7 +147,7 @@ def quant_apply_mlp(
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
-    is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
+    is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and w1_offset is None and is_mc2:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
@@ -340,15 +340,26 @@ def unquant_apply_mlp(
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
 
-    gate_up_out = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        bias=[w1_bias.to(dtype=torch.float32)] if w1_bias is not None else None,
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-    )[0]
+    # In the small batch scenario, use _C_ascend.moe_grouped_matmul
+    if group_list.dim() == 2 and get_forward_context().num_tokens <= DeviceOperator.small_batch_gmm_batch_num:
+        gate_up_out = torch.ops._C_ascend.moe_grouped_matmul(
+            x=hidden_states,
+            weight=w1,
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+        )[0]
+    else:
+        gate_up_out = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w1],
+            bias=[w1_bias.to(dtype=torch.float32)] if w1_bias is not None else None,
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+        )[0]
 
     if activation == "swigluoai":
         num_experts, _, hidden_size = w1.shape
@@ -359,15 +370,26 @@ def unquant_apply_mlp(
     if topk_scales is not None:
         gate_up_out *= topk_scales
 
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[gate_up_out],
-        weight=[w2],
-        bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-    )[0]
+    # In the small batch scenario, use _C_ascend.moe_grouped_matmul
+    if group_list.dim() == 2 and get_forward_context().num_tokens <= DeviceOperator.small_batch_gmm_batch_num:
+        hidden_states = torch.ops._C_ascend.moe_grouped_matmul(
+            x=gate_up_out,
+            weight=w2,
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+        )[0]
+    else:
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[gate_up_out],
+            weight=[w2],
+            bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+        )[0]
     return hidden_states
 
 
