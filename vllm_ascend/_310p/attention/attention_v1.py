@@ -78,6 +78,10 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         """
         return AscendAttentionMetadataBuilder310
 
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128, 64]
+
 
 class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     """
