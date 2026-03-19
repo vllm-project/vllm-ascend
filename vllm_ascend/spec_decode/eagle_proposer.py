@@ -89,7 +89,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
-        super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
+        super().__init__(vllm_config, device, pass_hidden_states_to_model, runner)
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
@@ -1623,8 +1623,8 @@ class AscendEagleProposer(AscendSpecDecodeBaseProposer, EagleProposer):
         runner=None,
     ):
         AscendSpecDecodeBaseProposer.__init__(
-            vllm_config,
-            device,
+            vllm_config=vllm_config,
+            device=device,
             pass_hidden_states_to_model=True,
             runner=runner,
         )
