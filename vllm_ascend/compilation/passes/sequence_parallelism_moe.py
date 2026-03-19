@@ -1,7 +1,7 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
-from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
+from vllm.compilation.passes.vllm_inductor_pass import PatternPrettyPrinter, VllmInductorPass
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import logger
@@ -186,8 +186,16 @@ class SequenceParallelismMoePass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
+        logger.debug(f"before apply replacement {graph}")
         self.matched_count = self.patterns.apply(graph)
+        logger.debug(f"after apply replacement {graph}")
         logger.debug("SequenceParallelismMoePass replaced %s patterns", self.matched_count)
+        pattern_idx = 0
+        for pattern_entry in self.patterns.patterns.values():
+            for p in pattern_entry:
+                p_str = PatternPrettyPrinter.run(p.pattern)
+                logger.debug("Pattern %d: %s", pattern_idx, p_str)
+                pattern_idx += 1
         self.end_and_log()
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
