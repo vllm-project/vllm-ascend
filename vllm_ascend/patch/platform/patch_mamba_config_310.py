@@ -4,7 +4,7 @@
 from math import lcm
 
 import vllm.model_executor.models.config
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
@@ -24,7 +24,6 @@ def verify_and_update_config(cls, vllm_config) -> None:
     Args:
         vllm_config: vLLM Config
     """
-    logger = init_logger(__name__)
     # Save the user input before it gets modified by MambaModelConfig
     mamba_block_size = vllm_config.cache_config.mamba_block_size
     # Enable FULL_AND_PIECEWISE by default

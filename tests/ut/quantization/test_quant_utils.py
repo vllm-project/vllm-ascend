@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import tempfile
 from pathlib import Path
@@ -135,16 +134,16 @@ class TestMaybeAutoDetectQuantization(TestBase):
         vllm_config = self._make_vllm_config(
             model_path="/fake/quant_model", quantization=None)
 
-        with self.assertLogs("vllm_ascend.quantization.utils",
-                             level=logging.INFO) as cm:
+        with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
             maybe_auto_detect_quantization(vllm_config)
 
         self.assertEqual(vllm_config.model_config.quantization,
                          ASCEND_QUANTIZATION_METHOD)
-        log_output = "\n".join(cm.output)
-        self.assertIn("Auto-detected quantization method", log_output)
-        self.assertIn(ASCEND_QUANTIZATION_METHOD, log_output)
-        self.assertIn("/fake/quant_model", log_output)
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args[0]
+        self.assertIn("Auto-detected quantization method", call_args[0])
+        self.assertIn(ASCEND_QUANTIZATION_METHOD, call_args)
+        self.assertIn("/fake/quant_model", call_args)
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
            return_value=ASCEND_QUANTIZATION_METHOD)
@@ -155,29 +154,28 @@ class TestMaybeAutoDetectQuantization(TestBase):
             model_path="/fake/quant_model",
             quantization=COMPRESSED_TENSORS_METHOD)
 
-        with self.assertLogs("vllm_ascend.quantization.utils",
-                             level=logging.WARNING) as cm:
+        with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
             maybe_auto_detect_quantization(vllm_config)
 
         self.assertEqual(vllm_config.model_config.quantization,
                          COMPRESSED_TENSORS_METHOD)
-        log_output = "\n".join(cm.output)
-        self.assertIn("Auto-detected quantization method", log_output)
-        self.assertIn(ASCEND_QUANTIZATION_METHOD, log_output)
-        self.assertIn(COMPRESSED_TENSORS_METHOD, log_output)
+        mock_logger.warning.assert_called_once()
+        call_args = mock_logger.warning.call_args[0]
+        self.assertIn("Auto-detected quantization method", call_args[0])
+        self.assertIn(ASCEND_QUANTIZATION_METHOD, call_args)
+        self.assertIn(COMPRESSED_TENSORS_METHOD, call_args)
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
            return_value=None)
     def test_no_detection_emits_no_log(self, mock_detect):
         """When no quantization is detected, no log should be emitted."""
         vllm_config = self._make_vllm_config(quantization=None)
-        logger_name = "vllm_ascend.quantization.utils"
 
-        with self.assertRaises(AssertionError):
-            # assertLogs raises AssertionError when no logs are emitted
-            with self.assertLogs(logger_name, level=logging.DEBUG):
-                maybe_auto_detect_quantization(vllm_config)
+        with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
+            maybe_auto_detect_quantization(vllm_config)
 
+        mock_logger.info.assert_not_called()
+        mock_logger.warning.assert_not_called()
         self.assertIsNone(vllm_config.model_config.quantization)
 
     @patch("vllm.config.VllmConfig._get_quantization_config",
