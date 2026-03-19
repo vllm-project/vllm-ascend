@@ -342,10 +342,6 @@ class NPUWorker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-        # self.non_torch_memory_increase = profile_result.non_torch_increase
-        # self.peak_activation_memory = profile_result.torch_peak_increase
-        # self.non_kv_cache_memory = profile_result.non_kv_cache_memory
-
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
             "Error in memory profiling. "
@@ -357,12 +353,7 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
-        # logger.info("requested_memory: %.2f GiB", GiB(self.requested_memory))
-        # logger.info("non_kv_cache_memory: %.2f GiB", GiB(self.non_kv_cache_memory))
-        # logger.info("non_torch_memory_before_empty_cache: %.2f GiB", GiB(non_torch_memory_before_empty_cache))
-        # logger.info("non_torch_memory_increase: %.2f GiB", GiB(self.non_torch_memory_increase))
-        logger.info(profile_result)
-        # logger.debug(profile_result)
+        logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
