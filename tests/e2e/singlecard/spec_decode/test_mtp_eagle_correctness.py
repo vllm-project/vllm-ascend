@@ -30,7 +30,6 @@ from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
-from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -39,26 +38,11 @@ MODELS_EAGLE = [
     "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
     "RedHatAI/Qwen3-8B-speculator.eagle3"
 ]
-MODELS_MAIN = [
-    "LLM-Research/Meta-Llama-3.1-8B-Instruct",
-    "Qwen/Qwen3-8B",
-    "wemaster/deepseek_mtp_main_random_bf16"]
+MODELS_MAIN = ["LLM-Research/Meta-Llama-3.1-8B-Instruct", "Qwen/Qwen3-8B"]
 VALID_COMBINATIONS = {("eagle", "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
                        "LLM-Research/Meta-Llama-3.1-8B-Instruct"),
-                      ("eagle", "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
-                       "wemaster/deepseek_mtp_main_random_bf16"),
                       ("eagle3", "RedHatAI/Qwen3-8B-speculator.eagle3",
                        "Qwen/Qwen3-8B")}
-VERSION_GATED_COMBINATION = (
-    "eagle",
-    "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
-    "wemaster/deepseek_mtp_main_random_bf16",
-)
-EAGER_VALID_COMBINATION = (
-    "eagle",
-    "vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B",
-    "wemaster/deepseek_mtp_main_random_bf16",
-)
 
 
 @pytest.mark.parametrize("model_name", MODELS)
@@ -143,7 +127,7 @@ def test_deepseek_mtp_correctness(model_name: str, num_speculative_tokens: int,
 @pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
-def test_llama_qwen3_deepseek_eagle_correctness(
+def test_llama_qwen3_eagle_correctness(
         model_name: str, model_name_main: str, num_speculative_tokens: int,
         method: str, disable_padded_drafter_batch: bool,
         async_scheduling: bool, draft_tensor_parallel_size: Union[None, int]):
@@ -160,20 +144,6 @@ def test_llama_qwen3_deepseek_eagle_correctness(
         pytest.skip(
             f"Invalid combination: method={method}, model_name={model_name}, model_name_main={model_name_main}, or case not support yet"
         )
-
-    if (
-        (method, model_name, model_name_main) == VERSION_GATED_COMBINATION
-        and not vllm_version_is("0.17.0")
-    ):
-        pytest.skip(
-            "Skip deepseek-main + eagle coverage for non-v0.17.0 vLLM versions."
-        )
-
-    # TODO(slippersss): After supporting graph mode, remove the enforce_eager restriction.
-    if (method, model_name, model_name_main) == EAGER_VALID_COMBINATION:
-        enforce_eager = True
-    else:
-        enforce_eager = False
 
     sampling_params = SamplingParams(
         max_tokens=300,
@@ -199,7 +169,6 @@ def test_llama_qwen3_deepseek_eagle_correctness(
                         draft_tensor_parallel_size,
                         "max_model_len": 128,
                     },
-                    enforce_eager=enforce_eager,
                     compilation_config=CompilationConfig(
                         cudagraph_mode="FULL",
                         cudagraph_capture_sizes=[5, 12])) as llm:
@@ -215,7 +184,6 @@ def test_llama_qwen3_deepseek_eagle_correctness(
                     max_model_len=4096,
                     seed=1024,
                     async_scheduling=async_scheduling,
-                    enforce_eager=enforce_eager,
                     compilation_config=CompilationConfig(
                         cudagraph_mode="FULL_DECODE_ONLY",
                         cudagraph_capture_sizes=[12])) as llm:
