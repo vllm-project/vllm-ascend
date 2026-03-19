@@ -5,13 +5,13 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
-
+from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendSpecDecodeBaseProposer
 
 logger = init_logger(__name__)
 
 
-class AscendDraftModelProposer(AscendSpecDecodeBaseProposer):
+class AscendDraftModelProposer(AscendSpecDecodeBaseProposer, DraftModelProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -46,7 +46,7 @@ class AscendDraftModelProposer(AscendSpecDecodeBaseProposer):
                 f"must be the same. Got {draft_tp} and {tgt_tp}. "
                 "Please pass 'draft_tensor_parallel_size' in the speculative_config."
             )
-
+    @override
     def _get_model(self) -> nn.Module:
         # Draft models may be quantized or on different parallelism,
         # so we load them with a modified vllm config
