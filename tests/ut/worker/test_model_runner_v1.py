@@ -14,9 +14,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
         runner.use_sparse = False
+        runner.use_sparse_c8_indexer = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
         runner.runner_only_attn_layers = set()
+        runner.is_kv_consumer = False
         runner.vllm_config = MagicMock()
         runner.vllm_config.kv_transfer_config = None
         runner.model_config = MagicMock()
