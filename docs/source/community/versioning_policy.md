@@ -23,6 +23,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        | Triton Ascend |
 |-------------|-------------------|-----------------|-------------|---------------------------------|---------------|
+| v0.17.1rc1  | v0.17.1           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0         |
 | v0.17.0rc1  | v0.17.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0         |
 | v0.16.0rc1  | v0.16.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0         |
 | v0.15.0rc1  | v0.15.0           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0         |
@@ -67,6 +68,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.03.20 | Release candidates, v0.17.1rc1            |
 | 2026.03.15 | Release candidates, v0.17.0rc1            |
 | 2026.03.10 | Release candidates, v0.16.0rc1            |
 | 2026.02.27 | Release candidates, v0.15.0rc1            |

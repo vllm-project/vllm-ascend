@@ -1,5 +1,63 @@
 # Release Notes
 
+## v0.17.1rc1 - 2026.03.20
+
+This is the rc1 release candidate of v0.17.1 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+
+### Highlights
+
+* Upgraded upstream vLLM main branch to 0317 afternoon version (#7409, #7213).
+* Supported DeepSeek-V3.1 Prefill-Decode (PD) Separation and C8 Quantization (#7222).
+* Introduced virtual push functionality on node D for LayerwiseConnector in P/D Separation (#7361).
+* Expanded hardware support on Ascend 310P for Mamba Cache and attention head size larger than 128 (#7372).
+* Replaced `npu_ring_mla` with FIA in MLA prefill for improved performance (#5704).
+
+### Features
+
+* Supported DeepSeek-V3.1 PD separation and C8 quantization (#7222).
+* Supported virtual push functionality on node D for LayerwiseConnector in P/D Separation (#7361).
+* Fixed model type bug for `qwen3_vl_8b_instruct_w8a8` (#7383).
+* Fixed DeepSeek indexer accuracy problem caused by k rope (#7341).
+* Fixed assertion error when decode prefix cache fully hits (#7236).
+* Fixed bugs related to A2 MOE method, layerwise MTP, and Mamba `gdn_metadata` (#7364).
+* Fixed bug for Eagle3 and cp enable (#7309).
+* Fixed `TransposeKvCacheByBlock` op error report in plog (#7235).
+* Fixed the problem that Eagle3 crashes in `FULL_DECODE_ONLY` mode (#7290).
+
+### Hardware and Operator Support
+
+* Supported Mamba Cache and `attn_head_size` larger than 128 on Ascend 310P (#7372).
+* Supported `mrope` and `deepstack` features in xlite backend (#7295).
+
+### Performance
+
+* Replaced `npu_ring_mla` with FIA in MLA prefill for better performance (#5704).
+* Enabled `dispatch_ffn_combine` feature for Qwen 3.5 (#7066).
+* Optimized bias handling in `AscendRMSNorm` (#7226).
+* Optimized the performance of the `_topk_log_softmax_kernel` (#7221).
+
+### Dependencies
+
+* Upgraded upstream vLLM main branch to 0317 afternoon version (#7409).
+* Upgraded upstream vLLM main branch to 0308 version (#7213).
+
+### Documentation
+
+* Added Prefill-Decode Disaggregation documentation for GLM-5 (#7300), and a known issue for GLM-5 2-node PD mixed deployment (#7436).
+* Added documentation for Kimi-K2.5 (#7371).
+* Added MiniMax-M2.5 model introduction (#7296).
+* Revised KV Pool User Guide (#7434).
+* Refreshed the documentation for DeepSeek-V3.2 (#7403) and GLM-4.7 (#7292).
+* Uploaded documentation for `qwen3.5-27B` and `qwen3.5-397B-A17B` on Ascend (#7313).
+
+### Others
+
+* Dropped the Prefetch MLP environment variable (#7357).
+* Fixed logger which does not take effect in patches (#7402).
+* Fixed unzip file path for fia operator (#7367).
+* Restored pr-7029 and fixed patch error (#7294).
+
+
 ## v0.17.0rc1 - 2026.03.15
 
 This is the first release candidate of v0.17.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
