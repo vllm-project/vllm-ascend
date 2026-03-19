@@ -56,7 +56,6 @@ def rejection_greedy_sample_spec_len_1_triton(
 
     draft_token_id = tl.load(draft_token_ids_ptr + offset, mask)
     target_argmax_id = tl.load(target_argmax_ptr + offset, mask)
-    # Use batch_mask when writing to output_token_ids to avoid out-of-bounds errors
     tl.store(output_token_ids_ptr + offset * 2, target_argmax_id, mask)
 
     # Add validity check for pos within the loop
