@@ -19,7 +19,12 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_fusion_matcher_compat_ops  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
-import vllm_ascend.patch.platform.patch_mamba_config  # noqa
+from vllm_ascend.utils import is_310p
+
+if not is_310p():
+    import vllm_ascend.patch.platform.patch_mamba_config  # noqa
+else:
+    import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
