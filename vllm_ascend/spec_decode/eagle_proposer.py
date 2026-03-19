@@ -183,29 +183,23 @@ class SpecDecodeBaseProposer(EagleProposer):
 
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
-        target_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
 
         with self.maybe_eager_context:
             self.model = self._get_model()
 
-        indexer_layers = get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys()
+        # Find draft layers (attention layers added by draft model)
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        all_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
+        self._draft_attn_layer_names = set(all_attn_layers.keys()) - target_attn_layer_names - all_indexer_layer_names
+
+        self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
-        draft_attn_layers = draft_attn_layers_dict.keys()
-
-        draft_attn_layer_names = draft_attn_layers - target_attn_layer_names
-        draft_indexer_layer_names = indexer_layers - target_indexer_layer_names
-        draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
-
-        self.attn_layer_names = list(sorted(draft_attn_layer_names))
-
         self.kernel_block_size = (
             draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
         )
-
-        self.piece_all_attn_layer_name = []
-        for _ in range(self.num_speculative_tokens):
-            self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
-        self.attn_layer_names = list(sorted(draft_attn_layer_names))
 
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
@@ -481,7 +475,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        num_tokens, token_indices_to_sample, common_attn_metadata = self.set_inputs_first_pass(
+        num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
             target_positions=target_positions,
@@ -489,65 +483,15 @@ class SpecDecodeBaseProposer(EagleProposer):
             token_indices_to_sample=token_indices_to_sample,
             cad=common_attn_metadata,
             num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            req_scheduled_tokens=req_scheduled_tokens,
+            long_seq_metadata=long_seq_metadata,
+            num_prefill_reqs=num_prefill_reqs,
+            num_decode_reqs=num_decode_reqs,
         )
-
-        assert self.runner is not None
-        # update pcp related params
         if self.pcp_size * self.dcp_size > 1:
-            assert long_seq_metadata is not None
-            common_attn_metadata.prefill_context_parallel_metadata = long_seq_metadata
-            ori_token_indices_to_sample = token_indices_to_sample.clone()
-            query_lens_d = self.runner.query_lens[:num_decode_reqs]
-        if self.pcp_size > 1:
-            # 1. preprocess decode/prefill input_ids & target_hidden_states
-            # decode input_ids: keep unchanged
-            # decode target_hidden_states: remove padding
-            # prefill input_ids: add padding and pcp split
-            # prefill target_hidden_states: pcp split
-            num_tokens_d = query_lens_d.sum().item()
-            num_tokens_d_padded = num_tokens_d * self.pcp_size
-            input_ids_d = self.input_ids[:num_tokens_d]
-            input_ids_p = self.input_ids[num_tokens_d:num_tokens]
-            target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
-            if num_tokens_d:
-                # remove padding (from pcp all-gather) in decode part
-                mask_start_loc = torch.cat(
-                    [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]]
-                )
-                mask_len = query_lens_d
-                mask = []
-                for req_id in range(num_decode_reqs):
-                    mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
-                target_hidden_states_d = target_hidden_states_d_padded[mask]
-            else:
-                target_hidden_states_d = target_hidden_states_d_padded
-            target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
-            req_scheduled_tokens_p = {}
-            for i, req_id in enumerate(self.runner.input_batch.req_ids):
-                if i >= num_decode_reqs:
-                    req_scheduled_tokens_p[req_id] = req_scheduled_tokens[req_id]
-            (num_tokens_p, input_ids_p, target_hidden_states_p, max_query_len_p, seq_lens_p, cu_num_tokens_p) = (
-                self._split_pcp_input(req_scheduled_tokens_p, input_ids_p, target_hidden_states_p)
-            )
-            num_tokens = num_tokens_d + num_tokens_p
-            target_positions = target_positions[:num_tokens]
-            self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
-            target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
-            # 2. update sample_indices according to main model
-            if num_decode_reqs:
-                token_indices_to_sample[:num_decode_reqs] = self.runner.logits_indices[
-                    token_indices_to_sample[:num_decode_reqs]
-                ]
-            if num_prefill_reqs:
-                token_indices_to_sample[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
-                # 3. update attn_metadata params that may be influenced by pcp
-                common_attn_metadata.num_actual_tokens = num_tokens
-                common_attn_metadata.max_query_len = max(self.decode_threshold, max_query_len_p)
-                common_attn_metadata.seq_lens[-num_prefill_reqs:] = seq_lens_p
-                common_attn_metadata.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
-                query_start_loc_p = cu_num_tokens_p[1:] + common_attn_metadata.query_start_loc[num_decode_reqs].item()
-                common_attn_metadata.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
-                common_attn_metadata.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
+            assert long_seq_args is not None
+            query_lens_d, ori_token_indices_to_sample = long_seq_args
+        assert self.runner is not None
         if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_tokens]
             if not (
@@ -565,6 +509,8 @@ class SpecDecodeBaseProposer(EagleProposer):
                 common_attn_metadata.num_reqs = num_reqs_padded
                 common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
                 common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
+                common_attn_metadata.seq_lens = self.runner.seq_lens.gpu[:num_reqs_padded]
+                common_attn_metadata.seq_lens_cpu = self.runner.seq_lens.cpu[:num_reqs_padded]
         else:
             num_input_tokens = num_tokens
 
@@ -668,6 +614,30 @@ class SpecDecodeBaseProposer(EagleProposer):
                 # Copy the old attn_metadata and update
                 if not self.parallel_drafting:
                     for draft_step in range(1, self.num_speculative_tokens):
+                        per_layer_attn_metadata = dict()
+                        for attn_group in self.draft_attn_groups:
+                            common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                                draft_step,
+                                attn_metadata,
+                                common_attn_metadata,
+                                batch_size,
+                                num_input_tokens,
+                                used_update_positions,
+                                aclgraph_runtime_mode,
+                                ori_seq_len,
+                                slot_indices,
+                                mtp_slot_mapping,
+                                attn_group=attn_group,
+                            )
+                            for layer_name in self.attn_layer_names:
+                                per_layer_attn_metadata[layer_name] = attn_metadata
+                        multi_steps_attn_metadata.append(per_layer_attn_metadata)
+        else:
+            # Copy the old attn_metadata and update
+            if not self.parallel_drafting:
+                for draft_step in range(1, self.num_speculative_tokens):
+                    per_layer_attn_metadata = dict()
+                    for attn_group in self.draft_attn_groups:
                         common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
                             draft_step,
                             attn_metadata,
@@ -676,30 +646,10 @@ class SpecDecodeBaseProposer(EagleProposer):
                             num_input_tokens,
                             used_update_positions,
                             aclgraph_runtime_mode,
-                            ori_seq_len,
-                            slot_indices,
-                            mtp_slot_mapping,
+                            attn_group=attn_group,
                         )
-                        per_layer_attn_metadata = dict()
                         for layer_name in self.attn_layer_names:
                             per_layer_attn_metadata[layer_name] = attn_metadata
-                        multi_steps_attn_metadata.append(per_layer_attn_metadata)
-        else:
-            # Copy the old attn_metadata and update
-            if not self.parallel_drafting:
-                for draft_step in range(1, self.num_speculative_tokens):
-                    common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
-                        draft_step,
-                        attn_metadata,
-                        common_attn_metadata,
-                        batch_size,
-                        num_input_tokens,
-                        used_update_positions,
-                        aclgraph_runtime_mode,
-                    )
-                    per_layer_attn_metadata = dict()
-                    for layer_name in self.attn_layer_names:
-                        per_layer_attn_metadata[layer_name] = attn_metadata
                     multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
@@ -957,7 +907,11 @@ class SpecDecodeBaseProposer(EagleProposer):
         token_indices_to_sample: torch.Tensor | None,
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
-    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        req_scheduled_tokens=None,
+        long_seq_metadata=None,
+        num_prefill_reqs=0,
+        num_decode_reqs=0,
+    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
@@ -973,6 +927,68 @@ class SpecDecodeBaseProposer(EagleProposer):
             # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
             self.input_ids[token_indices_to_sample] = next_token_ids
 
+            assert self.runner is not None
+            # update pcp related params
+            ori_token_indices_to_sample = None
+            query_lens_d = None
+            if self.pcp_size * self.dcp_size > 1:
+                assert long_seq_metadata is not None
+                cad.prefill_context_parallel_metadata = long_seq_metadata
+                ori_token_indices_to_sample = token_indices_to_sample.clone()
+                query_lens_d = self.runner.query_lens[:num_decode_reqs]
+            if self.pcp_size > 1:
+                # 1. preprocess decode/prefill input_ids & target_hidden_states
+                # decode input_ids: keep unchanged
+                # decode target_hidden_states: remove padding
+                # prefill input_ids: add padding and pcp split
+                # prefill target_hidden_states: pcp split
+                assert query_lens_d is not None
+                num_tokens_d = query_lens_d.sum().item()
+                num_tokens_d_padded = num_tokens_d * self.pcp_size
+                input_ids_d = self.input_ids[:num_tokens_d]
+                input_ids_p = self.input_ids[num_tokens_d:num_tokens]
+                target_hidden_states_d_padded = target_hidden_states[:num_tokens_d_padded]
+                if num_tokens_d:
+                    # remove padding (from pcp all-gather) in decode part
+                    mask_start_loc = torch.cat(
+                        [torch.tensor([0], dtype=torch.int32), torch.cumsum(query_lens_d * self.pcp_size, dim=0)[:-1]]
+                    )
+                    mask_len = query_lens_d
+                    mask = []
+                    for req_id in range(num_decode_reqs):
+                        assert None not in (mask_start_loc, mask_len)
+                        mask += list(range(mask_start_loc[req_id], mask_start_loc[req_id] + mask_len[req_id]))
+                    target_hidden_states_d = target_hidden_states_d_padded[mask]
+                else:
+                    target_hidden_states_d = target_hidden_states_d_padded
+                target_hidden_states_p = target_hidden_states[num_tokens_d_padded:]
+                req_scheduled_tokens_p = {}
+                for i, req_id in enumerate(self.runner.input_batch.req_ids):
+                    if i >= num_decode_reqs:
+                        req_scheduled_tokens_p[req_id] = req_scheduled_tokens[req_id]
+                (num_tokens_p, input_ids_p, target_hidden_states_p, max_query_len_p, seq_lens_p, cu_num_tokens_p) = (
+                    self._split_pcp_input(req_scheduled_tokens_p, input_ids_p, target_hidden_states_p)
+                )
+                num_tokens = num_tokens_d + num_tokens_p
+                target_positions = target_positions[:num_tokens]
+                self.input_ids[:num_tokens].copy_(torch.cat([input_ids_d, input_ids_p], dim=0))
+                target_hidden_states = torch.cat([target_hidden_states_d, target_hidden_states_p], dim=0)
+                # 2. update sample_indices according to main model
+                if num_decode_reqs:
+                    token_indices_to_sample[:num_decode_reqs] = self.runner.logits_indices[
+                        token_indices_to_sample[:num_decode_reqs]
+                    ]
+                if num_prefill_reqs:
+                    token_indices_to_sample[-num_prefill_reqs:] = self.runner.logits_indices[-num_prefill_reqs:]
+                    # 3. update attn_metadata params that may be influenced by pcp
+                    cad.num_actual_tokens = num_tokens
+                    cad.max_query_len = max(self.decode_threshold, max_query_len_p)
+                    cad.seq_lens[-num_prefill_reqs:] = seq_lens_p
+                    cad.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
+                    query_start_loc_p = cu_num_tokens_p[1:] + cad.query_start_loc[num_decode_reqs].item()
+                    cad.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
+                    cad.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
+
             # copy inputs to buffer for cudagraph
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
@@ -980,7 +996,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             self._set_positions(num_tokens, target_positions)
             self.hidden_states[:num_tokens] = target_hidden_states
 
-            return num_tokens, token_indices_to_sample, cad
+            return num_tokens, token_indices_to_sample, cad, (query_lens_d, ori_token_indices_to_sample)
         else:
             assert self.is_rejected_token_mask is not None
             assert self.is_masked_token_mask is not None
@@ -1028,7 +1044,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 # Use torch.where to avoid DtoH sync from boolean indexing
                 mask = self.is_masked_token_mask[:total_num_output_tokens]
                 torch.where(
-                    mask.unsqueeze(1),
+                    mask.unsqueeze(1),  # type: ignore
                     self.parallel_drafting_hidden_state_tensor,
                     self.hidden_states[:total_num_output_tokens],
                     out=self.hidden_states[:total_num_output_tokens],
@@ -1037,16 +1053,16 @@ class SpecDecodeBaseProposer(EagleProposer):
             # 2.
             # Recompute the slot mapping based on the new positions and
             # rejection mask.
-            builder = (
-                self._get_attention_metadata_builder()
-                if self.attn_metadata_builder is None
-                else self.attn_metadata_builder
-            )
+            # Use the first draft attention group's kv_cache_spec for block_size
+            # (all draft layers share the same kv-cache group)
+            assert len(self.draft_attn_groups) > 0
+            block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
+
             new_slot_mapping = compute_new_slot_mapping(
                 cad=cad,
                 new_positions=self.positions[:total_num_output_tokens],
                 is_rejected_token_mask=self.is_rejected_token_mask[:total_num_output_tokens],
-                block_size=builder.kv_cache_spec.block_size,
+                block_size=block_size,
                 num_new_tokens=self.net_num_new_slots_per_request,
                 max_model_len=self.max_model_len,
             )
@@ -1059,7 +1075,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 new_slot_mapping=new_slot_mapping,
             )
 
-            return total_num_output_tokens, token_indices_to_sample, new_cad
+            return total_num_output_tokens, token_indices_to_sample, new_cad, None
 
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model")
@@ -1077,8 +1093,10 @@ class SpecDecodeBaseProposer(EagleProposer):
         ori_seq_len=None,
         slot_indices=None,
         mtp_slot_mapping=None,
+        attn_group=None,
     ):
         assert draft_step > 0
+        assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
         if draft_step == 1:
@@ -1122,14 +1140,14 @@ class SpecDecodeBaseProposer(EagleProposer):
         # out-of-range access during the model execution. The draft tokens
         # generated with this adjustment should be ignored.
         if self.uses_mrope:
-            exceeds_max_model_len = used_update_positions[0] >= self.vllm_config.model_config.max_model_len
+            exceeds_max_model_len = used_update_positions[0] >= self.max_model_len
             # Mask out the position ids that exceed the max model length.
             # Otherwise, we may get out-of-range error in RoPE.
             clamped_positions = torch.where(
                 exceeds_max_model_len.unsqueeze(0), torch.zeros_like(used_update_positions), used_update_positions
             )
         else:
-            exceeds_max_model_len = used_update_positions >= self.vllm_config.model_config.max_model_len
+            exceeds_max_model_len = used_update_positions >= self.max_model_len
             clamped_positions = torch.where(exceeds_max_model_len, 0, used_update_positions)
 
         # For data integrity when async scheduling, we shouldn't use in place
@@ -1150,11 +1168,6 @@ class SpecDecodeBaseProposer(EagleProposer):
         else:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions)
 
-        if self.attn_metadata_builder is None:
-            attn_metadata_builder = self._get_attention_metadata_builder()
-        else:
-            attn_metadata_builder = self.attn_metadata_builder
-
         if self.pcp_size * self.dcp_size > 1:
             num_computed_tokens_of_pcp_dcp = self.runner.pcp_manager._get_cp_local_seq_lens(
                 ori_seq_len + draft_step + 1,
@@ -1166,7 +1179,8 @@ class SpecDecodeBaseProposer(EagleProposer):
             # update slot_mapping
             slot_indices += self.pcp_size
             slot_mapping = mtp_slot_mapping[slot_indices]
-            common_attn_metadata.slot_mapping[: batch_size * self.pcp_size] = slot_mapping
+            self.slot_mapping_group[draft_step][: batch_size * self.pcp_size] = slot_mapping
+            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
         else:
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
@@ -1194,8 +1208,9 @@ class SpecDecodeBaseProposer(EagleProposer):
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
 
-        # Rebuild attention metadata
-        attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
+        attn_metadata_builder = attn_group.get_metadata_builder()
+
+        attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata,
             draft_index=draft_step,
         )
