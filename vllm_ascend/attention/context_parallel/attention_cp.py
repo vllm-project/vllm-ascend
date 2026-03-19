@@ -826,7 +826,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         if num_tokens == attn_metadata.prefill.pcp_metadata.total_num_scheduled_tokens and pcp_padded_tokens_fla > 0:
             qkv_fla = F.pad(qkv_fla, pad=(0, 0, 0, pcp_padded_tokens_fla), mode="constant", value=0)
         all_qkv = get_pcp_group().all_gather(
-            qkv_fla[:attn_metadata.prefill.pcp_metadata.max_num_tokens_across_pcp].contiguous(), dim=0
+            qkv_fla[: attn_metadata.prefill.pcp_metadata.max_num_tokens_across_pcp].contiguous(), dim=0
         )
         # Restore the original sequence order using pre-computed indices
         pcp_enter_fa_restore_idx = (

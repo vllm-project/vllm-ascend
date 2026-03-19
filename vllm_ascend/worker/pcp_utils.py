@@ -545,7 +545,7 @@ class PCPManager:
                     hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
                 )
             hidden_states = get_pcp_group().all_gather(
-                hidden_states[:self.max_num_tokens_across_pcp].contiguous(), dim=0
+                hidden_states[: self.max_num_tokens_across_pcp].contiguous(), dim=0
             )
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
             return torch.index_select(hidden_states, 0, restore_idx)
