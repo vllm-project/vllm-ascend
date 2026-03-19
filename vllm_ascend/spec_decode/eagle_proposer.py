@@ -1623,6 +1623,7 @@ class AscendEagleProposer(AscendSpecDecodeBaseProposer, EagleProposer):
         runner=None,
     ):
         AscendSpecDecodeBaseProposer.__init__(
+            self,
             vllm_config,
             device,
             pass_hidden_states_to_model=True,
