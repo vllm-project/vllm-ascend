@@ -30,7 +30,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer, EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
@@ -1615,14 +1615,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return last_hidden_states, positions, hidden_states
 
 
-class AscendEagleProposer(AscendSpecDecodeBaseProposer):
+class AscendEagleProposer(AscendSpecDecodeBaseProposer, EagleProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
         runner=None,
     ):
-        super().__init__(
+        AscendSpecDecodeBaseProposer.__init__(
             vllm_config,
             device,
             pass_hidden_states_to_model=True,
