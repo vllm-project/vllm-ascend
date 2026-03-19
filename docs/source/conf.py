@@ -36,7 +36,7 @@ copyright = "2025, vllm-ascend team"
 author = "the vllm-ascend team"
 
 # The full version, including alpha/beta/rc tags
-release = ""
+release = "0.17.1rc1"
 
 # -- General configuration ---------------------------------------------------
 
