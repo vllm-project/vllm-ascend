@@ -1005,5 +1005,5 @@ def adjust_tensor(tensor, desired_size):
         pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
         tensor = F.pad(tensor, pad, mode="constant", value=0)
     else:
-        tensor=tensor[:desired_size]
+        tensor = tensor[:desired_size]
     return tensor
