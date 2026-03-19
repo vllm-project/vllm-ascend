@@ -300,7 +300,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
 
 
-class AscendQwen3NextAttention(nn.Module):
+class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
         qkv, _ = self.qkv_proj(hidden_states)
         if "qwen3_5" in self.config.model_type:
@@ -312,8 +312,8 @@ class AscendQwen3NextAttention(nn.Module):
 
             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 qkv=qkv,
-                q_weight=self.q_norm.weight,
-                k_weight=self.k_norm.weight,
+                q_weight=1.0 + self.q_norm.weight,
+                k_weight=1.0 + self.k_norm.weight,
                 cos_sin=cos_sin,
                 num_q_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
