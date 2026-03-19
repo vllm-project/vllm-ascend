@@ -261,6 +261,9 @@ jobs:
           - name: glm-5-w4a8
             os: linux-aarch64-a3-16
             config_file_path: GLM-5.yaml
+          - name: glm-4.7-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: GLM-4.7.yaml
           - name: kimi-k2-thinking
             os: linux-aarch64-a3-16
             config_file_path: Kimi-K2-Thinking.yaml

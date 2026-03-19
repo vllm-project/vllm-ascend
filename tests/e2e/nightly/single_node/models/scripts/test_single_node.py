@@ -147,7 +147,7 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
     if config.special_dependencies:
-        for k, v in config.benchmarks.items():
+        for k, v in config.special_dependencies.items():
             command = [
                 sys.executable,
                 "-m", "pip", "install",
