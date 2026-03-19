@@ -1,5 +1,6 @@
 import copy
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -10,11 +11,13 @@ from vllm.distributed import ensure_model_parallel_initialized, init_distributed
 from vllm.utils.system_utils import update_environment_variables
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.compilation.npugraph_ex_passes.graphex_qknorm_rope_fusion_pass import (
-    GraphEXQKNormRopeFusionPattern,
-    GraphEXQKNormRopeFusionPatternWithBias,
+from vllm_ascend.compilation.passes.qknorm_rope_fusion_pass import (
+    QKNormRopeFusionPattern,
+    QKNormRopeFusionPatternWithBias,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+MAX_POSITION_EMBEDDING = 262144
 
 
 def find_op(gm, op_default):
@@ -60,7 +63,7 @@ class ModelQKNormRopeWithoutBias(nn.Module):
         self.q_weight = nn.Parameter(torch.randn(head_dim, dtype=dtype, device=device))
         self.k_weight = nn.Parameter(torch.randn(head_dim, dtype=dtype, device=device))
 
-    def forward(self, qkv, cos, sin):
+    def forward(self, qkv, cos_sin_cache, positions):
         """
         Args:
             qkv: [T, q_size + 2*kv_size]
@@ -82,13 +85,12 @@ class ModelQKNormRopeWithoutBias(nn.Module):
 
         # Reshape for RoPE: [T, num_heads, head_dim] -> [1, T, num_heads, head_dim]
         q_flat = q_norm_out.view(q.shape)
-        q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1, self.head_dim)
-
         k_flat = k_norm_out.view(k.shape)
-        k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
 
         # Apply RoPE
-        q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
+        q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
+            positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+        )
 
         return q_rope, k_rope, v
 
@@ -116,7 +118,7 @@ class ModelQKNormRopeWithBias(nn.Module):
         self.q_bias = nn.Parameter(torch.randn(head_dim, dtype=dtype, device=device))
         self.k_bias = nn.Parameter(torch.randn(head_dim, dtype=dtype, device=device))
 
-    def forward(self, qkv, cos, sin):
+    def forward(self, qkv, cos_sin_cache, positions):
         # Split QKV
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -132,13 +134,12 @@ class ModelQKNormRopeWithBias(nn.Module):
 
         # Reshape for RoPE
         q_flat = q_normed.view(q.shape)
-        q_reshape = q_flat.contiguous().view(1, q_flat.shape[0], -1, self.head_dim)
-
         k_flat = k_normed.view(k.shape)
-        k_reshape = k_flat.contiguous().view(1, k_flat.shape[0], -1, self.head_dim)
 
         # Apply RoPE
-        q_rope, k_rope = torch.ops.npu.npu_apply_rotary_pos_emb(q_reshape, k_reshape, cos, sin)
+        q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
+            positions, q_flat, k_flat, cos_sin_cache, self.head_dim, self.head_dim, True
+        )
 
         return q_rope, k_rope, v
 
@@ -147,7 +148,7 @@ def assert_qknorm_rope_fusion(after_gm, expect_fused=True, use_bias=False):
     check_rules = [
         (torch.ops.vllm.qkv_rmsnorm_rope.default, expect_fused),
         (torch.ops.npu.npu_rms_norm.default, not expect_fused),
-        (torch.ops.npu.npu_apply_rotary_pos_emb.default, not expect_fused),
+        (torch.ops.vllm.npu_rotary_embedding.default, not expect_fused),
     ]
     if use_bias:
         check_rules.append((torch.ops.aten.add.Tensor, not expect_fused))
@@ -194,20 +195,25 @@ def test_rmsnorm_quant_fusion(
         qkv_size = q_size + 2 * kv_size
         if use_bias:
             model = ModelQKNormRopeWithBias(head_dim, num_heads, num_kv_heads, dtype, eps, device="npu")
-            fusion_pattern = GraphEXQKNormRopeFusionPatternWithBias(
+            fusion_pattern = QKNormRopeFusionPatternWithBias(
                 vllm_config=vllm_config, head_dim=head_dim, num_heads=num_heads, num_kv_heads=num_kv_heads, eps=eps
             )
         else:
             model = ModelQKNormRopeWithoutBias(head_dim, num_heads, num_kv_heads, dtype, eps, device="npu")
-            fusion_pattern = GraphEXQKNormRopeFusionPattern(
+            fusion_pattern = QKNormRopeFusionPattern(
                 vllm_config=vllm_config, head_dim=head_dim, num_heads=num_heads, num_kv_heads=num_kv_heads, eps=eps
             )
-        fusion_pattern.register()
+        from torch._inductor.pattern_matcher import PatternMatcherPass
+
+        pm_pass = PatternMatcherPass()
+        fusion_pattern.register(pm_pass)
         model = model.to("npu")
         seq_len = 5
         qkv = torch.randn(seq_len, qkv_size, device="npu", dtype=dtype)
-        cos = torch.randn(1, seq_len, 1, head_dim, device="npu", dtype=dtype)
-        sin = torch.randn(1, seq_len, 1, head_dim, device="npu", dtype=dtype)
+        cos_sin_cache = torch.from_numpy(np.random.uniform(0, 1, [MAX_POSITION_EMBEDDING, head_dim])).to(dtype).npu()
+        positions = torch.randint(
+            low=0, high=MAX_POSITION_EMBEDDING, size=(num_tokens,), dtype=torch.int64, device="npu"
+        )
 
         with torch.no_grad():
             original_optimize = torchair.npu_fx_compiler._optimize_fx
@@ -217,6 +223,6 @@ def test_rmsnorm_quant_fusion(
 
             compiled_model = torch.compile(model, backend="npugraph_ex", fullgraph=True, dynamic=True)
 
-            compiled_model(qkv, cos, sin)
+            compiled_model(qkv, cos_sin_cache, positions)
 
             torchair.npu_fx_compiler._optimize_fx = original_optimize

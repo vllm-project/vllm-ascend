@@ -13,7 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm_ascend.compilation.npugraph_ex_passes.utils.npugraph_ex_utils_check import \
+from vllm_ascend.compilation.passes.utils.npugraph_ex_utils_check import \
     extra_stream_scope_check
 
 

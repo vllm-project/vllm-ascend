@@ -117,6 +117,18 @@ class AscendLinearMethod(LinearMethodBase):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
+    def get_computed_params(self) -> set[str]:
+        """Return parameter name patterns that are computed, not loaded.
+
+        These parameters are computed during process_weights_after_loading
+        rather than loaded from checkpoint:
+        - weight_offset: Zero for symmetric quantization
+        - quant_bias: Computed from weight statistics
+        - deq_scale: Computed as input_scale * weight_scale
+        - weight_scale: May be computed or have default values for some models
+        """
+        return {"weight_offset", "quant_bias", "deq_scale", "weight_scale"}
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -208,8 +220,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             set_weight_attrs(param, extra_weight_attrs)
 
         extra_weight_attrs.update({"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
-        per_group_param = (
-            ["weight_scale_second", "weight_offset_second", "scale_bias"] + ["weight_scale", "weight_offset"]
+        per_group_param = ["weight_scale_second", "weight_offset_second", "scale_bias"] + (
+            ["weight_scale", "weight_offset"]
             if hasattr(self.quant_method, "group_size") and self.quant_method.group_size > 0
             else []
         )

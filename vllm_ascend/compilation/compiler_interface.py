@@ -15,7 +15,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import copy
 import functools
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -29,8 +31,10 @@ from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 
-from vllm_ascend.ascend_config import NpugraphExConfig, get_ascend_config
-from vllm_ascend.utils import COMPILATION_PASS_KEY
+from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
+from vllm_ascend.utils import COMPILATION_PASS_KEY, vllm_version_is
+
+logger = logging.getLogger(__name__)
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -70,7 +74,7 @@ def npugraph_ex_compile(
     example_inputs: list[Any],
     compiler_config: dict[str, Any],
     vllm_config: VllmConfig,
-    npugraph_ex_config: NpugraphExConfig,
+    ascend_compilation_config: AscendCompilationConfig,
     compile_range: Range,
     key: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
@@ -82,13 +86,18 @@ def npugraph_ex_compile(
     config.mode = "reduce-overhead"
     # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
-    if npugraph_ex_config.enable_static_kernel:
+    if not vllm_version_is("0.17.0"):
+        # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
+        # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
+        # and cause copy_between_host_and_device error.
+        config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
+    if ascend_compilation_config.enable_static_kernel:
         config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
         # According to the cudagraph_capture_size configuration, set the shapes
         # that can trigger the compilation of static kernel. If this configuration is
         # not applied, new shapes will trigger the compilation of static kernels,
         # affecting program execution.
-        num_spec_tokens = vllm_config.speculative_config.num_speculative_token if vllm_config.speculative_config else 0
+        num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         uniform_decode_query_len = num_spec_tokens + 1
         max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
         decode_cudagraph_batch_sizes = [
@@ -116,8 +125,8 @@ class AscendCompiler(CompilerInterface):
     name = "AscendCompiler"
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
-        npugraph_ex_config = get_ascend_config().npugraph_ex_config
-        if npugraph_ex_config.enable:
+        npugraph_ex_enabled = get_ascend_config().ascend_compilation_config.enable_npugraph_ex
+        if npugraph_ex_enabled:
             self.vllm_config = vllm_config
         return vllm_config.compute_hash()
 
@@ -129,11 +138,31 @@ class AscendCompiler(CompilerInterface):
         compile_range: Range,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
-        npugraph_ex_config = get_ascend_config().npugraph_ex_config
-        if npugraph_ex_config.enable:
+        # inductor can inplace modify the graph, so we need to copy it
+        # see https://github.com/pytorch/pytorch/issues/138980
+        graph = copy.deepcopy(graph)
+
+        if not vllm_version_is("0.17.0"):
+            from torch._guards import detect_fake_mode
+
+            current_fake_mode = detect_fake_mode()
+            if current_fake_mode is not None:
+                example_inputs = [
+                    current_fake_mode.from_tensor(inp)
+                    if (
+                        isinstance(inp, torch.Tensor)
+                        and hasattr(inp, "fake_mode")
+                        and inp.fake_mode is not current_fake_mode
+                    )
+                    else inp
+                    for inp in example_inputs
+                ]
+
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        if ascend_compilation_config.enable_npugraph_ex:
             assert hasattr(self, "vllm_config")
             return npugraph_ex_compile(
-                graph, example_inputs, compiler_config, self.vllm_config, npugraph_ex_config, compile_range, key
+                graph, example_inputs, compiler_config, self.vllm_config, ascend_compilation_config, compile_range, key
             )
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)

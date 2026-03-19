@@ -283,10 +283,10 @@ async def _select_instance(api: str, req_data: Any, request_length: int):
     request_id = await proxy_state.next_req_id()
     # Select dp server based on priority score
     server_idx = proxy_state.select_server(priority_score)
-    choosen_server = proxy_state.dp_servers[server_idx]
-    logger.debug(f"Choose server {choosen_server.url} to process request {request_id}")
+    chosen_server = proxy_state.dp_servers[server_idx]
+    logger.debug(f"Choose server {chosen_server.url} to process request {request_id}")
     return InstanceInfo(
-        request_id=request_id, server_idx=server_idx, priority_score=priority_score, server_state=choosen_server
+        request_id=request_id, server_idx=server_idx, priority_score=priority_score, server_state=chosen_server
     )
 
 

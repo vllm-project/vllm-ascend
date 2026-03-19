@@ -3,18 +3,24 @@
 ## Environmental Dependencies
 
 * Software:
-    * Python >= 3.10, < 3.12
-    * CANN == 8.3.rc2
-    * PyTorch == 2.8.0, torch-npu == 2.8.0
+    * CANN >= 8.5.0
     * vLLM：main branch
     * vLLM-Ascend：main branch
+    * mooncake：>= 0.3.9
 
 ### KV Pool Parameter Description
 
-**kv_connector_extra_config**: Additional Configurable Parameters for Pooling.  
-**lookup_rpc_port**: Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
-**load_async**: Whether to Enable Asynchronous Loading. The default value is false.  
-**backend**: Set the storage backend for kvpool, with the default being mooncake.
+#### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
+
+| Parameter | Description |
+| :--- | :--- |
+| `lookup_rpc_port` | Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration. |
+| `load_async` | Whether to Enable Asynchronous Loading. The default value is false. |
+| `backend` | Set the storage backend for kvpool, with the default being mooncake. |
+| `consumer_is_to_put` | Whether Decode node put KV Cache into KV Pool. The default value is false. |
+| `consumer_is_to_load` | Whether Decode node load KV cache from KV Pool. The default value is false. |
+| `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
+| `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP. |
 
 ### Environment Variable Configuration
 
@@ -42,7 +48,7 @@ export PYTHONHASHSEED=0
         First, we need to obtain the Mooncake project. Refer to the following command:
 
         ```shell
-        git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
+        git clone -b v0.3.9 --depth 1 https://github.com/kvcache-ai/Mooncake.git
         ```
 
         (Optional) Replace go install url if the network is poor
@@ -85,6 +91,14 @@ export PYTHONHASHSEED=0
         export LD_LIBRARY_PATH=/usr/local/lib64/python3.11/site-packages/mooncake:$LD_LIBRARY_PATH
         ```
 
+### Environment Variables Description
+
+| Hardware | HDK & CANN versions | Export Command | Description |
+| :--- | :--- | :--- | :--- |
+| 800 I/T A3 series | HDK >= 26.0.0<br>CANN >= 9.0.0 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
+| 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
+| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission cheme on 800 I/T A2 series|
+
 ### Run Mooncake Master
 
 #### 1.Configure mooncake.json
@@ -105,7 +119,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 **protocol:** Must be set to 'Ascend' on the NPU.
 **device_name**: ""
 **master_server_address**: Configured with the IP and port of the master service.  
-**global_segment_size**: Registered memory size per card to the KV Pool.
+**global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.**
 
 #### 2.Start mooncake_master
 
@@ -138,9 +152,10 @@ export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1
-
-# ASCEND_BUFFER_POOL is the environment variable for configuring the number and size of buffer on NPU Device for aggregation and KV transfer，the value 4:8 means we allocate 4 buffers of size 8MB.
-export ASCEND_BUFFER_POOL=4:8
+#A3
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+#A2
+#export HCCL_INTRA_ROCE_ENABLE=1
 
 # Unit: ms. The timeout for one-sided communication connection establishment is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039). Users can adjust this value based on their specific setup.
 # The recommended formula is: ASCEND_CONNECT_TIMEOUT = connection_time_per_card (typically within 500ms) × total_number_of_Decode_cards.
@@ -155,12 +170,12 @@ python3 -m vllm.entrypoints.openai.api_server \
     --port 8100 \
     --trust-remote-code \
     --enforce-eager \
-    --no_enable_prefix_caching \
+    --no-enable-prefix-caching \
     --tensor-parallel-size 1 \
     --data-parallel-size 1 \
-    --max-model-len 10000 \
+    --max-model-len 32768 \
     --block-size 128 \
-    --max-num-batched-tokens 4096 \
+    --max-num-batched-tokens 16384 \
     --kv-transfer-config \
     '{
     "kv_connector": "MultiConnector",
@@ -172,7 +187,6 @@ python3 -m vllm.entrypoints.openai.api_server \
                 "kv_role": "kv_producer",
                 "kv_port": "20001",
                 "kv_connector_extra_config": {
-                    "use_ascend_direct": true,
                     "prefill": {
                         "dp_size": 1,
                         "tp_size": 1
@@ -211,7 +225,10 @@ export PYTHONHASHSEED=0 
 export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
-export ASCEND_BUFFER_POOL=4:8
+#A3
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+#A2
+#export HCCL_INTRA_ROCE_ENABLE=1
 export ASCEND_CONNECT_TIMEOUT=10000
 export ASCEND_TRANSFER_TIMEOUT=10000
 
@@ -220,12 +237,12 @@ python3 -m vllm.entrypoints.openai.api_server \
     --port 8200 \
     --trust-remote-code \
     --enforce-eager \
-    --no_enable_prefix_caching \
+    --no-enable-prefix-caching \
     --tensor-parallel-size 1 \
     --data-parallel-size 1 \
-    --max-model-len 10000 \
+    --max-model-len 32768 \
     --block-size 128 \
-    --max-num-batched-tokens 4096 \
+    --max-num-batched-tokens 16384 \
     --kv-transfer-config \
     '{
     "kv_connector": "MultiConnector",
@@ -267,10 +284,10 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_consumer",
     "kv_connector_extra_config": {
-        "lookup_rpc_port":"0",
-        "backend": "mooncake"
+        "lookup_rpc_port": "0",
+        "backend": "mooncake",
         "consumer_is_to_put": true,
-        "prefill_pp_size": 2
+        "prefill_pp_size": 2,
         "prefill_pp_layer_partition": "30,31"
     }
 }
@@ -322,7 +339,10 @@ export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTHONHASHSEED=0 
 export ACL_OP_INIT_MODE=1
-export ASCEND_BUFFER_POOL=4:8
+#A3
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
+#A2
+#export HCCL_INTRA_ROCE_ENABLE=1
 export ASCEND_CONNECT_TIMEOUT=10000
 export ASCEND_TRANSFER_TIMEOUT=10000
 
@@ -331,12 +351,12 @@ python3 -m vllm.entrypoints.openai.api_server \
     --port 8100 \
     --trust-remote-code \
     --enforce-eager \
-    --no_enable_prefix_caching \
+    --no-enable-prefix-caching \
     --tensor-parallel-size 1 \
     --data-parallel-size 1 \
-    --max-model-len 10000 \
+    --max-model-len 32768 \
     --block-size 128 \
-    --max-num-batched-tokens 4096 \
+    --max-num-batched-tokens 16384 \
     --kv-transfer-config \
     '{
     "kv_connector": "AscendStoreConnector",
@@ -475,8 +495,8 @@ ock.mmc.tls.key.pass.path = /opt/ock/security/certs/client.passphrase
 ock.mmc.tls.package.path = /opt/ock/security/libs/
 ock.mmc.tls.decrypter.path =
 
-# Total count of local service 
-ock.mmc.local_service.world_size = 32
+# Total count of local service, including services that will be add in the future
+ock.mmc.local_service.world_size = 256
 # config store url, it will automatically modified to PodIP at Pod startup in HA scenario
 # keep consistent with the same name configuration in mmc-meta.conf
 ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
@@ -524,7 +544,7 @@ ock.mmc.client.write_thread_pool.size = 2
 
 * ock.mmc.meta_service_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
 * ock.mmc.local_service.config_store_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
-* ock.mmc.local_service.world_size：Total number of cards for starting services.
+* ock.mmc.local_service.world_size：Total count of local service, including services that will be add in the future.
 * ock.mmc.local_service.protocol：host_rdma (default), device_rdma (supported for A2 and A3 when device ROCE available, recommended for A2), device_sdma (supported for A3 when HCCS available, recommended for A3)
 * ock.mmc.local_service.dram.size：Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card.
 * To disable TLS authentication modification, set the following parameters to false:：ock.mmc.meta.ha.enable、ock.mmc.config_store.tls.enable
@@ -607,13 +627,12 @@ vllm serve xxxxxxx/Qwen3-32B \
   --tensor-parallel-size 4 \
   --seed 1024 \
   --served-model-name qwen3 \
-  --max-model-len 65536 \
+  --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
   --max-num_seqs 20 \
   --no-enable-prefix-caching \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --kv-transfer-config \
     '{
             "kv_connector": "MultiConnector",
@@ -624,11 +643,8 @@ vllm serve xxxxxxx/Qwen3-32B \
                 {
                             "kv_connector": "MooncakeConnectorV1",
                             "kv_role": "kv_producer",
-                            "kv_buffer_device": "npu",
-                            "kv_rank": 0,
                             "kv_port": "20001",
                             "kv_connector_extra_config": {
-                                    "use_ascend_direct": true,
                                     "prefill": {
                                             "dp_size": 2,
                                             "tp_size": 4
@@ -690,13 +706,12 @@ vllm serve xxxxxxx/Qwen3-32B \
   --tensor-parallel-size 4 \
   --seed 1024 \
   --served-model-name qwen3 \
-  --max-model-len 65536 \
+  --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
   --max-num_seqs 20 \
   --no-enable-prefix-caching \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --kv-transfer-config \
   '{
         "kv_connector": "MultiConnector",
@@ -706,11 +721,8 @@ vllm serve xxxxxxx/Qwen3-32B \
                 {
                                 "kv_connector": "MooncakeConnectorV1",
                                 "kv_role": "kv_consumer",
-                                "kv_buffer_device": "npu",
-                                "kv_rank": 1,
                                 "kv_port": "20002",
                                 "kv_connector_extra_config": {
-                    "use_ascend_direct": true,
                                         "prefill": {
                                                 "dp_size": 2,
                                                 "tp_size": 4
@@ -765,10 +777,9 @@ python -m vllm.entrypoints.openai.api_server \
   --data-parallel-size 2 \
   --tensor-parallel-size 8 \
   --port 30050 \
-  --max-num_seqs 28 \
-  --max-model-len 16384 \
+  --max-num_seqs 20 \
+  --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --enable_expert_parallel \
   --quantization ascend \
   --gpu-memory-utilization 0.90 \
@@ -783,11 +794,8 @@ python -m vllm.entrypoints.openai.api_server \
    {
      "kv_connector": "MooncakeConnectorV1",
      "kv_role": "kv_producer",
-     "kv_buffer_device": "npu",
-     "kv_rank": 0,
      "kv_port": "20001",
      "kv_connector_extra_config": {
-      "use_ascend_direct": true,
       "prefill": {
        "dp_size": 2,
        "tp_size": 8
@@ -837,15 +845,14 @@ python -m vllm.entrypoints.openai.api_server \
   --data-parallel-size 2 \
   --tensor-parallel-size 8 \
   --port 30060 \
-  --max-model-len 16384 \
-  --max-num-batched-tokens 5200 \
+  --max-model-len 32768 \
+  --max-num-batched-tokens 16384 \
   --enforce-eager\
   --quantization ascend \
   --no-enable-prefix-caching \
-  --max-num_seqs 28 \
+  --max-num_seqs 20 \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
   --enable_expert_parallel \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{
@@ -856,11 +863,8 @@ python -m vllm.entrypoints.openai.api_server \
   {
     "kv_connector": "MooncakeConnectorV1",
     "kv_role": "kv_consumer",
-    "kv_buffer_device": "npu",
-    "kv_rank": 1,
     "kv_port": "20002",
     "kv_connector_extra_config": {
-                    "use_ascend_direct": true,
      "prefill": {
       "dp_size": 2,
       "tp_size": 8
@@ -896,7 +900,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 The deepseek model needs to be run in a two-node cluster.
 
-**Run_hunbu_1.sh:**
+**Run_pd_mix_1.sh:**
 
 ```shell
 rm -rf /root/ascend/log/*
@@ -939,7 +943,7 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --tensor-parallel-size 8 \
   --seed 1024 \
   --served-model-name deepseek \
-  --max-model-len 65536 \
+  --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
@@ -947,7 +951,6 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --max-num_seqs 20 \
   --enable-expert-parallel \
   --no-enable-prefix-caching \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false}' \
   --kv-transfer-config \
   '{
         "kv_connector": "AscendStoreConnector",
@@ -956,11 +959,11 @@ vllm serve xxxxxxx/DeepSeek-R1 \
                 "backend": "memcache",
                 "lookup_rpc_port":"0"
            }
-  }' > log_hunbu_1.log 2>&1
+  }' > log_pd_mix_1.log 2>&1
 
 ```
 
-**Run_hunbu_2.sh:**
+**Run_pd_mix_2.sh:**
 
 ```shell
 rm -rf /root/ascend/log/*
@@ -1005,7 +1008,7 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --tensor-parallel-size 8 \
   --seed 1024 \
   --served-model-name deepseek \
-  --max-model-len 65536 \
+  --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
@@ -1013,16 +1016,15 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --max-num_seqs 20 \
   --enable-expert-parallel \
   --no-enable-prefix-caching \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false, "chunked_prefill_for_mla":true}' \
   --kv-transfer-config \
    '{
         "kv_connector": "AscendStoreConnector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {
                 "backend": "memcache",
-                "mooncake_rpc_port":"0"
+                "lookup_rpc_port":"0"
            }
-  }' > log_hunbu_2.log 2>&1
+  }' > log_pd_mix_2.log 2>&1
 
 ```
 
@@ -1060,12 +1062,11 @@ python -m vllm.entrypoints.openai.api_server \
   -dp 2 \
   -tp 8 \
   --port 30050 \
-  --max-num_seqs 28 \
-  --max-model-len 16384 \
+  --max-num_seqs 20 \
+  --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
   --compilation_config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional_config='{"ascend_scheduler_config":{"enabled":false}, "enable_shared_expert_dp":false, "chunked_prefill_for_mla":true}' \
   --enable_expert_parallel \
   --quantization ascend \
   --gpu-memory-utilization 0.90 \
@@ -1076,10 +1077,8 @@ python -m vllm.entrypoints.openai.api_server \
       "kv_role": "kv_both",
       "kv_connector_extra_config": {
         "backend": "memcache",
-        "mooncake_rpc_port":"0"
+        "lookup_rpc_port":"0"
       }
-  }' > log_hunbu.log 2>&1 
+  }' > log_pd_mix.log 2>&1 
 
 ```
-
-#### [2.Run Inference](#2run-inference)

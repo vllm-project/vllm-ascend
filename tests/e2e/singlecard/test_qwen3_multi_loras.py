@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import patch
+
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
-from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 from vllm_ascend.utils import enable_custom_op
@@ -27,15 +28,10 @@ LORA_TEST_EXPECTED = [
 
 def format_chatml_messages(prompt: str):
     return [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
-        },
-        {
-            "role": "user",
-            "content": prompt
-        },
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt},
     ]
+
 
 @patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_multi_loras_with_tp_sync():
@@ -102,9 +98,7 @@ def test_multi_loras_with_tp_sync():
         outputs = llm.chat(
             [messages],
             sampling_params,
-            chat_template_kwargs={
-                "enable_thinking": False
-            },  # for those loras, ensure enable_thinking=False
+            chat_template_kwargs={"enable_thinking": False},  # for those loras, ensure enable_thinking=False
             lora_request=lora_request,
             use_tqdm=False,
         )
@@ -113,15 +107,13 @@ def test_multi_loras_with_tp_sync():
 
     def reload_lora(name: str):
         """
-        reload a lora to simulate the case: 
-        setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` 
+        reload a lora to simulate the case:
+        setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true`
         for dynamic lora loading and unloading
         """
-        remove_lora_response = llm.llm_engine.remove_lora(
-            lora_id=lora_name_id_map[name])
+        remove_lora_response = llm.llm_engine.remove_lora(lora_id=lora_name_id_map[name])
 
-        add_lora_response = llm.llm_engine.add_lora(
-            make_add_lora_request(name, LORA_NAME_PATH_MAP[name]))
+        add_lora_response = llm.llm_engine.add_lora(make_add_lora_request(name, LORA_NAME_PATH_MAP[name]))
 
         print(f"{remove_lora_response=}, {add_lora_response=}")
 
@@ -131,7 +123,6 @@ def test_multi_loras_with_tp_sync():
         assert outputs == expected
 
     for prompt, expected_output in zip(LORA_TEST_PROMPTS, LORA_TEST_EXPECTED):
-
         output_text = call_llm_get_outputs(prompt, "Alice")
         check_outputs(output_text, expected_output, prompt)
 

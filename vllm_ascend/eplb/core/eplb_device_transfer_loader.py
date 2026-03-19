@@ -34,7 +34,7 @@ class D2DExpertWeightLoader:
         self.layer_id = -1  # layer id to be updated
         self.state = ExpertWeightUpdateState.WAITING
         self.recv_expert_list = []
-        self.mock_flag = True
+        self.num_layers = 0
 
     def set_adator(self, eplb_adaptor):
         self.eplb_adaptor = eplb_adaptor
@@ -68,7 +68,7 @@ class D2DExpertWeightLoader:
         self.updated_log2phy_map = log2phy_map
 
     def asyn_expert_weight_transfer(self, reqs):
-        # Only when send/recv tasks are parsed into self.comm_op_list, d2d send/recv tasks can be luanched
+        # Only when send/recv tasks are parsed into self.comm_op_list, d2d send/recv tasks can be launched
         if self.state != ExpertWeightUpdateState.READY:
             return
 
@@ -80,7 +80,7 @@ class D2DExpertWeightLoader:
         self.state = ExpertWeightUpdateState.TRANSFERRING
 
     def update_expert_map_and_weight(self, reqs):
-        # Only after send/recv tasks have been luanched, expert_map and weight can be updated
+        # Only after send/recv tasks have been launched, expert_map and weight can be updated
         if self.state != ExpertWeightUpdateState.TRANSFERRING:
             return
 
@@ -103,12 +103,10 @@ class D2DExpertWeightLoader:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, local_expert_to_replace, buffer_tensor_id)
 
-        logger.debug(f"[EPLB] finished update expert weight for layer: {self.layer_id}")
+        if self.layer_id == self.num_layers - 1:
+            logger.info("[EPLB] finished update expert weight.")
 
         self.recv_expert_list = []
         self.updated_expert_map = None
         self.layer_id = -1
         self.state = ExpertWeightUpdateState.WAITING
-
-    def load_impl(self, old_expert_table, new_expert_table):
-        raise NotImplementedError

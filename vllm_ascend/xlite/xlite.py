@@ -25,9 +25,9 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from xlite._C import (  # type: ignore[attr-defined]
+    AttnMeta,
     AttnMHA,
     Model,
-    ModelAttnMeta,
     ModelConfig,
     Runtime,
     ScoringFuncSoftmax,
@@ -89,6 +89,15 @@ class LlamaXliteModel(XliteModel):
         config.max_batch_size = max_batch_size
         config.max_seq_len = max_seq_len
         config.block_size = vllm_config.cache_config.block_size
+
+        vision_config = getattr(vllm_config.model_config.hf_config, "vision_config", None)
+        rope_parameters = getattr(hf_config, "rope_parameters", {})
+        if hasattr(config, "deepstack_num_level"):
+            config.deepstack_num_level = len(getattr(vision_config, "deepstack_visual_indexes", []))
+        if hasattr(config, "mrope_section"):
+            config.mrope_section = rope_parameters.get("mrope_section", [])
+        if hasattr(config, "mrope_interleaved"):
+            config.mrope_interleaved = rope_parameters.get("mrope_interleaved", False)
         return config
 
     def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig, config: ModelConfig) -> Model:
@@ -157,9 +166,6 @@ class LlamaXliteModel(XliteModel):
 
 class QwenMoeXliteModel(LlamaXliteModel):
     def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, int, int, torch.dtype]:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
-            architecture = vllm_config.model_config.architectures[0]
-            raise ValueError(f"{architecture} not support VLLM_ASCEND_ENABLE_NZ = 2!")
         dtype = vllm_config.model_config.dtype
         config = self._build_model_config(vllm_config)
         xlite_model = self._build_model(runnable, vllm_config, config)
@@ -174,7 +180,6 @@ class QwenMoeXliteModel(LlamaXliteModel):
         config = super()._build_model_config(vllm_config)
         hf_config = vllm_config.model_config.hf_text_config
         ep_group = get_ep_group()
-        config.n_layers = hf_config.max_window_layers
         config.n_dense_layers = 0
         config.n_routed_experts = hf_config.num_experts
         config.n_shared_experts = 0
@@ -229,9 +234,8 @@ class XliteWrapper:
 
         rank = torch.distributed.get_rank()
         local_rank = get_world_group().local_rank
-        self.xlite_rt = Runtime(
-            local_rank, 0, rank, get_tensor_model_parallel_world_size(), vllm_config.parallel_config.data_parallel_size
-        )
+        self.data_parallel_size = vllm_config.parallel_config.data_parallel_size
+        self.xlite_rt = Runtime(local_rank, 0, rank, get_tensor_model_parallel_world_size(), self.data_parallel_size)
 
         (self.xlite_model, self.freq_cis, hidden_size, dtype) = xlite_model_init(runnable, vllm_config)
 
@@ -278,7 +282,16 @@ class XliteWrapper:
             AscendAttentionState.SpecDecoding,
         ]
 
-        if not with_prefill or self.full_mode:
+        # Full: graph for prefill and decode
+        # Decode-Only: runnable for prefill, graph for decode
+        if not self.full_mode and self.data_parallel_size > 1:
+            num_tokens = forward_context.batch_descriptor.num_tokens
+            num_reqs = forward_context.batch_descriptor.num_reqs
+            use_xlite_graph = num_reqs is not None and num_tokens <= num_reqs
+        else:
+            use_xlite_graph = not with_prefill or self.full_mode
+
+        if use_xlite_graph:
             # TODO: When vllm_ascend enables graph mode, attn_metadata.num_decodes
             # will be padded in decode requests. Therefore, it is first fixed using
             # num_decode_tokens. However, in the future, when MTP is enabled, there
@@ -293,22 +306,42 @@ class XliteWrapper:
             query_lens = query_lens[:batch]
             cached_lens = seq_lens - query_lens
 
-            xlite_attn_metadata = ModelAttnMeta()
+            num_tokens = forward_context.batch_descriptor.num_tokens
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            xlite_attn_metadata = AttnMeta()
             xlite_attn_metadata.lens = query_lens.tolist()
             xlite_attn_metadata.cached_lens = cached_lens.tolist()
             xlite_attn_metadata.is_prefills = [False] * num_decodes + [True] * num_prefills
-            xlite_attn_metadata.block_tables = attn_metadata.block_tables.cpu().tolist()
+            xlite_attn_metadata.block_tables_cpu = attn_metadata.block_tables.cpu().tolist()
+            if positions.ndim == 2:
+                xlite_attn_metadata.positions = positions[:, : attn_metadata.num_actual_tokens].contiguous()
+            else:
+                xlite_attn_metadata.positions = positions
 
-            h = self.hidden_states[: attn_metadata.num_actual_tokens]
+            # Compatibility between DP and Non-DP scenarios
+            h = self.hidden_states[:num_tokens]
             stream = torch.npu.current_stream().npu_stream
             if inputs_embeds is None:
                 self.xlite_model.forward(
                     self.xlite_rt, input_ids, xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream
                 )
             else:
+                deepstack_input_embeds = getattr(self.runnable, "deepstack_input_embeds", [])
+                xlite_deepstack_input_embeds = [
+                    deepstack_input[: inputs_embeds.size(0)] for deepstack_input in deepstack_input_embeds
+                ]
                 self.xlite_model.forward_with_inputs_embeds(
-                    self.xlite_rt, inputs_embeds, xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream
+                    self.xlite_rt,
+                    inputs_embeds,
+                    xlite_attn_metadata,
+                    self.kv_caches,
+                    self.freq_cis,
+                    h,
+                    stream,
+                    xlite_deepstack_input_embeds,
                 )
-            return h
+                if xlite_deepstack_input_embeds and hasattr(self.runnable, "_clear_deepstack_input_embeds"):
+                    self.runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))
+            return h[:num_actual_tokens]
         else:
             return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds)

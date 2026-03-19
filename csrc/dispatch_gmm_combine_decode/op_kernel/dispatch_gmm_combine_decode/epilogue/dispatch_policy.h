@@ -26,4 +26,17 @@ struct EpilogueAtlasA2PerTokenDequantCombine {
     static constexpr uint32_t EXEC_FLAG = EXEC_FLAG_;
 };
 
+template <uint32_t UB_STAGES_, uint32_t EXEC_FLAG_>
+struct EpilogueAtlasA2Swiglu {
+    using ArchTag = Arch::AtlasA2;
+    static constexpr uint32_t UB_STAGES = UB_STAGES_;
+    static constexpr uint32_t EXEC_FLAG = EXEC_FLAG_;
+};
+
+template <uint32_t UB_STAGES_, uint32_t EXEC_FLAG_>
+struct EpilogueAtlasA2Combine {
+    using ArchTag = Arch::AtlasA2;
+    static constexpr uint32_t UB_STAGES = UB_STAGES_;
+    static constexpr uint32_t EXEC_FLAG = EXEC_FLAG_;
+};
 }  // namespace Catlass::Epilogue

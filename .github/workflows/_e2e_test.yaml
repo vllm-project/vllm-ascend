@@ -15,6 +15,16 @@ on:
       contains_310:
         required: true
         type: boolean
+      continue_on_error:
+        required: false
+        type: boolean
+        default: false
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
 
 jobs:
   e2e-light:
@@ -54,6 +64,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -66,21 +77,58 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-singlecard-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-singlecard-light-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-singlecard-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-singlecard-light-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize singlecard-light failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run singlecard-light test" \
+            --log-file /tmp/e2e-singlecard-light-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-singlecard-light-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
 
   e2e-full:
     name: singlecard-full
@@ -96,6 +144,7 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        MODELSCOPE_HUB_FILE_LOCK: False
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -120,6 +169,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -132,20 +182,56 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        shell: bash
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-singlecard \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 2 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-singlecard-full-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-singlecard \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 2 \
+              2>&1 | tee /tmp/e2e-singlecard-full-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize singlecard-full failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run singlecard-full test" \
+            --log-file /tmp/e2e-singlecard-full-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-singlecard-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
 
   e2e-2-cards-light:
     name: multicard-2-light
@@ -156,7 +242,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -185,6 +271,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -197,19 +284,56 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-2card-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-2card-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-2card-light-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-2card-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-2card-light-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize multicard-2-light failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run multicard-2-light test" \
+            --log-file /tmp/e2e-2card-light-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-2card-light-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
 
   e2e-2-cards-full:
     name: multicard-2-full
@@ -220,7 +344,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -249,6 +373,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -261,27 +386,76 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-2-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-multicard-2-cards \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-2card-full-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-multicard-2-cards \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-2card-full-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize multicard-2-full failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run multicard-2-full test " \
+            --log-file /tmp/e2e-2card-full-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-2card-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' && matrix.part == 0 }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
+          set -o pipefail
           python3 -m pip uninstall -y triton-ascend
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py \
+            2>&1 | tee /tmp/e2e-non-triton.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize non-triton failure
+        if: ${{ always() && inputs.type == 'full' && matrix.part == 0 }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run multicard-2-full test (non triton)" \
+            --log-file /tmp/e2e-non-triton.log \
+            --output "$GITHUB_STEP_SUMMARY"
 
   e2e-4-cards-full:
     name: multicard-4-full
@@ -292,7 +466,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: m.daocloud.io/quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -320,6 +494,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -332,27 +507,64 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-4-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-multicard-4-cards \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-4card-full-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-multicard-4-cards \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-4card-full-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize multicard-4-full failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run vllm-project/vllm-ascend test for V1 Engine" \
+            --log-file /tmp/e2e-4card-full-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v4
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-4card-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
 
   e2e_310p:
     name: 310p singlecard
     runs-on: linux-aarch64-310p-1
     if: ${{ inputs.contains_310 }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -377,6 +589,7 @@ jobs:
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -389,28 +602,43 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
-          pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py
+          set -o pipefail
+          pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py \
+          tests/e2e/310p/singlecard/test_vl_model_singlecard.py \
+          2>&1 | tee /tmp/e2e-310p-singlecard.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize 310p singlecard failure
+        if: ${{ always() && inputs.contains_310 }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run vllm-project/vllm-ascend test" \
+            --log-file /tmp/e2e-310p-singlecard.log \
+            --output "$GITHUB_STEP_SUMMARY"
 
   e2e_310p-4cards:
     name: 310p multicards 4cards
     runs-on: linux-aarch64-310p-4
     if: ${{ inputs.contains_310 }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -435,6 +663,7 @@ jobs:
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -447,20 +676,35 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
+          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
+          set -o pipefail
           pytest -sv --durations=0 \
           tests/e2e/310p/multicard/test_dense_model_multicard.py \
-          tests/e2e/310p/multicard/test_moe_model_multicard.py
+          tests/e2e/310p/multicard/test_moe_model_multicard.py \
+          tests/e2e/310p/multicard/test_vl_model_multicard.py \
+          2>&1 | tee /tmp/e2e-310p-4cards.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize 310p multicards failure
+        if: ${{ always() && inputs.contains_310 }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run vllm-project/vllm-ascend test" \
+            --log-file /tmp/e2e-310p-4cards.log \
+            --output "$GITHUB_STEP_SUMMARY"
