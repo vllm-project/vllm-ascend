@@ -40,6 +40,12 @@ def run_tests(
     """
     Run each TestFile with pytest and collect timing results.
 
+    NOTE:
+        The emitted START / PASSED / FAILED log lines are parsed by
+        ci_log_summary.py to recover per-test invocation boundaries.
+        Keep this output format stable, or update the corresponding
+        regexes in those CI log summarizers together.
+
     Args:
         files: Tests to run (skipped entries should already be filtered out).
         continue_on_error: If True, keep running after a failure.
@@ -54,6 +60,8 @@ def run_tests(
 
     for i, test in enumerate(files):
         print(f"\n{'.' * 60}", flush=True)
+        # NOTE: ci_log_summary.py depend on this
+        # START line format when splitting suite-level logs into test runs.
         print(
             f"{_Color.HEADER}[{i + 1}/{len(files)}] START  {test.name}{_Color.RESET}",
             flush=True,
@@ -68,6 +76,8 @@ def run_tests(
 
         color = _Color.GREEN if passed else _Color.RED
         status = "PASSED" if passed else f"FAILED (exit code {result.returncode})"
+        # NOTE: ci_log_summary.py depend on this
+        # PASSED / FAILED (exit code X) line format for suite end detection.
         print(
             f"{color}[{i + 1}/{len(files)}] {status}  {test.name}  ({elapsed:.0f}s){_Color.RESET}",
             flush=True,
