@@ -181,30 +181,47 @@ class AscendConfig:
                 stacklevel=2,
             )
 
+    @staticmethod
+    def _get_compile_ranges(compilation_config):
+        from vllm_ascend.utils import vllm_version_is
+
+        if vllm_version_is("0.17.0"):
+            return compilation_config.compile_ranges_split_points
+        else:
+            return compilation_config.compile_ranges_endpoints
+
+    @staticmethod
+    def _set_compile_ranges(compilation_config, value):
+        from vllm_ascend.utils import vllm_version_is
+
+        if vllm_version_is("0.17.0"):
+            compilation_config.compile_ranges_split_points = value
+        else:
+            compilation_config.compile_ranges_endpoints = value
+
     def update_compile_ranges_split_points(self):
         vllm_config = self.vllm_config
         if self.ascend_compilation_config.enable_npugraph_ex:
             if self.ascend_compilation_config.fuse_allreduce_rms:
                 from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
-                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
                 new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
                     "set compile_ranges_split_points to "
                     "{new_compile_ranges_split_points} for matmul and allreduce fusion"
                 )
 
         else:
-            new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+            new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
             if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
                 from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
-                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
                 new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
                     "set compile_ranges_split_points to "
                     "{new_compile_ranges_split_points} for matmul and allreduce fusion"
@@ -218,9 +235,9 @@ class AscendConfig:
                 sp_threshold = get_sp_threshold(vllm_config)
                 new_compile_ranges_split_points.append(sp_threshold)
                 logger.debug(f"add {sp_threshold} to compile_ranges_split_points for sequence parallelism")
-            if len(new_compile_ranges_split_points) > len(vllm_config.compilation_config.compile_ranges_split_points):
+            if len(new_compile_ranges_split_points) > len(self._get_compile_ranges(vllm_config.compilation_config)):
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
 
 
 class FinegrainedTPConfig:

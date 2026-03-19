@@ -51,7 +51,8 @@ This is the first release candidate of v0.17.0 for vLLM Ascend. Please follow th
 
 - GLM5 requires transformers==5.2.0, and this will resolved by [vllm-project/vllm#30566](https://github.com/vllm-project/vllm/pull/30566), will not included in v0.17.0.
 - There is a precision issue with Qwen3-Next due to the changed tp weight split method. Will fix it in next release.
-- The minimum number of tokens of prefix cache hit in hybrid model is 2k now
+- The minimum number of tokens of prefix cache hit in hybrid model is large now. The exact number is related to tp size, e.g., with tp 2, the block_size is adjusted to 2048, which means that any prefix shorter than 2048 will never be cached.
+- GLM5 has an issue in the 2-node PD mixed deployment scenario where inference may hang when concurrency exceeds 8 (fixed in PR [#7235](https://github.com/vllm-project/vllm-ascend/pull/7235) [#7290](https://github.com/vllm-project/vllm-ascend/pull/7290)).
 
 ## v0.16.0rc1 - 2026.03.09
 
