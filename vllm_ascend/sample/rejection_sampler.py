@@ -142,7 +142,6 @@ def rejection_sample(
                 max_spec_len,
                 grid,
                 block_size,
-                batch_size,
             )
         else:
             if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and sampling_metadata.all_greedy:

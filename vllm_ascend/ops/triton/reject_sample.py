@@ -48,19 +48,16 @@ def rejection_greedy_sample_spec_len_1_triton(
     target_argmax_ptr,  # [num_tokens]
     bonus_token_ids_ptr,
     vec_len,
-    batch_size,  # adapt: add batch_size parameter for validating the boundaries of output_token_ids
     BLOCK_SIZE: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
     offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    # adapt: Double mask: simultaneously check num_tokens and batch_size (for output_token_ids)
-    mask_token = offset < vec_len
-    mask_batch = offset < batch_size
+    mask = offset < vec_len
 
-    draft_token_id = tl.load(draft_token_ids_ptr + offset, mask_token)
-    target_argmax_id = tl.load(target_argmax_ptr + offset, mask_token)
+    draft_token_id = tl.load(draft_token_ids_ptr + offset, mask)
+    target_argmax_id = tl.load(target_argmax_ptr + offset, mask)
     # Use batch_mask when writing to output_token_ids to avoid out-of-bounds errors
-    tl.store(output_token_ids_ptr + offset * 2, target_argmax_id, mask_batch)
+    tl.store(output_token_ids_ptr + offset * 2, target_argmax_id, mask)
 
     # Add validity check for pos within the loop
     for pos in tl.range(0, BLOCK_SIZE):
@@ -327,7 +324,6 @@ def rejection_greedy_sample_with_triton(
     max_spec_len,
     grid,
     block_size,
-    batch_size,
 ):
     vec_len = output_token_ids.shape[0]
 
@@ -338,7 +334,6 @@ def rejection_greedy_sample_with_triton(
             target_argmax,
             bonus_token_ids,
             vec_len,
-            batch_size,
             BLOCK_SIZE=block_size,
         )
     else:
