@@ -127,9 +127,7 @@ def causal_conv1d_fn(
             f"expected dim={dim}, conv_states.shape={tuple(conv_states.shape)}"
         )
     if conv_states.shape[-1] < state_len:
-        raise RuntimeError(
-            f"causal_conv1d_fn: conv_states too short, need >= {state_len}, got {conv_states.shape[-1]}"
-        )
+        raise RuntimeError(f"causal_conv1d_fn: conv_states too short, need >= {state_len}, got {conv_states.shape[-1]}")
 
     seqlens = (query_start_loc[1:] - query_start_loc[:-1]).tolist()
     splits = torch.split(x, seqlens, dim=-1)
@@ -201,8 +199,7 @@ def causal_conv1d_update(
     dim, width = weight.shape
     if dim != feature_dim:
         raise RuntimeError(
-            f"causal_conv1d_update: weight dim mismatch, "
-            f"feature_dim={feature_dim}, weight.shape={tuple(weight.shape)}"
+            f"causal_conv1d_update: weight dim mismatch, feature_dim={feature_dim}, weight.shape={tuple(weight.shape)}"
         )
 
     if conv_state.shape[-2] != dim and conv_state.shape[-1] == dim:
