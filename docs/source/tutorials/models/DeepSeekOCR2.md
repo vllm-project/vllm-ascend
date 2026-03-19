@@ -111,6 +111,7 @@ vllm serve /weights/DeepSeek-OCR-2 \
 Single-node deployment is recommended.
 
 ### Prefill-Decode Disaggregation
+
 We don't neel to Prefill-Decode disaggregation
 
 ## Functional Verification
@@ -168,4 +169,3 @@ The performance result is:
 **Input/Output**: 1080P/256
 
 **Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card is 864 TPS (Token Per Second).
-
