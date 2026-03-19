@@ -45,6 +45,7 @@ from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDe
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_cp,
+    normalize_req_axis_by_query_start_loc,
     split_decodes_and_prefills,
     using_paged_attention,
 )
@@ -267,6 +268,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMetadata:
+        if normalize_req_axis_by_query_start_loc(common_attn_metadata):
+            logger.warning_once(
+                "Normalized attention metadata request dims to match query_start_loc. "
+                "This pads missing KV-side req entries with dummy rows."
+            )
+
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]

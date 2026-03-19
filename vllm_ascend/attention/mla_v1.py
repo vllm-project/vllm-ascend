@@ -28,6 +28,7 @@ from vllm_ascend.attention.utils import (
     ascend_chunked_prefill_workspace_size,
     enable_cp,
     enabling_mlapo,
+    normalize_req_axis_by_query_start_loc,
     maybe_save_kv_layer_to_connector,
     split_decodes_and_prefills,
     trans_rope_weight,
@@ -410,6 +411,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMLAMetadata:
+        if normalize_req_axis_by_query_start_loc(common_attn_metadata):
+            logger.warning_once(
+                "Normalized MLA attention metadata request dims to match query_start_loc. "
+                "This pads missing KV-side req entries with dummy rows."
+            )
+
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu

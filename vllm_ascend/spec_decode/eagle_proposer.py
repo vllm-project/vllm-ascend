@@ -42,7 +42,10 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    normalize_req_axis_by_query_start_loc,
+)
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -466,6 +469,10 @@ class SpecDecodeBaseProposer(EagleProposer):
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
+        if normalize_req_axis_by_query_start_loc(common_attn_metadata):
+            logger.warning_once(
+                "Normalized drafter attention metadata request dims to match query_start_loc."
+            )
 
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
@@ -1367,9 +1374,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         )
         common_attn_metadata.slot_mapping[token_indices.shape[0] :].fill_(-1)
 
-        # NOTE: Currently positions and seq_lens are not used in attn forward
-        # so we do not need to fixed them. But if they are used in the future,
-        # we should fixed them.
+        # Keep req-shaped members aligned before building per-layer metadata.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
@@ -1388,6 +1393,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             decode_token_per_req=self.runner.decode_token_per_req,
             max_seq_len=0,
         )
+        normalize_req_axis_by_query_start_loc(spec_common_attn_metadata)
         return spec_common_attn_metadata, token_indices
 
     def prepare_inputs_padded(
@@ -1447,9 +1453,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         total_num_tokens = query_start_loc_cpu[-1].item()
         token_indices = self.arange[:total_num_tokens]
 
-        # NOTE: Currently positions and seq_lens are not used in attn forward
-        # so we do not need to fixed them. But if they are used in the future,
-        # we should fixed them.
+        # Keep req-shaped members aligned before building per-layer metadata.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -1468,6 +1472,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=0,
         )
+        normalize_req_axis_by_query_start_loc(spec_common_attn_metadata)
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample, num_rejected_tokens_gpu
 
