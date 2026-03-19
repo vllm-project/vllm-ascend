@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -205,8 +206,30 @@ def _run_subprocess(cmd: list[str], cwd: Path) -> None:
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
-def _load_result(result_dir: Path, model_path: Path, workload: Workload, bs: int) -> dict[str, Any]:
+def _resolve_result_path(
+    result_dir: Path,
+    model_path: Path,
+    workload: Workload,
+    bs: int,
+) -> Path:
     result_path = result_dir / f"{model_path.name}-{workload.name}-bs{bs}.json"
+    if result_path.exists():
+        return result_path
+
+    for _ in range(5):
+        json_files = sorted(result_dir.glob("*.json"))
+        if json_files:
+            return json_files[-1]
+        time.sleep(1)
+
+    available = ", ".join(path.name for path in sorted(result_dir.iterdir()))
+    raise FileNotFoundError(
+        f"No benchmark result json found in {result_dir}. Available files: [{available}]"
+    )
+
+
+def _load_result(result_dir: Path, model_path: Path, workload: Workload, bs: int) -> dict[str, Any]:
+    result_path = _resolve_result_path(result_dir, model_path, workload, bs)
     return json.loads(result_path.read_text())
 
 
@@ -244,7 +267,6 @@ def run_matrix(args: argparse.Namespace) -> list[BenchmarkRow]:
     workloads = [WORKLOADS[name] for name in _parse_csv_strs(args.workloads)]
     batch_sizes = _parse_csv_ints(args.batch_sizes)
     rows: list[BenchmarkRow] = []
-    tool_root = Path(__file__).resolve().parents[1]
 
     for model_path in models:
         server_host = "127.0.0.1"
@@ -277,7 +299,7 @@ def run_matrix(args: argparse.Namespace) -> list[BenchmarkRow]:
                             result_dir=result_dir,
                             num_prompts=num_prompts,
                         )
-                        _run_subprocess(bench_cmd, cwd=tool_root)
+                        _run_subprocess(bench_cmd, cwd=result_dir)
                         result = _load_result(result_dir, model_path, workload, bs)
                         rows.append(
                             _result_to_row(
