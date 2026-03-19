@@ -787,23 +787,24 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 vllm bench serve \
---backend vllm \
---dataset-name prefix_repetition \
---prefix-repetition-prefix-len 22400 \
---prefix-repetition-suffix-len 9600 \
---prefix-repetition-output-len 1024 \
---num-prompts 1 \
---prefix-repetition-num-prefixes 1 \
---ignore-eos \
---model glm \
---tokenizer Eco-Tech/GLM-4.7-W8A8-floatmtp \
---seed 1000 \
---host 0.0.0.0 \
---port 8000 \
---endpoint /v1/completions \
---max-concurrency 1 \
---request-rate 1 \
+  --backend vllm \
+  --dataset-name prefix_repetition \
+  --prefix-repetition-prefix-len 22400 \
+  --prefix-repetition-suffix-len 9600 \
+  --prefix-repetition-output-len 1024 \
+  --num-prompts 1 \
+  --prefix-repetition-num-prefixes 1 \
+  --ignore-eos \
+  --model glm \
+  --tokenizer Eco-Tech/GLM-4.7-W8A8-floatmtp \
+  --seed 1000 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --endpoint /v1/completions \
+  --max-concurrency 1 \
+  --request-rate 1 \
 ```
+
 After about several minutes, you can get the performance evaluation result.
 
 ## Best Practices
