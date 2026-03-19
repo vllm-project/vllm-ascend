@@ -51,7 +51,7 @@ done
 
 if [[ $VIOLATIONS -gt 0 ]]; then
     echo ""
-    echo "Found $VIOLATIONS violation(s): init_logger(__name__) must not be used in vllm_ascend patch modules."
+    echo "Found $VIOLATIONS violation(s): init_logger(__name__) must not be used in vllm_ascend modules."
     echo ""
     echo "vllm's logging handler is registered only for the 'vllm' namespace."
     echo "Loggers created with init_logger(__name__) inside vllm_ascend end up"
