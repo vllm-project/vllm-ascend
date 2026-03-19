@@ -1062,11 +1062,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         D = self.v_head_dim
         H = self.num_heads
 
-        # Normalize prefix output/lse to [num_tokens, H, D] and [num_tokens, H, 1]
-        prefix_output = prefix_output.to(torch.float32)
-        prefix_lse = prefix_lse.to(torch.float32)
         if prefix_lse.dim() == 2:
             prefix_lse = prefix_lse.transpose(0, 1).unsqueeze(-1)
+        prefix_output = prefix_output.to(torch.float32)
+        prefix_lse = prefix_lse.to(torch.float32)
         out_list = [prefix_output.reshape(num_tokens * H, D)]
         lse_list = [prefix_lse.reshape(num_tokens * H)]
 
@@ -1117,10 +1116,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 actual_seq_lengths=actual_seq_lengths_q,
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
             )
-            chunk_out = chunk_out.to(torch.float32)
-            chunk_lse = chunk_lse.to(torch.float32)
             if chunk_lse.dim() == 2:
                 chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
+            chunk_out = chunk_out.to(torch.float32)
+            chunk_lse = chunk_lse.to(torch.float32)
             out_list.append(chunk_out.reshape(num_tokens * H, D))
             lse_list.append(chunk_lse.reshape(num_tokens * H))
 
