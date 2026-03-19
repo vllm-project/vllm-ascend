@@ -146,14 +146,14 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
-    if config.name == "GLM-5-TP16-DP1-decodegraph":
-        command = [
-            sys.executable,
-            "-m", "pip", "install",
-            f"transformers==5.2.0",
-            "--upgrade"
-        ]
-        subprocess.call(command)
+    if config.special_dependencies:
+        for k, v in config.benchmarks.items():
+            command = [
+                sys.executable,
+                "-m", "pip", "install",
+                f"{k}=={v}",
+            ]
+            subprocess.call(command)
     if config.service_mode == "epd":
         with (
             RemoteEPDServer(vllm_serve_args=config.epd_server_cmds, env_dict=config.envs) as _,
