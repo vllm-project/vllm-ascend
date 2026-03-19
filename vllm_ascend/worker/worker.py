@@ -58,7 +58,6 @@ from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_sp,
     get_ascend_device_type,
-    get_current_non_torch_mem,
     register_ascend_customop,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -277,7 +276,6 @@ class NPUWorker(WorkerBase):
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
             )
-        self.init_non_torch_memory = get_current_non_torch_mem()
 
         if (
             self.parallel_config.data_parallel_size > 1
@@ -343,13 +341,10 @@ class NPUWorker(WorkerBase):
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
             self.model_runner.profile_run()
-            non_torch_memory_before_empty_cache = get_current_non_torch_mem()
 
-        self.non_torch_memory_increase = profile_result.non_torch_increase
-        self.peak_activation_memory = profile_result.torch_peak_increase
-        non_torch_memory_cleared_by_empty_cache = (
-            non_torch_memory_before_empty_cache - self.init_non_torch_memory - self.non_torch_memory_increase
-        )
+        # self.non_torch_memory_increase = profile_result.non_torch_increase
+        # self.peak_activation_memory = profile_result.torch_peak_increase
+        # self.non_kv_cache_memory = profile_result.non_kv_cache_memory
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
@@ -361,21 +356,17 @@ class NPUWorker(WorkerBase):
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container."
         )
-        self.available_kv_cache_memory_bytes = (
-            self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
+        self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        # logger.info("requested_memory: %.2f GiB", GiB(self.requested_memory))
+        # logger.info("non_kv_cache_memory: %.2f GiB", GiB(self.non_kv_cache_memory))
+        # logger.info("non_torch_memory_before_empty_cache: %.2f GiB", GiB(non_torch_memory_before_empty_cache))
+        # logger.info("non_torch_memory_increase: %.2f GiB", GiB(self.non_torch_memory_increase))
+        logger.info(profile_result)
+        # logger.debug(profile_result)
+        logger.info_once(
+            "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
 
-        logger.debug("requested_memory: %.2f GiB", GiB(self.requested_memory))
-        logger.debug("non_kv_cache_memory: %.2f GiB", GiB(profile_result.non_kv_cache_memory))
-        logger.debug("init_non_torch_memory: %.2f GiB", GiB(self.init_non_torch_memory))
-        logger.debug("non_torch_memory_before_empty_cache: %.2f GiB", GiB(non_torch_memory_before_empty_cache))
-        logger.debug("non_torch_memory_increase: %.2f GiB", GiB(self.non_torch_memory_increase))
-        logger.debug("non_torch_memory_cleared_by_empty_cache: %.2f GiB", GiB(non_torch_memory_cleared_by_empty_cache))
-        logger.info_once(
-            "Available KV cache memory: %.2f GiB",
-            GiB(self.available_kv_cache_memory_bytes),
-            scope="local",
-        )
         return int(self.available_kv_cache_memory_bytes)
 
     def execute_model(
