@@ -359,7 +359,7 @@ def get_sfa_skip_indices(num_comptuted_tokens, query_lens):
     skip_query_lens = np.minimum(num_skip_tokens, query_lens)
     # if no request is skipped, return None
     if np.sum(num_skip_tokens) == 0:
-        return None, None, None, None, None
+        return None, None, None, None, None, None, None, None
 
     # calculate query lens for non-skip part
     no_skip_query_lens = np.maximum(query_lens - skip_query_lens, 0)
@@ -406,7 +406,9 @@ def get_sfa_skip_indices(num_comptuted_tokens, query_lens):
 
     indices = np.concatenate([q_cal_part_indices, q_skip_indices]).astype(np.int32)
 
-    return indices, li_cum_query_lens, li_seq_lens, li_skipped_mask, num_of_non_skip_tokens
+    return (indices, li_cum_query_lens, li_seq_lens, li_skipped_mask,
+            num_of_non_skip_tokens, skip_query_lens, no_skip_query_lens,
+            num_comptuted_tokens)
 
 
 def get_index_of_skipped_queries_numpy(actual_seq_lengths_query, actual_seq_lengths_key, num_actual_seqs, sparse_count):
