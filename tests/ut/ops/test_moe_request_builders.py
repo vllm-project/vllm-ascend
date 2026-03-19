@@ -28,7 +28,6 @@ class TestMoERequestBuilders(unittest.TestCase):
             "MoEMlpKernelParams",
             "MoEMlpParams",
             "MoEMxfpParams",
-            "MoEOptionalQuantTensor",
             "MoEPrepareOutput",
             "MoEQuantParams",
             "MoEReservedQuantParams",
@@ -37,7 +36,6 @@ class TestMoERequestBuilders(unittest.TestCase):
             "MoETokenDispatchInput",
             "MoETokenDispatchOutput",
             "MoEWeights",
-            "MoEWeightTensor",
             "TMoERoutingMetadata",
         ]
 

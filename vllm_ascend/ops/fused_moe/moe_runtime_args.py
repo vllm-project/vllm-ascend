@@ -1,15 +1,14 @@
-from vllm_ascend.ops.fused_moe.moe_routing_metadata import (
+from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
     MoEAllGatherRoutingMetadata,
     MoEAllToAllRoutingMetadata,
-    MoEMC2RoutingMetadata,
-)
-from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
     MoEFusedExpertsInput,
+    MoEMC2RoutingMetadata,
     MoEMlpComputeInput,
     MoEPrepareOutput,
     MoETokenCombineOutput,
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
+    MoEWeights,
     TMoERoutingMetadata,
 )
 from vllm_ascend.ops.fused_moe.moe_stage_params import (
@@ -19,11 +18,6 @@ from vllm_ascend.ops.fused_moe.moe_stage_params import (
     MoEQuantParams,
     MoEReservedQuantParams,
     MoERoutingParams,
-)
-from vllm_ascend.ops.fused_moe.moe_stage_weights import (
-    MoEOptionalQuantTensor,
-    MoEWeights,
-    MoEWeightTensor,
 )
 
 __all__ = [
@@ -35,7 +29,6 @@ __all__ = [
     "MoEMlpKernelParams",
     "MoEMlpParams",
     "MoEMxfpParams",
-    "MoEOptionalQuantTensor",
     "MoEPrepareOutput",
     "MoEQuantParams",
     "MoEReservedQuantParams",
@@ -44,6 +37,5 @@ __all__ = [
     "MoETokenDispatchInput",
     "MoETokenDispatchOutput",
     "MoEWeights",
-    "MoEWeightTensor",
     "TMoERoutingMetadata",
 ]
