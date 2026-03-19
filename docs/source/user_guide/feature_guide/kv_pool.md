@@ -470,6 +470,7 @@ ock.mmc.config_store.tls.decrypter.path =
 ```
 
 **Key Focuses：**
+
 | Parameter | Description |
 | :--- | :--- |
 | `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
@@ -543,6 +544,7 @@ ock.mmc.client.write_thread_pool.size = 2
 ```
 
 **Key Focuses：**
+
 | Parameter | Description |
 | :--- | :--- |
 | `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
