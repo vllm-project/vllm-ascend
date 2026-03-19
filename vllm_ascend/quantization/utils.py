@@ -19,11 +19,9 @@ import json
 from pathlib import Path
 
 from vllm import envs
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
-
-logger = init_logger(__name__)
 
 
 def get_model_file(
