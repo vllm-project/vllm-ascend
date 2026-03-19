@@ -70,7 +70,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--compilation-config"
-      - '{"cudagraph_capture": [4,8,12,16,20,24,28,32], "cudagraph_model":"FULL_DECODE_ONLY"}'
+      - '{"cudagraph_capture_sizes": [4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
       <<: *benchmarks
 
