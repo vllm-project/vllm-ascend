@@ -13,5 +13,5 @@ class AscendDraftModelProposer(DraftModelProposer, AscendSpecDecodeBaseProposer)
         runner=None,
     ):
         DraftModelProposer.__init__(self, vllm_config, device, runner=runner)
-            
+ 
         AscendSpecDecodeBaseProposer.__init__(self, vllm_config, device, False, runner=runner)
