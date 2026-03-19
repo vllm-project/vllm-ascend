@@ -7,7 +7,6 @@ import torch
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
     MoEMlpComputeInput,
-    MoEMlpKernelParams,
     MoEMxfpParams,
     MoEQuantParams,
     MoERoutingParams,
@@ -48,6 +47,9 @@ def build_fused_experts_input(
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
 ) -> MoEFusedExpertsInput:
+    if quant_type == QuantType.MXFP8 and mxfp is None:
+        raise ValueError("mxfp params are required when quant_type is QuantType.MXFP8.")
+
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
         topk_weights=topk_weights,
@@ -97,44 +99,15 @@ def build_token_dispatch_input(
     )
 
 
-def build_mlp_kernel_params(
-    *,
-    hidden_states: torch.Tensor,
-    quant: MoEQuantParams,
-    use_fusion_ops: bool,
-) -> MoEMlpKernelParams:
-    act_quant_type = torch.float8_e4m3fn
-    weight_quant_type = torch.float8_e4m3fn
-    scale_type = None
-    per_token_scale_type = None
-    use_mxfp_quant = False
-    use_bf16 = hidden_states.dtype == torch.bfloat16
-
-    if quant.is_mxfp and quant.mxfp is not None:
-        use_mxfp_quant = True
-        act_quant_type = quant.mxfp.act_quant_type or act_quant_type
-        weight_quant_type = quant.mxfp.weight_quant_type or weight_quant_type
-        scale_type = quant.mxfp.scale_dtype
-        per_token_scale_type = quant.mxfp.per_token_scale_dtype
-        use_bf16 = quant.mxfp.use_bf16
-
-    return MoEMlpKernelParams(
-        fusion=quant.quant_type in (QuantType.W8A8, QuantType.MXFP8) and use_fusion_ops,
-        use_mxfp_quant=use_mxfp_quant,
-        act_quant_type=act_quant_type,
-        weight_quant_type=weight_quant_type,
-        scale_type=scale_type,
-        per_token_scale_type=per_token_scale_type,
-        use_bf16=use_bf16,
-    )
-
-
 def build_mlp_compute_input(
     *,
     request: MoEFusedExpertsInput,
     dispatch_result: MoETokenDispatchOutput[TMoERoutingMetadata],
     use_fusion_ops: bool,
 ) -> MoEMlpComputeInput:
+    if request.quant.is_mxfp and request.quant.mxfp is None:
+        raise ValueError("request.quant.mxfp is required when quant_type is QuantType.MXFP8.")
+
     return MoEMlpComputeInput(
         hidden_states=dispatch_result.hidden_states,
         group_list=dispatch_result.group_list,
@@ -142,13 +115,9 @@ def build_mlp_compute_input(
         dynamic_scale=dispatch_result.dynamic_scale,
         topk_scales=dispatch_result.topk_scales,
         weights=request.weights,
+        quant=request.quant,
+        fusion=request.quant.quant_type in (QuantType.W8A8, QuantType.MXFP8) and use_fusion_ops,
         activation=request.activation,
         need_trans=request.need_trans,
         dynamic_eplb=request.dynamic_eplb,
-        quant=request.quant,
-        kernel=build_mlp_kernel_params(
-            hidden_states=dispatch_result.hidden_states,
-            quant=request.quant,
-            use_fusion_ops=use_fusion_ops,
-        ),
     )

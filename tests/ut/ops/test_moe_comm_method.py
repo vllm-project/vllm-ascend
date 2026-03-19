@@ -262,8 +262,8 @@ class TestMoECommMethod(TestBase):
         # Verify unified_apply_mlp was called
         mock_unified_apply_mlp.assert_called_once()
         mlp_request = mock_unified_apply_mlp.call_args.kwargs["request"]
-        self.assertFalse(mlp_request.kernel.fusion)
-        self.assertFalse(mlp_request.kernel.use_mxfp_quant)
+        self.assertFalse(mlp_request.fusion)
+        self.assertFalse(mlp_request.quant.is_mxfp)
 
         # Verify token_combine was called
         mock_td_instance.token_combine.assert_called_once_with(

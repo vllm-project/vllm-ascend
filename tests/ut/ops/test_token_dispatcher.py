@@ -49,7 +49,6 @@ def build_dispatch_request(
     expert_map: torch.Tensor | None = None,
     global_redundant_expert_num: int = 0,
     apply_router_weight_on_input: bool = False,
-    dynamic_eplb: bool = False,
     pertoken_scale: torch.Tensor | None = None,
     quant_type: QuantType = QuantType.NONE,
     comm_quant_mode: int | None = None,
@@ -150,7 +149,6 @@ class TestTokenDispatcherWithMC2(TestBase):
             expert_map=expert_map,
             global_redundant_expert_num=0,
             apply_router_weight_on_input=False,
-            dynamic_eplb=False,
             pertoken_scale=None,
         )
         kwargs = self.dispatcher.get_dispatch_mc2_kwargs(request)

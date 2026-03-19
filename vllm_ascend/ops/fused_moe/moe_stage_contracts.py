@@ -7,7 +7,6 @@ import numpy as np
 import torch
 
 from vllm_ascend.ops.fused_moe.moe_stage_params import (
-    MoEMlpKernelParams,
     MoEQuantParams,
     MoERoutingParams,
 )
@@ -122,7 +121,7 @@ class MoEMlpComputeInput:
     topk_scales: torch.Tensor | None
     weights: MoEWeights
     quant: MoEQuantParams
-    kernel: MoEMlpKernelParams
+    fusion: bool
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False

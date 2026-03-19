@@ -25,7 +25,6 @@ class TestMoERequestBuilders(unittest.TestCase):
             "MoEFusedExpertsInput",
             "MoEMC2RoutingMetadata",
             "MoEMlpComputeInput",
-            "MoEMlpKernelParams",
             "MoEMxfpParams",
             "MoEPrepareOutput",
             "MoEQuantParams",
@@ -69,6 +68,7 @@ class TestMoERequestBuilders(unittest.TestCase):
                     log2phy=torch.tensor([3, 2, 1, 0], dtype=torch.int32),
                     pertoken_scale=torch.randn(4),
                     activation="gelu",
+                    mxfp=MoEMxfpParams() if quant_type == QuantType.MXFP8 else None,
                 )
 
                 self.assertIs(request.hidden_states, hidden_states)
@@ -139,7 +139,19 @@ class TestMoERequestBuilders(unittest.TestCase):
         self.assertIs(dispatch_request.quant, request.quant)
         self.assertIs(dispatch_request.topk_ids, routed_topk_ids)
 
-    def test_build_mlp_compute_input_derives_kernel_params(self):
+    def test_build_fused_experts_input_requires_mxfp_params_for_mxfp_quant(self):
+        with self.assertRaisesRegex(ValueError, "mxfp params are required"):
+            build_fused_experts_input(
+                hidden_states=torch.randn(2, 8),
+                topk_weights=torch.randn(2, 2),
+                topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
+                w1=torch.randn(2, 8, 16),
+                w2=torch.randn(2, 16, 8),
+                quant_type=QuantType.MXFP8,
+                dynamic_eplb=False,
+            )
+
+    def test_build_mlp_compute_input_derives_fusion_and_preserves_mxfp_params(self):
         request = build_fused_experts_input(
             hidden_states=torch.randn(2, 8, dtype=torch.bfloat16),
             topk_weights=torch.randn(2, 2),
@@ -180,11 +192,12 @@ class TestMoERequestBuilders(unittest.TestCase):
         self.assertIs(mlp_request.weights, request.weights)
         self.assertIs(mlp_request.weights.w1_scale, request.weights.w1_scale)
         self.assertIs(mlp_request.weights.w2_scale, request.weights.w2_scale)
-        self.assertTrue(mlp_request.kernel.fusion)
-        self.assertTrue(mlp_request.kernel.use_mxfp_quant)
-        self.assertEqual(mlp_request.kernel.scale_type, torch.float32)
-        self.assertEqual(mlp_request.kernel.per_token_scale_type, torch.float16)
-        self.assertFalse(mlp_request.kernel.use_bf16)
+        self.assertTrue(mlp_request.fusion)
+        self.assertTrue(mlp_request.quant.is_mxfp)
+        assert mlp_request.quant.mxfp is not None
+        self.assertEqual(mlp_request.quant.mxfp.scale_dtype, torch.float32)
+        self.assertEqual(mlp_request.quant.mxfp.per_token_scale_dtype, torch.float16)
+        self.assertFalse(mlp_request.quant.mxfp.use_bf16)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,6 @@ from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
-    MoEMlpKernelParams,
     MoEQuantParams,
     MoEWeights,
 )
@@ -46,17 +45,11 @@ def build_request(
         dynamic_scale=None,
         topk_scales=None,
         weights=MoEWeights(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale),
+        quant=MoEQuantParams(quant_type=QuantType.W8A8 if with_quant else QuantType.NONE),
+        fusion=False,
         activation="silu",
         need_trans=False,
         dynamic_eplb=False,
-        quant=MoEQuantParams(quant_type=QuantType.W8A8 if with_quant else QuantType.NONE),
-        kernel=MoEMlpKernelParams(
-            fusion=False,
-            use_mxfp_quant=False,
-            act_quant_type=torch.float8_e4m3fn,
-            weight_quant_type=torch.float8_e4m3fn,
-            use_bf16=hidden_states.dtype == torch.bfloat16,
-        ),
     )
 
 

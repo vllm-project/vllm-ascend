@@ -145,7 +145,6 @@ def test_token_dispatcher_with_all_gather(
                 global_redundant_expert_num=0,
                 mc2_mask=None,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                dynamic_eplb=False,
             ),
             quant=MoEQuantParams(quant_type=QuantType.NONE),
         )
@@ -229,7 +228,6 @@ def test_token_dispatcher_with_all_gather_quant(
                     global_redundant_expert_num=0,
                     mc2_mask=None,
                     apply_router_weight_on_input=apply_router_weight_on_input,
-                    dynamic_eplb=False,
                 ),
                 quant=MoEQuantParams(quant_type=QuantType.W8A8),
             )

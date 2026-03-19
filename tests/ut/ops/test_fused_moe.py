@@ -28,7 +28,6 @@ from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
-    MoEMlpKernelParams,
     MoEPrepareOutput,
     MoEQuantParams,
     MoEWeights,
@@ -99,17 +98,11 @@ def build_mlp_request(
             w1_offset=w1_offset,
             w2_offset=w2_offset,
         ),
+        quant=MoEQuantParams(quant_type=QuantType.W8A8 if with_quant else QuantType.NONE),
+        fusion=fusion,
         activation=activation,
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
-        quant=MoEQuantParams(quant_type=QuantType.W8A8 if with_quant else QuantType.NONE),
-        kernel=MoEMlpKernelParams(
-            fusion=fusion,
-            use_mxfp_quant=False,
-            act_quant_type=torch.float8_e4m3fn,
-            weight_quant_type=torch.float8_e4m3fn,
-            use_bf16=hidden_states.dtype == torch.bfloat16,
-        ),
     )
 
 

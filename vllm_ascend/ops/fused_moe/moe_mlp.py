@@ -407,6 +407,7 @@ def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
     activation = request.activation
     need_trans = request.need_trans
     dynamic_eplb = request.dynamic_eplb
+    fusion = request.fusion
 
     if not request.quant.is_quant:
         return unquant_apply_mlp(
@@ -423,7 +424,21 @@ def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
         )
 
     assert w1_scale is not None and w2_scale is not None
-    kernel = request.kernel
+    act_quant_type = torch.float8_e4m3fn
+    weight_quant_type = torch.float8_e4m3fn
+    scale_type = None
+    per_token_scale_type = None
+    use_bf16 = hidden_states.dtype == torch.bfloat16
+    use_mxfp_quant = request.quant.is_mxfp
+
+    if use_mxfp_quant:
+        mxfp = request.quant.mxfp
+        assert mxfp is not None, "request.quant.mxfp is required when quant_type is MXFP8."
+        act_quant_type = mxfp.act_quant_type or act_quant_type
+        weight_quant_type = mxfp.weight_quant_type or weight_quant_type
+        scale_type = mxfp.scale_dtype
+        per_token_scale_type = mxfp.per_token_scale_dtype
+        use_bf16 = mxfp.use_bf16
 
     return quant_apply_mlp(
         hidden_states=hidden_states,
@@ -438,12 +453,12 @@ def unified_apply_mlp(*, request: MoEMlpComputeInput) -> torch.Tensor:
         w2_scale_bias=w2_scale_bias,
         w1_offset=w1_offset,
         w2_offset=w2_offset,
-        fusion=kernel.fusion,
+        fusion=fusion,
         dynamic_eplb=dynamic_eplb,
-        use_mxfp_quant=kernel.use_mxfp_quant,
-        act_quant_type=kernel.act_quant_type,
-        weight_quant_type=kernel.weight_quant_type,
-        scale_type=kernel.scale_type,
-        per_token_scale_type=kernel.per_token_scale_type,
-        use_bf16=kernel.use_bf16,
+        use_mxfp_quant=use_mxfp_quant,
+        act_quant_type=act_quant_type,
+        weight_quant_type=weight_quant_type,
+        scale_type=scale_type,
+        per_token_scale_type=per_token_scale_type,
+        use_bf16=use_bf16,
     )

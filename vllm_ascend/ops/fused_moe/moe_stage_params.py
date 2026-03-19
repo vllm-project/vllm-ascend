@@ -64,23 +64,9 @@ class MoEQuantParams:
         return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8)
 
 
-@dataclass(frozen=True, slots=True)
-class MoEMlpKernelParams:
-    """MLP kernel execution parameters."""
-
-    fusion: bool
-    use_mxfp_quant: bool
-    act_quant_type: torch.dtype | None = None
-    weight_quant_type: torch.dtype | None = None
-    scale_type: torch.dtype | None = None
-    per_token_scale_type: torch.dtype | None = None
-    use_bf16: bool = True
-
-
 __all__ = [
     "MoERoutingParams",
     "MoEMxfpParams",
     "MoEReservedQuantParams",
     "MoEQuantParams",
-    "MoEMlpKernelParams",
 ]
