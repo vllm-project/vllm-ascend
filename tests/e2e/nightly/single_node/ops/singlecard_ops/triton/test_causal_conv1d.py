@@ -1,5 +1,6 @@
 from typing import Optional
 
+import gc
 import pytest
 import torch
 import torch.nn.functional as F
@@ -310,6 +311,9 @@ def test_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias,
 
     validate_cmp(out, out_ref, itype)
     validate_cmp(conv_states, conv_states_ref, itype)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 def causal_conv1d_update_ref(x,
@@ -443,3 +447,6 @@ def test_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim,
     assert torch.equal(conv_state[unused_states_bool],
                        conv_state_for_padding_test[unused_states_bool])
     assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
