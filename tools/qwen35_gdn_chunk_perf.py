@@ -9,11 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
-import sys
-import tempfile
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +16,10 @@ from typing import Any
 import torch_npu  # noqa: F401
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from vllm.benchmarks.serve import add_cli_args as add_bench_cli_args
+from vllm.benchmarks.serve import main as run_bench_main
 from vllm.utils.network_utils import get_open_port
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DEFAULT_BS = (1, 4, 8, 16)
 DEFAULT_WORKLOADS = ("short", "prefill")
@@ -152,14 +150,9 @@ def _bench_cmd(
     server: RemoteOpenAIServer,
     workload: Workload,
     bs: int,
-    result_dir: Path,
     num_prompts: int,
 ) -> list[str]:
-    result_name = f"{model_path.name}-{workload.name}-bs{bs}.json"
     return [
-        sys.executable,
-        "-m",
-        "vllm.benchmarks.serve",
         "--backend",
         "openai-chat",
         "--model",
@@ -193,44 +186,15 @@ def _bench_cmd(
         "ttft,tpot,e2el",
         "--metric-percentiles",
         "50,90,99",
-        "--save-result",
-        "--result-dir",
-        str(result_dir),
-        "--result-filename",
-        result_name,
     ]
 
 
-def _run_subprocess(cmd: list[str], cwd: Path) -> None:
-    print(f"RUN {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, cwd=cwd, check=True)
-
-
-def _resolve_result_path(
-    result_dir: Path,
-    model_path: Path,
-    workload: Workload,
-    bs: int,
-) -> Path:
-    result_path = result_dir / f"{model_path.name}-{workload.name}-bs{bs}.json"
-    if result_path.exists():
-        return result_path
-
-    for _ in range(5):
-        json_files = sorted(result_dir.glob("*.json"))
-        if json_files:
-            return json_files[-1]
-        time.sleep(1)
-
-    available = ", ".join(path.name for path in sorted(result_dir.iterdir()))
-    raise FileNotFoundError(
-        f"No benchmark result json found in {result_dir}. Available files: [{available}]"
-    )
-
-
-def _load_result(result_dir: Path, model_path: Path, workload: Workload, bs: int) -> dict[str, Any]:
-    result_path = _resolve_result_path(result_dir, model_path, workload, bs)
-    return json.loads(result_path.read_text())
+def _run_benchmark(cmd: list[str]) -> dict[str, Any]:
+    print(f"RUN vllm.benchmarks.serve {' '.join(cmd)}", flush=True)
+    parser = FlexibleArgumentParser(description="vLLM benchmark serve driver")
+    add_bench_cli_args(parser)
+    bench_args = parser.parse_args(cmd)
+    return run_bench_main(bench_args)
 
 
 def _result_to_row(mode: str, model_path: Path, workload: Workload, bs: int, result: dict[str, Any]) -> BenchmarkRow:
@@ -289,27 +253,23 @@ def run_matrix(args: argparse.Namespace) -> list[BenchmarkRow]:
             for workload in workloads:
                 for bs in batch_sizes:
                     num_prompts = _num_prompts_for(bs, workload)
-                    with tempfile.TemporaryDirectory(prefix="qwen35-gdn-bench-") as tmpdir:
-                        result_dir = Path(tmpdir)
-                        bench_cmd = _bench_cmd(
+                    bench_cmd = _bench_cmd(
+                        model_path=model_path,
+                        server=server,
+                        workload=workload,
+                        bs=bs,
+                        num_prompts=num_prompts,
+                    )
+                    result = _run_benchmark(bench_cmd)
+                    rows.append(
+                        _result_to_row(
+                            mode=args.mode,
                             model_path=model_path,
-                            server=server,
                             workload=workload,
                             bs=bs,
-                            result_dir=result_dir,
-                            num_prompts=num_prompts,
+                            result=result,
                         )
-                        _run_subprocess(bench_cmd, cwd=result_dir)
-                        result = _load_result(result_dir, model_path, workload, bs)
-                        rows.append(
-                            _result_to_row(
-                                mode=args.mode,
-                                model_path=model_path,
-                                workload=workload,
-                                bs=bs,
-                                result=result,
-                            )
-                        )
+                    )
     return rows
 
 
