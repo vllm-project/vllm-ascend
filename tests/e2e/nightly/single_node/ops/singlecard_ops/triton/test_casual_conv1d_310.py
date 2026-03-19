@@ -1,4 +1,3 @@
-import pytest
 import torch
 
 from tests.ut.base import PytestBase
@@ -6,25 +5,10 @@ from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn_pytorch, causal
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
-def _require_ascend_910() -> None:
-    npu = getattr(torch, "npu", None)
-    if npu is None:
-        pytest.skip("This test requires an Ascend NPU runtime.")
-    is_available = getattr(npu, "is_available", None)
-    if not callable(is_available) or not is_available():
-        pytest.skip("This test requires an Ascend NPU runtime.")
-
-    device_type = get_ascend_device_type()
-    if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
-        pytest.skip(f"This test targets Ascend 910B/C (A2/A3). Current device type: {device_type.name}")
-
-
 class TestCausalConv1d(PytestBase):
     def test_triton_matches_torch_reference(self):
 
-        _require_ascend_910()
-
-        from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update_npu
+        from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
 
         torch.manual_seed(0)
         device = torch.device("npu")
@@ -48,7 +32,7 @@ class TestCausalConv1d(PytestBase):
         cache_indices = torch.randint(low=0, high=conv_state_blocks, size=(bs,), dtype=torch.int32, device=device)
         query_start_loc = torch.tensor([0, total_tokens], dtype=torch.int32, device=device)
 
-        fn_triton_out = causal_conv1d_fn(
+        fn_triton_out = torch.ops._C_ascend.causal_conv1d_fn(
             mixed_qkv_prefill,
             conv_weights,
             bias=None,
