@@ -46,7 +46,7 @@ for FILE in $(find "$PATCH_DIR" -type f -name "*.py" 2>/dev/null); do
         fi
         echo "  $FILE:$LINENUM: $LINE"
         VIOLATIONS=$(( VIOLATIONS + 1 ))
-    done < <(grep -n "init_logger(__name__)" "$FILE" 2>/dev/null || true)
+    done < <(grep -n 'init_logger[[:space:]]*([[:space:]]*__name__[[:space:]]*)' "$FILE" 2>/dev/null || true)
 done
 
 if [[ $VIOLATIONS -gt 0 ]]; then
