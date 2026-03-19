@@ -327,10 +327,10 @@ curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json"
 #### 1.Run Mixed Department Script
 
 ```shell
-bash mixed_department.sh
+bash pd_mix.sh
 ```
 
-Content of mixed_department.sh:
+Content of pd_mix.sh:
 
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
@@ -384,7 +384,7 @@ Long question:
 curl -s http://localhost:8100/v1/completions -H "Content-Type: application/json" -d '{ "model": "/xxxxx/Qwen2.5-7B-Instruct", "prompt": "Given the accelerating impacts of climate change—including rising sea levels, increasing frequency of extreme weather events, loss of biodiversity, and adverse effects on agriculture and human health—there is an urgent need for a robust, globally coordinated response. However, international efforts are complicated by a range of factors: economic disparities between high-income and low-income countries, differing levels of industrialization, varying access to clean energy technologies, and divergent political systems that influence climate policy implementation. In this context, how can global agreements like the Paris Accord be redesigned or strengthened to not only encourage but effectively enforce emission reduction targets? Furthermore, what mechanisms can be introduced to promote fair and transparent technology transfer, provide adequate financial support for climate adaptation in vulnerable regions, and hold nations accountable without exacerbating existing geopolitical tensions or disproportionately burdening those with historically lower emissions?", "max_completion_tokens": 256, "temperature":0.0 }'
 ```
 
-Note: For MooncakeStore, it is recommended to perform a warm-up phase before running actual performance benchmarks.
+Note: For MooncakeStore with `ASCEND_BUFFER_POOL` enabled, it is recommended to perform a warm-up phase before running actual performance benchmarks.
 
 This is because HCCL one-sided communication connections are created lazily after the instance is launched when Device-to-Device communication is involved. Currently, full-mesh connections between all devices are required. Establishing these connections introduces a one-time time overhead and persistent device memory consumption (4 MB of device memory per connection).
 
@@ -403,7 +403,7 @@ This is because HCCL one-sided communication connections are created lazily afte
 ### Configuring the memcache Config File
 
     config Path：/usr/local/memcache_hybrid/latest/config/
-    **Configuration item description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>
+    **Config file parameters description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>
 
     Set TLS certificate configurations. If TLS is disabled, you do not need to upload a certificate. If TLS is enabled, you need to upload a certificate.
 
@@ -470,10 +470,12 @@ ock.mmc.config_store.tls.decrypter.path =
 ```
 
 **Key Focuses：**
-
-* ock.mmc.meta_service_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
-* ock.mmc.meta_service.config_store_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
-* To disable TLS authentication modification, set the following parameters to false:ock.mmc.meta.ha.enable、ock.mmc.config_store.tls.enable
+| Parameter | Description |
+| :--- | :--- |
+| `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
+| `ock.mmc.meta_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
+| `ock.mmc.meta.ha.enable` | Set to `false` to disable TLS authentication modification. |
+| `ock.mmc.config_store.tls.enable` | Set to `false` to disable TLS authentication modification. |
 
 **mmc-local.conf：**
 
@@ -541,13 +543,15 @@ ock.mmc.client.write_thread_pool.size = 2
 ```
 
 **Key Focuses：**
-
-* ock.mmc.meta_service_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
-* ock.mmc.local_service.config_store_url：Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same.
-* ock.mmc.local_service.world_size：Total count of local service, including services that will be add in the future.
-* ock.mmc.local_service.protocol：host_rdma (default), device_rdma (supported for A2 and A3 when device ROCE available, recommended for A2), device_sdma (supported for A3 when HCCS available, recommended for A3)
-* ock.mmc.local_service.dram.size：Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card.
-* To disable TLS authentication modification, set the following parameters to false:：ock.mmc.meta.ha.enable、ock.mmc.config_store.tls.enable
+| Parameter | Description |
+| :--- | :--- |
+| `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
+| `ock.mmc.local_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
+| `ock.mmc.local_service.world_size` | Total count of local service, including services that will be added in the future. |
+| `ock.mmc.local_service.protocol` | `host_rdma` (default), `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
+| `ock.mmc.local_service.dram.size` | Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card. |
+| `ock.mmc.meta.ha.enable` | Set to `false` to disable TLS authentication modification. |
+| `ock.mmc.config_store.tls.enable` | Set to `false` to disable TLS authentication modification. |
 
 ### Memcache environment variables
 
@@ -1031,10 +1035,10 @@ vllm serve xxxxxxx/DeepSeek-R1 \
 #### 800I A3/800T A3 Series
 
 ```shell
-bash mixed_department.sh
+bash pd_mix.sh
 ```
 
-Content of mixed_department.sh:
+Content of pd_mix.sh:
 
 ```shell
 rm -rf /root/ascend/log/*
