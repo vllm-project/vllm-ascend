@@ -35,7 +35,7 @@ test_cases:
       - metric: "TTFT"
         baseline: "prefix0"
         target: "prefix75"
-        ratio: 0.6
+        ratio: 0.4
         operator: "<"
     benchmarks:
       warm_up:
