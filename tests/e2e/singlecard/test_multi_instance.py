@@ -16,20 +16,6 @@
 #
 
 """
-End-to-end regression test for PR #7427: two vllm-ascend services running
-Qwen3-0.6B on the same NPU card must both start successfully and produce
-valid inference outputs.
-
-Background
-----------
-Before the fix, the second instance's determine_available_memory() computed
-a negative Available KV cache memory value (e.g. -1.32 GiB) because
-non_kv_cache_memory was erroneously inflated by the first instance's already-
-allocated NPU memory.  This caused zero KV blocks to be allocated and an
-immediate OOM on the first decode step.
-
-Test strategy
--------------
 Two VllmRunner instances are nested so that the first instance's worker
 process is still holding NPU memory when the second instance's worker process
 starts.  Both instances must:
@@ -100,9 +86,7 @@ def test_two_instances_on_single_card() -> None:
     _, text1 = outputs1[0]
     _, text2 = outputs2[0]
 
-    assert text1, (
-        "First instance output text is empty — model may have failed to run"
-    )
+    assert text1, "First instance output text is empty — model may have failed to run"
     assert text2, (
         "Second instance output text is empty — "
         "KV cache may have been allocated with zero blocks (pre-fix OOM regression)"

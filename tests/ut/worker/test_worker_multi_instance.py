@@ -15,27 +15,6 @@
 # limitations under the License.
 #
 
-"""
-Unit tests for NPUWorker.determine_available_memory() covering the
-multi-instance on single card scenario fixed in PR #7427.
-
-Bug:  When a second vllm-ascend instance starts on a card that already has a
-      first instance running, non_kv_cache_memory was incorrectly calculated
-      (it included memory held by the first instance), causing
-      available_kv_cache_memory_bytes to go negative (reported as -1.32 GiB).
-
-Fix:  Correctly account for initial non-PyTorch memory so that
-      available_kv_cache_memory_bytes stays positive for the second instance.
-
-Why UT (not E2E) is sufficient here:
-  The core of the bug is a numerical formula:
-    available = requested_memory - non_kv_cache_memory
-  By mocking memory_profiling we can precisely control non_kv_cache_memory and
-  verify the formula yields a positive result when the fix is applied and a
-  negative result when the buggy behaviour is reproduced – without requiring
-  real NPU hardware or a running model.
-"""
-
 from unittest.mock import MagicMock, patch
 
 from vllm.utils.mem_constants import GiB_bytes
