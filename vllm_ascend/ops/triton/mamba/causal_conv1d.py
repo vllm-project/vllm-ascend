@@ -171,23 +171,23 @@ def _causal_conv1d_update_kernel_npu_tiled(
     initial_state_idx,  # (batch,)
     o_ptr,  # same shape as x_ptr
     batch: tl.int32,
-    dim: tl.constexpr,
+    dim,
     seqlen: tl.constexpr,  # max seqlen for varlen, or exact seqlen
-    state_len: tl.constexpr,  # effective state_len computed in wrapper
-    num_cache_lines: tl.constexpr,
+    state_len,  # effective state_len computed in wrapper
+    num_cache_lines,
     # Strides
-    stride_x_seq: tl.constexpr,
-    stride_x_dim: tl.constexpr,
-    stride_x_token: tl.constexpr,
+    stride_x_seq,
+    stride_x_dim,
+    stride_x_token,
     stride_w_dim: tl.constexpr,
     stride_w_width: tl.constexpr,
-    stride_conv_state_seq: tl.constexpr,
-    stride_conv_state_dim: tl.constexpr,
-    stride_conv_state_tok: tl.constexpr,
-    stride_state_indices: tl.constexpr,
-    stride_o_seq: tl.constexpr,
-    stride_o_dim: tl.constexpr,
-    stride_o_token: tl.constexpr,
+    stride_conv_state_seq,
+    stride_conv_state_dim,
+    stride_conv_state_tok,
+    stride_state_indices,
+    stride_o_seq,
+    stride_o_dim,
+    stride_o_token,
     # others
     pad_slot_id: tl.constexpr,
     # Meta
