@@ -1,3 +1,4 @@
+import gc
 import pytest
 import torch
 
@@ -217,4 +218,7 @@ def test_apply_penalties_and_temperature(
         atol = 1e-02
         rtol = 1e-02
     assert torch.allclose(logits_triton, logits_pytorch_result, atol=atol, rtol=rtol)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
