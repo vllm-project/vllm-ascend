@@ -1,0 +1,62 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  HCCL_BUFFSIZE: "512"
+  SERVER_PORT: "DEFAULT_PORT"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+
+_server_cmd: &server_cmd
+  - "--enable-expert-parallel"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--data-parallel-size"
+  - "2"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "8192"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--max-num-seqs"
+  - "32"
+  - "--async-scheduling"
+  - "--quantization"
+  - "ascend"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--additional-config"
+  - '{"multistream_overlap_shared_expert":true}'
+
+_benchmarks: &benchmarks
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 8
+    baseline: 95
+    threshold: 5
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Kimi-K2.5-W4A8-TP8-DP2-Case"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes": [1,2,4,8,16,32], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks
