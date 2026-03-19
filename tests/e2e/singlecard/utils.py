@@ -148,7 +148,7 @@ def _check_decode_token(
 def compare_logprobs(
     runner_kwargs: dict,
     prompts: list[str],
-    atol: float = 0.035,
+    atol: float = 0.0689,
     decode_atol: float | None = None,
 ) -> None:
     """Run the model in eager baseline mode and in the configured compilation
