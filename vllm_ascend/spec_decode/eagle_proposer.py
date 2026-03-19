@@ -1590,11 +1590,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return last_hidden_states, positions, hidden_states
 
 
-class AscendEagleProposer(AscendSpecDecodeBaseProposer, EagleProposer):
+class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
         runner=None,
     ):
-        super().__init__(vllm_config, device, True, runner=runner)
+        EagleProposer.__init__(self, vllm_config, device, runner=runner)
+        
+        AscendSpecDecodeBaseProposer.__init__(vllm_config, device, True, runner=runner)

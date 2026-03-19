@@ -5,16 +5,13 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendSpecDecodeBaseProposer
 
 
-class AscendDraftModelProposer(AscendSpecDecodeBaseProposer, DraftModelProposer):
+class AscendDraftModelProposer(DraftModelProposer, AscendSpecDecodeBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
         runner=None,
     ):
-        super().__init__(
-            vllm_config=vllm_config,
-            device=device,
-            pass_hidden_states_to_model=False,
-            runner=runner,
-        )
+        DraftModelProposer.__init__(self, vllm_config, device, runner=runner)
+            
+        AscendSpecDecodeBaseProposer.__init__(self, vllm_config, device, False, runner=runner)
