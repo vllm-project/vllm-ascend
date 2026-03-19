@@ -3,7 +3,7 @@
 # ==========================================
 
 _envs: &envs
-  HCCL_BUFFSIZE: "200"
+  HCCL_BUFFSIZE: "1024"
   SERVER_PORT: "DEFAULT_PORT"
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: "false"

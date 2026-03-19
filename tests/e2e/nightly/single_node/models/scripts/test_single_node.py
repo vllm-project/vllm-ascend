@@ -148,10 +148,10 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 async def test_single_node(config: SingleNodeConfig) -> None:
     if config.name == "GLM-5-TP16-DP1-decodegraph":
         command = [
-            sys.executable,  # 指向当前Python解释器的路径
+            sys.executable,
             "-m", "pip", "install",
             f"transformers==5.2.0",
-            "--upgrade"  # 强制升级/安装指定版本
+            "--upgrade"
         ]
         subprocess.call(command)
     if config.service_mode == "epd":
