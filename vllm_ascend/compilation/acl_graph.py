@@ -96,7 +96,7 @@ class ACLGraphWrapper:
             raise AttributeError(
                 f"Attribute {key} not exists in the runnable of aclgraph wrapper: {self._runnable_str}"
             )
-        raise AttributeError
+        raise AttributeError(f"Attribute {key} not found. Set VLLM_LOGGING_LEVEL=DEBUG for more details.")
 
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
