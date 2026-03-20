@@ -233,11 +233,12 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A2}:
-        if (
-            num_tokens <= mc2_tokens_capacity
-            and vllm_config.parallel_config.world_size_across_dp / vllm_config.parallel_config.pipeline_parallel_size
-            >= 16
-        ):
+        num_experts = vllm_config.model_config.get_num_experts()
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        )
+        num_experts_per_device = num_experts // ep_world_size
+        if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
             moe_comm_type = MoECommType.MC2
         else:
             moe_comm_type = MoECommType.ALLGATHER
@@ -245,14 +246,18 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType.A3}:
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
         # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic"
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2
         dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
-                fused_decode_enable = fused_mc2_enable and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+                fused_decode_enable = (
+                    fused_mc2_enable
+                    and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+                    and quant_type == "w8a8_dynamic"
+                )
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
