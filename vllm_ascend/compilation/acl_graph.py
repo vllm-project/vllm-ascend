@@ -68,13 +68,13 @@ class ACLGraphWrapper:
         cudagraph_options: CUDAGraphOptions | None = None,
     ):
         self.runnable = runnable
-        self._runnable_str = str(runnable) if self.is_debugging_mode else None
         self.vllm_config = vllm_config
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
