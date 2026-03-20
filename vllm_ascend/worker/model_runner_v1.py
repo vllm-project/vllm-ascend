@@ -4151,6 +4151,8 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_ec_transfer() and get_ec_transfer().is_producer:
             return {}
+        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+        register_all_kvcache_specs(self.vllm_config)
 
         kv_cache_spec: dict[str, list[KVCacheSpec]] = defaultdict(list)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
@@ -4184,10 +4186,12 @@ class NPUModelRunner(GPUModelRunner):
                     # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
                     # Re-importing it at runtime will therefore resolve to the patched class.
                     # Rename it here to make this behavior explicit.
-                    from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
+                    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+                    from vllm.v1.kv_cache_registry import KVCacheSpecRegistry
                     # TODO(rjg-lyh): when kv_cache_spec's refactor is ready,
                     # implement it by creating a new kv_cache_spec class
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                    kv_cache_spec[layer_name] = KVCacheSpecRegistry.create(
+                        kvcache_spec_cls=MLAAttentionSpec,
                         block_size=self.block_size,
                         num_kv_heads=1,
                         head_size=sum(self.sparse_head_dim),

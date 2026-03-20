@@ -1042,3 +1042,7 @@ class NPUPlatform(Platform):
     @classmethod
     def manual_seed_all(cls, seed: int) -> None:
         pass
+
+    @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
+        import vllm_ascend.core.kv_cache_interface  # noqa
