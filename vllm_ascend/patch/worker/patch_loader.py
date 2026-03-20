@@ -11,7 +11,6 @@ class AutoWeightsLoaderWithTrans(AutoWeightsLoader):
             if getattr(v, "transposed", False):
                 setattr(v, "transposed", False)
                 v.data = v.data.transpose(1, 2)
-                assert not v.is_contiguous()
 
     def load_weights(self, model_path: str):
         self._preprocess()
