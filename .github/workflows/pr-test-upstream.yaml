@@ -102,8 +102,7 @@ jobs:
               pip install uc-manager
               uv pip install -r requirements-dev.txt
               uv pip install -v -e .
-              uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
-              uv pip install tblib
+              uv pip install tblib mteb
 
           - name: Run vllm-project/vllm test
             env:
