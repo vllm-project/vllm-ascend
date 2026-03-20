@@ -32,7 +32,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, has_rope, is_vl_model
+from vllm_ascend.utils import has_rope, is_vl_model
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -519,7 +519,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             # todo: need cann update in 8.5.0
             return self.forward_triton(positions, query, key)
 
-        if self.mrope_section != [16, 24, 24] or get_ascend_device_type() == AscendDeviceType.A5:
+        if self.mrope_section != [16, 24, 24]:
             return super().forward_oot(positions, query, key)
 
         import torch_npu
