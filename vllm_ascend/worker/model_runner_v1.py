@@ -292,16 +292,27 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_sparse_c8_indexer:
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16
+        from vllm_ascend.utils import vllm_version_is
 
-        self.attn_backend = get_attn_backend(
-            0,
-            self.dtype,
-            None,
-            self.block_size,
-            use_mla=self.model_config.use_mla,
-            use_sparse=self.use_sparse,
-            use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
-        )
+        if vllm_version_is("0.17.0"):
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse,
+                use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
+            )
+        else:
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                use_mla=self.model_config.use_mla,
+                use_sparse=self.use_sparse,
+                use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
+            )
 
         try:
             self.dcp_size = get_dcp_group().world_size
@@ -412,15 +423,14 @@ class NPUModelRunner(GPUModelRunner):
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
 
-        if vllm_version_is("0.17.0"):
-            # self.cudagraph_batch_sizes sorts in ascending order.
-            if (
-                self.compilation_config.cudagraph_capture_sizes
-                and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            ):
-                self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
-            else:
-                self.cudagraph_batch_sizes = []
+        # self.cudagraph_batch_sizes sorts in ascending order.
+        if (
+            self.compilation_config.cudagraph_capture_sizes
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            self.cudagraph_batch_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        else:
+            self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
 
@@ -1376,7 +1386,12 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
             ),
             self.maybe_get_kv_connector_output(
-                scheduler_output, clear_metadata=clear_kv_metadata
+                scheduler_output,
+                **(
+                    {"clear_metadata": clear_kv_metadata}
+                    if vllm_version_is("0.17.0")
+                    else {"defer_finalize": not clear_kv_metadata}
+                ),
             ) as kv_connector_output,
         ):
             hidden_states = self._model_forward(
@@ -2253,6 +2268,7 @@ class NPUModelRunner(GPUModelRunner):
         remove_lora: bool = True,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
+        profile_seq_lens: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -2359,11 +2375,14 @@ class NPUModelRunner(GPUModelRunner):
             # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
             # in inference. This will be removed once npu_fused_infer_attention_score
             # outperforms _npu_paged_attention on all cases.
-            seq_lens = (
-                SEQ_LEN_WITH_MAX_PA_WORKSPACE
-                if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
-                else max_query_len
-            )  # type: ignore[assignment]
+            if profile_seq_lens is not None:
+                seq_lens = profile_seq_lens
+            else:
+                seq_lens = (
+                    SEQ_LEN_WITH_MAX_PA_WORKSPACE
+                    if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
+                    else max_query_len
+                )  # type: ignore[assignment]
             self.seq_lens.np[:num_reqs_padded] = seq_lens
             self.seq_lens.np[num_reqs_padded:] = 0
             self.seq_lens.copy_to_gpu()
@@ -2545,7 +2564,17 @@ class NPUModelRunner(GPUModelRunner):
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
-                    self.model.set_aux_hidden_state_layers(self.model.get_eagle3_aux_hidden_state_layers())
+                    if vllm_version_is("0.17.0"):
+                        self.model.set_aux_hidden_state_layers(self.model.get_eagle3_aux_hidden_state_layers())
+                    else:
+                        from vllm.model_executor.models.interfaces import supports_eagle3
+                        if not supports_eagle3(self.model):
+                            raise RuntimeError(
+                                "Model does not support EAGLE3 interface but "
+                                "aux_hidden_state_outputs was requested"
+                            )
+                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                        self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
@@ -2579,14 +2608,13 @@ class NPUModelRunner(GPUModelRunner):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
-        if vllm_version_is("0.17.0"):
-            # TODO: refactor the logic of attention
-            # Initialize drafter attention group initialization
-            if self.speculative_config and (
-                self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
-            ):
-                assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
-                self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
+        # TODO: refactor the logic of attention
+        # Initialize drafter attention group initialization
+        if self.speculative_config and (
+            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+        ):
+            assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
+            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
@@ -3031,11 +3059,18 @@ class NPUModelRunner(GPUModelRunner):
             max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
-            assert self.cache_config.cpu_offload_gb == 0, (
-                "Cannot re-initialize the input batch when CPU weight "
-                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                "for more details."
-            )
+            if vllm_version_is("0.17.0"):
+                assert self.cache_config.cpu_offload_gb == 0, (
+                    "Cannot re-initialize the input batch when CPU weight "
+                    "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                    "for more details."
+                )
+            else:
+                assert self.offload_config.uva.cpu_offload_gb == 0, (
+                    "Cannot re-initialize the input batch when CPU weight "
+                    "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                    "for more details."
+                )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,
