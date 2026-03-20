@@ -157,6 +157,13 @@ class CustomRowParallelOp(CustomLinearOp):
             return output
         return output, output_bias
 
+    def get_input_parallel(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.input_is_parallel:
+            return input_
+
+        split_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+        return split_input[self.tp_rank].contiguous()
+
 
 class CustomReplicatedOp(CustomLinearOp):
     def apply_impl(self, input_):
@@ -200,11 +207,7 @@ class MLPRowParallelOp(CustomRowParallelOp):
         return get_mlp_tp_group()
 
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+        input_parallel = self.get_input_parallel(input_)
 
         assert self.quant_method is not None
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.layer.bias
@@ -227,11 +230,7 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self,
         input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+        input_parallel = self.get_input_parallel(input_)
 
         # Prepare tensors for all-to-all communication
         local_batch_size = input_parallel.size(0)
@@ -303,12 +302,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         Output.shape = [(batchsize*seqlength+padsize)/TP, hiddensize]
         """
         # Handle input parallelism - split or use as-is
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            tp_rank = self.tp_rank
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[tp_rank].contiguous()
+        input_parallel = self.get_input_parallel(input_)
 
         # padding for all-to-all
         num_padding_tokens = _EXTRA_CTX.pad_size
@@ -394,11 +388,7 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
         self.hcomm_info = self.get_hcomm_info(self.comm_group.device_group)
 
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+        input_parallel = self.get_input_parallel(input_)
         """Calculate the output tensor of forward by considering
         fusing communication and computation."""
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
@@ -492,12 +482,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         Implemented multiple optimization projects for dense models, such as FlashComm and
         communication-computation fusion.
         """
-
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+        input_parallel = self.get_input_parallel(input_)
 
         assert self.quant_method is not None
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
