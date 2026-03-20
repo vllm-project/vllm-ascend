@@ -18,7 +18,7 @@ on:
       continue_on_error:
         required: false
         type: boolean
-        default: true
+        default: false
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
   UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
