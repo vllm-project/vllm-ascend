@@ -78,6 +78,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
 
+        # use_strict_rejection_sampling is not attribute of super class,
+        # so we redefine it here.
+        use_strict_rejection_sampling = False
+        if self.speculative_config is not None:
+            self.num_speculative_steps = self.speculative_config.num_speculative_tokens
+            use_strict_rejection_sampling = self.speculative_config.rejection_sample_method == "strict"
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
         self.req_states: AscendRequestState = AscendRequestState(
@@ -87,6 +93,8 @@ class NPUModelRunner(GPUModelRunner):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            model_dtype=self.dtype,
+            cache_draft_logits=not use_strict_rejection_sampling,
         )
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
