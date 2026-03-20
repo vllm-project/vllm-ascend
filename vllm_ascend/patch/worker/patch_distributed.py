@@ -111,6 +111,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
             return input_
         return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
 
+    # TODO(realliujiaxu) delete all_reduce and all_gather after vllm-ascend drop v0.17.0
     def all_gather(self, input_, dim: int = -1) -> torch.Tensor:
         if self.world_size == 1:
             return input_

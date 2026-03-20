@@ -25,6 +25,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
     init_distributed_environment,
+    tensor_model_parallel_all_gather,
 )
 from vllm.distributed.parallel_state import (
     destroy_distributed_environment,
@@ -34,6 +35,7 @@ from vllm.distributed.parallel_state import (
 from vllm.utils.system_utils import update_environment_variables
 
 import vllm_ascend.ops.register_custom_ops  # noqa
+import vllm_ascend.patch.worker.patch_distributed  # noqa # TODO: delete this after vllm-ascend drop v0.17.0
 from tests.e2e.singlecard.compile.backend import TestBackend as CompileTestBackend
 from vllm_ascend.compilation.passes.sequence_parallelism_moe import (
     SequenceParallelismMoePass,
@@ -68,7 +70,7 @@ class AllGatherRMSNormModel(nn.Module):
     ) -> torch.Tensor:
         num_tokens = num_tokens_helper.shape[0]
         z = torch.relu(x)
-        gathered = torch.ops.vllm.all_gather(z, 0, self.tp_size, self.group_name)
+        gathered = tensor_model_parallel_all_gather(z, 0)
         sliced = gathered[:num_tokens]
         rms_out = torch.ops._C_ascend.npu_add_rms_norm_bias(sliced, residual, self.norm_w, None, self.eps)
         return rms_out[0]
@@ -112,13 +114,6 @@ def _run_sequence_parallelism_moe_test(
         }
     )
 
-    init_distributed_environment(
-        world_size=world_size,
-        rank=local_rank,
-        local_rank=local_rank,
-        backend="hccl",
-    )
-
     model_config = ModelConfig(
         model="Qwen/Qwen3-VL-30B-A3B-Instruct",
         dtype=dtype,
@@ -127,6 +122,12 @@ def _run_sequence_parallelism_moe_test(
 
     try:
         with vllm.config.set_current_vllm_config(vllm_config):
+            init_distributed_environment(
+                world_size=world_size,
+                rank=local_rank,
+                local_rank=local_rank,
+                backend="hccl",
+            )
             initialize_model_parallel(tensor_model_parallel_size=world_size)
 
             if not enable_custom_op():
@@ -135,14 +136,6 @@ def _run_sequence_parallelism_moe_test(
             tp_group = get_tp_group()
             tp_size = get_tensor_model_parallel_world_size()
             group_name = tp_group.unique_name
-
-            # Force-create the TP group's HCCL communicator before
-            # SequenceParallelismMoePass.__init__ traces patterns with
-            # make_fx(tracing_mode="real"), which executes real all_gather
-            # ops and would otherwise trigger lazy communicator creation
-            # that can fail with Bind_Failed on Ascend.
-            dummy = torch.zeros(1, dtype=dtype)
-            torch.distributed.all_reduce(dummy, group=tp_group.device_group)
 
             sp_moe_pass = SequenceParallelismMoePass(vllm_config)
             backend = CompileTestBackend(custom_passes=[sp_moe_pass])
