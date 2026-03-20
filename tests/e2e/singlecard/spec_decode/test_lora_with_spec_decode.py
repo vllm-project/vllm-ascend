@@ -4,6 +4,7 @@ This script contains:
 """
 
 import random
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -45,6 +46,7 @@ SEED = 42
         )
     ],
 )
+@patch.dict("os.environ", {"VLLM_USE_MODELSCOPE": "False"})
 def test_batch_inference_correctness(
     model_setup: tuple[str, str, str, str, int],
 ):
