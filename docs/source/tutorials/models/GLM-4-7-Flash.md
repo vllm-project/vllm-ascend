@@ -16,6 +16,10 @@ git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -r requirements.txt 
  
+###环境变量
+```bash
+export VLLM_ASCEND_DISABLE_RING_MLA=1 
+ 
 
 ##启动命令
 ###单卡运行
