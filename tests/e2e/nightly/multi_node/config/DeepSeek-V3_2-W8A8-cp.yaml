@@ -11,7 +11,6 @@ env_common:
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   ASCEND_A3_EBA_ENABLE: 1
 
 
@@ -36,21 +35,19 @@ deployment:
       --no-enable-prefix-caching
       --gpu-memory-utilization 0.85
       --trust-remote-code
-      --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
       --compilation-config '{"cudagraph_capture_sizes": [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
-      --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
 
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
-      --headless
+      --host 0.0.0.0
+      --port $SERVER_PORT
       --data-parallel-size 4
-      --data-parallel-rpc-port 13399
       --data-parallel-size-local 2
-      --data-parallel-start-rank 2
-      --data-parallel-address $MASTER_IP
+      --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13399
       --tensor-parallel-size 8
       --decode-context-parallel-size 8
       --quantization ascend
@@ -62,24 +59,11 @@ deployment:
       --no-enable-prefix-caching
       --gpu-memory-utilization 0.85
       --trust-remote-code
-      --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
       --compilation-config '{"cudagraph_capture_sizes": [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48], "cudagraph_mode": "FULL_DECODE_ONLY"}' 
-      --additional-config '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       --tokenizer-mode deepseek_v32
       --reasoning-parser deepseek_v3
+
 benchmarks:
-  perf:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 512
-    max_out_len: 3000
-    batch_size: 512
-    request_rate: 11.2
-    baseline: 1253.8466 
-    threshold: 0.97
-    
   acc:
     case_type: accuracy
     dataset_path: vllm-ascend/gsm8k-lite
