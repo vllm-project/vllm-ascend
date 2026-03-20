@@ -133,7 +133,7 @@ jobs:
         if: ${{ inputs.is_pr_test }}
         shell: bash -l {0} 
         run: |
-          git clone -b v3.0-20250930-master --depth 1 https://gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
+          git clone -b v3.0-20250930-master --depth 1 https://liuhaiyang27:db2ca53b0c07b803bf70e7a5c6a45b2b@gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
           cd /vllm-workspace/vllm-ascend/benchmark
           pip install pytest asyncio pytest-asyncio
           pip install -e . -r requirements/api.txt -r requirements/extra.txt
