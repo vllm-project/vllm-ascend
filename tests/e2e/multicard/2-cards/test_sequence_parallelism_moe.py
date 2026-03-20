@@ -24,7 +24,7 @@ import queue
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generator
 
 import pytest
 import torch
@@ -434,7 +434,7 @@ def _wait_for_worker_reports(
 
 
 @pytest.fixture(scope="module")
-def sequence_parallelism_moe_workers() -> Callable[[str], None]:
+def sequence_parallelism_moe_workers() -> Generator[Callable[[str], None], None, None]:
     ctx = torch.multiprocessing.get_context("spawn")
     command_queues = [ctx.Queue() for _ in range(WORLD_SIZE)]
     result_queue = ctx.Queue()
