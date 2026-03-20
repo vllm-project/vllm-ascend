@@ -28,23 +28,15 @@ from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.utils import enable_sp
 
 
-def gdn_attention_core_310p(
+def _run_gdn_attention_core(
     layer,
+    attn_metadata: GDNAttentionMetadata,
+    forward_context,
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
 ) -> None:
-    """310P wrapper for qwen3.5 gdn core; only encapsulates existing op calls."""
-    forward_context = get_forward_context()
-    attn_metadata: AttentionMetadata = forward_context.attn_metadata
-
-    if attn_metadata is None:
-        return
-
-    assert isinstance(attn_metadata, dict)
-    attn_metadata = attn_metadata[layer.prefix]
-    assert isinstance(attn_metadata, GDNAttentionMetadata)
     has_initial_state = attn_metadata.has_initial_state
     spec_query_start_loc = attn_metadata.spec_query_start_loc
     non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
@@ -230,3 +222,67 @@ def gdn_attention_core_310p(
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
+
+
+def gdn_attention_core_impl(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    prefix: str,
+) -> None:
+    """next-new style wrapper entry for 310P GDN attention core."""
+    forward_context = get_forward_context()
+    attn_metadata: AttentionMetadata = forward_context.attn_metadata
+
+    if attn_metadata is None:
+        return
+
+    assert isinstance(attn_metadata, dict)
+    meta = attn_metadata[prefix]
+    assert isinstance(meta, GDNAttentionMetadata)
+    layer = forward_context.no_compile_layers[prefix]
+    _run_gdn_attention_core(
+        layer=layer,
+        attn_metadata=meta,
+        forward_context=forward_context,
+        mixed_qkv=mixed_qkv,
+        b=b,
+        a=a,
+        core_attn_out=core_attn_out,
+    )
+
+
+def gdn_attention_core_310p(
+    layer,
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+) -> None:
+    """Direct layer wrapper; can be called from patch_qwen3_5 when needed."""
+    forward_context = get_forward_context()
+    attn_metadata: AttentionMetadata = forward_context.attn_metadata
+
+    if attn_metadata is None:
+        return
+
+    assert isinstance(attn_metadata, dict)
+    meta = attn_metadata[layer.prefix]
+    assert isinstance(meta, GDNAttentionMetadata)
+    _run_gdn_attention_core(
+        layer=layer,
+        attn_metadata=meta,
+        forward_context=forward_context,
+        mixed_qkv=mixed_qkv,
+        b=b,
+        a=a,
+        core_attn_out=core_attn_out,
+    )
+
+
+def register_gdn_attention_ops() -> None:
+    """Register wrapper in torch.ops.vllm namespace."""
+    if not hasattr(torch.ops, "vllm"):
+        torch.ops.vllm = type("vllm", (), {})()
+    torch.ops.vllm.gdn_attention_core = gdn_attention_core_impl

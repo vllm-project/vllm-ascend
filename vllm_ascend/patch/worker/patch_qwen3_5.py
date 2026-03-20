@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.utils import enable_sp, is_310p
+from vllm_ascend.utils import enable_sp
 
 
 class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
@@ -53,19 +53,6 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         if attn_metadata is None:
             # V1 profile run
-            return
-
-        if is_310p():
-            from vllm_ascend._310p.ops.fla.gdn_attention import gdn_attention_core_310p
-
-            gdn_attention_core_310p(
-                layer=self,
-                mixed_qkv=mixed_qkv,
-                b=b,
-                a=a,
-                core_attn_out=core_attn_out,
-            )
-            maybe_save_kv_layer_to_connector("", [])
             return
 
         assert isinstance(attn_metadata, dict)
