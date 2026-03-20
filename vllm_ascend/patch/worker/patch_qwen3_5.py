@@ -56,14 +56,14 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             return
 
         if is_310p():
-            from vllm_ascend._310p.ops.fla.gdn_attention import gdn_attention_core_impl
+            from vllm_ascend._310p.ops.fla.gdn_attention import gdn_attention_core_310p
 
-            gdn_attention_core_impl(
+            gdn_attention_core_310p(
+                layer=self,
                 mixed_qkv=mixed_qkv,
                 b=b,
                 a=a,
                 core_attn_out=core_attn_out,
-                prefix=self.prefix,
             )
             maybe_save_kv_layer_to_connector("", [])
             return

@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,37 +13,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
+# mypy: ignore-errors
 
 import torch
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend._310p.ops.fla.delta_rule import (
-    chunk_gated_delta_rule_pytorch,
-    fused_recurrent_gated_delta_rule_pytorch,
-    fused_sigmoid_gating_delta_rule_update_pytorch,
-)
-from vllm_ascend._310p.ops.fla.causal_conv1d import (
-    causal_conv1d_fn_pytorch,
-    causal_conv1d_update_pytorch,
-)
-from vllm_ascend._310p.ops.fla.gdn_gating import fused_gdn_gating_pytorch
+from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
+from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.utils import enable_sp
 
 
-def gdn_attention_core_impl(
+def gdn_attention_core_310p(
+    layer,
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
-    prefix: str,
-):
-    """
-    PyTorch implementation of GDN attention core.
-    This is called by the 310P patch fallback path.
-    """
+) -> None:
+    """310P wrapper for qwen3.5 gdn core; only encapsulates existing op calls."""
     forward_context = get_forward_context()
     attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
@@ -50,9 +43,8 @@ def gdn_attention_core_impl(
         return
 
     assert isinstance(attn_metadata, dict)
-    attn_metadata = attn_metadata[prefix]
+    attn_metadata = attn_metadata[layer.prefix]
     assert isinstance(attn_metadata, GDNAttentionMetadata)
-
     has_initial_state = attn_metadata.has_initial_state
     spec_query_start_loc = attn_metadata.spec_query_start_loc
     non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
@@ -61,49 +53,18 @@ def gdn_attention_core_impl(
     non_spec_token_indx = attn_metadata.non_spec_token_indx
     spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor
     non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
-
+    self_kv_cache = layer.kv_cache[forward_context.virtual_engine]
+    conv_state = self_kv_cache[0].transpose(-1, -2)
+    ssm_state = self_kv_cache[1]
     num_actual_tokens = attn_metadata.num_actual_tokens
     num_accepted_tokens = attn_metadata.num_accepted_tokens
 
-    mixed_qkv = mixed_qkv[:num_actual_tokens]
-    b = b[:num_actual_tokens]
-    a = a[:num_actual_tokens]
+    if not enable_sp():
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
 
-    # Get layer instance from static forward context.
-    # vLLM ForwardContext does not expose a `model` attribute.
-    try:
-        layer = forward_context.no_compile_layers[prefix]
-        conv1d = layer.conv1d
-        conv_dim = conv1d.weight.size(0)
-        self_kv_cache = layer.kv_cache[forward_context.virtual_engine]
-        conv_state = self_kv_cache[0]
-        # Accept both cache layouts:
-        # 1) [num_blocks, state_len, dim] -> transpose to [num_blocks, dim, state_len]
-        # 2) [num_blocks, dim, state_len] -> keep as is
-        if conv_state.shape[-2] == conv_dim:
-            pass
-        elif conv_state.shape[-1] == conv_dim:
-            conv_state = conv_state.transpose(-1, -2)
-        else:
-            raise RuntimeError(
-                "Unexpected conv_state layout for 310P GDN attention: "
-                f"conv_state.shape={tuple(conv_state.shape)}, conv_dim={conv_dim}"
-            )
-        ssm_state = self_kv_cache[1]
-        A_log = layer.A_log
-        dt_bias = layer.dt_bias
-        activation = layer.activation
-    except (AttributeError, KeyError, TypeError) as exc:
-        raise NotImplementedError(
-            "GDN attention core implementation for 310P requires "
-            "proper layer instance access. Please ensure that the layer "
-            "is registered in static_forward_context and forward context "
-            "is correctly initialized."
-        ) from exc
-
-    # 1. Convolution sequence transformation
-    conv_weights = conv1d.weight.view(conv1d.weight.size(0), conv1d.weight.size(2))
-
+    conv_weights = layer.conv1d.weight.view(layer.conv1d.weight.size(0), layer.conv1d.weight.size(2))
     if spec_sequence_masks is not None:
         if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
             mixed_qkv_spec = mixed_qkv
@@ -115,14 +76,13 @@ def gdn_attention_core_impl(
         mixed_qkv_spec = None
         mixed_qkv_non_spec = mixed_qkv
 
-    # 1.1: Process multi-query part
     if spec_sequence_masks is not None:
-        mixed_qkv_spec = causal_conv1d_update_pytorch(
+        mixed_qkv_spec = causal_conv1d_update(
             mixed_qkv_spec,
             conv_state,
             conv_weights,
-            conv1d.bias,
-            activation=activation,
+            layer.conv1d.bias,
+            layer.activation,
             conv_state_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes],
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc=spec_query_start_loc,
@@ -130,40 +90,38 @@ def gdn_attention_core_impl(
             validate_data=False,
         )
 
-    # 1.2: Process remaining part
     if attn_metadata.num_prefills > 0:
         if mixed_qkv_non_spec is not None:
-            mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-            mixed_qkv_non_spec = causal_conv1d_fn_pytorch(
-                mixed_qkv_non_spec_T,
-                conv_weights,
-                conv1d.bias,
-                activation=activation,
-                conv_states=conv_state,
+            conv_weights_t = conv_weights.transpose(0, 1)
+            mixed_qkv_non_spec = torch.ops._C_ascend.causal_conv1d_fn(
+                mixed_qkv_non_spec,
+                conv_weights_t,
+                layer.conv1d.bias,
+                activation=layer.activation,
+                conv_state=self_kv_cache[0],
                 has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata,
-            ).transpose(0, 1)
+                non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+                non_spec_query_start_loc=non_spec_query_start_loc,
+                pad_slot_id=PAD_SLOT_ID,
+            )
     elif attn_metadata.num_decodes > 0:
-        mixed_qkv_non_spec = causal_conv1d_update_pytorch(
+        mixed_qkv_non_spec = causal_conv1d_update(
             mixed_qkv_non_spec,
             conv_state,
             conv_weights,
-            conv1d.bias,
-            activation=activation,
+            layer.conv1d.bias,
+            layer.activation,
             conv_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
             validate_data=True,
         )
     else:
         mixed_qkv_non_spec = None
 
-    # Use the layer's native tensor layout logic from qwen3-next implementation.
     query_spec, key_spec, value_spec = layer.rearrange_mixed_qkv(mixed_qkv_spec)
     query_non_spec, key_non_spec, value_non_spec = layer.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
     if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
-        g, beta = fused_gdn_gating_pytorch(A_log, a, b, dt_bias)
+        g, beta = fused_gdn_gating_patch(layer.A_log, a, b, layer.dt_bias)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 g_spec = g
@@ -181,11 +139,8 @@ def gdn_attention_core_impl(
             g_non_spec = g
             beta_non_spec = beta
 
-        # 2. Recurrent attention
-
-        # 2.1: Process multi-query part
         if spec_sequence_masks is not None:
-            core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule_pytorch(
+            core_attn_out_spec, _ = fused_recurrent_gated_delta_rule(
                 q=query_spec,
                 k=key_spec,
                 v=value_spec,
@@ -199,16 +154,12 @@ def gdn_attention_core_impl(
                 use_qk_l2norm_in_kernel=True,
             )
         else:
-            core_attn_out_spec, last_recurrent_state = None, None
+            core_attn_out_spec = None
 
-        # 2.2: Process remaining part
         if attn_metadata.num_prefills > 0:
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
             initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = chunk_gated_delta_rule_pytorch(
+            core_attn_out_non_spec, last_recurrent_state = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
@@ -220,10 +171,9 @@ def gdn_attention_core_impl(
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-            # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
         elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = fused_recurrent_gated_delta_rule_pytorch(
+            core_attn_out_non_spec, _ = fused_recurrent_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
@@ -236,12 +186,11 @@ def gdn_attention_core_impl(
                 use_qk_l2norm_in_kernel=True,
             )
         else:
-            core_attn_out_non_spec, last_recurrent_state = None, None
-
+            core_attn_out_non_spec = None
     elif attn_metadata.num_decodes > 0:
-        core_attn_out_non_spec = fused_sigmoid_gating_delta_rule_update_pytorch(
-            A_log=A_log.contiguous(),
-            dt_bias=dt_bias.contiguous(),
+        core_attn_out_non_spec = fused_sigmoid_gating_delta_rule_update(
+            A_log=layer.A_log.contiguous(),
+            dt_bias=layer.dt_bias.contiguous(),
             q=query_non_spec.contiguous(),
             k=key_non_spec.contiguous(),
             v=value_non_spec.contiguous(),
@@ -254,8 +203,11 @@ def gdn_attention_core_impl(
             softplus_beta=1.0,
             softplus_threshold=20.0,
         )
+        core_attn_out_spec = None
+    else:
+        core_attn_out_spec = None
+        core_attn_out_non_spec = None
 
-    # 3. Merge core attention output
     if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
         merged_out = torch.empty(
             (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
@@ -264,16 +216,17 @@ def gdn_attention_core_impl(
         )
         merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
         merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-        core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+        if not enable_sp():
+            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+        else:
+            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)[:num_actual_tokens]
     elif spec_sequence_masks is not None:
-        core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+        if not enable_sp():
+            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+        else:
+            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)[:num_actual_tokens]
     else:
-        core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-
-
-def register_gdn_attention_ops():
-    """Register GDN attention custom ops."""
-    if not hasattr(torch.ops, "vllm"):
-        torch.ops.vllm = type("vllm", (), {})()
-
-    torch.ops.vllm.gdn_attention_core = gdn_attention_core_impl
+        if not enable_sp():
+            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+        else:
+            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
