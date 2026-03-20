@@ -8,11 +8,7 @@ Welcome to the tutorial on optimizing Qwen Dense models in the vLLM-Ascend envir
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, accuracy and performance evaluation.
 
-The Qwen3 Dense models is first supported in [v0.8.4rc2](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---20250429)
-
-## **Node**
-
-This example requires version **v0.11.0rc2**. Earlier versions may lack certain features.
+The Qwen3 Dense models is first supported in [v0.8.4rc2](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/release_notes.md#v084rc2---20250429). This example requires version **v0.11.0rc2**. Earlier versions may lack certain features.
 
 ## Supported Features
 
@@ -115,12 +111,13 @@ The specific example scenario is as follows:
 
 ### Run docker container
 
-#### **Node**
+:::{note}
 
-- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+- vllm-ascend/Qwen3-32B-W8A8 is the default model path, replace this with your actual path.
 - v0.11.0rc2-a3 is image tag, replace this with your actual tag.
 - replace this with your actual port: '-p 8113:8113'.
 - replace this with your actual card: '--device /dev/davinci0'.
+:::
 
 ```{code-block} bash
    :substitutions:
@@ -142,7 +139,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /model/Qwen3-32B-W8A8:/model/Qwen3-32B-W8A8 \
+-v /root/.cache:/root/.cache \
 -p 8113:8113 \
 -it $IMAGE bash
 ```
@@ -174,7 +171,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 # Enable FlashComm_v1 optimization when tensor parallel is enabled.
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /model/Qwen3-32B-W8A8 \
+vllm serve vllm-ascend/Qwen3-32B-W8A8 \
   --served-model-name qwen3 \
   --trust-remote-code \
   --async-scheduling \
@@ -190,15 +187,16 @@ vllm serve /model/Qwen3-32B-W8A8 \
   --gpu-memory-utilization 0.9
 ```
 
-#### **Node**
+:::{note}
 
-- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+- vllm-ascend/Qwen3-32B-W8A8 is the default model path, replace this with your actual path.
 
 - If the model is not a quantized model, remove the `--quantization ascend` parameter.
 
 - **[Optional]** `--additional-config '{"pa_shape_list":[48,64,72,80]}'`: `pa_shape_list` specifies the batch sizes where you want to switch to the PA operator. This is a temporary tuning knob. Currently, the attention operator dispatch defaults to the FIA operator. In some batch-size (concurrency) settings, FIA may have suboptimal performance. By setting `pa_shape_list`, when the runtime batch size matches one of the listed values, vLLM-Ascend will replace FIA with the PA operator to prevent performance degradation. In the future, FIA will be optimized for these scenarios and this parameter will be removed.
 
 - If the ultimate performance is desired, the cudagraph_capture_sizes parameter can be enabled, reference: [key-optimization-points](./Qwen3-Dense.md#key-optimization-points)、[optimization-highlights](./Qwen3-Dense.md#optimization-highlights). Here is an example of batchsize of 72: `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60,64,72,76]}'`.
+:::
 
 Once your server is started, you can query the model with input prompts
 
@@ -219,11 +217,12 @@ curl http://localhost:8113/v1/chat/completions -H "Content-Type: application/jso
 
 Run the following script to execute offline inference on multi-NPU.
 
-#### **Node**
+:::{note}
 
-- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+- vllm-ascend/Qwen3-32B-W8A8 is the default model path, replace this with your actual path.
 
 - If the model is not a quantized model,remove the `quantization="ascend"` parameter.
+:::
 
 ```python
 import gc
@@ -244,7 +243,7 @@ prompts = [
     "The future of AI is",
 ]
 sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
-llm = LLM(model="/model/Qwen3-32B-W8A8",
+llm = LLM(model="vllm-ascend/Qwen3-32B-W8A8",
           tensor_parallel_size=4,
           trust_remote_code=True,
           distributed_executor_backend="mp",
@@ -299,12 +298,13 @@ There are three `vllm bench` subcommands:
 
 Take the `serve` as an example. Run the code as follows.
 
-#### **Node**
+:::{note}
 
-- /model/Qwen3-32B-W8A8 is the model path, replace this with your actual path.
+- vllm-ascend/Qwen3-32B-W8A8 is the default model path, replace this with your actual path.
+:::
 
 ```shell
-vllm bench serve --model /model/Qwen3-32B-W8A8 --served-model-name qwen3 --port 8113 --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model vllm-ascend/Qwen3-32B-W8A8 --served-model-name qwen3 --port 8113 --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
