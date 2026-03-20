@@ -23,10 +23,10 @@ def _reload_patch_qwen3_5(monkeypatch: pytest.MonkeyPatch, *, enable_fused: bool
 def _make_dummy_fused_layer():
     hidden_size = 5
     key_dim = 4
-    value_dim = 6
     num_v_heads = 6
     tp_size = 2
     head_v_dim = 2
+    value_dim = num_v_heads * head_v_dim
     output_size = key_dim * 2 // tp_size + value_dim * 2 // tp_size + num_v_heads * 2 // tp_size
     weight = torch.arange(output_size * hidden_size, dtype=torch.float32).reshape(output_size, hidden_size)
     return SimpleNamespace(
@@ -102,4 +102,3 @@ def test_qwen35_packed_modules_mapping_switches_to_fused_in_proj(monkeypatch: py
     ]
     assert "in_proj_qkvz" not in mapping
     assert "in_proj_ba" not in mapping
-
