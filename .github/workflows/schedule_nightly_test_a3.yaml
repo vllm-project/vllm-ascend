@@ -282,6 +282,9 @@ jobs:
           - name: qwen3-next-80b-a3b-instruct-w8a8
             os: linux-aarch64-a3-4
             config_file_path: Qwen3-Next-80B-A3B-Instruct-W8A8.yaml
+          - name: qwen3-next-80b-a3b-instruct
+            os: linux-aarch64-a3-4
+            config_file_path: Qwen3-Next-80B-A3B-Instruct.yaml
           - name: qwq-32b
             os: linux-aarch64-a3-4
             config_file_path: QwQ-32B.yaml

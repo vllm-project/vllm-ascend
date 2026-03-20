@@ -31,8 +31,8 @@ test_cases:
       - "--trust-remote-code"
       - "--gpu-memory-utilization"
       - "0.65"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes": [32]}'
+      - "--compilation_config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
       acc:
         case_type: accuracy
@@ -41,5 +41,5 @@ test_cases:
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
         max_out_len: 32768
         batch_size: 32
-        baseline: 95
-        threshold: 5
+        baseline: 96
+        threshold: 3

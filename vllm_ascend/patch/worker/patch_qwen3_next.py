@@ -22,6 +22,7 @@ from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
 from vllm.triton_utils import triton
@@ -306,5 +307,20 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
 
 
+_original_attention_init = Qwen3NextGatedDeltaNet.__init__
+
+
+def _patched_attention_init(self, *args, **kwargs) -> None:
+    _original_attention_init(self, *args, **kwargs)
+    self.in_proj_ba = ColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_size=self.num_v_heads * 2,
+            bias=False,
+            quant_config=kwargs.get('quant_config'),
+            prefix=f"{kwargs.get('prefix')}.in_proj_ba",
+        )
+
 Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
 Qwen3NextGatedDeltaNet._forward_core = AscendQwen3Next_GatedDeltaNet._forward_core
+if vllm_version_is("0.17.0"):
+    Qwen3NextGatedDeltaNet.__init__ = _patched_attention_init
