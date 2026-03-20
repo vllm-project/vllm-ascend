@@ -125,7 +125,7 @@ class MoECommMethod(ABC):
         w2_offset: torch.Tensor | None = None,
         # For load balance
         log2phy: torch.Tensor = None,
-        need_trans: bool = False,
+        need_trans: bool = True,
         dynamic_eplb: bool = False,
         mc2_mask: torch.Tensor = None,
         pertoken_scale: torch.Tensor | None = None,
