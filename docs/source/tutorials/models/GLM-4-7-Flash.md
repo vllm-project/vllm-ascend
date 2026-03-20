@@ -16,3 +16,38 @@ git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -r requirements.txt 
  
+
+##启动命令
+###单卡运行
+```bash
+python -m vllm.entrypoints.api_server \
+  --model zai-org/GLM-4-7-Flash \
+  --device npu \
+  --trust-remote-code \
+  --max-model-len 8192 \
+  --dtype float16 
+ 
+###多卡张量并行
+```bash
+python -m vllm.entrypoints.api_server \
+  --model zai-org/GLM-4-7-Flash \
+  --device npu \
+  --trust-remote-code \
+  --max-model-len 8192 \
+  --tensor-parallel-size 2 
+ 
+##推理示例
+```bash
+curl http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "zai-org/GLM-4-7-Flash",
+    "prompt": "Hello, how are you?",
+    "max_tokens": 256,
+    "temperature": 0.7
+  }' 
+ 
+
+
+
+
