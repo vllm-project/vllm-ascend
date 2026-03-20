@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
-from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
@@ -31,7 +31,6 @@ from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -40,6 +39,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendPrefillContextParallelMetadata
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor
 
@@ -197,11 +197,11 @@ def _get_layer_kv_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCac
 
 
 def _get_attention_kv_cache_dims(layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
-    if isinstance(kv_cache_spec, MLAAttentionSpec):
+    if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
         attn_layers = get_layers_from_vllm_config(get_current_vllm_config(), AttentionLayerBase, [layer_name])
         attn_layer = attn_layers[layer_name]
         if not isinstance(attn_layer, MLAAttention):
-            raise TypeError(f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}.")
+            raise TypeError(f"Expected AscendMLAAttention layer for {layer_name}, got {type(attn_layer).__name__}.")
         return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
 
     head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
@@ -357,7 +357,7 @@ def _reshape_kv_cache(
                     kv_cache_spec.head_size,
                     cache_dtype,
                 )
-                if not isinstance(kv_cache_spec, MLAAttentionSpec):
+                if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
                     k_shape = kv_cache_shape[1:]
                     if hasattr(kv_cache_spec, "head_size_v"):
                         v_shape = (*kv_cache_shape[1:-1], kv_cache_spec.head_size_v)
@@ -436,7 +436,7 @@ def _reshape_kv_cache_v2(
                 cache_dtype,
             )
 
-            if not isinstance(kv_cache_spec, MLAAttentionSpec):
+            if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
                 k_shape = kv_cache_shape[1:]
                 if hasattr(kv_cache_spec, "head_size_v"):
                     v_shape = (*kv_cache_shape[1:-1], kv_cache_spec.head_size_v)
