@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import MagicMock, patch
 
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -103,3 +104,23 @@ class TestAscendModelSlimConfig310(TestBase):
             method = self.ascend_config.get_quant_method(fused_moe_layer, ".moe")
             self.assertIs(method, fused_moe_method.return_value)
             fused_moe_method.assert_called_once_with(mock_scheme, fused_moe_layer.moe_config)
+
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_QWEN35_FUSED_IN_PROJ": "1"})
+    def test_get_quant_method_uses_fused_qwen35_mapping(self):
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "qwen3_5"
+        linear_layer = MagicMock(spec=LinearBase)
+        mock_scheme = MagicMock()
+
+        with (
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
+            patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
+            patch("vllm_ascend._310p.quantization.modelslim_config.AscendLinearMethod", return_value=MagicMock()),
+        ):
+            self.ascend_config.get_quant_method(linear_layer, "model.layers.0.linear_attn.in_proj")
+
+        self.assertEqual(
+            self.ascend_config.packed_modules_mapping["in_proj"],
+            ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
+        )

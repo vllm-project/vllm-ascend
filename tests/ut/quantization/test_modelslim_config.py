@@ -12,6 +12,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    get_packed_modules_mapping,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
@@ -256,3 +257,13 @@ class TestAscendModelSlimConfig(TestBase):
 
     def test_get_scaled_act_names(self):
         self.assertEqual(self.ascend_config.get_scaled_act_names(), [])
+
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_QWEN35_FUSED_IN_PROJ": "1"})
+    def test_get_packed_modules_mapping_qwen35_fused_in_proj(self):
+        mapping = get_packed_modules_mapping("qwen3_5")
+        self.assertEqual(
+            mapping["in_proj"],
+            ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
+        )
+        self.assertNotIn("in_proj_qkvz", mapping)
+        self.assertNotIn("in_proj_ba", mapping)

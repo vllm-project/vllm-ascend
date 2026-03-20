@@ -36,6 +36,7 @@ from vllm_ascend._310p.quantization.methods.registry import (
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod, AscendLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     AscendModelSlimConfig,
+    get_packed_modules_mapping,
     get_quant_type_for_layer,
     packed_modules_model_mapping,
 )
@@ -92,7 +93,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
         model_type = vllm_config.model_config.hf_config.model_type
 
         if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping[model_type]
+            self.packed_modules_mapping = get_packed_modules_mapping(model_type)
 
         prefix = self.quant_prefix_mapper(model_type, prefix)
         if prefix.startswith("language_model"):
