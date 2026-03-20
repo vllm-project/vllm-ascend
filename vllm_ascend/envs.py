@@ -107,6 +107,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # Communication algorithm for MC2 dispatch/combine.
+    # Supported values: "" (default, no comm_alg set), "fullmesh_v2".
+    # When set to "fullmesh_v2", input tensors are padded to ensure
+    # consistent batch sizes across all EP ranks.
+    "VLLM_ASCEND_MC2_COMM_ALG": lambda: os.getenv("VLLM_ASCEND_MC2_COMM_ALG", ""),
 }
 
 # end-env-vars-definition

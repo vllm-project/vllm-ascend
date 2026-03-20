@@ -112,6 +112,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.need_expert_scale = is_hierarchical_communication_enabled()
         self.with_quant = False
 
+        from vllm_ascend import envs
+        self.comm_alg = envs.VLLM_ASCEND_MC2_COMM_ALG
+        self.use_fullmesh_v2 = self.comm_alg == "fullmesh_v2"
+
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
@@ -128,6 +132,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
+        self.per_rank_bs = num_tokens_per_tp_rank
 
     def get_dispatch_mc2_kwargs(
         self,
@@ -162,6 +167,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
+        if self.comm_alg:
+            kwargs_mc2["comm_alg"] = self.comm_alg
 
         stage1_kwargs = {
             "scales": None,
@@ -193,6 +200,22 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
 
+    def _pad_for_fullmesh_v2(self, hidden_states, topk_weights, topk_ids):
+        """Pad inputs so each rank has exactly per_rank_bs tokens,
+        as required by fullmesh_v2 comm algorithm."""
+        actual_bs = hidden_states.shape[0]
+        if actual_bs >= self.per_rank_bs:
+            return hidden_states, topk_weights, topk_ids, actual_bs
+        pad_size = self.per_rank_bs - actual_bs
+        hidden_states = torch.nn.functional.pad(
+            hidden_states, (0, 0, 0, pad_size), value=0.0
+        )
+        topk_ids = torch.nn.functional.pad(topk_ids, (0, 0, 0, pad_size), value=0)
+        topk_weights = torch.nn.functional.pad(
+            topk_weights, (0, 0, 0, pad_size), value=0.0
+        )
+        return hidden_states, topk_weights, topk_ids, actual_bs
+
     def token_dispatch(
         self,
         hidden_states: torch.Tensor,
@@ -208,6 +231,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         **kwargs,
     ):
         self.with_quant = with_quant
+        self._actual_bs = hidden_states.shape[0]
+
+        if self.use_fullmesh_v2:
+            hidden_states, topk_weights, topk_ids, self._actual_bs = (
+                self._pad_for_fullmesh_v2(hidden_states, topk_weights, topk_ids)
+            )
+
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(
             hidden_states, topk_weights, topk_ids, expert_map, mc2_mask, global_redundant_expert_num, **kwargs
         )
@@ -266,6 +296,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "moe_expert_num": self.moe_expert_num,
             "global_bs": self.global_bs,
         }
+        if self.comm_alg:
+            kwargs_mc2["comm_alg"] = self.comm_alg
 
         if self.with_quant:
             tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
@@ -305,6 +337,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             if self.enable_dispatch_v2
             else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
         )
+
+        # When fullmesh_v2 is used, the output is padded; slice back to original size.
+        if self.use_fullmesh_v2 and combined_output.shape[0] > self._actual_bs:
+            combined_output = combined_output[: self._actual_bs]
 
         return TokenCombineResult(
             routed_out=combined_output,
