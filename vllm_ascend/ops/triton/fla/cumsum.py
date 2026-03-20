@@ -12,8 +12,6 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_indices
-
 
 @triton.heuristics(
     {"HAS_SCALE": lambda args: args["scale"] is not None, "IS_VARLEN": lambda args: args["cu_seqlens"] is not None}
@@ -24,55 +22,44 @@ def chunk_local_cumsum_scalar_kernel(
     o,
     scale,
     cu_seqlens,
-    chunk_indices,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
-    BLOCK_T: tl.constexpr,
+    N_CHUNKS: tl.constexpr,
     REVERSE: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
     CHUNK_SIZE: tl.constexpr = 64,
 ):
-    i_block, i_b = tl.program_id(0), tl.program_id(1)
-    N_CHUNKS: tl.constexpr = BLOCK_T // CHUNK_SIZE
+    i_prog = tl.program_id(0)
 
     if IS_VARLEN:
-        i_s, i_block = (
-            tl.load(chunk_indices + i_block * 2).to(tl.int32),
-            tl.load(chunk_indices + i_block * 2 + 1).to(tl.int32),
-        )
-        bos, eos = tl.load(cu_seqlens + i_s).to(tl.int32), tl.load(cu_seqlens + i_s + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_prog).to(tl.int32)
+        eos = tl.load(cu_seqlens + i_prog + 1).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos = i_prog * T
 
     if HEAD_FIRST:
-        ptr_s = tl.make_block_ptr(s + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
-        ptr_o = tl.make_block_ptr(o + bos * H, (H, T), (T, 1), (0, i_block * BLOCK_T), (H, BLOCK_T), (1, 0))
-        b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32)
-        b_s = tl.reshape(b_s, (H, N_CHUNKS, CHUNK_SIZE))
-        b_s = tl.trans(b_s, (2, 0, 1))
-        b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
-        if HAS_SCALE:
-            b_o *= scale
-        b_o = tl.trans(b_o, (2, 0, 1))
-        b_o = tl.reshape(b_o, (H, BLOCK_T))
+        for i_chunk in range(N_CHUNKS):
+            t_offset = i_chunk * CHUNK_SIZE
+            ptr_s = tl.make_block_ptr(s + bos * H, (H, T), (T, 1), (0, t_offset), (H, CHUNK_SIZE), (1, 0))
+            ptr_o = tl.make_block_ptr(o + bos * H, (H, T), (T, 1), (0, t_offset), (H, CHUNK_SIZE), (1, 0))
+            b_s = tl.load(ptr_s, boundary_check=(1,)).to(tl.float32)
+            b_o = tl.cumsum(b_s, axis=1, reverse=REVERSE)
+            if HAS_SCALE:
+                b_o *= scale
+            tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(1,))
     else:
-        ptr_s = tl.make_block_ptr(s + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
-        ptr_o = tl.make_block_ptr(o + bos * H, (T, H), (H, 1), (i_block * BLOCK_T, 0), (BLOCK_T, H), (1, 0))
-        b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32)
-        b_s = tl.reshape(b_s, (N_CHUNKS, CHUNK_SIZE, H))
-        b_s = tl.trans(b_s, (1, 0, 2))
-        b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
-        if HAS_SCALE:
-            b_o *= scale
-        b_o = tl.trans(b_o, (1, 0, 2))
-        b_o = tl.reshape(b_o, (BLOCK_T, H))
-
-    tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(0,))
-    return
+        for i_chunk in range(N_CHUNKS):
+            t_offset = i_chunk * CHUNK_SIZE
+            ptr_s = tl.make_block_ptr(s + bos * H, (T, H), (H, 1), (t_offset, 0), (CHUNK_SIZE, H), (1, 0))
+            ptr_o = tl.make_block_ptr(o + bos * H, (T, H), (H, 1), (t_offset, 0), (CHUNK_SIZE, H), (1, 0))
+            b_s = tl.load(ptr_s, boundary_check=(0,)).to(tl.float32)
+            b_o = tl.cumsum(b_s, axis=0, reverse=REVERSE)
+            if HAS_SCALE:
+                b_o *= scale
+            tl.store(ptr_o, b_o.to(s.dtype.element_ty), boundary_check=(0,))
 
 
 def chunk_local_cumsum_scalar(
@@ -89,26 +76,29 @@ def chunk_local_cumsum_scalar(
     else:
         B, T, H = g.shape
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
-    OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * chunk_size))
-    block_indices = prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE) if cu_seqlens is not None else None
-    num_blocks = len(block_indices) if cu_seqlens is not None else triton.cdiv(T, OPTIM_BLOCK_SIZE)
+
+    N_CHUNKS = triton.cdiv(T, chunk_size)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
-    grid = (num_blocks, B)
+
+    if cu_seqlens is not None:
+        num_seqs = cu_seqlens.shape[0] - 1
+        grid = (num_seqs,)
+    else:
+        grid = (B,)
+
     chunk_local_cumsum_scalar_kernel[grid](
         s=g_org,
         o=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_indices=block_indices,
         T=T,
-        B=B,
         H=H,
-        BLOCK_T=OPTIM_BLOCK_SIZE,
+        N_CHUNKS=N_CHUNKS,
         CHUNK_SIZE=chunk_size,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
-        num_warps=8,
-        num_stages=3,
+        num_warps=1,
+        num_stages=1,
     )
     return g
 

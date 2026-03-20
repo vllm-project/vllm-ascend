@@ -115,8 +115,6 @@ def recompute_w_u_fwd(
 
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
-    beta = beta.transpose(1, 2).contiguous()
-    g_cumsum = g_cumsum.transpose(1, 2).contiguous()
     recompute_w_u_fwd_kernel[(NT, B)](
         k=k,
         v=v,
