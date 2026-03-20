@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 import weakref
 from collections import deque
 from collections.abc import Callable
@@ -20,8 +19,6 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
     set_multiprocessing_worker_envs,
 )
-
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendMultiprocExecutor(MultiprocExecutor):
@@ -69,7 +66,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         success = False
         try:
             global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
-            
+
             # When using fork, keep track of socket file descriptors that are
             # inherited by the worker, so that we can close them in subsequent
             # workers
@@ -202,13 +199,13 @@ class AscendWorkerProc(WorkerProc):
             daemon=False,
         )
 
-            proc.start()
-            # Close child ends of pipes here in the parent
-            ready_writer.close()
-            death_reader.close()
-            # Keep death_writer open in parent - when parent exits,
-            # death_reader in child will get EOFError
-            return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
+        proc.start()
+        # Close child ends of pipes here in the parent
+        ready_writer.close()
+        death_reader.close()
+        # Keep death_writer open in parent - when parent exits,
+        # death_reader in child will get EOFError
+        return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
 
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor

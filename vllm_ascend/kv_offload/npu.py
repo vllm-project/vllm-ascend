@@ -12,7 +12,6 @@ from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
-from vllm_ascend.utils import vllm_version_is
 
 
 class NPUOffloadingSpec(OffloadingSpec):

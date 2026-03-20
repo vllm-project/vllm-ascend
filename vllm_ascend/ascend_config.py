@@ -161,12 +161,10 @@ class AscendConfig:
 
     @staticmethod
     def _get_compile_ranges(compilation_config):
-        from vllm_ascend.utils import vllm_version_is
         return compilation_config.compile_ranges_endpoints
 
     @staticmethod
     def _set_compile_ranges(compilation_config, value):
-        from vllm_ascend.utils import vllm_version_is
         compilation_config.compile_ranges_endpoints = value
 
     def update_compile_ranges_split_points(self):

@@ -32,7 +32,7 @@ from vllm.config import VllmConfig
 from vllm.config.utils import Range
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
-from vllm_ascend.utils import COMPILATION_PASS_KEY, vllm_version_is
+from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 logger = logging.getLogger(__name__)
 
