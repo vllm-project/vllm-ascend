@@ -30,11 +30,9 @@ from vllm.model_executor.layers.activation import SiluAndMul
 
 from vllm_ascend.ops.fused_moe.experts_selector import check_npu_moe_gating_top_k, select_experts
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_request_builders import (
+from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     build_fused_experts_input,
     build_mlp_compute_input,
-)
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEQuantParams,
     MoERoutingParams,
     MoETokenDispatchInput,
@@ -153,7 +151,7 @@ def test_token_dispatcher_with_all_gather(
     sorted_hidden_states = token_dispatch_output.hidden_states
     group_list = token_dispatch_output.group_list
     group_list_type = token_dispatch_output.group_list_type
-    routing_metadata = token_dispatch_output.routing_metadata
+    combine_metadata = token_dispatch_output.combine_metadata
 
     expert_output = apply_mlp(
         hidden_states=sorted_hidden_states,
@@ -164,12 +162,12 @@ def test_token_dispatcher_with_all_gather(
     )
 
     combined_output = dispatcher.token_combine(
-        hidden_states=expert_output, routing_metadata=routing_metadata, bias=None
+        hidden_states=expert_output, combine_metadata=combine_metadata, bias=None
     )
 
     torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map)
 
-    torch.testing.assert_close(combined_output.routed_out, torch_output, atol=4e-2, rtol=1)
+    torch.testing.assert_close(combined_output, torch_output, atol=4e-2, rtol=1)
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
@@ -233,7 +231,7 @@ def test_token_dispatcher_with_all_gather_quant(
             )
         )
 
-        routing_metadata = token_dispatch_output.routing_metadata
+        combine_metadata = token_dispatch_output.combine_metadata
 
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=build_fused_experts_input(
@@ -253,9 +251,9 @@ def test_token_dispatcher_with_all_gather_quant(
         )
         expert_output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
         combined_output = dispatcher.token_combine(
-            hidden_states=expert_output, routing_metadata=routing_metadata, bias=None
+            hidden_states=expert_output, combine_metadata=combine_metadata, bias=None
         )
-        assert combined_output.routed_out.shape == (m, k)
+        assert combined_output.shape == (m, k)
         gc.collect()
         torch.npu.empty_cache()
         torch.npu.reset_peak_memory_stats()

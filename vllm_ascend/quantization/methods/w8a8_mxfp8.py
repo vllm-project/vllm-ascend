@@ -31,10 +31,7 @@ from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.moe_request_builders import build_fused_experts_input
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEMxfpParams,
-)
+from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
@@ -220,13 +217,11 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 log2phy=log2phy,
                 pertoken_scale=pertoken_scale,
                 activation=activation,
-                mxfp=MoEMxfpParams(
-                    act_quant_type=torch.float8_e4m3fn,
-                    weight_quant_type=torch.float8_e4m3fn,
-                    scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                    per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                    use_bf16=(x.dtype == torch.bfloat16),
-                ),
+                mxfp_act_quant_type=torch.float8_e4m3fn,
+                mxfp_weight_quant_type=torch.float8_e4m3fn,
+                mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_use_bf16=(x.dtype == torch.bfloat16),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
             )

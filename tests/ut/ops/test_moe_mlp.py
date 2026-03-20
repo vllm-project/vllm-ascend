@@ -7,10 +7,10 @@ import torch
 from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
-    MoEMxfpParams,
     MoEQuantParams,
     MoEWeights,
 )
+from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 

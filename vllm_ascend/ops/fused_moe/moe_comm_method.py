@@ -24,14 +24,12 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_request_builders import (
-    build_mlp_compute_input,
-    build_token_dispatch_input,
-)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
     MoEMlpComputeInput,
     MoEPrepareOutput,
+    build_mlp_compute_input,
+    build_token_dispatch_input,
 )
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
@@ -146,13 +144,13 @@ class MoECommMethod(ABC):
         mlp_output = self._apply_mlp(mlp_compute_input)
 
         before_combine_evt = torch.npu.current_stream().record_event()
-        token_combine_output = self.token_dispatcher.token_combine(
+        routed_out = self.token_dispatcher.token_combine(
             hidden_states=mlp_output,
-            routing_metadata=token_dispatch_output.routing_metadata,
+            combine_metadata=token_dispatch_output.combine_metadata,
         )
 
         return FusedExpertsResult(
-            routed_out=token_combine_output.routed_out,
+            routed_out=routed_out,
             before_dispatch_evt=before_dispatch_evt,
             before_combine_evt=before_combine_evt,
             group_list_type=token_dispatch_output.group_list_type,

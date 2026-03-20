@@ -3,43 +3,42 @@ import unittest
 import torch
 
 import vllm_ascend.ops.fused_moe.moe_runtime_args as runtime_args
-from vllm_ascend.ops.fused_moe.moe_request_builders import (
+from vllm_ascend.ops.fused_moe.moe_runtime_args import (
+    MoEAllGatherCombineMetadata,
+    MoETokenDispatchOutput,
+    MoEWeights,
     build_fused_experts_input,
     build_mlp_compute_input,
     build_token_dispatch_input,
 )
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEAllGatherRoutingMetadata,
-    MoEMxfpParams,
-    MoETokenDispatchOutput,
-    MoEWeights,
-)
 from vllm_ascend.quantization.quant_type import QuantType
 
 
-class TestMoERequestBuilders(unittest.TestCase):
-    def test_runtime_args_facade_exports_public_types(self):
+class TestMoERuntimeArgs(unittest.TestCase):
+    def test_runtime_args_facade_exports_public_contracts_and_builders(self):
         expected_symbols = [
-            "MoEAllGatherRoutingMetadata",
-            "MoEAllToAllRoutingMetadata",
+            "MoEAllGatherCombineMetadata",
+            "MoEAllToAllCombineMetadata",
             "MoEFusedExpertsInput",
-            "MoEMC2RoutingMetadata",
+            "MoEMC2CombineMetadata",
             "MoEMlpComputeInput",
-            "MoEMxfpParams",
             "MoEPrepareOutput",
             "MoEQuantParams",
             "MoEReservedQuantParams",
             "MoERoutingParams",
-            "MoETokenCombineOutput",
             "MoETokenDispatchInput",
             "MoETokenDispatchOutput",
             "MoEWeights",
-            "TMoERoutingMetadata",
+            "TMoECombineMetadata",
+            "build_fused_experts_input",
+            "build_mlp_compute_input",
+            "build_token_dispatch_input",
         ]
 
         for symbol in expected_symbols:
             with self.subTest(symbol=symbol):
                 self.assertTrue(hasattr(runtime_args, symbol))
+        self.assertFalse(hasattr(runtime_args, "MoEMxfpParams"))
 
     def test_build_fused_experts_input_preserves_runtime_semantics(self):
         for quant_type in (
@@ -68,7 +67,7 @@ class TestMoERequestBuilders(unittest.TestCase):
                     log2phy=torch.tensor([3, 2, 1, 0], dtype=torch.int32),
                     pertoken_scale=torch.randn(4),
                     activation="gelu",
-                    mxfp=MoEMxfpParams() if quant_type == QuantType.MXFP8 else None,
+                    mxfp_act_quant_type=torch.float8_e4m3fn if quant_type == QuantType.MXFP8 else None,
                 )
 
                 self.assertIs(fused_experts_input.hidden_states, hidden_states)
@@ -139,8 +138,8 @@ class TestMoERequestBuilders(unittest.TestCase):
         self.assertIs(token_dispatch_input.quant, fused_experts_input.quant)
         self.assertIs(token_dispatch_input.topk_ids, routed_topk_ids)
 
-    def test_build_fused_experts_input_requires_mxfp_params_for_mxfp_quant(self):
-        with self.assertRaisesRegex(ValueError, "mxfp params are required"):
+    def test_build_fused_experts_input_requires_primitive_mxfp_params_for_mxfp_quant(self):
+        with self.assertRaisesRegex(ValueError, "primitive MXFP params are required"):
             build_fused_experts_input(
                 hidden_states=torch.randn(2, 8),
                 topk_weights=torch.randn(2, 2),
@@ -160,13 +159,11 @@ class TestMoERequestBuilders(unittest.TestCase):
             w2=torch.randn(2, 16, 8),
             quant_type=QuantType.MXFP8,
             dynamic_eplb=False,
-            mxfp=MoEMxfpParams(
-                act_quant_type=torch.float8_e4m3fn,
-                weight_quant_type=torch.float8_e4m3fn,
-                scale_dtype=torch.float32,
-                per_token_scale_dtype=torch.float16,
-                use_bf16=False,
-            ),
+            mxfp_act_quant_type=torch.float8_e4m3fn,
+            mxfp_weight_quant_type=torch.float8_e4m3fn,
+            mxfp_scale_dtype=torch.float32,
+            mxfp_per_token_scale_dtype=torch.float16,
+            mxfp_use_bf16=False,
             w1_scale=[torch.randn(1)],
             w2_scale=[torch.randn(1)],
         )
@@ -175,7 +172,7 @@ class TestMoERequestBuilders(unittest.TestCase):
             group_list=torch.tensor([2, 2], dtype=torch.int64),
             group_list_type=1,
             dynamic_scale=torch.randn(4, 1),
-            routing_metadata=MoEAllGatherRoutingMetadata(
+            combine_metadata=MoEAllGatherCombineMetadata(
                 topk_weights=fused_experts_input.topk_weights,
                 expanded_row_idx=torch.arange(4, dtype=torch.int32),
                 restore_shape=torch.Size([2, 8]),
@@ -198,6 +195,30 @@ class TestMoERequestBuilders(unittest.TestCase):
         self.assertEqual(mlp_compute_input.quant.mxfp.scale_dtype, torch.float32)
         self.assertEqual(mlp_compute_input.quant.mxfp.per_token_scale_dtype, torch.float16)
         self.assertFalse(mlp_compute_input.quant.mxfp.use_bf16)
+
+    def test_build_fused_experts_input_constructs_internal_mxfp_leaf_from_primitives(self):
+        fused_experts_input = build_fused_experts_input(
+            hidden_states=torch.randn(2, 8, dtype=torch.bfloat16),
+            topk_weights=torch.randn(2, 2),
+            topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
+            w1=torch.randn(2, 8, 16),
+            w2=torch.randn(2, 16, 8),
+            quant_type=QuantType.MXFP8,
+            dynamic_eplb=False,
+            mxfp_act_quant_type=torch.float8_e4m3fn,
+            mxfp_weight_quant_type=torch.float8_e4m3fn,
+            mxfp_scale_dtype=torch.float32,
+            mxfp_per_token_scale_dtype=torch.float16,
+            mxfp_use_bf16=False,
+        )
+
+        self.assertTrue(fused_experts_input.quant.is_mxfp)
+        assert fused_experts_input.quant.mxfp is not None
+        self.assertEqual(fused_experts_input.quant.mxfp.act_quant_type, torch.float8_e4m3fn)
+        self.assertEqual(fused_experts_input.quant.mxfp.weight_quant_type, torch.float8_e4m3fn)
+        self.assertEqual(fused_experts_input.quant.mxfp.scale_dtype, torch.float32)
+        self.assertEqual(fused_experts_input.quant.mxfp.per_token_scale_dtype, torch.float16)
+        self.assertFalse(fused_experts_input.quant.mxfp.use_bf16)
 
 
 if __name__ == "__main__":

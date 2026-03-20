@@ -10,14 +10,14 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     MC2CommImpl,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEAllGatherRoutingMetadata,
+    MoEAllGatherCombineMetadata,
     MoEFusedExpertsInput,
     MoEPrepareOutput,
     MoEQuantParams,
     MoERoutingParams,
     MoEWeights,
 )
-from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenCombineOutput, MoETokenDispatchOutput
+from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput
 from vllm_ascend.quantization.methods.base import QuantType
 
 
@@ -206,13 +206,12 @@ class TestMoECommMethod(TestBase):
             hidden_states=torch.randn(6, 8),
             group_list=torch.tensor([2, 2, 2]),
             group_list_type=1,
-            routing_metadata=MoEAllGatherRoutingMetadata(
+            combine_metadata=MoEAllGatherCombineMetadata(
                 topk_weights=dispatch_topk_weights,
                 expanded_row_idx=torch.arange(8, dtype=torch.int32),
                 restore_shape=torch.Size([4, 8]),
             ))
-        mock_td_instance.token_combine.return_value = MoETokenCombineOutput(
-            routed_out=torch.randn(4, 8))
+        mock_td_instance.token_combine.return_value = torch.randn(4, 8)
         mock_token_dispatcher.return_value = mock_td_instance
 
         # Mock unified_apply_mlp
@@ -268,5 +267,5 @@ class TestMoECommMethod(TestBase):
         # Verify token_combine was called
         mock_td_instance.token_combine.assert_called_once_with(
             hidden_states=mock_unified_apply_mlp.return_value,
-            routing_metadata=mock_td_instance.token_dispatch.return_value.routing_metadata,
+            combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )

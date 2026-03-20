@@ -23,21 +23,20 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEAllGatherRoutingMetadata,
-    MoEAllToAllRoutingMetadata,
-    MoEMC2RoutingMetadata,
-    MoEMxfpParams,
+    MoEAllGatherCombineMetadata,
+    MoEAllToAllCombineMetadata,
+    MoEMC2CombineMetadata,
     MoEQuantParams,
     MoERoutingParams,
     MoETokenDispatchInput,
 )
-
 from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
     AscendDeviceType,
     TokenDispatcherWithAll2AllV,
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
 )
+from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -174,7 +173,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
             mock_dispatch.assert_called_once()
             self.assertEqual(output.group_list_type, 0)  # group_list_type == 0
-            self.assertIsInstance(output.routing_metadata, MoEMC2RoutingMetadata)
+            self.assertIsInstance(output.combine_metadata, MoEMC2CombineMetadata)
 
     def test_get_combine_mc_kwargs_with_quant(self):
         hidden_states = torch.randn(10, 128)
@@ -185,7 +184,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         assist_info_for_combine = torch.arange(10)
 
-        routing_metadata = MoEMC2RoutingMetadata(
+        combine_metadata = MoEMC2CombineMetadata(
             topk_ids=topk_ids,
             topk_weights=topk_weights,
             expert_map=expert_map,
@@ -200,7 +199,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.dispatcher.enable_dispatch_v2 = True
         self.dispatcher.moe_expert_num = len(expert_map)
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states,
-                                                       routing_metadata)
+                                                       combine_metadata)
         self.assertIn("tp_send_counts", kwargs)
 
 
@@ -257,7 +256,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         args, kwargs = self.mock_npu_moe_init_routing_custom.call_args
 
         self.assertEqual(results.group_list_type, 1)
-        self.assertIsInstance(results.routing_metadata, MoEAllGatherRoutingMetadata)
+        self.assertIsInstance(results.combine_metadata, MoEAllGatherCombineMetadata)
 
     @pytest.mark.skip(
         "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
@@ -279,7 +278,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         args, kwargs = self.mock_npu_moe_init_routing_custom.call_args
 
         self.assertEqual(results.group_list_type, 1)
-        self.assertIsInstance(results.routing_metadata, MoEAllGatherRoutingMetadata)
+        self.assertIsInstance(results.combine_metadata, MoEAllGatherCombineMetadata)
 
     @pytest.mark.skip(
         "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
@@ -339,26 +338,24 @@ class TestTokenDispatcherWithAllGather(TestBase):
         "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine_with_expert_map(self):
         hidden_states = torch.randn(6, 128)
-        routing_metadata = MoEAllGatherRoutingMetadata(
+        combine_metadata = MoEAllGatherCombineMetadata(
             expanded_row_idx=torch.tensor([0, 1, 1, 1, 1, 1]),
             topk_weights=torch.tensor([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
             restore_shape=torch.Size([6, 128]),
         )
-        final_hidden_states = self.dispatcher.token_combine(
-            hidden_states, routing_metadata).routed_out
+        final_hidden_states = self.dispatcher.token_combine(hidden_states, combine_metadata)
         self.assertEqual(final_hidden_states.shape, (6, 128))
 
     @pytest.mark.skip(
         "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine_without_expert_map(self):
         hidden_states = torch.randn(6, 128)
-        routing_metadata = MoEAllGatherRoutingMetadata(
+        combine_metadata = MoEAllGatherCombineMetadata(
             expanded_row_idx=torch.tensor([0, 1, 1, 1, 1, 1]),
             topk_weights=torch.tensor([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
             restore_shape=torch.Size([6, 128]),
         )
-        final_hidden_states = self.dispatcher.token_combine(
-            hidden_states, routing_metadata).routed_out
+        final_hidden_states = self.dispatcher.token_combine(hidden_states, combine_metadata)
         self.mock_npu_moe_token_unpermute.assert_called_once()
         self.assertEqual(final_hidden_states.shape, (6, 128))
 
@@ -377,7 +374,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
         )
         results = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
         self.assertEqual(results.hidden_states.shape, (6, 128))
-        self.assertIsInstance(results.routing_metadata, MoEAllGatherRoutingMetadata)
+        self.assertIsInstance(results.combine_metadata, MoEAllGatherCombineMetadata)
 
 
 class TestTokenDispatcherWithAll2AllV(TestBase):
@@ -496,13 +493,13 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertIsNotNone(result.hidden_states)
         self.assertIsNotNone(result.group_list)
         self.assertEqual(result.group_list_type, 1)
-        self.assertIsInstance(result.routing_metadata, MoEAllToAllRoutingMetadata)
+        self.assertIsInstance(result.combine_metadata, MoEAllToAllCombineMetadata)
 
     @pytest.mark.skip(
         "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_combine(self):
         hidden_states = torch.randn(16, 16)
-        routing_metadata = MoEAllToAllRoutingMetadata(
+        combine_metadata = MoEAllToAllCombineMetadata(
             input_splits=np.array([4, 4]),
             output_splits=np.array([4, 4]),
             topk_weights=torch.rand(8, 4),
@@ -515,9 +512,9 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             [0, 1], dtype=torch.int32)
         self.dispatcher.local_expert_indices = [0, 1]
 
-        output = self.dispatcher.token_combine(hidden_states, routing_metadata)
+        output = self.dispatcher.token_combine(hidden_states, combine_metadata)
         self.assertIsNotNone(output)
-        self.assertEqual(output.routed_out.shape, (8, 16))
+        self.assertEqual(output.shape, (8, 16))
 
     @pytest.mark.skip(
         "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
@@ -548,7 +545,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertIsNotNone(result.group_list)
         self.assertIsNotNone(result.dynamic_scale)
         self.assertEqual(result.group_list_type, 1)
-        self.assertIsInstance(result.routing_metadata, MoEAllToAllRoutingMetadata)
+        self.assertIsInstance(result.combine_metadata, MoEAllToAllCombineMetadata)
 
     @pytest.mark.skip(
         "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")

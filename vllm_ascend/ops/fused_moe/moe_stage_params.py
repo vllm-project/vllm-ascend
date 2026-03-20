@@ -9,19 +9,27 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 @dataclass(frozen=True, slots=True)
 class MoERoutingParams:
-    """Routing-stage runtime parameters."""
+    """Routing and dispatch side inputs for one MoE invocation.
+
+    `pertoken_scale` is intentionally kept here even though it is not a pure
+    routing concept. It is used by pre-quantized activation flows, currently
+    the AllGather + EP W8A8 prepare path, where prepare emits per-token
+    activation scales and dispatch needs to carry them forward so the MLP
+    quant path can reuse those scales instead of requantizing activations.
+    """
 
     expert_map: torch.Tensor | None
     global_redundant_expert_num: int
     mc2_mask: torch.Tensor | None
     apply_router_weight_on_input: bool
     log2phy: torch.Tensor | None = None
+    # Precomputed activation scales from prepare stage for quantized dispatch.
     pertoken_scale: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class MoEMxfpParams:
-    """MXFP-only precision settings."""
+    """Internal MXFP-only precision settings used by fused_moe runtime."""
 
     act_quant_type: torch.dtype | None = None
     weight_quant_type: torch.dtype | None = None
@@ -32,7 +40,7 @@ class MoEMxfpParams:
 
 @dataclass(frozen=True, slots=True)
 class MoEReservedQuantParams:
-    """Reserved quant fields for future rollout."""
+    """Internal placeholder for deferred quant runtime knobs."""
 
     round_mode: str = "rint"
     rollback_quant_config: dict | None = None
@@ -40,7 +48,7 @@ class MoEReservedQuantParams:
 
 @dataclass(frozen=True, slots=True)
 class MoEQuantParams:
-    """Quantization runtime parameters for a single MoE invocation."""
+    """Quant mode, backend override, and optional internal MXFP leaf config."""
 
     quant_type: QuantType = QuantType.NONE
     comm_quant_mode: int | None = None

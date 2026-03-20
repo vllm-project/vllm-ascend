@@ -32,18 +32,17 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEAllGatherRoutingMetadata,
-    MoEAllToAllRoutingMetadata,
-    MoEMC2RoutingMetadata,
-    MoETokenCombineOutput,
+    MoEAllGatherCombineMetadata,
+    MoEAllToAllCombineMetadata,
+    MoEMC2CombineMetadata,
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
-    TMoERoutingMetadata,
+    TMoECombineMetadata,
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, is_hierarchical_communication_enabled
 
 
-class MoETokenDispatcher(ABC, Generic[TMoERoutingMetadata]):
+class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
     def __init__(self, **kwargs) -> None:
         """
         Initialize the MoE Token Dispatcher.
@@ -68,20 +67,20 @@ class MoETokenDispatcher(ABC, Generic[TMoERoutingMetadata]):
     def token_dispatch(
         self,
         token_dispatch_input: MoETokenDispatchInput,
-    ) -> MoETokenDispatchOutput[TMoERoutingMetadata]:
+    ) -> MoETokenDispatchOutput[TMoECombineMetadata]:
         raise NotImplementedError("Dispatch function not implemented.")
 
     @abstractmethod
     def token_combine(
         self,
         hidden_states: torch.Tensor,
-        routing_metadata: TMoERoutingMetadata,
+        combine_metadata: TMoECombineMetadata,
         bias: torch.Tensor | None = None,
-    ) -> MoETokenCombineOutput:
+    ) -> torch.Tensor:
         raise NotImplementedError("Combine function not implemented.")
 
 
-class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
+class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         device_group = get_mc2_group().device_group
@@ -208,7 +207,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
             dynamic_scale=dynamic_scale,
             group_list=expert_token_nums,
             group_list_type=group_list_type,
-            routing_metadata=MoEMC2RoutingMetadata(
+            combine_metadata=MoEMC2CombineMetadata(
                 topk_ids=token_dispatch_input.topk_ids,
                 topk_weights=token_dispatch_input.topk_weights,
                 expert_map=token_dispatch_input.routing.expert_map,
@@ -220,14 +219,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
             ),
         )
 
-    def get_combine_mc_kwargs(self, hidden_states: torch.Tensor, routing_metadata: MoEMC2RoutingMetadata):
-        expert_map = routing_metadata.expert_map
-        topk_ids = routing_metadata.topk_ids
-        topk_weights = routing_metadata.topk_weights
-        ep_recv_counts = routing_metadata.ep_recv_counts
-        tp_recv_counts = routing_metadata.tp_recv_counts
-        assist_info_for_combine = routing_metadata.assist_info_for_combine
-        expand_scales = routing_metadata.expand_scales
+    def get_combine_mc_kwargs(self, hidden_states: torch.Tensor, combine_metadata: MoEMC2CombineMetadata):
+        expert_map = combine_metadata.expert_map
+        topk_ids = combine_metadata.topk_ids
+        topk_weights = combine_metadata.topk_weights
+        ep_recv_counts = combine_metadata.ep_recv_counts
+        tp_recv_counts = combine_metadata.tp_recv_counts
+        assist_info_for_combine = combine_metadata.assist_info_for_combine
+        expand_scales = combine_metadata.expand_scales
 
         assert expert_map is not None
 
@@ -241,7 +240,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
             "global_bs": self.global_bs,
         }
 
-        if routing_metadata.dispatch_with_quant:
+        if combine_metadata.dispatch_with_quant:
             tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
 
         stage3_kwargs = {
@@ -270,22 +269,20 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2RoutingMetadata]):
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
 
-    def token_combine(self, hidden_states, routing_metadata, bias=None):
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
 
-        kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states, routing_metadata)
+        kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states, combine_metadata)
         combined_output = (
             torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2)
             if self.enable_dispatch_v2
             else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
         )
 
-        return MoETokenCombineOutput(
-            routed_out=combined_output,
-        )
+        return combined_output
 
 
-class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherRoutingMetadata]):
+class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadata]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.max_num_tokens = kwargs.get("max_num_tokens")
@@ -343,27 +340,27 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherRoutingMetadat
             dynamic_scale=pertoken_scale if with_quant else None,
             group_list=expert_tokens,
             group_list_type=group_list_type,
-            routing_metadata=MoEAllGatherRoutingMetadata(
+            combine_metadata=MoEAllGatherCombineMetadata(
                 topk_weights=topk_weights,
                 expanded_row_idx=expanded_row_idx,
                 restore_shape=restore_shape,
             ),
         )
 
-    def token_combine(self, hidden_states, routing_metadata, bias=None):
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
         final_hidden_states = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
-            sorted_indices=torch.abs(routing_metadata.expanded_row_idx),
-            probs=routing_metadata.topk_weights,
+            sorted_indices=torch.abs(combine_metadata.expanded_row_idx),
+            probs=combine_metadata.topk_weights,
         )
-        if len(routing_metadata.restore_shape) == 3:
-            final_hidden_states = final_hidden_states.view(routing_metadata.restore_shape)
+        if len(combine_metadata.restore_shape) == 3:
+            final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
 
         # these values are no longer used, so they need to be set to None for memory release.
-        return MoETokenCombineOutput(routed_out=final_hidden_states)
+        return final_hidden_states
 
 
-class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllRoutingMetadata]):
+class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]):
     """
     The implementation of the AlltoAll-based token dispatcher, which handles token
     dispatching on the sequence level instead of token level. The core of this implementation
@@ -446,7 +443,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllRoutingMetadata]
             dynamic_scale=dynamic_scale_final,
             group_list=tokens_per_expert,
             group_list_type=1,
-            routing_metadata=MoEAllToAllRoutingMetadata(
+            combine_metadata=MoEAllToAllCombineMetadata(
                 input_splits=input_splits,
                 output_splits=output_splits,
                 topk_weights=topk_weights,
@@ -457,26 +454,26 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllRoutingMetadata]
             ),
         )
 
-    def token_combine(self, hidden_states, routing_metadata, bias=None):
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
 
         # 1. Preprocess using metadata
-        hidden_states = self._combine_preprocess(hidden_states, routing_metadata)
+        hidden_states = self._combine_preprocess(hidden_states, combine_metadata)
 
         # 2. AllToAll
         _, permutated_local_input_tokens, handle = async_all_to_all(
             hidden_states,
-            routing_metadata.input_splits,
-            routing_metadata.output_splits,
+            combine_metadata.input_splits,
+            combine_metadata.output_splits,
             self.ep_group,
         )
         handle.wait()
         hidden_states.untyped_storage().resize_(0)
 
         # 3. Postprocess using metadata
-        output = self._combine_postprocess(permutated_local_input_tokens, routing_metadata)
+        output = self._combine_postprocess(permutated_local_input_tokens, combine_metadata)
 
-        return MoETokenCombineOutput(routed_out=output)
+        return output
 
     def _dispatch_preprocess(self, hidden_states, topk_ids):
         hidden_shape = hidden_states.shape
@@ -576,10 +573,10 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllRoutingMetadata]
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(
-        self, hidden_states: torch.Tensor, routing_metadata: MoEAllToAllRoutingMetadata
+        self, hidden_states: torch.Tensor, combine_metadata: MoEAllToAllCombineMetadata
     ) -> torch.Tensor:
         # Unpermutation 2: expert output to AlltoAll input
-        rev_global = routing_metadata.reversed_global_input_permutation_mapping
+        rev_global = combine_metadata.reversed_global_input_permutation_mapping
         if hidden_states.shape[0] > 0 and self.num_local_experts > 1 and rev_global is not None:
             hidden_states = torch_npu.npu_moe_token_unpermute(hidden_states, rev_global)
         return hidden_states
@@ -587,14 +584,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllRoutingMetadata]
     def _combine_postprocess(
         self,
         permutated_local_input_tokens: torch.Tensor,
-        routing_metadata: MoEAllToAllRoutingMetadata,
+        combine_metadata: MoEAllToAllCombineMetadata,
     ) -> torch.Tensor:
         # Unpermutation 1: AlltoAll output to output
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permutated_local_input_tokens,
-            sorted_indices=routing_metadata.reversed_local_input_permutation_mapping.to(torch.int32),
-            probs=routing_metadata.topk_weights,
-            restore_shape=routing_metadata.hidden_shape_before_permute,
+            sorted_indices=combine_metadata.reversed_local_input_permutation_mapping.to(torch.int32),
+            probs=combine_metadata.topk_weights,
+            restore_shape=combine_metadata.hidden_shape_before_permute,
         )
-        output = output.view(routing_metadata.hidden_shape)
+        output = output.view(combine_metadata.hidden_shape)
         return output

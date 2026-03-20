@@ -25,7 +25,7 @@ from vllm.config import get_current_vllm_config
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.moe_request_builders import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendMoEScheme, QuantType
 from .registry import register_scheme

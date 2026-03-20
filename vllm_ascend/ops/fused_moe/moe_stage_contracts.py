@@ -6,12 +6,9 @@ from typing import Generic, TypeVar
 import numpy as np
 import torch
 
-from vllm_ascend.ops.fused_moe.moe_stage_params import (
-    MoEQuantParams,
-    MoERoutingParams,
-)
+from vllm_ascend.ops.fused_moe.moe_stage_params import MoEQuantParams, MoERoutingParams
 
-TMoERoutingMetadata = TypeVar("TMoERoutingMetadata")
+TMoECombineMetadata = TypeVar("TMoECombineMetadata")
 
 
 # prepare -> fused_experts
@@ -68,9 +65,9 @@ class MoETokenDispatchInput:
     quant: MoEQuantParams
 
 
-# dispatch carry-over metadata for combine
+# dispatch carry-over state consumed by combine
 @dataclass(frozen=True, slots=True)
-class MoEMC2RoutingMetadata:
+class MoEMC2CombineMetadata:
     topk_ids: torch.Tensor
     topk_weights: torch.Tensor
     expert_map: torch.Tensor | None
@@ -82,14 +79,14 @@ class MoEMC2RoutingMetadata:
 
 
 @dataclass(frozen=True, slots=True)
-class MoEAllGatherRoutingMetadata:
+class MoEAllGatherCombineMetadata:
     topk_weights: torch.Tensor
     expanded_row_idx: torch.Tensor
     restore_shape: torch.Size
 
 
 @dataclass(frozen=True, slots=True)
-class MoEAllToAllRoutingMetadata:
+class MoEAllToAllCombineMetadata:
     input_splits: np.ndarray
     output_splits: np.ndarray
     topk_weights: torch.Tensor
@@ -100,11 +97,11 @@ class MoEAllToAllRoutingMetadata:
 
 
 @dataclass(frozen=True, slots=True)
-class MoETokenDispatchOutput(Generic[TMoERoutingMetadata]):
+class MoETokenDispatchOutput(Generic[TMoECombineMetadata]):
     hidden_states: torch.Tensor
     group_list: torch.Tensor
     group_list_type: int
-    routing_metadata: TMoERoutingMetadata
+    combine_metadata: TMoECombineMetadata
     dynamic_scale: torch.Tensor | None = None
     topk_scales: torch.Tensor | None = None
 
@@ -127,21 +124,15 @@ class MoEMlpComputeInput:
     dynamic_eplb: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class MoETokenCombineOutput:
-    routed_out: torch.Tensor
-
-
 __all__ = [
     "MoEPrepareOutput",
     "MoEWeights",
     "MoEFusedExpertsInput",
     "MoETokenDispatchInput",
-    "MoEMC2RoutingMetadata",
-    "MoEAllGatherRoutingMetadata",
-    "MoEAllToAllRoutingMetadata",
+    "MoEMC2CombineMetadata",
+    "MoEAllGatherCombineMetadata",
+    "MoEAllToAllCombineMetadata",
     "MoETokenDispatchOutput",
     "MoEMlpComputeInput",
-    "MoETokenCombineOutput",
-    "TMoERoutingMetadata",
+    "TMoECombineMetadata",
 ]
