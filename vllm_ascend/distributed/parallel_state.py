@@ -275,7 +275,7 @@ def get_fc3_quant_x_group() -> GroupCoordinator:
 
 
 def get_dynamic_eplb_group() -> GroupCoordinator:
-    assert _DYNAMIC_EPLB is not None, "fc3 quant x group is not initialized"
+    assert _DYNAMIC_EPLB is not None, "Dynamic eplb group is not initialized"
     return _DYNAMIC_EPLB
 
 
