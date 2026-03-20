@@ -245,6 +245,7 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free()
 def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
     short_example_prompts = [
         "Hello ",
@@ -272,6 +273,7 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free()
 def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
     short_example_prompts = [
         "Hello ",
