@@ -54,7 +54,7 @@ jobs:
 
     - name: Publish - Login to Quay Container Registry
       if: ${{ github.repository_owner == 'vllm-project' }}
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: quay.io
         username: ${{ vars.QUAY_CI_USERNAME }}
