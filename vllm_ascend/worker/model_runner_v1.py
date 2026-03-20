@@ -2157,6 +2157,11 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
+                if isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
+                    if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
+                        attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
+                    elif attn_metadata_i.num_decodes > 0 and attn_metadata_i.num_spec_decodes == 0:
+                        attn_metadata_i.non_spec_state_indices_tensor[attn_metadata_i.num_decodes:].fill_(0)
 
             if ubid is None:
                 assert isinstance(attn_metadata, dict)
