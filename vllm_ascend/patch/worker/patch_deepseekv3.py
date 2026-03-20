@@ -78,8 +78,8 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
         self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
 
         ascend_config = get_ascend_config()
-        mix_placement = getattr(ascend_config, "mix_placement", False)
-        if config.n_shared_experts is None or mix_placement:
+        self.mix_placement = getattr(ascend_config, "mix_placement", False)
+        if config.n_shared_experts is None or self.mix_placement:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -110,12 +110,12 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
             scoring_func=config.scoring_func,
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
-            routed_scaling_factor=1.0 if not mix_placement else self.routed_scaling_factor,
+            routed_scaling_factor=1.0 if not self.mix_placement else self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=config.n_shared_experts if mix_placement else 0,
+            n_shared_experts=config.n_shared_experts if self.mix_placement else 0,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -137,7 +137,8 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:
-            final_hidden_states *= self.routed_scaling_factor
+            if not self.mix_placement:
+                final_hidden_states *= self.routed_scaling_factor
         elif self.shared_experts is not None:
             assert shared_output is not None
             shared_output *= 1.0 / self.routed_scaling_factor

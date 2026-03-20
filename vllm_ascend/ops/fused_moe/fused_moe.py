@@ -281,7 +281,7 @@ class AscendFusedMoE(FusedMoE):
         num_experts += num_shared_experts if self.mix_placement else 0
         self.moe_config.num_experts = num_experts
         self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
-            eplb_config, self.moe_instance_id, self.moe_config
+            eplb_config, self.moe_instance_id, self.moe_config, self.mix_placement, num_shared_experts
         )
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)

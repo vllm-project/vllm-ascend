@@ -102,7 +102,7 @@ def select_experts(
             global_num_experts=global_num_experts,
         )
     if mix_placement:
-        shared_expert_routing_factor = 0.4
+        shared_expert_routing_factor = 1.0 if is_support_npu_moe_gating_top_k else (1 / routed_scaling_factor)
         batch_size = topk_ids.shape[0]
         pad_shared_expert_ids = torch.arange(
             num_logical_experts, num_logical_experts + num_shared_experts, dtype=topk_ids.dtype, device=topk_ids.device
