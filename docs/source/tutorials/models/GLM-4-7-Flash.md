@@ -51,7 +51,14 @@ curl http://localhost:8000/v1/completions \
     "temperature": 0.7
   }' 
  
-
+##常见问题排查
+###模型加载失败
+确保添加 --trust-remote-code
+升级 transformers 版本 ≥ 4.57.0
+检查网络可正常访问 Hugging Face
+###推理性能较低
+使用 export VLLM_ASCEND_DISABLE_RING_MLA=1
+适当降低 max-model-len 至 8192 以内
 
 
 
