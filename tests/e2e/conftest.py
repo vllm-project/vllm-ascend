@@ -349,7 +349,9 @@ class RemoteOpenAIServer:
         # Then wait for all api_server nodes
         self._wait_for_multiple_servers(targets=targets, timeout=timeout)
 
-    def _wait_for_multiple_servers(self, targets, timeout: float, log_interval: float = 30.0):
+    def _wait_for_multiple_servers(
+        self, targets, timeout: float, log_interval: float = 30.0, always_check_nodes: bool = False
+    ):
         """
         targets: List[(node_ip, url)]
         log_interval
@@ -367,14 +369,14 @@ class RemoteOpenAIServer:
             should_log = (now - last_log_time) >= log_interval
 
             for node_ip, url in targets:
-                if ready[node_ip]:
+                if ready[node_ip] and not always_check_nodes:
                     continue
 
                 try:
                     resp = client.get(url)
                     if resp.status_code == 200:
                         ready[node_ip] = True
-                        logger.info(f"[READY] Node {node_ip} is ready.")
+                        logger.info(f"[READY] Node {node_ip}: {url} is ready.")
                 except RequestException:
                     all_ready = False
                     if should_log:
@@ -498,7 +500,9 @@ class RemoteEPDServer(RemoteOpenAIServer):
             self._proc_list.append(proc)
 
         timeout_value = float(max_wait_seconds) if max_wait_seconds is not None else 2800.0
-        super()._wait_for_multiple_servers([(self.host, url) for url in self.health_url_list], timeout=timeout_value)
+        super()._wait_for_multiple_servers(
+            [(self.host, url) for url in self.health_url_list], timeout=timeout_value, always_check_nodes=True
+        )
 
     def _poll(self) -> int | None:
         return None
