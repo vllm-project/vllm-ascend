@@ -146,6 +146,7 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
+    # TODO: remove this part after the transformers version upgraded
     if config.special_dependencies:
         for k, v in config.special_dependencies.items():
             command = [
