@@ -582,6 +582,28 @@ std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm(
     return std::tuple<at::Tensor, at::Tensor>(y, rstd);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_sum_lstm(
+    const at::Tensor& states_4d,
+    const at::Tensor& z4_4d,
+    const at::Tensor& prev_cell,
+    const c10::optional<at::Tensor>& w_cell,
+    const c10::optional<at::Tensor>& b_cell,
+    const c10::optional<at::Tensor>& w_state,
+    const c10::optional<at::Tensor>& b_state,
+    double alpha,
+    double eps_cell,
+    double eps_state,
+    bool use_fast_gelu)
+{
+    // Output shape is the same as prev_cell
+    at::Tensor out_state = at::empty(prev_cell.sizes(), prev_cell.options());
+    at::Tensor out_cell = at::empty(prev_cell.sizes(), prev_cell.options());
+    EXEC_NPU_CMD(aclnnSumLstm, states_4d, z4_4d, prev_cell, w_cell, b_cell,
+                 w_state, b_state, alpha, eps_cell, eps_state, use_fast_gelu,
+                 out_state, out_cell);
+    return std::tuple<at::Tensor, at::Tensor>(out_state, out_cell);
+}
+
 void transpose_kv_cache_by_block(
     const at::TensorList &kCache,
     const at::TensorList &vCache,
@@ -644,8 +666,8 @@ at::Tensor causal_conv1d_fn(
     const at::Tensor& non_spec_query_start_loc,
     int64_t  pad_slot_id)
 {
-    at::Tensor x=mixed_qkv_non_spec_T; //不需要转置
-    at::Tensor weight=conv_weights;//不需要转置
+    at::Tensor x=mixed_qkv_non_spec_T; // No transpose needed
+    at::Tensor weight=conv_weights; // No transpose needed
     c10::optional<at::Tensor> biasOptional =bias_opt;
     at::Tensor convStates= conv_state;
     at::Tensor queryStartLoc=non_spec_query_start_loc;
@@ -931,4 +953,20 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
+
+    ops.def(
+        "npu_sum_lstm(Tensor states_4d, "
+                     "Tensor z4_4d, "
+                     "Tensor prev_cell, "
+                     "Tensor? w_cell=None, "
+                     "Tensor? b_cell=None, "
+                     "Tensor? w_state=None, "
+                     "Tensor? b_state=None, "
+                     "float alpha=1.0, "
+                     "float eps_cell=1e-6, "
+                     "float eps_state=1e-6, "
+                     "bool use_fast_gelu=True) "
+        "-> (Tensor out_state, Tensor out_cell)"
+    );
+    ops.impl("npu_sum_lstm", torch::kPrivateUse1, &vllm_ascend::npu_sum_lstm);
 }

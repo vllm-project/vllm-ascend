@@ -35,3 +35,6 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 if envs.VLLM_ASCEND_BALANCE_SCHEDULING and vllm_version_is("0.17.0"):
     import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+
+if os.getenv("VLLM_ASCEND_ENABLE_ARCTIC_SPECULATIVE_DECODING", "0") == "1":
+    import vllm_ascend.patch.platform.patch_arctic_speculator  # noqa: F401

@@ -111,12 +111,12 @@ from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
+from vllm_ascend.spec_decode.arctic_proposer import AscendArcticProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend.spec_decode.arctic_proposer import AscendArcticProposer
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
@@ -149,10 +149,8 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 
-from vllm.model_executor.layers.attention import Attention, MLAAttention
-
-
 from arctic_inference.suffix_decoding import SuffixDecodingCache
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -232,14 +230,13 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.parallel_config.prefill_context_parallel_size * 2 * vllm_config.scheduler_config.max_num_seqs
         )
         vllm_config.scheduler_config.max_num_batched_tokens += max_pcp_pad_tokens
+        self.arctic_speculative_config = None
         if (vllm_config.speculative_config is not None and \
-                vllm_config.speculative_config.method in ("arctic", 'mlp_speculator')):
-            # Delay the creation of the drafter until
-            # after the child class has been initialized.
+                vllm_config.speculative_config.method == "arctic"):
+            # set speculative method to "suffix" for compatibility with the rest of the code, 
+            # and keep the original method in arctic_speculative_config for later use in _set_up_drafter.
+            vllm_config.speculative_config.method = "suffix"
             self.arctic_speculative_config = vllm_config.speculative_config
-            vllm_config.speculative_config = None
-        else:
-            self.arctic_speculative_config = None
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
@@ -447,20 +444,19 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
 
         self._suffix_cache: SuffixDecodingCache = None
-        if (self.speculative_config is not None and 
+        if (self.arctic_speculative_config is not None and 
                 getattr(self.speculative_config, "enable_suffix_decoding", False)):
-            if self.speculative_config.method not in ("arctic", "suffix",
-                                                      "mlp_speculator"):
-                raise ValueError(
-                    "Suffix decoding is only supported with the 'arctic', "
-                    "'mlp_speculator' or 'suffix' spec decoding methods.")
-            spec_cfg = self.speculative_config
+
             self._suffix_cache = SuffixDecodingCache(
-                max_tree_depth=spec_cfg.suffix_cache_max_depth,
-                max_cached_requests=spec_cfg.suffix_cache_max_requests
+                max_tree_depth=self.arctic_speculative_config.suffix_cache_max_depth,
+                max_cached_requests=self.arctic_speculative_config.suffix_cache_max_requests
             )
             self.suffix_processor = get_spec_decode_method("suffix", self.vllm_config, 
                                                     self.device, self)
+        else:
+            raise ValueError(
+                "Suffix cache is only supported for the 'arctic', "
+                "spec decoding methods.")
 
     @property
     def use_cp(self) -> bool:
@@ -480,13 +476,13 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDraftModelProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
+            | AscendArcticProposer
             | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.arctic_speculative_config is not None:
-            self.speculative_config = self.arctic_speculative_config
-            self.vllm_config.speculative_config = self.arctic_speculative_configƒ
+                self.vllm_config.speculative_config.method = "arctic"
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
@@ -1056,7 +1052,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         sampled_token_ids: list[list[int]],
-        previous_hidden_states: Optional[torch.Tensor] = None,
+        previous_hidden_states: torch.Tensor = None,
     ) -> list[list[int]]:
         last_tokens: list[int] = []
         max_spec_tokens = self.speculative_config.num_speculative_tokens
@@ -1117,7 +1113,7 @@ class NPUModelRunner(GPUModelRunner):
         hidden_states: torch.Tensor,
         aux_hidden_states: torch.Tensor = None,
         sample_hidden_states: torch.Tensor = None,
-        original_sampled_token_ids: np.ndarray = None,
+        original_sampled_token_ids: np.ndarray | None = None,
     ) -> list[list[int]] | None:
         if not self.drafter:
             # Speculative decoding is not enabled.
@@ -1145,7 +1141,7 @@ class NPUModelRunner(GPUModelRunner):
                         else:
                             suffix_spec_token_ids.append([])
                 spec_token_ids = None
-                assert isinstance(self.drafter, ArcticProposer)
+                assert isinstance(self.drafter, AscendArcticProposer)
                 previous_hidden_states = self.drafter.prepare_hidden_states(
                     sample_hidden_states=sample_hidden_states,
                     sampled_token_ids=original_sampled_token_ids,
@@ -1156,13 +1152,15 @@ class NPUModelRunner(GPUModelRunner):
                     new_sampled_token_ids,
                     previous_hidden_states=previous_hidden_states)
                 
-                if spec_token_ids is None:
-                    draft_token_ids = suffix_spec_token_ids
-                elif suffix_spec_token_ids is not None:
+                if spec_token_ids is not None and suffix_spec_token_ids is not None:
                     draft_token_ids = [
                         suffix_spec_token_ids[i] or spec_token_ids[i]
                         for i in range(len(suffix_spec_token_ids))
                     ]
+                elif suffix_spec_token_ids is not None:
+                    draft_token_ids = suffix_spec_token_ids
+                elif spec_token_ids is not None:
+                    draft_token_ids = spec_token_ids
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids

@@ -1,6 +1,7 @@
+from arctic_inference.suffix_decoding import SuffixDecodingCache, SuffixDecodingDraft
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.worker.gpu_input_batch import InputBatch
-from arctic_inference.suffix_decoding import SuffixDecodingDraft, SuffixDecodingCache
+
 
 class AscendSuffixDecodingProposer(SuffixDecodingProposer):
     def __init__(self, vllm_config, runner):
@@ -51,10 +52,10 @@ class AscendSuffixDecodingProposer(SuffixDecodingProposer):
             result = _suffix_cache.speculate(
                 req_id,
                 pattern,
-                max_spec_tokens=min(self.num_speculative_tokens,
-                                    self.max_model_len - num_tokens - 1),
+                max_spec_tokens=min(self.num_speculative_tokens, self.max_model_len - num_tokens - 1),
                 max_spec_factor=self.max_spec_factor,
-                min_token_prob=self.min_token_prob)
+                min_token_prob=self.min_token_prob,
+            )
 
             results.append(result)
 
