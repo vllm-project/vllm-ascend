@@ -36,8 +36,7 @@ _server_cmd: &server_cmd
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
-_special_dependencies: &special_dependencies
-  transformers: "5.2.0"
+
 
 _benchmarks: &benchmarks
   acc:
@@ -68,7 +67,6 @@ _benchmarks: &benchmarks
 test_cases:
   - name: "GLM-5-TP16-DP1-decodegraph"
     model: "Eco-Tech/GLM-5-w4a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd
