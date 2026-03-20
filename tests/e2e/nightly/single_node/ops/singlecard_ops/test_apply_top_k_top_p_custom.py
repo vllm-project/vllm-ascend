@@ -1,3 +1,4 @@
+import gc
 import numpy as np
 import pytest
 import torch
@@ -103,6 +104,9 @@ def test_npu_apply_top_k_top_p(vocab_size, batch_size, p_val, k_val):
     out_npu = ascendc_op_exec(logits, p, k)
 
     assert_output_close(out_cpu, out_npu)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 @pytest.mark.parametrize('vocab_size', [15206, 152064])
@@ -120,6 +124,9 @@ def test_npu_apply_top_k(vocab_size, batch_size, k_val):
     out_npu = ascendc_op_exec(logits, p, k)
 
     assert_output_close(out_cpu, out_npu)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 @pytest.mark.parametrize('vocab_size', [15206, 152064])
@@ -137,3 +144,6 @@ def test_npu_apply_top_p(vocab_size, batch_size, p_val):
     out_npu = ascendc_op_exec(logits, p, k)
 
     assert_output_close(out_cpu, out_npu)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
