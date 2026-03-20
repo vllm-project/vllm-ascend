@@ -38,7 +38,7 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import set_weight_prefetch_method
-from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
@@ -64,11 +64,11 @@ class NPUModelRunner(GPUModelRunner):
         del self.speculator
 
         # NPU specific initializations can be added below.
-        self.cudagraph_manager: AclGraphManager = AclGraphManager(
+        self.cudagraph_manager: ModelAclGraphManager = ModelAclGraphManager(
             self.vllm_config,
-            self.use_aux_hidden_state_outputs,
             self.device,
-            self,
+            self.compilation_config.cudagraph_mode,
+            decode_query_len=self.decode_query_len,
         )
 
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
@@ -391,6 +391,15 @@ class NPUModelRunner(GPUModelRunner):
         # worker, implement it in the future.
         pass
 
+    def is_uniform_decode(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int,
+    ) -> bool:
+        """Check if the decode batch is uniform."""
+        return (max_query_len == self.decode_query_len) and (num_tokens == max_query_len * num_reqs)
+
     def _pad_query_start_loc_for_fia(
         self,
         num_tokens_padded: int,
@@ -408,19 +417,18 @@ class NPUModelRunner(GPUModelRunner):
         cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if cudagraph_runtime_mode != CUDAGraphMode.FULL:
             return query_start_loc_np, num_reqs
-        uniform_decode_query_len = self.cudagraph_manager.uniform_decode_query_len
-        is_uniform_decode = self.cudagraph_manager.is_uniform_decode(
+        is_uniform_decode = self.is_uniform_decode(
             num_reqs=num_reqs,
             num_tokens=num_tokens,
             max_query_len=max_query_len,
         )
         if is_uniform_decode:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
-            num_reqs_padded = num_tokens_padded // uniform_decode_query_len
+            num_reqs_padded = num_tokens_padded // self.decode_query_len
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * uniform_decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
