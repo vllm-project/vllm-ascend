@@ -23,7 +23,7 @@ jobs:
     name: e2e-test
     strategy:
       matrix:
-        vllm_version: [v0.17.0]
+        vllm_version: [v0.18.0]
         type: [full, light]
     uses: ./.github/workflows/_e2e_test.yaml
     with:
