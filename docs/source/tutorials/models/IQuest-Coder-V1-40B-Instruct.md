@@ -295,6 +295,9 @@ After confirming service stability, run performance tests:
 vllm bench serve \
   --model IQuestLab/IQuest-Coder-V1-40B-Instruct \
   --trust-remote-code \
+  --tensor-parallel-size 2 \
+  --dtype bfloat16 \
+  --enforce-eager \
   --dataset-name random \
   --random-input 512 \
   --num-prompts 100 \
