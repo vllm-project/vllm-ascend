@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 import weakref
 from collections import deque
 from collections.abc import Callable
@@ -21,8 +20,6 @@ from vllm.v1.executor.multiproc_executor import (
     set_multiprocessing_worker_envs,
 )
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendMultiprocExecutor(MultiprocExecutor):
     def _init_executor(self) -> None:
@@ -30,8 +27,6 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
-        if vllm_version_is("0.17.0"):
-            self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
         tensor_parallel_size, pp_parallel_size, pcp_parallel_size = self._get_parallel_sizes()
@@ -71,44 +66,29 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         success = False
         try:
             global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
-            if vllm_version_is("0.17.0"):
-                for local_rank in range(self.local_world_size):
-                    global_rank = global_start_rank + local_rank
-                    is_driver_worker = self._is_driver_worker(global_rank)
-                    unready_workers.append(
-                        AscendWorkerProc.make_worker_process(
-                            vllm_config=self.vllm_config,
-                            local_rank=local_rank,
-                            rank=global_rank,
-                            distributed_init_method=distributed_init_method,
-                            input_shm_handle=scheduler_output_handle,
-                            shared_worker_lock=shared_worker_lock,
-                            is_driver_worker=is_driver_worker,
-                        )
-                    )
-            else:
-                # When using fork, keep track of socket file descriptors that are
-                # inherited by the worker, so that we can close them in subsequent
-                # workers
-                inherited_fds: list[int] | None = [] if context.get_start_method() == "fork" else None
 
-                for local_rank in range(self.local_world_size):
-                    global_rank = global_start_rank + local_rank
-                    is_driver_worker = self._is_driver_worker(global_rank)
-                    unready_worker_handle = AscendWorkerProc.make_worker_process(
-                        vllm_config=self.vllm_config,
-                        local_rank=local_rank,
-                        rank=global_rank,
-                        distributed_init_method=distributed_init_method,
-                        input_shm_handle=scheduler_output_handle,
-                        shared_worker_lock=shared_worker_lock,
-                        is_driver_worker=is_driver_worker,
-                        inherited_fds=inherited_fds,
-                    )
-                    unready_workers.append(unready_worker_handle)
-                    if inherited_fds is not None:
-                        inherited_fds.append(unready_worker_handle.death_writer.fileno())
-                        inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+            # When using fork, keep track of socket file descriptors that are
+            # inherited by the worker, so that we can close them in subsequent
+            # workers
+            inherited_fds: list[int] | None = [] if context.get_start_method() == "fork" else None
+
+            for local_rank in range(self.local_world_size):
+                global_rank = global_start_rank + local_rank
+                is_driver_worker = self._is_driver_worker(global_rank)
+                unready_worker_handle = AscendWorkerProc.make_worker_process(
+                    vllm_config=self.vllm_config,
+                    local_rank=local_rank,
+                    rank=global_rank,
+                    distributed_init_method=distributed_init_method,
+                    input_shm_handle=scheduler_output_handle,
+                    shared_worker_lock=shared_worker_lock,
+                    is_driver_worker=is_driver_worker,
+                    inherited_fds=inherited_fds,
+                )
+                unready_workers.append(unready_worker_handle)
+                if inherited_fds is not None:
+                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
+                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -153,8 +133,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
-                        if not vllm_version_is("0.17.0"):
-                            uw.death_writer = None
+                        uw.death_writer = None
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.output_rank = self._get_output_rank()
@@ -192,73 +171,41 @@ class AscendWorkerProc(WorkerProc):
         inherited_fds: list[int] | None = None,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
-        if vllm_version_is("0.17.0"):
-            # (reader, writer)
-            reader, writer = context.Pipe(duplex=False)
+        # Ready pipe to communicate readiness from child to parent
+        ready_reader, ready_writer = context.Pipe(duplex=False)
+        # Death pipe to let child detect parent process exit
+        death_reader, death_writer = context.Pipe(duplex=False)
+        if inherited_fds is not None:
+            inherited_fds = inherited_fds.copy()
+            inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
+        process_kwargs = {
+            "vllm_config": vllm_config,
+            "local_rank": local_rank,
+            "rank": rank,
+            "distributed_init_method": distributed_init_method,
+            "input_shm_handle": input_shm_handle,
+            "ready_pipe": ready_writer,
+            "death_pipe": death_reader,
+            "shared_worker_lock": shared_worker_lock,
+            "is_driver_worker": is_driver_worker,
+            # Have the worker close parent end of this worker's pipes too
+            "inherited_fds": inherited_fds if inherited_fds is not None else [],
+        }
+        # Run EngineCore busy loop in background process.
+        proc = context.Process(
+            target=WorkerProc.worker_main,
+            kwargs=process_kwargs,
+            name=f"VllmWorker-{rank}",
+            daemon=False,
+        )
 
-            # Create death pipe to detect parent process exit
-            death_reader, death_writer = context.Pipe(duplex=False)
-
-            process_kwargs = {
-                "vllm_config": vllm_config,
-                "local_rank": local_rank,
-                "rank": rank,
-                "distributed_init_method": distributed_init_method,
-                "input_shm_handle": input_shm_handle,
-                "ready_pipe": (reader, writer),
-                "death_pipe": death_reader,
-                "shared_worker_lock": shared_worker_lock,
-                "is_driver_worker": is_driver_worker,
-            }
-            # Run EngineCore busy loop in background process.
-            proc = context.Process(
-                target=WorkerProc.worker_main,
-                kwargs=process_kwargs,
-                name=f"VllmWorker-{rank}",
-                daemon=False,
-            )
-
-            proc.start()
-            writer.close()
-            # Keep death_writer open in parent - when parent exits,
-            # death_reader in child will get EOFError
-            return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
-        else:
-            # Ready pipe to communicate readiness from child to parent
-            ready_reader, ready_writer = context.Pipe(duplex=False)
-            # Death pipe to let child detect parent process exit
-            death_reader, death_writer = context.Pipe(duplex=False)
-            if inherited_fds is not None:
-                inherited_fds = inherited_fds.copy()
-                inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
-            process_kwargs = {
-                "vllm_config": vllm_config,
-                "local_rank": local_rank,
-                "rank": rank,
-                "distributed_init_method": distributed_init_method,
-                "input_shm_handle": input_shm_handle,
-                "ready_pipe": ready_writer,
-                "death_pipe": death_reader,
-                "shared_worker_lock": shared_worker_lock,
-                "is_driver_worker": is_driver_worker,
-                # Have the worker close parent end of this worker's pipes too
-                "inherited_fds": inherited_fds if inherited_fds is not None else [],
-            }
-            # Run EngineCore busy loop in background process.
-            proc = context.Process(
-                target=WorkerProc.worker_main,
-                kwargs=process_kwargs,
-                name=f"VllmWorker-{rank}",
-                daemon=False,
-            )
-
-            proc.start()
-            # Close child ends of pipes here in the parent
-            ready_writer.close()
-            death_reader.close()
-            # Keep death_writer open in parent - when parent exits,
-            # death_reader in child will get EOFError
-            return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
+        proc.start()
+        # Close child ends of pipes here in the parent
+        ready_writer.close()
+        death_reader.close()
+        # Keep death_writer open in parent - when parent exits,
+        # death_reader in child will get EOFError
+        return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
 
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
