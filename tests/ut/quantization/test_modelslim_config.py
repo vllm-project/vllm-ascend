@@ -258,7 +258,6 @@ class TestAscendModelSlimConfig(TestBase):
     def test_get_scaled_act_names(self):
         self.assertEqual(self.ascend_config.get_scaled_act_names(), [])
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_QWEN35_FUSED_IN_PROJ": "1"})
     def test_get_packed_modules_mapping_qwen35_fused_in_proj(self):
         mapping = get_packed_modules_mapping("qwen3_5")
         self.assertEqual(

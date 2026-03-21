@@ -2,19 +2,13 @@ import importlib
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 import torch
 import torch.nn.functional as F
 
 import vllm.model_executor.models.qwen3_5 as qwen3_5_module
 
 
-def _reload_patch_qwen3_5(monkeypatch: pytest.MonkeyPatch, *, enable_fused: bool):
-    monkeypatch.setenv(
-        "VLLM_ASCEND_ENABLE_QWEN35_FUSED_IN_PROJ",
-        "1" if enable_fused else "0",
-    )
-    monkeypatch.setenv("VLLM_ASCEND_DEBUG_QWEN35_FUSED_IN_PROJ", "0")
+def _reload_patch_qwen3_5():
     import vllm_ascend.patch.worker.patch_qwen3_5 as patch_qwen3_5
 
     return importlib.reload(patch_qwen3_5)
@@ -40,14 +34,34 @@ def _make_dummy_fused_layer():
     )
 
 
-def test_split_fused_in_proj_outputs_matches_legacy_projection(monkeypatch: pytest.MonkeyPatch):
-    patch_qwen3_5 = _reload_patch_qwen3_5(monkeypatch, enable_fused=True)
+def _compute_legacy_in_proj_outputs(layer, hidden_states: torch.Tensor):
+    q_size = layer.key_dim // layer.tp_size
+    k_size = layer.key_dim // layer.tp_size
+    v_size = layer.value_dim // layer.tp_size
+    z_size = layer.value_dim // layer.tp_size
+    b_size = layer.num_v_heads // layer.tp_size
+    a_size = layer.num_v_heads // layer.tp_size
+    q_weight, k_weight, v_weight, z_weight, b_weight, a_weight = layer.in_proj.weight.split(
+        [q_size, k_size, v_size, z_size, b_size, a_size],
+        dim=0,
+    )
+    query = F.linear(hidden_states, q_weight)
+    key = F.linear(hidden_states, k_weight)
+    value = F.linear(hidden_states, v_weight)
+    z = F.linear(hidden_states, z_weight).reshape(hidden_states.size(0), -1, layer.head_v_dim)
+    b = F.linear(hidden_states, b_weight).contiguous()
+    a = F.linear(hidden_states, a_weight).contiguous()
+    return torch.cat((query, key, value), dim=-1), z, b, a
+
+
+def test_split_fused_in_proj_outputs_matches_legacy_projection():
+    patch_qwen3_5 = _reload_patch_qwen3_5()
     layer = _make_dummy_fused_layer()
     hidden_states = torch.randn(3, 5, dtype=torch.float32)
     projected_states = F.linear(hidden_states, layer.in_proj.weight)
 
     mixed_qkv, z, b, a = patch_qwen3_5._split_qwen35_fused_in_proj_outputs(layer, projected_states)
-    expected_mixed_qkv, expected_z, expected_b, expected_a = patch_qwen3_5._compute_qwen35_legacy_in_proj_outputs(
+    expected_mixed_qkv, expected_z, expected_b, expected_a = _compute_legacy_in_proj_outputs(
         layer, hidden_states
     )
 
@@ -57,8 +71,8 @@ def test_split_fused_in_proj_outputs_matches_legacy_projection(monkeypatch: pyte
     assert torch.allclose(a, expected_a)
 
 
-def test_qwen35_load_weights_maps_legacy_gdn_shards_to_fused_in_proj(monkeypatch: pytest.MonkeyPatch):
-    _reload_patch_qwen3_5(monkeypatch, enable_fused=True)
+def test_qwen35_load_weights_maps_legacy_gdn_shards_to_fused_in_proj():
+    _reload_patch_qwen3_5()
 
     param = torch.nn.Parameter(torch.zeros(16, 5))
     loader_calls: list[tuple[tuple[int, ...] | int, torch.Tensor]] = []
@@ -90,8 +104,8 @@ def test_qwen35_load_weights_maps_legacy_gdn_shards_to_fused_in_proj(monkeypatch
     }
 
 
-def test_qwen35_packed_modules_mapping_switches_to_fused_in_proj(monkeypatch: pytest.MonkeyPatch):
-    _reload_patch_qwen3_5(monkeypatch, enable_fused=True)
+def test_qwen35_packed_modules_mapping_uses_fused_in_proj():
+    _reload_patch_qwen3_5()
 
     mapping = qwen3_5_module.Qwen3_5ForCausalLMBase.packed_modules_mapping
     assert mapping["in_proj"] == [

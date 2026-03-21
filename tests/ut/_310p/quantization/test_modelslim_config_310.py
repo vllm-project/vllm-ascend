@@ -105,7 +105,6 @@ class TestAscendModelSlimConfig310(TestBase):
             self.assertIs(method, fused_moe_method.return_value)
             fused_moe_method.assert_called_once_with(mock_scheme, fused_moe_layer.moe_config)
 
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_QWEN35_FUSED_IN_PROJ": "1"})
     def test_get_quant_method_uses_fused_qwen35_mapping(self):
         mock_config = MagicMock()
         mock_config.model_config.hf_config.model_type = "qwen3_5"

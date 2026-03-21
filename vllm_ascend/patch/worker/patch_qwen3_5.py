@@ -19,7 +19,6 @@ from collections.abc import Iterable
 from copy import deepcopy
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import (
@@ -46,21 +45,12 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.sigmoid_gating import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.utils import enable_sp
-
-
-def _qwen35_fused_in_proj_enabled() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_QWEN35_FUSED_IN_PROJ
-
-
-def _qwen35_debug_fused_in_proj_enabled() -> bool:
-    return envs_ascend.VLLM_ASCEND_DEBUG_QWEN35_FUSED_IN_PROJ
 
 
 def _store_original_method_once(cls, attr_name: str):
@@ -98,45 +88,6 @@ def _split_qwen35_fused_in_proj_outputs(layer, projected_states: torch.Tensor):
     return mixed_qkv, z, b.contiguous(), a.contiguous()
 
 
-def _compute_qwen35_legacy_in_proj_outputs(layer, hidden_states: torch.Tensor):
-    q_size, k_size, v_size, z_size, b_size, a_size = _get_qwen35_local_in_proj_sizes(layer)
-    q_weight, k_weight, v_weight, z_weight, b_weight, a_weight = layer.in_proj.weight.split(
-        [q_size, k_size, v_size, z_size, b_size, a_size],
-        dim=0,
-    )
-    query = F.linear(hidden_states, q_weight)
-    key = F.linear(hidden_states, k_weight)
-    value = F.linear(hidden_states, v_weight)
-    z = F.linear(hidden_states, z_weight).reshape(hidden_states.size(0), -1, layer.head_v_dim)
-    b = F.linear(hidden_states, b_weight).contiguous()
-    a = F.linear(hidden_states, a_weight).contiguous()
-    return torch.cat((query, key, value), dim=-1), z, b, a
-
-
-def _validate_qwen35_fused_in_proj_outputs(
-    layer,
-    hidden_states: torch.Tensor,
-    mixed_qkv: torch.Tensor,
-    z: torch.Tensor,
-    b: torch.Tensor,
-    a: torch.Tensor,
-):
-    expected_outputs = _compute_qwen35_legacy_in_proj_outputs(layer, hidden_states)
-    actual_outputs = (mixed_qkv, z, b, a)
-    output_names = ("mixed_qkv", "z", "b", "a")
-    for name, actual, expected in zip(output_names, actual_outputs, expected_outputs):
-        if actual.shape != expected.shape:
-            raise RuntimeError(
-                f"{layer.prefix}: fused in_proj {name} shape mismatch, "
-                f"actual={tuple(actual.shape)}, expected={tuple(expected.shape)}"
-            )
-        if not torch.allclose(actual, expected, atol=1e-5, rtol=1e-5):
-            max_diff = (actual - expected).abs().max().item()
-            raise RuntimeError(
-                f"{layer.prefix}: fused in_proj {name} mismatch, max_diff={max_diff}"
-            )
-
-
 def _build_qwen35_fused_packed_modules_mapping(
     base_mapping: dict[str, list[str]],
 ) -> dict[str, list[str]]:
@@ -150,51 +101,29 @@ def _build_qwen35_fused_packed_modules_mapping(
 def _apply_qwen35_packed_modules_mapping():
     for cls in (Qwen3_5ForCausalLMBase, Qwen3_5ForConditionalGeneration):
         original_mapping = _store_original_mapping_once(cls)
-        if _qwen35_fused_in_proj_enabled():
-            cls.packed_modules_mapping = _build_qwen35_fused_packed_modules_mapping(original_mapping)
-        else:
-            cls.packed_modules_mapping = original_mapping
+        cls.packed_modules_mapping = _build_qwen35_fused_packed_modules_mapping(original_mapping)
 
 
 def _get_qwen35_stacked_params_mapping():
-    stacked_params_mapping = [
+    return [
         ("qkv_proj", "q_proj", "q"),
         ("qkv_proj", "k_proj", "k"),
         ("qkv_proj", "v_proj", "v"),
         ("gate_up_proj", "gate_proj", 0),
         ("gate_up_proj", "up_proj", 1),
+        ("in_proj", "in_proj_qkv", (0, 1, 2)),
+        ("in_proj", "in_proj_z", 3),
+        ("in_proj", "in_proj_b", 4),
+        ("in_proj", "in_proj_a", 5),
     ]
-    if _qwen35_fused_in_proj_enabled():
-        stacked_params_mapping.extend(
-            [
-                ("in_proj", "in_proj_qkv", (0, 1, 2)),
-                ("in_proj", "in_proj_z", 3),
-                ("in_proj", "in_proj_b", 4),
-                ("in_proj", "in_proj_a", 5),
-            ]
-        )
-    else:
-        stacked_params_mapping.extend(
-            [
-                ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-                ("in_proj_qkvz", "in_proj_z", 3),
-                ("in_proj_ba", "in_proj_b", 0),
-                ("in_proj_ba", "in_proj_a", 1),
-            ]
-        )
-    return stacked_params_mapping
 
 
 _ORIGINAL_QWEN35_GDN_INIT = _store_original_method_once(Qwen3_5GatedDeltaNet, "__init__")
-_ORIGINAL_QWEN35_GDN_FORWARD = _store_original_method_once(Qwen3_5GatedDeltaNet, "forward")
-_ORIGINAL_QWEN35_MODEL_LOAD_WEIGHTS = _store_original_method_once(Qwen3_5Model, "load_weights")
 
 
 class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
     def __init__(self, *args, **kwargs):
         _ORIGINAL_QWEN35_GDN_INIT(self, *args, **kwargs)
-        if not _qwen35_fused_in_proj_enabled():
-            return
 
         self.in_proj = MergedColumnParallelLinear(
             input_size=self.hidden_size,
@@ -218,14 +147,9 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        if not _qwen35_fused_in_proj_enabled():
-            return _ORIGINAL_QWEN35_GDN_FORWARD(self, hidden_states, output)
-
         projected_states, _ = self.in_proj(hidden_states)
         num_tokens = projected_states.size(0)
         mixed_qkv, z, b, a = _split_qwen35_fused_in_proj_outputs(self, projected_states)
-        if _qwen35_debug_fused_in_proj_enabled():
-            _validate_qwen35_fused_in_proj_outputs(self, hidden_states, mixed_qkv, z, b, a)
 
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
@@ -473,9 +397,6 @@ def _patched_qwen35_model_load_weights(
     self,
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> set[str]:
-    if not _qwen35_fused_in_proj_enabled():
-        return _ORIGINAL_QWEN35_MODEL_LOAD_WEIGHTS(self, weights)
-
     params_dict = dict(self.named_parameters())
     loaded_params: set[str] = set()
     expert_params_mapping = self.get_expert_mapping()
