@@ -277,12 +277,11 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
                 mrope_section=self.rotary_emb.mrope_section,
                 is_interleaved=self.rotary_emb.mrope_interleaved,
                 rope_dim=self.rotary_emb.rotary_dim, 
-                has_gate=self.attn_output_gate, )
+                has_gate=self.attn_output_gate, 
+            )
         else:
             if self.attn_output_gate:
-                q_gate, k, v = qkv.split(
-                    [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
-                )
+                q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
                 orig_shape = q_gate.shape[:-1]
                 q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
                 q, gate = torch.chunk(q_gate, 2, dim=-1)
@@ -291,12 +290,8 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             else:
                 q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-            q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
-                -1, self.num_heads * self.head_dim
-            )
-            k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
-                -1, self.num_kv_heads * self.head_dim
-            )
+            q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(-1, self.num_heads * self.head_dim)
+            k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(-1, self.num_kv_heads * self.head_dim)
 
             q, k = self.rotary_emb(positions, q, k)
 
