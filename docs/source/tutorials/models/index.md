@@ -31,6 +31,7 @@ GLM4.x.md
 GLM5.md
 Kimi-K2-Thinking.md
 Kimi-K2.5.md
+IQuest-Coder-V1-40B-Instruct.md
 PaddleOCR-VL.md
 MiniMax-M2.5.md
 :::
