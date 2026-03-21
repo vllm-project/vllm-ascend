@@ -215,9 +215,9 @@ def chunk_gated_delta_rule_pytorch(
                 if g_chunk is not None:
                     g_last = g_chunk[-1]
                     v_new_scaled = v_new * _safe_exp(g_last - g_chunk)[:, None]
-                    h_state = h_chunk * torch.exp(g_last) + (
-                        k_eval_low.transpose(0, 1) @ v_new_scaled.to(k.dtype)
-                    ).to(torch.float32)
+                    h_state = h_chunk * torch.exp(g_last) + (k_eval_low.transpose(0, 1) @ v_new_scaled.to(k.dtype)).to(
+                        torch.float32
+                    )
                 else:
                     h_state = h_chunk + (k_eval_low.transpose(0, 1) @ v_new.to(k.dtype)).to(torch.float32)
                 h_state = h_state.to(torch.float32)
