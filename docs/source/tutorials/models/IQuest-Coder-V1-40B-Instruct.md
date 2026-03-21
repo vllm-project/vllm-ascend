@@ -169,6 +169,7 @@ vllm serve ${MODEL_PATH} \
 ```
 
 **Configuration Notes**:
+
 - Adjust `ASCEND_RT_VISIBLE_DEVICES` to match your available NPU devices
 - Modify `--tensor-parallel-size` based on available NPU memory (recommend 2+ cards for 40B model)
 - Reduce `--max-model-len` if encountering memory constraints
@@ -303,6 +304,7 @@ vllm bench serve \
 ```
 
 **Benchmarking Recommendations**:
+
 - Start with moderate prompt lengths and concurrency
 - Gradually increase `--max-model-len` and request rate
 - Monitor NPU memory utilization throughout testing
@@ -353,12 +355,13 @@ For feature configuration options, see the [feature guide](../../user_guide/feat
 
 ### Ascend Graph Mode (ACLGraph) Pitfalls & Blank Outputs
 
-When deploying on Ascend NPUs, you might encounter an issue where the model generates output successfully (tokens/sec > 0), but the printed output consists entirely of **blank spaces or empty lines**. 
+When deploying on Ascend NPUs, you might encounter an issue where the model generates output successfully (tokens/sec > 0), but the printed output consists entirely of **blank spaces or empty lines**.
 
 Through rigorous debugging (including setting `export INF_NAN_MODE_ENABLE=1`), it has been confirmed that this is **not** caused by typical NaN (Not a Number) tensor pollution. Instead, it is an Ascend Graph compilation compatibility issue with the `bfloat16` data type on certain operators.
 
 **Solution:**
 To resolve the blank output issue, you have two options:
+
 1. **Downgrade Precision (Recommended for Production)**: Change `--dtype bfloat16` to `--dtype float16` in your startup script. This bypasses the precision bug in the graph compiler while maintaining graph acceleration.
 2. **Enable Eager Mode (Recommended for Testing)**: Add `--enforce-eager` to bypass ACLGraph compilation entirely. This is highly stable but trades off inference speed.
 
