@@ -2599,7 +2599,9 @@ class NPUModelRunner(GPUModelRunner):
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
-            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
+            block_size = (self.kernel_block_sizes[0] if isinstance(
+            self.kernel_block_sizes, list) else self.kernel_block_sizes)
+            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
