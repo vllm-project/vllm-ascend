@@ -276,8 +276,8 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
                 eps=self.config.rms_norm_eps,
                 mrope_section=self.rotary_emb.mrope_section,
                 is_interleaved=self.rotary_emb.mrope_interleaved,
-                rope_dim=self.rotary_emb.rotary_dim, 
-                has_gate=self.attn_output_gate, 
+                rope_dim=self.rotary_emb.rotary_dim,
+                has_gate=self.attn_output_gate,
             )
         else:
             if self.attn_output_gate:
