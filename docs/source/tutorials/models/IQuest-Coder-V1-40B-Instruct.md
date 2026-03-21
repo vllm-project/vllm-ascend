@@ -228,22 +228,22 @@ print(response.choices[0].message.content)
 ### Sample Use Cases
 
 1. **Code Generation**
-   ```
+   ```text
    "Generate a REST API endpoint in FastAPI for user authentication with JWT tokens."
    ```
 
 2. **Code Review**
-   ```
+   ```text
    "Review this Python code for potential memory leaks and suggest improvements."
    ```
 
 3. **Debugging**
-   ```
+   ```text
    "This function is throwing a KeyError. Help me identify and fix the issue."
    ```
 
 4. **Documentation**
-   ```
+   ```text
    "Generate comprehensive documentation for this class including usage examples."
    ```
 
