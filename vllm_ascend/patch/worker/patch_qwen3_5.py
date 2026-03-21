@@ -258,7 +258,6 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
         qkv, _ = self.qkv_proj(hidden_states)
-        
         if "qwen3_5" in self.config.model_type:
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
