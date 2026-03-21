@@ -302,7 +302,7 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             attn_output = attn_output * gate
 
         output[:], _ = self.o_proj(attn_output)
-        
+
 
 Qwen3_5GatedDeltaNet._forward_core = AscendQwen3_5GatedDeltaNet._forward_core
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
