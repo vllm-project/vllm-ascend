@@ -23,12 +23,13 @@ _CONDITIONS = ("seq7168",)
 # Split the original kernel into two independent kernels:
 # - kernel_v1: Process V dimension [0:64]
 # - kernel_v2: Process V dimension [64:128]
-# 
+#
 # Benefits:
 # 1. Each kernel has half the state tensors (16KB vs 32KB)
 # 2. Each kernel has half the float32 intermediates (64KB vs 128KB)
 # 3. Enables better UB utilization and potential double buffering
 # ============================================================================
+
 
 @triton.heuristics(
     {
@@ -124,7 +125,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_v1(
         v_base = v + bos * H * V + i_h * V
         p_v = tl.make_block_ptr(v_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, 64), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
-        
+
         # Compute v_new
         b_h1_bv_f32 = b_h1_bv.to(tl.float32)
         b_v_new = b_v.to(tl.float32)
@@ -243,7 +244,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_v2(
         v_base = v + bos * H * V + i_h * V
         p_v = tl.make_block_ptr(v_base, (T, V), (stride_v, 1), (i_t * BT, v_start), (BT, 64), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
-        
+
         # Compute v_new
         b_h1_bv_f32 = b_h1_bv.to(tl.float32)
         b_v_new = b_v.to(tl.float32)
@@ -329,7 +330,7 @@ def chunk_gated_delta_rule_fwd_h(
         num_warps=4,
         num_stages=4,
     )
-    
+
     # Launch v2 kernel (processes V[64:128])
     chunk_gated_delta_rule_fwd_kernel_h_v2[grid](
         k=k,
