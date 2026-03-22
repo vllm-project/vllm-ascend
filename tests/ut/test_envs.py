@@ -60,3 +60,9 @@ class TestEnvVariables(TestBase):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
+
+    def test_qwen35_debug_envs_removed(self):
+        self.assertNotIn("VLLM_ASCEND_ENABLE_QWEN35_FUSED_IN_PROJ",
+                         envs_ascend.env_variables)
+        self.assertNotIn("VLLM_ASCEND_DEBUG_QWEN35_FUSED_IN_PROJ",
+                         envs_ascend.env_variables)

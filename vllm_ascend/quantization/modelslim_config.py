@@ -26,6 +26,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from types import MappingProxyType
 from typing import Any, Optional
 
@@ -39,7 +40,6 @@ from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
-
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, calc_split_factor
 
 from .methods import get_scheme_class
@@ -116,14 +116,12 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
     "qwen3_5": {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "in_proj": ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
     },
     "qwen3_5_moe": {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "in_proj": ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
     "deepseek_v2": {
@@ -306,7 +304,7 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
         Dictionary mapping fused module names to their component module names.
         Returns empty dict if model_type is not found.
     """
-    return packed_modules_model_mapping.get(model_type, {})
+    return deepcopy(packed_modules_model_mapping.get(model_type, {}))
 
 
 def get_prefix_mapping(model_type: str) -> dict[str, str]:
@@ -571,7 +569,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                     prefix = ".".join(parts)
 
         if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping[model_type]
+            self.packed_modules_mapping = get_packed_modules_mapping(model_type)
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
