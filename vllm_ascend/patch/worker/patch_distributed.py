@@ -84,7 +84,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         if use_message_queue_broadcaster and self.world_size > 1:
             self.mq_broadcaster = MessageQueue.create_from_process_group(self.cpu_group, 1 << 22, 6)
 
-        self.use_custom_op_call = False
+        self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
 
     def all_to_all(
@@ -105,17 +105,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
         )
         assert self.device_communicator is not None, "device_communicator should be initialized when world_size > 1"
         return self.device_communicator.all_to_all(input_, scatter_dim, gather_dim, scatter_sizes, gather_sizes)
-
-    def all_reduce(self, input_):
-        if self.world_size == 1:
-            return input_
-        return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
-
-    # TODO(realliujiaxu) delete all_reduce and all_gather after vllm-ascend drop v0.17.0
-    def all_gather(self, input_, dim: int = -1) -> torch.Tensor:
-        if self.world_size == 1:
-            return input_
-        return torch.ops.vllm.all_gather(input_, dim=dim, world_size=self.world_size, group_name=self.unique_name)
 
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch

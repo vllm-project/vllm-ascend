@@ -46,7 +46,6 @@ from vllm.distributed.parallel_state import (
 from vllm.utils.system_utils import update_environment_variables
 
 import vllm_ascend.ops.register_custom_ops  # noqa
-import vllm_ascend.patch.worker.patch_distributed  # noqa # TODO: delete this after vllm-ascend drop v0.17.0
 from tests.e2e.singlecard.compile.backend import TestBackend as CompileTestBackend
 from vllm_ascend.compilation.passes.sequence_parallelism_moe import (
     SequenceParallelismMoePass,
