@@ -22,9 +22,9 @@ find_package(Torch REQUIRED)
 
 run_python(TORCH_VERSION
   "import torch; print(torch.__version__)" "Failed to locate torch path")
-# check torch version is 2.8.0
-if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.8.0")
-  message(FATAL_ERROR "Expected PyTorch version 2.8.0, but found ${TORCH_VERSION}")
+# check torch version is 2.9.0
+if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.9.0")
+  message(FATAL_ERROR "Expected PyTorch version 2.9.0, but found ${TORCH_VERSION}")
 endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
@@ -61,12 +61,30 @@ set(VLLM_ASCEND_CUSTOM_OP
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE
+set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_310P
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bgmv_expand.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bgmv_shrink.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sgmv_expand.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sgmv_shrink.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
-if(SOC_VERSION STREQUAL "ASCEND310P3")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE})
+set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
+)
+
+if(SOC_VERSION MATCHES "ascend310p.*")
+    message(STATUS "310P hardware detected: disabling MLAPO operators")
+    message(STATUS "310P hardware detected: excluding batch_matmul_transpose operators")
+    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_310P})
+endif()
+
+if(SOC_VERSION MATCHES "ascend950")
+    message(STATUS "A5 hardware detected: disabling MLAPO operators")
+    message(STATUS "A5 hardware detected: excluding batch_matmul_transpose operators")
+    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
 endif()
 
 ascendc_library(vllm_ascend_kernels SHARED
@@ -75,7 +93,7 @@ ascendc_library(vllm_ascend_kernels SHARED
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
-if(SOC_VERSION STREQUAL "ASCEND310P3")
+if(SOC_VERSION MATCHES "ascend310p.*")
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)

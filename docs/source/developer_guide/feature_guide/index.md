@@ -6,11 +6,14 @@ This section provides an overview of the features implemented in vLLM Ascend. De
 :caption: Feature Guide
 :maxdepth: 1
 patch
+cpu_binding
 ModelRunner_prepare_inputs
 disaggregated_prefill
-eplb_swift_balancer.md
-Multi_Token_Prediction
+eplb_swift_balancer
 ACL_Graph
 KV_Cache_Pool_Guide
 add_custom_aclnn_op
+context_parallel
+quantization
+npugraph_ex
 :::

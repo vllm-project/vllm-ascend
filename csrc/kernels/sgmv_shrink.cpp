@@ -94,7 +94,7 @@ private:
             AscendC::LocalTensor<float> xTmpTensor = tmpBufferX_.Get<float>();
             AscendC::LocalTensor<X_T> xLocal = inQueueX_.DeQue<X_T>();
             Cast(xTmpTensor, xLocal, AscendC::RoundMode::CAST_NONE, inputHiddenDim_);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             inQueueX_.FreeTensor(xLocal);
         }
 
@@ -153,20 +153,20 @@ private:
             AscendC::LocalTensor<X_T> xLocal = inQueueX_.DeQue<X_T>();
             Cast(xTmpTensor, xLocal, AscendC::RoundMode::CAST_NONE, numElements);
             Cast(wTmpTensor, wLocal, AscendC::RoundMode::CAST_NONE, numElements);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             inQueueX_.FreeTensor(xLocal);
             inQueueW_.FreeTensor(wLocal);
         } else {
             Cast(wTmpTensor, wLocal, AscendC::RoundMode::CAST_NONE, numElements);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             inQueueW_.FreeTensor(wLocal);
         }
         // dot product of the one tile of X and W 
         Mul(wTmpTensor, xTmpTensor, wTmpTensor, numElements);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         // reduce sum generate one number, which is the summation of all the dot product
         ReduceSum<float>(wTmpTensor, wTmpTensor, wTmpTensor, numElements);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
 
         acc += wTmpTensor.GetValue(0);
     }
@@ -192,7 +192,7 @@ private:
         AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.AllocTensor<Y_T>();
 
         Muls(yOutLocal, yLocal, scale_, maxLoRARank_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
 
         outQueueY_.EnQue<Y_T>(yOutLocal);
     }
@@ -242,7 +242,7 @@ private:
 
 // declare all dtype kernel
 SGMV_SHRINK_TYPE_DECLARE(half)
-#if (__CCE_AICORE__ >= 220)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
     SGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
 #endif
 
@@ -260,8 +260,8 @@ extern void sgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
                                                         numTokensPerCore, inputHiddenDim, maxLoRARank,
                                                         scale);
     } else if (type == AscendType::BF16) {
-        #if (__CCE_AICORE__ >= 220)
-            sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
+        #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
                                                                   seqLen, seqLenSize, 
                                                                   y, batchSize,
                                                                   numTokensPerCore, inputHiddenDim, maxLoRARank,

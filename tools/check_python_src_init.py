@@ -36,8 +36,8 @@ def check_init_file_in_package(directory):
         return False
 
     # If any .py file exists, we expect an __init__.py
-    if any(f.endswith('.py') for f in files):
-        init_file = os.path.join(directory, '__init__.py')
+    if any(f.endswith(".py") for f in files):
+        init_file = os.path.join(directory, "__init__.py")
         if not os.path.isfile(init_file):
             return False
     return True
@@ -62,14 +62,12 @@ def main():
         all_missing.update(missing)
 
     if all_missing:
-        print(
-            "❌ Missing '__init__.py' files in the following Python package directories:"
-        )
+        print("❌ Missing '__init__.py' files in the following Python package directories:")
         for pkg in sorted(all_missing):
             print(f" - {pkg}")
         sys.exit(1)
     else:
-        print("✅ All Python packages have __init__.py files.")
+        print("All Python packages have __init__.py files.")
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ check_command() {
         echo "pre-commit install"
         echo ""
         echo "See step by step contribution guide:"
-        echo "https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution"
+        echo "https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution"
         exit 1
     fi
 }

@@ -1,7 +1,7 @@
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
-  name: vllm
+  name: {{ lws_name | default("vllm") }}
   namespace: vllm-project
 spec:
   replicas: {{ replicas | default(1) }}
@@ -22,15 +22,16 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
-              # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
-              - name: VLLM_ASCEND_VERSION
+              - name: FAIL_TAG
+                value: {{ fail_tag | default("FAIL_TAG") }}
+              - name: IS_PR_TEST
+                value: "{{ is_pr_test | default("false") }}"
+              - name: VLLM_VERSION
+                value: {{ vllm_version | default("latest") }}
+              - name: VLLM_ASCEND_REF
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
-              - name: RESULT_FILE_PATH
-                value: {{ result_file_path | default("/root/.cache/tests/ret") }}
-              - name: FAIL_TAG
-                value: {{ fail_tag | default("FAIL_TAG") }}
             command:
               - sh
               - -c
@@ -81,15 +82,16 @@ spec:
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
-              # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
-              - name: VLLM_ASCEND_VERSION
+              - name: FAIL_TAG
+                value: {{ fail_tag | default("FAIL_TAG") }}
+              - name: IS_PR_TEST
+                value: "{{ is_pr_test | default("false") }}"
+              - name: VLLM_VERSION
+                value: {{ vllm_version | default("latest") }}
+              - name: VLLM_ASCEND_REF
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
-              - name: RESULT_FILE_PATH
-                value: {{ result_file_path | default("/root/.cache/tests/ret") }}
-              - name: FAIL_TAG
-                value: {{ fail_tag | default("FAIL_TAG") }}
             command:
               - sh
               - -c
@@ -126,7 +128,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-leader
+  name: {{ lws_name | default("vllm") }}-leader
   namespace: vllm-project
 spec:
   ports:
@@ -135,6 +137,6 @@ spec:
       protocol: TCP
       targetPort: 8080
   selector:
-    leaderworkerset.sigs.k8s.io/name: vllm
+    leaderworkerset.sigs.k8s.io/name: {{ lws_name | default("vllm") }}
     role: leader
   type: ClusterIP

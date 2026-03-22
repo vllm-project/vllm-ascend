@@ -15,7 +15,7 @@ on:
         required: false
         type: string
         description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11"
       config_file_path:
         required: true
         type: string
@@ -32,7 +32,7 @@ on:
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
       vllm_version:
         required: false
-        default: "v0.12.0"
+        default: "v0.18.0"
         type: string
         description: vllm version to use
       vllm_ascend_remote_url:
@@ -45,6 +45,12 @@ on:
         default: main
         type: string
         description: used for pr level tests
+      is_pr_test:
+        required: true
+        type: boolean
+      is_run:
+        required: true  
+        type: boolean
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -60,7 +66,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 8 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.soc_version }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.soc_version }}-${{ inputs.config_file_path }}
   cancel-in-progress: true
 
 jobs:
@@ -68,63 +74,60 @@ jobs:
     name: ${{ inputs.config_file_path }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.is_run }}
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc2-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
       env:
         KUBECONFIG: /tmp/kubeconfig
-        KUBECTL: /root/.cache/.kube/kubectl
         NAMESPACE: vllm-project
-        LEADER_POD: vllm-0
-        RESULT_FILE: /root/.cache/tests/ret_${{ inputs.soc_version }}
     steps:
-        - name: Install system denpendencies
-          run: |
-           # configure apt and pip source
-           sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-           pip install jinja2-cli
-
-        - name: Install kubectl
-          run: |
-            # Install kubectl
-            arch=$(uname -m)
-
-            if echo "$arch" | grep -qiE "arm|aarch64"; then
-              echo "Detected ARM architecture: $arch"
-              KUBECTL="$KUBECTL"_arm
-            fi
-            install -o root -g root -m 0755 $KUBECTL /usr/local/bin/kubectl
-
-            # Verify kubectl installation
-            kubectl version --client=true
-
         - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
-            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
-
+            if [ "${{ inputs.is_pr_test }}" = "true" ]; then
+              echo "PR test mode"
+              if [ "${{ inputs.soc_version }}" = "a3" ]; then
+                echo "Using A3 cached kubeconfig"
+                cp /root/.cache/.kube/kubeconfig.yaml "$KUBECONFIG"
+              else
+                echo "Using A2 cached kubeconfig"
+                cp /root/.cache/.kube/hk_001_kb.yaml "$KUBECONFIG"
+              fi
+            else
+              echo "Decoding kubeconfig from secrets"
+              echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
+            fi
         - name: Checkout code
-          uses: actions/checkout@v6.0.1
+          uses: actions/checkout@v6
+
+        - name: Set job variables
+          run: |
+            # Derive a unique, valid k8s resource name from config_file_path.
+            # Strip .yaml extension, lowercase, replace dots/underscores with hyphens, cap at 50 chars.
+            config_file="${{ inputs.config_file_path }}"
+            lws_suffix=$(echo "$config_file" | sed 's/\.yaml$//' | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-50)
+            LWS_NAME="vllm-${lws_suffix}"
+            echo "LWS_NAME=${LWS_NAME}" >> $GITHUB_ENV
+            echo "LEADER_POD=${LWS_NAME}-0" >> $GITHUB_ENV
+            echo "Computed LWS_NAME=${LWS_NAME}"
 
         - name: Prepare scripts
           run: |
             # prepare for lws entrypoint scripts
             install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
-            # clear log directory
-            rm -fr $RESULT_FILE
 
         - name: Clear resources
           run: |
             set -euo pipefail
 
-            CRD_NAME="${CRD_NAME:-vllm}"
             TIMEOUT=${TIMEOUT:-120}
             SLEEP_INTERVAL=2
 
-            echo "Deleting leaderworkerset [$CRD_NAME] in namespace [$NAMESPACE]..."
-            kubectl delete leaderworkerset "$CRD_NAME" -n "$NAMESPACE" --ignore-not-found
+            echo "Deleting leaderworkerset [$LWS_NAME] in namespace [$NAMESPACE]..."
+            kubectl delete leaderworkerset "$LWS_NAME" -n "$NAMESPACE" --ignore-not-found
+            kubectl delete service "${LWS_NAME}-leader" -n "$NAMESPACE" --ignore-not-found
 
-            echo "Waiting for all pods starting with 'vllm' to be deleted..."
+            echo "Waiting for pods of leaderworkerset [$LWS_NAME] to be deleted..."
             START_TIME=$(date +%s)
 
             while true; do
@@ -133,14 +136,14 @@ jobs:
 
               if [[ $ELAPSED -ge $TIMEOUT ]]; then
                 echo "Timeout reached ($TIMEOUT seconds), some pods still exist:"
-                kubectl get pods -n "$NAMESPACE" | grep '^vllm' || true
+                kubectl get pods -n "$NAMESPACE" | grep "^${LWS_NAME}-" || true
                 exit 1
               fi
 
-              PODS_EXIST=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep '^vllm' || true)
+              PODS_EXIST=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "^${LWS_NAME}-" || true)
 
               if [[ -z "$PODS_EXIST" ]]; then
-                echo "All vllm pods deleted."
+                echo "All pods for [$LWS_NAME] deleted."
                 break
               else
                 echo "Waiting for pods to be deleted: $PODS_EXIST"
@@ -157,14 +160,14 @@ jobs:
             replicas="${{ inputs.replicas }}"
             image="${{ inputs.image }}"
             config_file_path="${{ inputs.config_file_path }}"
+            fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
+            is_pr_test="${{ inputs.is_pr_test }}"
             vllm_version="${{ inputs.vllm_version }}"
             vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
             vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
-            result_file_path="$RESULT_FILE"
-            fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
             echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
-            required_params=("size" "replicas" "image" "config_file_path")
+            required_params=("size" "replicas" "image" "config_file_path" "is_pr_test" "vllm_version" "vllm_ascend_ref" "vllm_ascend_remote_url")
             for param in "${required_params[@]}"; do
               if [ -z "${!param}" ]; then
                 echo "Error: Parameter '$param' is required but empty"
@@ -174,28 +177,31 @@ jobs:
 
             if [ "${{ inputs.soc_version }}" = "a3" ]; then
               npu_per_node=16
+              TEMPLATE_FILE="tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2"
             else
               npu_per_node=8
+              TEMPLATE_FILE="tests/e2e/nightly/multi_node/scripts/lws-a2.yaml.jinja2"
             fi
 
-            jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
+            jinja2 $TEMPLATE_FILE \
+              -D lws_name="$LWS_NAME" \
               -D size="$size" \
               -D replicas="$replicas" \
               -D image="$image" \
               -D config_file_path="$config_file_path" \
-              -D vllm_version="$vllm_version" \
-              -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
-              -D vllm_ascend_ref="$vllm_ascend_ref" \
-              -D result_file_path="$result_file_path" \
               -D npu_per_node="$npu_per_node" \
               -D fail_tag="$fail_tag" \
+              -D is_pr_test="$is_pr_test" \
+              -D vllm_version="$vllm_version" \
+              -D vllm_ascend_ref="$vllm_ascend_ref" \
+              -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml
 
         - name: Waiting for pod ready
           run: |
-            POD_PREFIX="${POD_PREFIX:-vllm-0}"
+            POD_PREFIX="${LWS_NAME}-0"
             SIZE="${{ inputs.size }}"
             TIMEOUT=1200  # default timeout 20 minutes
 
@@ -252,16 +258,77 @@ jobs:
         - name: Stream logs
           run: |
             set -euo pipefail
+
+            size="${{ inputs.size }}"
+            pids=()
+
+            cleanup() {
+              echo "Cleaning up background log streams..."
+              for pid in "${pids[@]}"; do
+                kill "$pid" 2>/dev/null || true
+              done
+            }
+            trap cleanup EXIT
+
+            for i in $(seq 1 $((size - 1))); do
+              POD="${LWS_NAME}-0-${i}"
+
+              echo "==== Collecting logs from worker pod: $POD ===="
+              kubectl logs -f "$POD" -n "$NAMESPACE" \
+                > "/tmp/${POD}_logs.txt" 2>&1 &
+
+              pids+=($!)
+            done
+
+            echo "==== Streaming logs from leader pod: $LEADER_POD ===="
             echo "Looking for logs containing: $FAIL_TAG"
-            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while read -r line; do
+
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while IFS= read -r line; do
               echo "$line"
               if echo "$line" | grep -q "$FAIL_TAG"; then
-                exit 1   # workflow step failed
+                exit 1
               fi
             done
+
+        - name: Upload logs
+          if: always()
+          uses: actions/upload-artifact@v7
+          with:
+            name: ${{ inputs.config_file_path }}-pod-logs
+            path: /tmp/vllm*_logs.txt
+            retention-days: 7
 
         - name: Post process
           if: always()
           run: |
-            kubectl get pods -n $NAMESPACE --ignore-not-found=true
+            echo "Current pod status:"
+            kubectl get pods -n "$NAMESPACE" --ignore-not-found=true
+
+            echo "Deleting resources for [$LWS_NAME]..."
             kubectl delete -f ./lws.yaml --ignore-not-found=true || true
+
+            echo "Waiting for pods of [$LWS_NAME] to fully terminate..."
+            TIMEOUT=300
+            SLEEP_INTERVAL=5
+            START_TIME=$(date +%s)
+
+            while true; do
+              NOW=$(date +%s)
+              ELAPSED=$((NOW - START_TIME))
+
+              if [[ $ELAPSED -ge $TIMEOUT ]]; then
+                echo "Timeout reached ($TIMEOUT seconds) waiting for termination, continuing anyway."
+                kubectl get pods -n "$NAMESPACE" | grep "^${LWS_NAME}-" || true
+                break
+              fi
+
+              PODS_EXIST=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "^${LWS_NAME}-" || true)
+
+              if [[ -z "$PODS_EXIST" ]]; then
+                echo "All pods for [$LWS_NAME] have terminated."
+                break
+              else
+                echo "Waiting for pods to terminate: $PODS_EXIST"
+                sleep $SLEEP_INTERVAL
+              fi
+            done

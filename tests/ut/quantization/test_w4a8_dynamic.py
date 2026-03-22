@@ -3,14 +3,14 @@ from unittest.mock import Mock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.w4a8_dynamic import (
+from vllm_ascend.quantization.methods.w4a8 import (
     AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod)
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch('vllm.distributed.get_tensor_model_parallel_world_size')
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_current_vllm_config')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_current_vllm_config')
     def setUp(self, mock_get_current_vllm_config, mock_get_tp_world_size):
         mock_get_tp_world_size.return_value = 1
         mock_vllm_config = Mock()
@@ -62,7 +62,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     @patch('torch_npu.npu_convert_weight_to_int4pack')
     @patch('torch.Tensor.npu')
-    def test_process_weights_after_loading(self, mock_npu,
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading(self, mock_format_cast, mock_npu,
                                            mock_npu_convert_weight):
         mock_npu.side_effect = lambda: torch.zeros(
             (1, 32), dtype=torch.float32)
@@ -85,6 +86,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         layer.weight_offset_second = torch.nn.Parameter(torch.empty_like(
             layer.weight_scale_second.data),
                                                         requires_grad=False)
+        mock_format_cast.return_value = layer.weight.data.transpose(
+            0, 1).contiguous()
         self.method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "weight_scale_bias"))
         self.assertEqual(layer.weight_scale_bias.data.shape, (32, ))
@@ -110,6 +113,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         new_layer.scale_bias = torch.nn.Parameter(torch.zeros(
             (32, 1), dtype=torch.float32),
                                                   requires_grad=False)
+        mock_format_cast.return_value = new_layer.weight.data.transpose(
+            0, 1).contiguous()
         self.method.process_weights_after_loading(new_layer)
         self.assertEqual(new_layer.scale_bias.data.shape, (32, ))
         self.assertTrue(hasattr(new_layer, "weight_scale_second"))
@@ -122,16 +127,16 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     output_size = 56
     group_size = 2
 
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_ascend_config')
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_current_vllm_config')
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_ep_group')
-    @patch('vllm_ascend.quantization.w4a8_dynamic.get_mc2_group')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_ascend_config')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_current_vllm_config')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_ep_group')
+    @patch('vllm_ascend.quantization.methods.w4a8.get_mc2_group')
     @patch('torch.distributed.get_rank', return_value=0)
     def setUp(self, mock_get_rank, mock_get_mc2_group, mock_get_ep_group,
               get_current_vllm_config, mock_get_ascend_config):
         # Mock ascend config
         mock_ascend_config = Mock()
-        mock_ascend_config.dynamic_eplb = False
+        mock_ascend_config.eplb_config.dynamic_eplb = False
         mock_get_ascend_config.return_value = mock_ascend_config
 
         mock_vllm_config = Mock()

@@ -70,23 +70,24 @@ public:
         __gm__ int32_t *ptrTokenPerExpert{nullptr};
         int32_t EP;
         int32_t expertPerRank;
+        int32_t n2;
 
         CATLASS_DEVICE
         Params() {};
 
         CATLASS_DEVICE
-        Params(int32_t EP_, int32_t expertPerRank_, __gm__ int32_t *ptrTokenPerExpert_) : ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), expertPerRank(expertPerRank_) {}
+        Params(int32_t EP_, int32_t expertPerRank_, __gm__ int32_t *ptrTokenPerExpert_, int32_t n2_) : ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), expertPerRank(expertPerRank_), n2(n2_) {}
     };
 
     CATLASS_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, Params const &params = Params{}) : params(params)
     {
-        size_t ubOffset = 4096;
+        size_t ubOffset = 0;
         int32_t eventVMTE2 = 0;
         int32_t eventMTE2V = 0;
         int32_t eventMTE3V = 0;
         int32_t eventVMTE3 = 0;
-        constexpr int32_t blockN = 12000;
+        int32_t blockN = params.n2;
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
             ubCList[i] = resource.ubBuf.template GetBufferByByte<ElementC>(ubOffset);
             ubOffset += blockN * sizeof(ElementC);

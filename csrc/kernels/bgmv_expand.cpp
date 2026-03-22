@@ -187,7 +187,7 @@ private:
             }
         } else {
             Cast(xDup, xLocal, AscendC::RoundMode::CAST_NONE, maxLoRARank_);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
 
             for (int32_t i = maxLoRARank_; i < NUM_ELEMENTS_PER_REPEAT; i += maxLoRARank_) {
                 for (int32_t j = 0; j < maxLoRARank_; j++) {
@@ -219,15 +219,15 @@ private:
         AscendC::LocalTensor<Y_T> yInLocal = inQueueY_.DeQue<Y_T>();
         AscendC::LocalTensor<float> yInLocalFP32 = inBufferY_.Get<float>();
         Cast(yInLocalFP32, yInLocal, AscendC::RoundMode::CAST_NONE, numElements);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         inQueueY_.FreeTensor(yInLocal);
 
         Add(yLocal, yLocal, yInLocalFP32, numElements);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
 
         AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.AllocTensor<Y_T>();
         Cast(yOutLocal, yLocal, AscendC::RoundMode::CAST_RINT, numElements);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
 
         outQueueY_.EnQue<Y_T>(yOutLocal);
     }
@@ -243,40 +243,40 @@ private:
         AscendC::LocalTensor<float> wTmpTensor = tmpBufferW_.Get<float>();
 
         Cast(wTmpTensor, wLocal, AscendC::RoundMode::CAST_NONE, MASK_COUNT, blockReduceRepeatCount, castParams_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         inQueueW_.FreeTensor(wLocal);
 
         Mul(wTmpTensor, xDup, wTmpTensor, MASK_COUNT, blockReduceRepeatCount, dotProductParams_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
 
         if (maxLoRARank_ == LORA_RANK_8) {
             BlockReduceSum(yLocal[progress], wTmpTensor, blockReduceRepeatCount, MASK_COUNT,
                            reduceSumParams_.dstRepStride, reduceSumParams_.srcBlkStride, reduceSumParams_.srcRepStride);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
         } else if (maxLoRARank_ == LORA_RANK_16) {
             BlockReduceSum(wTmpTensor, wTmpTensor, blockReduceRepeatCount, MASK_COUNT,
                            reduceSumParams_.dstRepStride, reduceSumParams_.srcBlkStride, reduceSumParams_.srcRepStride);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             PairReduceSum(yLocal[progress], wTmpTensor, pairReduceRepeat16, MASK_COUNT,
                           reduceSumParams_.dstRepStride, reduceSumParams_.srcBlkStride, reduceSumParams_.srcRepStride);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
         } else if (maxLoRARank_ == LORA_RANK_32) {
             BlockReduceSum(wTmpTensor, wTmpTensor, blockReduceRepeatCount, MASK_COUNT,
                            reduceSumParams_.dstRepStride, reduceSumParams_.srcBlkStride, reduceSumParams_.srcRepStride);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             PairReduceSum(wTmpTensor, wTmpTensor, pairReduceRepeat16, MASK_COUNT,
                            reduceSumParams_.dstRepStride, reduceSumParams_.srcBlkStride, reduceSumParams_.srcRepStride);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             PairReduceSum(yLocal[progress], wTmpTensor, pairReduceRepeat32, MASK_COUNT,
                           reduceSumParams_.dstRepStride, reduceSumParams_.srcBlkStride, reduceSumParams_.srcRepStride);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
         } else if (maxLoRARank_ == LORA_RANK_64) {
             BlockReduceSum(wTmpTensor, wTmpTensor, blockReduceRepeatCount, MASK_COUNT,
                            reduceSumParams_.dstRepStride, reduceSumParams_.srcBlkStride, reduceSumParams_.srcRepStride);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             BlockReduceSum(yLocal[progress], wTmpTensor, pairReduceRepeat16, MASK_COUNT,
                           reduceSumParams_.dstRepStride, reduceSumParams_.srcBlkStride, reduceSumParams_.srcRepStride);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
         }
     }
 
@@ -342,7 +342,7 @@ private:
 
 // declare all dtype kernel
 BGMV_EXPAND_TYPE_DECLARE(half)
-#if (__CCE_AICORE__ >= 220)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
     BGMV_EXPAND_TYPE_DECLARE(bfloat16_t)
 #endif
 
@@ -356,8 +356,8 @@ extern void bgmv_expand_impl(AscendType type, void* stream, void* x, void* weigh
         bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore,
                                                         maxLoRARank, outputHiddenDim, sliceOffset, outputFullDim);
     } else if (type == AscendType::BF16) {
-        #if (__CCE_AICORE__ >= 220)
-            bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
+        #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
                                                                   numTokensPerCore, maxLoRARank, outputHiddenDim,
                                                                   sliceOffset, outputFullDim);
         #endif

@@ -20,24 +20,27 @@ AscendMergedColumnParallelLinear, AscendMergedColumnParallelLinear,
 AscendRowParallelLinear and AscendColumnParallelLinear.
 """
 
-from typing import Optional, Union
-
 import torch
 import torch.nn as nn
-import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
 from vllm.model_executor.layers.linear import (  # noqa
-    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
-    MergedColumnParallelLinear, QKVParallelLinear, QuantizeMethodBase,
-    ReplicatedLinear, RowParallelLinear, UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
+    WEIGHT_LOADER_V2_SUPPORTED,
+    ColumnParallelLinear,
+    LinearBase,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    QuantizeMethodBase,
+    ReplicatedLinear,
+    RowParallelLinear,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
+from vllm_ascend.utils import enable_sp, maybe_trans_nz
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
@@ -45,23 +48,19 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        if "conv1d" not in layer.prefix and (
-                is_enable_nz() and layer.weight.data.dtype
-                in [torch.float16, torch.bfloat16]):
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+        if "conv1d" not in layer.prefix:
+            layer.weight.data = maybe_trans_nz(layer.weight.data)
 
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
 class AscendLinearBase(LinearBase):
-
     def __init__(
         self,
         input_size: int,
         output_size: int,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -79,11 +78,9 @@ class AscendLinearBase(LinearBase):
         self.quant_config = quant_config
         self.prefix = prefix
         if quant_config is None:
-            self.quant_method: Optional[
-                QuantizeMethodBase] = AscendUnquantizedLinearMethod()
+            self.quant_method: QuantizeMethodBase | None = AscendUnquantizedLinearMethod()
         else:
-            self.quant_method = quant_config.get_quant_method(self,
-                                                              prefix=prefix)
+            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         self.return_bias = return_bias
         self.disable_tp = disable_tp
 
@@ -104,19 +101,21 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         hidden_size: int,
         head_size: int,
         total_num_heads: int,
-        total_num_kv_heads: Optional[int] = None,
+        total_num_kv_heads: int | None = None,
         bias: bool = True,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        v_head_size: int | None = None,
     ):
-        self.custom_op, _, tp_size = get_parallel_op(disable_tp, prefix, self,
-                                                     "column")
-        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
+        self.v_head_size = v_head_size if v_head_size is not None else head_size
+        self.custom_op, _, tp_size = get_parallel_op(disable_tp, prefix, self, "column")
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
+        # linear of vllm supports custom comm group
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -127,35 +126,35 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         self.num_heads = divide(self.total_num_heads, tp_size)
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
-            self.num_kv_head_replicas = divide(tp_size,
-                                               self.total_num_kv_heads)
+            self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_heads)
         else:
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
-        output_size = (self.num_heads +
-                       2 * self.num_kv_heads) * tp_size * self.head_size
+        output_size = (self.num_heads + 2 * self.num_kv_heads) * tp_size * self.head_size
         self.output_sizes = [
             self.num_heads * self.head_size * tp_size,  # q_proj
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
             self.num_kv_heads * self.head_size * tp_size,  # v_proj
         ]
-        AscendColumnParallelLinear.__init__(self,
-                                            input_size=input_size,
-                                            output_size=output_size,
-                                            bias=bias,
-                                            gather_output=False,
-                                            skip_bias_add=skip_bias_add,
-                                            params_dtype=params_dtype,
-                                            quant_config=quant_config,
-                                            prefix=prefix,
-                                            return_bias=return_bias,
-                                            disable_tp=disable_tp)
+        AscendColumnParallelLinear.__init__(
+            self,
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            gather_output=False,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
 
     def forward(
         self,
         input_,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
@@ -180,35 +179,36 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         bias: bool = True,
         gather_output: bool = False,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
-            disable_tp, prefix, self, "column")
-        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "column")
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
+        # linear of vllm supports custom comm group
         self.output_sizes = output_sizes
-        assert all(output_size % self.tp_size == 0
-                   for output_size in output_sizes)
-        AscendColumnParallelLinear.__init__(self,
-                                            input_size=input_size,
-                                            output_size=sum(output_sizes),
-                                            bias=bias,
-                                            gather_output=gather_output,
-                                            skip_bias_add=skip_bias_add,
-                                            params_dtype=params_dtype,
-                                            quant_config=quant_config,
-                                            prefix=prefix,
-                                            return_bias=return_bias,
-                                            disable_tp=disable_tp)
+        assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
+        AscendColumnParallelLinear.__init__(
+            self,
+            input_size=input_size,
+            output_size=sum(output_sizes),
+            bias=bias,
+            gather_output=gather_output,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
 
     def forward(
         self,
         input_,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
@@ -221,6 +221,9 @@ class AscendRowParallelLinear(RowParallelLinear):
     and the original TP group in other modules.
     """
 
+    # NOTE: Globally unique prefix identifier used in SP scenarios
+    unique_prefix_idx = 0
+
     def __init__(
         self,
         input_size: int,
@@ -228,40 +231,43 @@ class AscendRowParallelLinear(RowParallelLinear):
         bias: bool = True,
         input_is_parallel: bool = True,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
         reduce_results: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        compilation_config = get_current_vllm_config().compilation_config
-        # TODO(shaopeng-666): Remove the visual check after the mm model reconstruction is complete.
-        # TODO(MengqingCao): Remove the empty string check, after specifying the prefix in linear layers of some models in the vLLM.
-        if prefix in compilation_config.static_forward_context and \
-            prefix != "" and \
-            "visual" not in prefix:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
+        # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
+        if enable_sp():
+            compilation_config = get_current_vllm_config().compilation_config
+            unique_prefix = prefix
+            if prefix in compilation_config.static_forward_context:
+                unique_prefix = f"{prefix}.unique_prefix{AscendRowParallelLinear.unique_prefix_idx}"
+                AscendRowParallelLinear.unique_prefix_idx += 1
+            self.unique_prefix = unique_prefix
+            compilation_config.static_forward_context[unique_prefix] = self
 
-        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
-            disable_tp, prefix, self, "row")
-        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "row")
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
+        # linear of vllm supports custom comm group
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
 
-        AscendLinearBase.__init__(self,
-                                  input_size,
-                                  output_size,
-                                  skip_bias_add,
-                                  params_dtype,
-                                  quant_config,
-                                  prefix,
-                                  return_bias=return_bias,
-                                  disable_tp=disable_tp)
+        AscendLinearBase.__init__(
+            self,
+            input_size,
+            output_size,
+            skip_bias_add,
+            params_dtype,
+            quant_config,
+            prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
@@ -275,19 +281,23 @@ class AscendRowParallelLinear(RowParallelLinear):
             output_size=self.output_size,
             params_dtype=self.params_dtype,
             weight_loader=(
-                self.weight_loader_v2 if self.quant_method.__class__.__name__
-                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+                self.weight_loader_v2
+                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+                else self.weight_loader
+            ),
+        )
         if not reduce_results and (bias and not skip_bias_add):
-            raise ValueError("When not reduce the results, adding bias to the "
-                             "results can lead to incorrect results")
+            raise ValueError("When not reduce the results, adding bias to the results can lead to incorrect results")
 
         if bias:
-            self.bias = Parameter(
-                torch.empty(self.output_size, dtype=params_dtype))
-            set_weight_attrs(self.bias, {
-                "output_dim": 0,
-                "weight_loader": self.weight_loader,
-            })
+            self.bias = Parameter(torch.empty(self.output_size, dtype=params_dtype))
+            set_weight_attrs(
+                self.bias,
+                {
+                    "output_dim": 0,
+                    "weight_loader": self.weight_loader,
+                },
+            )
         else:
             self.register_parameter("bias", None)
 
@@ -298,7 +308,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         self,
         input_,
         **kwargs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
@@ -319,36 +329,36 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         bias: bool = True,
         gather_output: bool = False,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        output_sizes: Optional[list[int]] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        output_sizes: list[int] | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
-            disable_tp, prefix, self, "column")
-        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
+        #
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "column")
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
+        # linear of vllm supports custom comm group
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
         # If QKV or MergedColumn, use output size of each partition.
         if hasattr(self, "output_sizes"):
-            self.output_partition_sizes = [
-                divide(output_size, self.tp_size)
-                for output_size in self.output_sizes
-            ]
+            self.output_partition_sizes = [divide(output_size, self.tp_size) for output_size in self.output_sizes]
 
-        AscendLinearBase.__init__(self,
-                                  input_size,
-                                  output_size,
-                                  skip_bias_add,
-                                  params_dtype,
-                                  quant_config,
-                                  prefix,
-                                  return_bias=return_bias,
-                                  disable_tp=disable_tp)
+        AscendLinearBase.__init__(
+            self,
+            input_size,
+            output_size,
+            skip_bias_add,
+            params_dtype,
+            quant_config,
+            prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
 
         self.gather_output = gather_output
 
@@ -364,16 +374,20 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             output_size=self.output_size,
             params_dtype=self.params_dtype,
             weight_loader=(
-                self.weight_loader_v2 if self.quant_method.__class__.__name__
-                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+                self.weight_loader_v2
+                if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
+                else self.weight_loader
+            ),
+        )
         if bias:
-            self.bias = Parameter(
-                torch.empty(self.output_size_per_partition,
-                            dtype=params_dtype))
-            set_weight_attrs(self.bias, {
-                "output_dim": 0,
-                "weight_loader": self.weight_loader,
-            })
+            self.bias = Parameter(torch.empty(self.output_size_per_partition, dtype=params_dtype))
+            set_weight_attrs(
+                self.bias,
+                {
+                    "output_dim": 0,
+                    "weight_loader": self.weight_loader,
+                },
+            )
         else:
             self.register_parameter("bias", None)
 
@@ -383,7 +397,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
     def forward(
         self,
         input_,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
@@ -412,46 +426,53 @@ class AscendReplicatedLinear(ReplicatedLinear):
         output_size: int,
         bias: bool = True,
         skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_op = get_replicated_op(disable_tp, prefix, self)
+        self.custom_op, self.tp_rank, self.tp_size = get_replicated_op(disable_tp, prefix, self)
         # If MergedReplicatedLinear, use output size of each partition.
         if hasattr(self, "output_sizes"):
             self.output_partition_sizes = self.output_sizes
         else:
             self.output_partition_sizes = [output_size]
 
-        AscendLinearBase.__init__(self,
-                                  input_size,
-                                  output_size,
-                                  skip_bias_add,
-                                  params_dtype,
-                                  quant_config,
-                                  prefix=prefix,
-                                  return_bias=return_bias,
-                                  disable_tp=disable_tp)
+        AscendLinearBase.__init__(
+            self,
+            input_size,
+            output_size,
+            skip_bias_add,
+            params_dtype,
+            quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
-        self.quant_method.create_weights(self,
-                                         self.input_size, [self.output_size],
-                                         self.input_size,
-                                         self.output_size,
-                                         self.params_dtype,
-                                         weight_loader=self.weight_loader)
+        self.quant_method.create_weights(
+            self,
+            self.input_size,
+            [self.output_size],
+            self.input_size,
+            self.output_size,
+            self.params_dtype,
+            weight_loader=self.weight_loader,
+        )
 
         if bias:
-            self.bias = Parameter(
-                torch.empty(self.output_size, dtype=self.params_dtype))
-            set_weight_attrs(self.bias, {
-                "output_dim": 0,
-                "weight_loader": self.weight_loader,
-            })
+            self.bias = Parameter(torch.empty(self.output_size, dtype=self.params_dtype))
+            set_weight_attrs(
+                self.bias,
+                {
+                    "output_dim": 0,
+                    "weight_loader": self.weight_loader,
+                },
+            )
         else:
             self.register_parameter("bias", None)
 
@@ -461,7 +482,7 @@ class AscendReplicatedLinear(ReplicatedLinear):
     def forward(
         self,
         input_,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 

@@ -18,6 +18,7 @@
 #
 import pytest
 from modelscope import snapshot_download  # type: ignore[import-untyped]
+import huggingface_hub
 
 from tests.e2e.conftest import HfRunner, VllmRunner
 from tests.e2e.utils import check_embeddings_close
@@ -32,11 +33,10 @@ MODELS = [
 def test_embed_models_correctness(model: str):
     queries = ['What is the capital of China?', 'Explain gravity']
 
-    model_name = snapshot_download(model)
+    model_name = snapshot_download(model, local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
     with VllmRunner(
             model_name,
             runner="pooling",
-            enforce_eager=False,
             max_model_len=None,
             cudagraph_capture_sizes=[4],
     ) as vllm_runner:
@@ -58,14 +58,14 @@ def test_embed_models_correctness(model: str):
     )
 
 
-def test_bge_model_correctness():
+def test_bge_m3_correctness():
     queries = ['What is the capital of China?', 'Explain gravity']
 
-    model_name = snapshot_download("BAAI/bge-m3")
+    model_name = snapshot_download("BAAI/bge-m3", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
     with VllmRunner(
             model_name,
             runner="pooling",
-            enforce_eager=False,
+            cudagraph_capture_sizes=[4],
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
 

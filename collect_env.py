@@ -27,33 +27,35 @@ from vllm.envs import environment_variables
 
 try:
     import torch
+
     TORCH_AVAILABLE = True
 except (ImportError, NameError, AttributeError, OSError):
     TORCH_AVAILABLE = False
 
 # System Environment Information
 SystemEnv = namedtuple(
-    'SystemEnv',
+    "SystemEnv",
     [
-        'torch_version',
-        'is_debug_build',
-        'gcc_version',
-        'clang_version',
-        'cmake_version',
-        'os',
-        'libc_version',
-        'python_version',
-        'python_platform',
-        'pip_version',  # 'pip' or 'pip3'
-        'pip_packages',
-        'conda_packages',
-        'cpu_info',
-        'vllm_version',  # vllm specific field
-        'vllm_ascend_version',  # vllm ascend specific field
-        'env_vars',
-        'npu_info',  # ascend specific field
-        'cann_info',  # ascend specific field
-    ])
+        "torch_version",
+        "is_debug_build",
+        "gcc_version",
+        "clang_version",
+        "cmake_version",
+        "os",
+        "libc_version",
+        "python_version",
+        "python_platform",
+        "pip_version",  # 'pip' or 'pip3'
+        "pip_packages",
+        "conda_packages",
+        "cpu_info",
+        "vllm_version",  # vllm specific field
+        "vllm_ascend_version",  # vllm ascend specific field
+        "env_vars",
+        "npu_info",  # ascend specific field
+        "cann_info",  # ascend specific field
+    ],
+)
 
 DEFAULT_CONDA_PATTERNS = {
     "torch",
@@ -65,6 +67,7 @@ DEFAULT_CONDA_PATTERNS = {
     "transformers",
     "zmq",
     "pynvml",
+    "triton-ascend",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -77,20 +80,18 @@ DEFAULT_PIP_PATTERNS = {
     "transformers",
     "zmq",
     "pynvml",
+    "triton-ascend",
 }
 
 
 def run(command):
     """Return (return-code, stdout, stderr)."""
-    shell = True if type(command) is str else False
-    p = subprocess.Popen(command,
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE,
-                         shell=shell)
+    shell = isinstance(command, str)
+    p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell)
     raw_output, raw_err = p.communicate()
     rc = p.returncode
-    if get_platform() == 'win32':
-        enc = 'oem'
+    if get_platform() == "win32":
+        enc = "oem"
     else:
         enc = locale.getpreferredencoding()
     output = raw_output.decode(enc)
@@ -122,42 +123,40 @@ def run_and_return_first_line(run_lambda, command):
     rc, out, _ = run_lambda(command)
     if rc != 0:
         return None
-    return out.split('\n')[0]
+    return out.split("\n")[0]
 
 
 def get_conda_packages(run_lambda, patterns=None):
     if patterns is None:
         patterns = DEFAULT_CONDA_PATTERNS
-    conda = os.environ.get('CONDA_EXE', 'conda')
+    conda = os.environ.get("CONDA_EXE", "conda")
     out = run_and_read_all(run_lambda, "{} list".format(conda))
     if out is None:
         return out
 
-    return "\n".join(line for line in out.splitlines()
-                     if not line.startswith("#") and any(name in line
-                                                         for name in patterns))
+    return "\n".join(
+        line for line in out.splitlines() if not line.startswith("#") and any(name in line for name in patterns)
+    )
 
 
 def get_gcc_version(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'gcc --version', r'gcc (.*)')
+    return run_and_parse_first_match(run_lambda, "gcc --version", r"gcc (.*)")
 
 
 def get_clang_version(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'clang --version',
-                                     r'clang version (.*)')
+    return run_and_parse_first_match(run_lambda, "clang --version", r"clang version (.*)")
 
 
 def get_cmake_version(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'cmake --version',
-                                     r'cmake (.*)')
+    return run_and_parse_first_match(run_lambda, "cmake --version", r"cmake (.*)")
 
 
 def _parse_version(version, version_tuple):
     version_str = version_tuple[-1]
-    if isinstance(version_str, str) and version_str.startswith('g'):
-        if '.' in version_str:
-            git_sha = version_str.split('.')[0][1:]
-            date = version_str.split('.')[-1][1:]
+    if isinstance(version_str, str) and version_str.startswith("g"):
+        if "." in version_str:
+            git_sha = version_str.split(".")[0][1:]
+            date = version_str.split(".")[-1][1:]
             return f"{version} (git sha: {git_sha}, date: {date})"
         else:
             git_sha = version_str[1:]  # type: ignore
@@ -167,26 +166,28 @@ def _parse_version(version, version_tuple):
 
 def get_vllm_version():
     from vllm import __version__, __version_tuple__
+
     return _parse_version(__version__, __version_tuple__)
 
 
 def get_vllm_ascend_version():
     from vllm_ascend._version import __version__, __version_tuple__
+
     return _parse_version(__version__, __version_tuple__)
 
 
 def get_cpu_info(run_lambda):
-    rc, out, err = 0, '', ''
-    if get_platform() == 'linux':
-        rc, out, err = run_lambda('lscpu')
-    elif get_platform() == 'win32':
+    rc, out, err = 0, "", ""
+    if get_platform() == "linux":
+        rc, out, err = run_lambda("lscpu")
+    elif get_platform() == "win32":
         rc, out, err = run_lambda(
-            'wmic cpu get Name,Manufacturer,Family,Architecture,ProcessorType,DeviceID, \
-        CurrentClockSpeed,MaxClockSpeed,L2CacheSize,L2CacheSpeed,Revision /VALUE'
+            "wmic cpu get Name,Manufacturer,Family,Architecture,ProcessorType,DeviceID, \
+        CurrentClockSpeed,MaxClockSpeed,L2CacheSize,L2CacheSpeed,Revision /VALUE"
         )
-    elif get_platform() == 'darwin':
+    elif get_platform() == "darwin":
         rc, out, err = run_lambda("sysctl -n machdep.cpu.brand_string")
-    cpu_info = 'None'
+    cpu_info = "None"
     if rc == 0:
         cpu_info = out
     else:
@@ -195,67 +196,63 @@ def get_cpu_info(run_lambda):
 
 
 def get_platform():
-    if sys.platform.startswith('linux'):
-        return 'linux'
-    elif sys.platform.startswith('win32'):
-        return 'win32'
-    elif sys.platform.startswith('cygwin'):
-        return 'cygwin'
-    elif sys.platform.startswith('darwin'):
-        return 'darwin'
+    if sys.platform.startswith("linux"):
+        return "linux"
+    elif sys.platform.startswith("win32"):
+        return "win32"
+    elif sys.platform.startswith("cygwin"):
+        return "cygwin"
+    elif sys.platform.startswith("darwin"):
+        return "darwin"
     else:
         return sys.platform
 
 
 def get_mac_version(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'sw_vers -productVersion',
-                                     r'(.*)')
+    return run_and_parse_first_match(run_lambda, "sw_vers -productVersion", r"(.*)")
 
 
 def get_windows_version(run_lambda):
-    system_root = os.environ.get('SYSTEMROOT', 'C:\\Windows')
-    wmic_cmd = os.path.join(system_root, 'System32', 'Wbem', 'wmic')
-    findstr_cmd = os.path.join(system_root, 'System32', 'findstr')
-    return run_and_read_all(
-        run_lambda,
-        '{} os get Caption | {} /v Caption'.format(wmic_cmd, findstr_cmd))
+    system_root = os.environ.get("SYSTEMROOT", "C:\\Windows")
+    wmic_cmd = os.path.join(system_root, "System32", "Wbem", "wmic")
+    findstr_cmd = os.path.join(system_root, "System32", "findstr")
+    return run_and_read_all(run_lambda, "{} os get Caption | {} /v Caption".format(wmic_cmd, findstr_cmd))
 
 
 def get_lsb_version(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'lsb_release -a',
-                                     r'Description:\t(.*)')
+    return run_and_parse_first_match(run_lambda, "lsb_release -a", r"Description:\t(.*)")
 
 
 def check_release_file(run_lambda):
-    return run_and_parse_first_match(run_lambda, 'cat /etc/*-release',
-                                     r'PRETTY_NAME="(.*)"')
+    return run_and_parse_first_match(run_lambda, "cat /etc/*-release", r'PRETTY_NAME="(.*)"')
 
 
 def get_os(run_lambda):
     from platform import machine
+
     platform = get_platform()
 
-    if platform == 'win32' or platform == 'cygwin':
+    if platform == "win32" or platform == "cygwin":
         return get_windows_version(run_lambda)
 
-    if platform == 'darwin':
+    if platform == "darwin":
         version = get_mac_version(run_lambda)
         if version is None:
             return None
-        return 'macOS {} ({})'.format(version, machine())
+        return "macOS {} ({})".format(version, machine())
 
-    if platform == 'linux':
+    if platform == "linux":
         # Ubuntu/Debian based
         desc = get_lsb_version(run_lambda)
         if desc is not None:
-            return '{} ({})'.format(desc, machine())
+            return "{} ({})".format(desc, machine())
 
         # Try reading /etc/*-release
         desc = check_release_file(run_lambda)
         if desc is not None:
-            return '{} ({})'.format(desc, machine())
+            return "{} ({})".format(desc, machine())
 
-        return '{} ({})'.format(platform, machine())
+        return "{} ({})".format(platform, machine())
 
     # Unknown platform
     return platform
@@ -263,14 +260,16 @@ def get_os(run_lambda):
 
 def get_python_platform():
     import platform
+
     return platform.platform()
 
 
 def get_libc_version():
     import platform
-    if get_platform() != 'linux':
-        return 'N/A'
-    return '-'.join(platform.libc_ver())
+
+    if get_platform() != "linux":
+        return "N/A"
+    return "-".join(platform.libc_ver())
 
 
 def get_pip_packages(run_lambda, patterns=None):
@@ -282,31 +281,29 @@ def get_pip_packages(run_lambda, patterns=None):
     # But here it is invoked as `python -mpip`
     def run_with_pip(pip):
         out = run_and_read_all(run_lambda, pip + ["list", "--format=freeze"])
-        return "\n".join(line for line in out.splitlines()
-                         if any(name in line for name in patterns))
+        return "\n".join(line for line in out.splitlines() if any(name in line for name in patterns))
 
-    pip_version = 'pip3' if sys.version[0] == '3' else 'pip'
-    out = run_with_pip([sys.executable, '-mpip'])
+    pip_version = "pip3" if sys.version[0] == "3" else "pip"
+    out = run_with_pip([sys.executable, "-mpip"])
 
     return pip_version, out
 
 
 def get_npu_info(run_lambda):
-    return run_and_read_all(run_lambda, 'npu-smi info')
+    return run_and_read_all(run_lambda, "npu-smi info")
 
 
 def get_cann_info(run_lambda):
-    out = run_and_read_all(run_lambda, 'lscpu | grep Architecture:')
+    out = run_and_read_all(run_lambda, "lscpu | grep Architecture:")
     cpu_arch = str(out).split()[-1]
     return run_and_read_all(
-        run_lambda,
-        'cat /usr/local/Ascend/ascend-toolkit/latest/{}-linux/ascend_toolkit_install.info'
-        .format(cpu_arch))
+        run_lambda, "cat /usr/local/Ascend/ascend-toolkit/latest/{}-linux/ascend_toolkit_install.info".format(cpu_arch)
+    )
 
 
 def get_env_vars():
-    env_vars = ''
-    secret_terms = ('secret', 'token', 'api', 'access', 'password')
+    env_vars = ""
+    secret_terms = ("secret", "token", "api", "access", "password")
     report_prefix = ("TORCH", "PYTORCH", "ASCEND_", "ATB_")
     for k, v in os.environ.items():
         if any(term in k.lower() for term in secret_terms):
@@ -327,7 +324,7 @@ def get_env_info():
         version_str = torch.__version__
         debug_mode_str = str(torch.version.debug)
     else:
-        version_str = debug_mode_str = 'N/A'
+        version_str = debug_mode_str = "N/A"
 
     sys_version = sys.version.replace("\n", " ")
 
@@ -336,9 +333,7 @@ def get_env_info():
     return SystemEnv(
         torch_version=version_str,
         is_debug_build=debug_mode_str,
-        python_version='{} ({}-bit runtime)'.format(
-            sys_version,
-            sys.maxsize.bit_length() + 1),
+        python_version="{} ({}-bit runtime)".format(sys_version, sys.maxsize.bit_length() + 1),
         python_platform=get_python_platform(),
         pip_version=pip_version,
         pip_packages=pip_list_output,
@@ -399,36 +394,35 @@ CANN:
 
 
 def pretty_str(envinfo):
-
-    def replace_nones(dct, replacement='Could not collect'):
-        for key in dct.keys():
+    def replace_nones(dct, replacement="Could not collect"):
+        for key in dct:
             if dct[key] is not None:
                 continue
             dct[key] = replacement
         return dct
 
-    def replace_bools(dct, true='Yes', false='No'):
-        for key in dct.keys():
+    def replace_bools(dct, true="Yes", false="No"):
+        for key in dct:
             if dct[key] is True:
                 dct[key] = true
             elif dct[key] is False:
                 dct[key] = false
         return dct
 
-    def prepend(text, tag='[prepend]'):
-        lines = text.split('\n')
+    def prepend(text, tag="[prepend]"):
+        lines = text.split("\n")
         updated_lines = [tag + line for line in lines]
-        return '\n'.join(updated_lines)
+        return "\n".join(updated_lines)
 
-    def replace_if_empty(text, replacement='No relevant packages'):
+    def replace_if_empty(text, replacement="No relevant packages"):
         if text is not None and len(text) == 0:
             return replacement
         return text
 
     def maybe_start_on_next_line(string):
         # If `string` is multiline, prepend a \n to it.
-        if string is not None and len(string.split('\n')) > 1:
-            return '\n{}\n'.format(string)
+        if string is not None and len(string.split("\n")) > 1:
+            return "\n{}\n".format(string)
         return string
 
     mutable_dict = envinfo._asdict()
@@ -440,22 +434,18 @@ def pretty_str(envinfo):
     mutable_dict = replace_nones(mutable_dict)
 
     # If either of these are '', replace with 'No relevant packages'
-    mutable_dict['pip_packages'] = replace_if_empty(
-        mutable_dict['pip_packages'])
-    mutable_dict['conda_packages'] = replace_if_empty(
-        mutable_dict['conda_packages'])
+    mutable_dict["pip_packages"] = replace_if_empty(mutable_dict["pip_packages"])
+    mutable_dict["conda_packages"] = replace_if_empty(mutable_dict["conda_packages"])
 
     # Tag conda and pip packages with a prefix
     # If they were previously None, they'll show up as ie '[conda] Could not collect'
-    if mutable_dict['pip_packages']:
-        mutable_dict['pip_packages'] = prepend(
-            mutable_dict['pip_packages'], '[{}] '.format(envinfo.pip_version))
-    if mutable_dict['conda_packages']:
-        mutable_dict['conda_packages'] = prepend(
-            mutable_dict['conda_packages'], '[conda] ')
-    mutable_dict['cpu_info'] = envinfo.cpu_info
-    mutable_dict['npu_info'] = envinfo.npu_info
-    mutable_dict['cann_info'] = envinfo.cann_info
+    if mutable_dict["pip_packages"]:
+        mutable_dict["pip_packages"] = prepend(mutable_dict["pip_packages"], "[{}] ".format(envinfo.pip_version))
+    if mutable_dict["conda_packages"]:
+        mutable_dict["conda_packages"] = prepend(mutable_dict["conda_packages"], "[conda] ")
+    mutable_dict["cpu_info"] = envinfo.cpu_info
+    mutable_dict["npu_info"] = envinfo.npu_info
+    mutable_dict["cann_info"] = envinfo.cann_info
     return env_info_fmt.format(**mutable_dict)
 
 
@@ -468,22 +458,19 @@ def main():
     output = get_pretty_env_info()
     print(output)
 
-    if TORCH_AVAILABLE and hasattr(torch, 'utils') and hasattr(
-            torch.utils, '_crash_handler'):
+    if TORCH_AVAILABLE and hasattr(torch, "utils") and hasattr(torch.utils, "_crash_handler"):
         minidump_dir = torch.utils._crash_handler.DEFAULT_MINIDUMP_DIR
         if sys.platform == "linux" and os.path.exists(minidump_dir):
-            dumps = [
-                os.path.join(minidump_dir, dump)
-                for dump in os.listdir(minidump_dir)
-            ]
+            dumps = [os.path.join(minidump_dir, dump) for dump in os.listdir(minidump_dir)]
             latest = max(dumps, key=os.path.getctime)
             ctime = os.path.getctime(latest)
-            creation_time = datetime.datetime.fromtimestamp(ctime).strftime(
-                '%Y-%m-%d %H:%M:%S')
-            msg = "\n*** Detected a minidump at {} created on {}, ".format(latest, creation_time) + \
-                  "if this is related to your bug please include it when you file a report ***"
+            creation_time = datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S")
+            msg = (
+                "\n*** Detected a minidump at {} created on {}, ".format(latest, creation_time)
+                + "if this is related to your bug please include it when you file a report ***"
+            )
             print(msg, file=sys.stderr)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

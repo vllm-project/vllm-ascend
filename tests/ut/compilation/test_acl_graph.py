@@ -24,12 +24,15 @@ from vllm.forward_context import BatchDescriptor, ForwardContext
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (AscendMetadata,
                                                 AscendMetadataForDecode)
+from vllm_ascend.attention.context_parallel.attention_cp import \
+    AscendAttentionCPImpl
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaCPImpl
 from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAMetadata)
 from vllm_ascend.compilation.acl_graph import (
-    ACLGraphEntry, ACLGraphWrapper, get_graph_params, get_mtp_graph_params,
-    set_graph_params, set_mtp_graph_params, update_attn_dcp_pcp_params,
-    update_mla_attn_dcp_pcp_params, update_mtp_graph_params_workspaces)
+    ACLGraphEntry, ACLGraphWrapper, get_draft_graph_params, get_graph_params,
+    set_draft_graph_params, set_graph_params,
+    update_draft_graph_params_workspaces)
 
 
 class TestACLGraphEntry(TestBase):
@@ -158,12 +161,13 @@ class TestACLGraphWrapper(TestBase):
                             vllm_config=self.mock_vllm_config,
                             runtime_mode=CUDAGraphMode.NONE)
 
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     def test_call_with_none_runtime_mode(self, mock_envs,
                                          mock_current_platform,
-                                         mock_get_forward_context):
+                                         mock_get_forward_context, mock_get_forward_context_2):
         """Test __call__ method when runtime mode is NONE"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
@@ -182,16 +186,19 @@ class TestACLGraphWrapper(TestBase):
         self.mock_runnable.assert_called_once_with("arg1", "arg2")
         self.assertEqual(result, "test_output")
 
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     def test_call_with_mismatched_runtime_mode(self, mock_envs,
                                                mock_current_platform,
-                                               mock_get_forward_context):
+                                               mock_get_forward_context,
+                                               mock_get_forward_context_2):
         """Test __call__ method when runtime mode doesn't match wrapper mode"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE  # Different from FULL
 
         wrapper = ACLGraphWrapper(
@@ -211,18 +218,20 @@ class TestACLGraphWrapper(TestBase):
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.compilation_counter')
     @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
     def test_call_capture_graph_first_time(
             self, mock_weak_ref_tensors, mock_compilation_counter, mock_envs,
-            mock_current_platform, mock_get_forward_context,
+            mock_current_platform, mock_get_forward_context,mock_get_forward_context_2,
             mock_validate_cudagraph_capturing_enabled, mock_torch):
         """Test __call__ method captures graph for the first time"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
 
         # Mock torch.npu.NPUGraph
@@ -281,6 +290,7 @@ class TestACLGraphWrapper(TestBase):
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.compilation_counter')
@@ -288,13 +298,17 @@ class TestACLGraphWrapper(TestBase):
     def test_call_replay_graph(self, mock_weak_ref_tensors,
                                mock_compilation_counter, mock_envs,
                                mock_current_platform, mock_get_forward_context,
+                               mock_get_forward_context_2,
                                mock_validate_cudagraph_capturing_enabled,
                                mock_torch):
         """Test __call__ method replays graph when already captured"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
+
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        self.mock_forward_context.is_draft_model = False
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
@@ -354,18 +368,21 @@ class TestACLGraphWrapper(TestBase):
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
     def test_call_with_debug_mode_input_address_check(
             self, mock_weak_ref_tensors, mock_envs, mock_current_platform,
-            mock_get_forward_context,
+            mock_get_forward_context,mock_get_forward_context_2,
             mock_validate_cudagraph_capturing_enabled, mock_torch):
         """Test __call__ method with debug mode input address checking"""
         mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"  # Enable debug mode
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+        self.mock_forward_context.is_draft_model = False
 
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
@@ -408,17 +425,19 @@ class TestACLGraphWrapper(TestBase):
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
     def test_call_with_debug_mode_input_address_mismatch(
             self, mock_weak_ref_tensors, mock_envs, mock_current_platform,
-            mock_get_forward_context,
+            mock_get_forward_context,mock_get_forward_context_2,
             mock_validate_cudagraph_capturing_enabled, mock_torch):
         """Test __call__ method with debug mode input address mismatch raises AssertionError"""
         mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"  # Enable debug mode
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
 
         # Mock torch.npu.NPUGraph
@@ -466,6 +485,7 @@ class TestACLGraphWrapper(TestBase):
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.compilation_counter')
@@ -473,12 +493,13 @@ class TestACLGraphWrapper(TestBase):
     @patch('vllm_ascend.compilation.acl_graph.patch')
     def test_call_capture_graph_with_gc_disable(
             self, mock_patch, mock_weak_ref_tensors, mock_compilation_counter,
-            mock_envs, mock_current_platform, mock_get_forward_context,
+            mock_envs, mock_current_platform, mock_get_forward_context,mock_get_forward_context_2,
             mock_validate_cudagraph_capturing_enabled, mock_torch):
         """Test __call__ method captures graph with gc_disable option enabled"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
 
         # Enable gc_disable option
@@ -540,18 +561,20 @@ class TestACLGraphWrapper(TestBase):
         'vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'
     )
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.compilation_counter')
     @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
     def test_call_capture_graph_with_weak_ref_output(
             self, mock_weak_ref_tensors, mock_compilation_counter, mock_envs,
-            mock_current_platform, mock_get_forward_context,
+            mock_current_platform, mock_get_forward_context,mock_get_forward_context_2,
             mock_validate_cudagraph_capturing_enabled, mock_torch):
         """Test __call__ method captures graph with weak_ref_output option enabled"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
 
         # Enable weak_ref_output option
@@ -603,18 +626,20 @@ class TestACLGraphWrapper(TestBase):
 
         # Should return the weak ref output when weak_ref_output option is enabled
         self.assertEqual(result, "weak_ref_output")
-
+        
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     @patch('vllm_ascend.compilation.acl_graph.logger')
     def test_call_capture_graph_with_debug_log(self, mock_logger, mock_envs,
                                                mock_current_platform,
-                                               mock_get_forward_context):
+                                               mock_get_forward_context,mock_get_forward_context_2):
         """Test __call__ method captures graph with debug logging enabled"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
+        mock_get_forward_context_2.return_value = self.mock_forward_context
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
 
         # Enable debug logging
@@ -713,25 +738,26 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(unwrapped, self.mock_runnable)
 
 
-class TestMTPGraphParams(TestBase):
+class TestDraftGraphParams(TestBase):
 
-    def test_set_mtp_graph_params(self):
-        with patch('vllm_ascend.compilation.acl_graph._mtp_graph_params',
+    def test_set_draft_graph_params(self):
+        with patch('vllm_ascend.compilation.acl_graph._draft_graph_params',
                    new=None):
-            set_mtp_graph_params([4])
-            from vllm_ascend.compilation.acl_graph import _mtp_graph_params
-            self.assertIsNotNone(_mtp_graph_params)
+            set_draft_graph_params([4])
+            from vllm_ascend.compilation.acl_graph import _draft_graph_params
+            self.assertIsNotNone(_draft_graph_params)
 
-    @patch('vllm_ascend.compilation.acl_graph._mtp_graph_params')
-    def test_update_mtp_graph_params_workspaces(self, mtp_graph_params_mock):
-        mtp_graph_params_mock.workspaces = {4: 5}
-        update_mtp_graph_params_workspaces(4, 6)
-        self.assertEqual(mtp_graph_params_mock.workspaces[4], 6)
+    @patch('vllm_ascend.compilation.acl_graph._draft_graph_params')
+    def test_update_draft_graph_params_workspaces(self,
+                                                  draft_graph_params_mock):
+        draft_graph_params_mock.workspaces = {4: 5}
+        update_draft_graph_params_workspaces(4, 6)
+        self.assertEqual(draft_graph_params_mock.workspaces[4], 6)
 
-    @patch('vllm_ascend.compilation.acl_graph._mtp_graph_params')
-    def test_get_mtp_graph_params(self, mtp_graph_params_mock):
-        graph_params = get_mtp_graph_params()
-        self.assertIs(mtp_graph_params_mock, graph_params)
+    @patch('vllm_ascend.compilation.acl_graph._draft_graph_params')
+    def test_get_draft_graph_params(self, draft_graph_params_mock):
+        graph_params = get_draft_graph_params()
+        self.assertIs(draft_graph_params_mock, graph_params)
 
 
 class TestPCPDCPGraphParams(TestBase):
@@ -751,10 +777,11 @@ class TestPCPDCPGraphParams(TestBase):
         self.graph_params.events[4].append(mock_event)
         self.graph_params.handles[4].append(MagicMock())
 
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch('torch.npu.graph_task_update_end', )
     @patch('torch.npu.graph_task_update_begin', MagicMock())
-    @patch('torch_npu.atb.npu_multi_head_latent_attention', MagicMock())
-    def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end):
+    @patch('torch_npu.npu_fused_infer_attention_score.out', MagicMock())
+    def test_update_mla_dcp_pcp_params(self, _mock_graph_task_end, mock_context):
         input_positions = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
         block_table = torch.zeros(2, 5, dtype=torch.long)
         seq_lens = torch.tensor([4, 4])
@@ -783,7 +810,8 @@ class TestPCPDCPGraphParams(TestBase):
                                      decode=decode)
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_mtp_model = False
+        forward_context.is_draft_model = False
+        mock_context.return_value = forward_context
 
         num_heads = 256
         scale = 0.1
@@ -792,20 +820,25 @@ class TestPCPDCPGraphParams(TestBase):
         qk_rope_head_dim = 32
         qk_nope_head_dim = 64
         query = torch.randn(4, num_heads, qk_head_dim)
-        q_pe = query[..., qk_nope_head_dim:]
+
         q_nope = query[..., :qk_nope_head_dim]
+        q_pe = query[..., qk_rope_head_dim:]
         k_nope = torch.randn(4, num_heads, qk_nope_head_dim)
         k_pe = torch.randn(4, num_heads, qk_rope_head_dim)
+        input_layout = "BNSD"
+        actual_seq_lengths_kv = [1, 1]
         out = torch.randn(2, 16, 128)
         lse = torch.randn(2, 16, 8)
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
-            (q_nope, q_pe, k_nope, k_pe, block_table, seq_lens, num_heads,
-             scale, num_kv_heads, out, lse))
+            (q_nope, k_nope, q_pe, k_pe, num_heads, num_kv_heads, input_layout,
+             None, 0, scale, block_table, 128, None, actual_seq_lengths_kv,
+             out, lse))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
-            update_mla_attn_dcp_pcp_params(self.update_stream, forward_context,
-                                           4)
+            AscendMlaCPImpl.update_graph_params(
+                self.update_stream, forward_context, 4
+            )
 
         _mock_graph_task_end.assert_called_once()
 
@@ -836,7 +869,7 @@ class TestPCPDCPGraphParams(TestBase):
                                   decode_meta=decode)
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
-        forward_context.is_mtp_model = False
+        forward_context.is_draft_model = False
 
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
@@ -845,6 +878,8 @@ class TestPCPDCPGraphParams(TestBase):
              out, lse, 2, 0, 0))
 
         with patch("torch_npu._C._npu_setStream", return_value=None):
-            update_attn_dcp_pcp_params(self.update_stream, forward_context, 4)
+            AscendAttentionCPImpl.update_graph_params(
+                self.update_stream, forward_context, 4, None
+            )
 
         _mock_graph_task_end.assert_called_once()

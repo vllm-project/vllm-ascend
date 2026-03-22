@@ -14,13 +14,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-name: 'ascend test / full'
+name: E2E-Full
 
 on:
   pull_request:
     branches:
       - 'main'
       - '*-dev'
+      - 'releases/v*'
     types: [ labeled, synchronize ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -38,7 +39,7 @@ concurrency:
 
 jobs:
   changes:
-    runs-on: linux-aarch64-a2-0
+    runs-on: linux-aarch64-a2b3-0
     if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
@@ -49,13 +50,13 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
             e2e_tracker:
-              - '.github/workflows/vllm_ascend_test_pr_full.yaml'
+              - '.github/workflows/pr_test_full.yaml'
               - '.github/workflows/_e2e_test.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
@@ -74,12 +75,12 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [97f2f160fda2805f9149b0e44da76b5d3b1f7c7e, v0.12.0]
+        vllm_version: [8b6325758cce5f9c36d38f2462edbd368b97a07c, v0.18.0]
     needs: [changes]
-    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
+    if: ${{ needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.e2e_tracker == true }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc2-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+      contains_310: false
       type: full

@@ -18,23 +18,22 @@
 #
 import dataclasses
 import os
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
 from vllm.logger import logger
 
-from vllm_ascend.platform import NPUPlatform
 
-
-def find_loaded_library(lib_name) -> Optional[str]:
+def find_loaded_library(lib_name) -> str | None:
     """
     According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
     shared libraries loaded by the process. We can use this file to find the path of the
     a loaded library.
-    """ # noqa
+    """  # noqa
     found_line = None
     with open("/proc/self/maps") as f:
         for line in f:
@@ -49,20 +48,22 @@ def find_loaded_library(lib_name) -> Optional[str]:
     start = found_line.index("/")
     path = found_line[start:].strip()
     filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), \
-        f"Unexpected filename: {filename} for library {lib_name}"
+    assert filename.rpartition(".so")[0].startswith(lib_name), f"Unexpected filename: {filename} for library {lib_name}"
     return path
 
 
 camem_available = False
 try:
     from vllm_ascend.vllm_ascend_C import (  # type: ignore # noqa: F401
-        init_module, python_create_and_map, python_unmap_and_release)
+        init_module,
+        python_create_and_map,
+        python_unmap_and_release,
+    )
+
     lib_name = find_loaded_library("vllm_ascend_C")
     camem_available = True
 except ImportError as e:
-    logger.warning(
-        "Failed to import vllm_ascend_C:%s. Sleep mode will be disabled. ", e)
+    logger.warning("Failed to import vllm_ascend_C:%s. Sleep mode will be disabled. ", e)
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
@@ -70,14 +71,14 @@ except ImportError as e:
     libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = Tuple[int, int, int, int]
+HandleType = tuple[int, int, int, int]
 
 
 @dataclasses.dataclass
 class AllocationData:
     handle: HandleType
     tag: str
-    cpu_backup_tensor: Optional[torch.Tensor] = None
+    cpu_backup_tensor: torch.Tensor | None = None
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -90,18 +91,18 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 
 def get_pluggable_allocator(
     python_malloc_fn: Callable[[tuple[int, int, int, int]], None],
-    python_free_func: Callable[[int], tuple[int, int, int, int]]
+    python_free_func: Callable[[int], tuple[int, int, int, int]],
 ) -> torch.npu.memory.NPUPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
-    new_alloc = torch.npu.memory.NPUPluggableAllocator(lib_name, 'my_malloc',
-                                                       'my_free')
+    new_alloc = torch.npu.memory.NPUPluggableAllocator(lib_name, "my_malloc", "my_free")
     return new_alloc
 
 
 @contextmanager
 def use_memory_pool_with_allocator(
-        python_malloc_fn: Callable[[tuple[int, int, int, int]], None],
-        python_free_func: Callable[[int], tuple[int, int, int, int]]):
+    python_malloc_fn: Callable[[tuple[int, int, int, int]], None],
+    python_free_func: Callable[[int], tuple[int, int, int, int]],
+):
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.npu.memory.MemPool(new_alloc._allocator)
     with torch.npu.memory.use_mem_pool(mem_pool):
@@ -129,6 +130,7 @@ class CaMemAllocator:
     the global variable will be overwritten and the free callback will
     not work as expected.
     """
+
     instance = None
     default_tag: str = "default"
 
@@ -145,22 +147,22 @@ class CaMemAllocator:
 
     def __init__(self):
         conf = os.environ.get("PYTORCH_NPU_ALLOC_CONF", "")
-        assert "expandable_segments:True" not in conf, \
-            ("Expandable segments are not compatible with memory pool. "
+        assert "expandable_segments:True" not in conf, (
+            "Expandable segments are not compatible with memory pool. "
             "Please track https://github.com/pytorch/pytorch/issues/147851 "
-            "for the latest updates.")
+            "for the latest updates."
+        )
 
-        self.pointer_to_data: Dict[int, AllocationData] = {}
+        self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CaMemAllocator.default_tag
-        self.allocator_and_pools: Dict[str, Any] = {}
+        self.allocator_and_pools: dict[str, Any] = {}
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
         Internal method to store the allocation data
         when memory is allocated in the memory pool."""
         py_d_mem = allocation_handle[2]
-        self.pointer_to_data[py_d_mem] = AllocationData(
-            allocation_handle, self.current_tag)
+        self.pointer_to_data[py_d_mem] = AllocationData(allocation_handle, self.current_tag)
         return
 
     def python_free_callback(self, ptr: int) -> HandleType:
@@ -172,13 +174,10 @@ class CaMemAllocator:
             data.cpu_backup_tensor = None
         return data.handle
 
-    def sleep(
-            self,
-            offload_tags: Optional[Union[Tuple[str, ...],
-                                         str]] = None) -> None:
+    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """
         Put the allocator in sleep mode.
-        All data in the memory allocation with the specified tag will be 
+        All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
         :param offload_tags: The tags of the memory allocation that will be
             offloaded. The rest of the memory allocation will be discarded.
@@ -186,9 +185,9 @@ class CaMemAllocator:
         if offload_tags is None:
             # by default, allocated tensors are offloaded
             # when the allocator sleeps
-            offload_tags = (CaMemAllocator.default_tag, )
+            offload_tags = (CaMemAllocator.default_tag,)
         elif isinstance(offload_tags, str):
-            offload_tags = (offload_tags, )
+            offload_tags = (offload_tags,)
 
         assert isinstance(offload_tags, tuple)
 
@@ -196,23 +195,18 @@ class CaMemAllocator:
             handle = data.handle
             if data.tag in offload_tags:
                 size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes,
-                    dtype=torch.uint8,
-                    device='cpu',
-                    pin_memory=NPUPlatform.is_pin_memory_available())
+                cpu_backup_tensor = torch.empty(size_in_bytes, dtype=torch.uint8, device="cpu", pin_memory=True)
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 ACL_MEMCPY_DEVICE_TO_HOST = 2
                 dest_max = cpu_ptr + size_in_bytes * 2
-                memcpy(cpu_ptr, dest_max, ptr, size_in_bytes,
-                       ACL_MEMCPY_DEVICE_TO_HOST)
+                memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         """
         Wake up the allocator from sleep mode.
-        All data that is previously offloaded will be loaded back to GPU 
+        All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory."""
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
@@ -221,20 +215,18 @@ class CaMemAllocator:
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
-                        size_in_bytes = cpu_backup_tensor.numel(
-                        ) * cpu_backup_tensor.element_size()
+                        size_in_bytes = cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         ACL_MEMCPY_HOST_TO_DEVICE = 1
                         dest_max = ptr + size_in_bytes * 2
-                        memcpy(ptr, dest_max, cpu_ptr, size_in_bytes,
-                               ACL_MEMCPY_HOST_TO_DEVICE)
+                        memcpy(ptr, dest_max, cpu_ptr, size_in_bytes, ACL_MEMCPY_HOST_TO_DEVICE)
                         data.cpu_backup_tensor = None
 
     @contextmanager
-    def use_memory_pool(self, tag: Optional[str] = None):
+    def use_memory_pool(self, tag: str | None = None):
         """
         A context manager to use the memory pool.
-        All memory allocation created inside the context will be allocated 
+        All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
         :param tag: The tag of the memory allocation. If None, the default tag
             will be used.
@@ -246,8 +238,7 @@ class CaMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        with use_memory_pool_with_allocator(self.python_malloc_callback,
-                                            self.python_free_callback) as data:
+        with use_memory_pool_with_allocator(self.python_malloc_callback, self.python_free_callback) as data:
             # start to hit another PyTorch bug in PyTorch 2.6,
             # possibly because of gc-related issue w.r.t. the allocator and
             # the memory pool.

@@ -10,7 +10,9 @@
 
 #ifndef CAM_MOE_DISTRIBUTE_DISPATCH_H
 #define CAM_MOE_DISTRIBUTE_DISPATCH_H
+#ifndef OPT_RANK_OFFSET
 #define OPT_RANK_OFFSET 512
+#endif
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
@@ -22,6 +24,7 @@ constexpr uint8_t BUFFER_NUM = 2;
 constexpr uint32_t STATE_OFFSET = 512;        // state space offset
 constexpr uint32_t STATE_SIZE = 1024 * 1024;  // 1M
 constexpr uint32_t UB_ALIGN = 32;
+constexpr uint64_t ALIGNED_LEN_256 = 256UL;
 constexpr uint32_t SELF_STATE_OFFSET = 256 * 1024;
 constexpr uint8_t COMM_NUM = 2;
 constexpr uint8_t COMM_EP_IDX = 0;
@@ -47,18 +50,13 @@ __aicore__ inline void SyncFunc()
     AscendC::WaitFlag<event>(eventID);
 }
 
-#define TemplateDispatchTypeClass                                                                          \
-    typename XType, typename ExpandXOutType, bool StaticQuant, bool DynamicQuant, bool IsSmoothScaleExist, \
-        bool IsNeedAllgater
-#define TemplateDispatchTypeFunc XType, ExpandXOutType, StaticQuant, DynamicQuant, IsSmoothScaleExist, IsNeedAllgater
-
 using namespace AscendC;
 template <TemplateDispatchTypeClass>
 class CamMoeDistributeDispatch
 {
 public:
     __aicore__ inline CamMoeDistributeDispatch(){};
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR expandXOut,
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR expandXOut,
                                 GM_ADDR dynamicScalesOut, GM_ADDR expandIdxOut, GM_ADDR expertTokenNumsOut,
                                 GM_ADDR sendCountsOut, GM_ADDR outputRecvCount, GM_ADDR tpSendCountsOut,
                                 GM_ADDR workspaceGM, TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData);
@@ -80,6 +78,7 @@ private:
     __aicore__ inline void AllGatherSetStatusAndWait();
     __aicore__ inline void ResetStatus();
     __aicore__ inline void QuantInit(GM_ADDR scales);
+    __aicore__ inline void TokenActiveMaskCal();
     __aicore__ inline void AllgatherProcessOut();
     __aicore__ inline void UpdataMultiMoeTokenNumsOut();
     __aicore__ inline void UpdataTokenNumsOut();
@@ -112,6 +111,7 @@ private:
     GlobalTensor<XType> xGMTensor_;
     GlobalTensor<int32_t> expertIdsGMTensor_;
     GlobalTensor<float> scalesGMTensor_;
+    GlobalTensor<bool> xActiveMaskGMTensor_;
     GlobalTensor<ExpandXOutType> expandXOutGMTensor_;
     GlobalTensor<float> dynamicScalesOutGMTensor_;
     GlobalTensor<int64_t> expertTokenNumsOutGMTensor_;
@@ -144,6 +144,9 @@ private:
     TBuf<> rowMaxBuf_;
     TBuf<> receiveDataCastFloatBuf_;
     TBuf<> smoothScalesBuf_;
+    TBuf<> dstExpBuf_;
+    TBuf<> subExpBuf_;
+    TBuf<> gatherMaskTBuf_;
     TQueBind<QuePosition::VECIN, QuePosition::VECOUT, 1> xQueue_;
     TQue<QuePosition::VECIN, 1> xInQueue_;
     TQue<QuePosition::VECOUT, 1> xOutQueue_;
@@ -161,7 +164,10 @@ private:
     GM_ADDR tpLocalStatusWindowGM_;
     GlobalTensor<GM_ADDR> peerMemsAddrGm_;
     uint32_t axisBS_{0};
+    uint32_t axisBsAlignSize_{0};
+    uint64_t activeMaskBsCnt_{0};
     uint32_t axisMaxBS_{0};
+    uint64_t sendToMoeExpTokenCnt_{0};
     uint32_t axisH_{0};
     uint32_t axisK_{0};
     uint32_t aivNum_{0};
@@ -183,6 +189,7 @@ private:
     uint32_t hSize_{0};
     uint32_t hOutSize_{0};
     uint32_t hCommuSize_{0};
+    uint32_t maxSize_{0};
     uint32_t scaleParamPad_{0};
     uint32_t axisHCommu_{0};
     uint32_t startExpertId_;
@@ -216,7 +223,7 @@ private:
 
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
-    GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expandIdxOut,
+    GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expandIdxOut,
     GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut, GM_ADDR outputRecvCount, GM_ADDR tpSendCountsOut,
     GM_ADDR workspaceGM, TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData)
 {
@@ -246,7 +253,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
         selfDataStatusTensor[aivId_ * UB_ALIGN]);
     __asm__ __volatile__("");
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
     axisBS_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.bs;
     axisH_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.h;
     epWorldSize_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.epRankSize;
@@ -268,6 +275,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     tpWorldSize_ = 1;
     xGMTensor_.SetGlobalBuffer((__gm__ XType *)x);
     expertIdsGMTensor_.SetGlobalBuffer((__gm__ int32_t *)expertIds);
+    xActiveMaskGMTensor_.SetGlobalBuffer((__gm__ bool*)xActiveMask);
     expandXOutGMTensor_.SetGlobalBuffer((__gm__ ExpandXOutType *)expandXOut);
     dynamicScalesOutGMTensor_.SetGlobalBuffer((__gm__ float *)dynamicScalesOut);
     expertTokenNumsOutGMTensor_.SetGlobalBuffer((__gm__ int64_t *)expertTokenNumsOut);
@@ -329,7 +337,8 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     if (isQuant_) {
         QuantInit(scales);
     }
-    uint32_t expertIdsSize = Ceil(axisBS_ * axisK_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN;
+    uint32_t expertIdsCnt = axisBS_ * axisK_;
+    uint32_t expertIdsSize = Ceil(expertIdsCnt * sizeof(int32_t), UB_ALIGN) * UB_ALIGN;
     tpipe_->InitBuffer(expertIdsBuf_, expertIdsSize);
     expertIdsTensor_ = expertIdsBuf_.Get<int32_t>();
     tpipe_->InitBuffer(expertCountBuf_, expertIdsSize);
@@ -339,7 +348,22 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     tpipe_->InitBuffer(getTotalBuf_,
                        epWorldSize_ * moeExpertNumPerRank_ * sizeof(int32_t));
     tpipe_->InitBuffer(scalarBuf_, UB_ALIGN * 2);
-
+    uint32_t hFp32Size = axisH_ * sizeof(float);
+    uint32_t xActivateMaskSize = axisBS_ * (Ceil(axisK_ * sizeof(bool), UB_ALIGN) * UB_ALIGN) * sizeof(half);
+    uint32_t bsAlign256 = Ceil(axisBS_ * sizeof(half), ALIGNED_LEN_256) * ALIGNED_LEN_256 / sizeof(half);
+    uint32_t bsKAlign256 = Ceil(expertIdsCnt * sizeof(half), ALIGNED_LEN_256) * ALIGNED_LEN_256 / sizeof(half);
+    expertIdsSize = Ceil(expertIdsSize, UB_ALIGN) * UB_ALIGN;
+    maxSize_ = hFp32Size > expertIdsSize ? hFp32Size : expertIdsSize;
+    maxSize_ = maxSize_ > xActivateMaskSize ? maxSize_ : xActivateMaskSize;
+    maxSize_ = maxSize_ > bsKAlign256 ? maxSize_ : bsKAlign256;
+    tpipe_->InitBuffer(gatherMaskTBuf_, maxSize_);
+    if constexpr (DynamicQuant || StaticQuant) {
+        dstExpBuf_ = receiveDataCastFloatBuf_;  // 内存复用
+        subExpBuf_ = smoothScalesBuf_;          // 内存复用
+    } else {
+        tpipe_->InitBuffer(dstExpBuf_, maxSize_);             // BS * K * 4 = 32K
+        tpipe_->InitBuffer(subExpBuf_, maxSize_);             // BS * K * 4 = 32K
+    }
     moeExpertRankNumAligned_ = Ceil(moeExpertNum_, TABLE_ELEM_COUNT_PER_BLOCK) * TABLE_ELEM_COUNT_PER_BLOCK;
     if (axisBS_ <= LOOP_OPT_MAX_BS && moeExpertRankNumAligned_ <= LOOP_OPT_MAX_MOE_RANK &&
         axisK_ % TOPK_ELEM_COUNT_PER_BLOCK == 0) {
@@ -371,10 +395,35 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Quant
 }
 
 template <TemplateDispatchTypeClass>
+__aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::TokenActiveMaskCal()
+{
+    // 搬运x_active_mask, 当前仅用于计算有效token总数
+    LocalTensor<half> maskTmpTensor;
+    LocalTensor<half> sumOutTensor;
+    LocalTensor<bool> maskInputTensor;
+    axisBsAlignSize_ = Ceil(axisBS_ * sizeof(bool), UB_ALIGN) * UB_ALIGN;
+    maskInputTensor = dstExpBuf_.Get<bool>();
+    maskTmpTensor = subExpBuf_.Get<half>();
+    sumOutTensor = gatherMaskTBuf_.Get<half>();
+    DataCopyExtParams maskParams = {1U, static_cast<uint32_t>(axisBS_ * sizeof(bool)), 0U, 0U, 0U};
+    DataCopyPadExtParams<bool> maskCopyPadParams{false, 0U, 0U, 0U};
+    DataCopyPad(maskInputTensor, xActiveMaskGMTensor_, maskParams, maskCopyPadParams);
+    SyncFunc<AscendC::HardEvent::MTE2_V>();
+    LocalTensor<int8_t> maskInputInt8Tensor = maskInputTensor.ReinterpretCast<int8_t>();
+    Cast(maskTmpTensor, maskInputInt8Tensor, RoundMode::CAST_NONE, axisBS_);
+    PipeBarrier<PIPE_V>();
+    SumParams params{1, axisBsAlignSize_, axisBS_};
+    Sum(sumOutTensor, maskTmpTensor, params);
+    SyncFunc<AscendC::HardEvent::V_S>();
+    activeMaskBsCnt_ = static_cast<int32_t>(sumOutTensor.GetValue(0));
+    sendToMoeExpTokenCnt_ = activeMaskBsCnt_ * axisK_;
+}
+
+template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SendToSharedExpert()
 {
-    uint32_t sendTokenNum = axisBS_ / sharedUsedAivNum_;
-    uint32_t remainderTokenNum = axisBS_ % sharedUsedAivNum_;
+    uint32_t sendTokenNum = activeMaskBsCnt_ / sharedUsedAivNum_;
+    uint32_t remainderTokenNum = activeMaskBsCnt_ % sharedUsedAivNum_;
     uint32_t newAivId = aivId_ - moeUsedAivNum_;
     uint32_t startTokenId = sendTokenNum * newAivId;
     if (newAivId < remainderTokenNum) {
@@ -383,16 +432,16 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SendT
     } else {
         startTokenId += remainderTokenNum;
     }
-    if (startTokenId >= axisBS_) {
+    if (startTokenId >= activeMaskBsCnt_) {
         return;
     }
     uint32_t endTokenId = startTokenId + sendTokenNum;
     for (uint32_t tokenShuffleIndex = 0; tokenShuffleIndex < sendTokenNum; ++tokenShuffleIndex) {
         uint32_t tokenIndex = startTokenId + ((tokenShuffleIndex + epRankId_) % sendTokenNum);
-        uint32_t temp = (epRankId_ * axisBS_) / sharedExpertRankNum_;
-        uint32_t moeOnShareRank = Ceil((tokenIndex + 1 + temp) * sharedExpertRankNum_, axisBS_) - 1 - epRankId_;
-        uint32_t preCnt = (moeOnShareRank + epRankId_) * axisBS_ / sharedExpertRankNum_ -
-                          epRankId_ * axisBS_ / sharedExpertRankNum_;
+        uint32_t temp = (epRankId_ * activeMaskBsCnt_) / sharedExpertRankNum_;
+        uint32_t moeOnShareRank = Ceil((tokenIndex + 1 + temp) * sharedExpertRankNum_, activeMaskBsCnt_) - 1 - epRankId_;
+        uint32_t preCnt = (moeOnShareRank + epRankId_) * activeMaskBsCnt_ / sharedExpertRankNum_ -
+                          epRankId_ * activeMaskBsCnt_ / sharedExpertRankNum_;
         GlobalTensor<ExpandXOutType> dstWinGMTensor;
         dstWinGMTensor.SetGlobalBuffer((__gm__ ExpandXOutType *)(GetWindAddrByRankId(COMM_EP_IDX, moeOnShareRank) +
                                                                  expertPerSizeOnWin_ * epRankId_));
@@ -440,7 +489,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SendT
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SendToMoeExpert()
 {
-    uint32_t expertIdsCnt = axisBS_ * axisK_;
+    uint32_t expertIdsCnt = activeMaskBsCnt_ * axisK_;
     uint32_t sendTokenNum = expertIdsCnt / moeUsedAivNum_;
     uint32_t remainderTokenNum = expertIdsCnt % moeUsedAivNum_;
     uint32_t startTokenId = sendTokenNum * aivId_;
@@ -496,7 +545,12 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SendT
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::AlltoAllDispatch()
 {
-    uint32_t expertIdsCnt = axisBS_ * axisK_;
+    activeMaskBsCnt_ = axisBS_;
+    sendToMoeExpTokenCnt_ = activeMaskBsCnt_ * axisK_;
+    if constexpr (EXEC_FLAG & EXEC_FLAG_X_ACTIVE_MASK) {
+        TokenActiveMaskCal();
+    }
+    uint32_t expertIdsCnt = activeMaskBsCnt_ * axisK_;
     DataCopyExtParams expertIdsCntParams = {1U, static_cast<uint32_t>(expertIdsCnt * sizeof(uint32_t)), 0U, 0U, 0U};
     DataCopyPadExtParams<int32_t> copyPadParams{false, 0U, 0U, 0U};
     DataCopyPad(expertIdsTensor_, expertIdsGMTensor_, expertIdsCntParams, copyPadParams);
@@ -514,7 +568,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Allto
             }
             tableLocalTensor_((tokenIndex / axisK_ + 1) * moeExpertRankNumAligned_ + expertId) = 1;
         }
-        pipe_barrier(PIPE_ALL);
+        AscendC::PipeBarrier<PIPE_ALL>();
 
         uint32_t sendTokenNum = expertIdsCnt / moeUsedAivNum_;
         uint32_t remainderTokenNum = expertIdsCnt % moeUsedAivNum_;
@@ -533,7 +587,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Allto
             Add(tableInt16LocalTensor_[row * moeExpertRankNumInt16Aligned_],
                 tableInt16LocalTensor_[row * moeExpertRankNumInt16Aligned_],
                 tableInt16LocalTensor_[(row - 1) * moeExpertRankNumInt16Aligned_], moeExpertRankNumInt16Aligned_);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
         }
 
         // row-i of tableLocalTensor_ is index of token
@@ -601,7 +655,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Allto
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SetStatus()
 {
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
     SyncAll<true>();
     totalExpertNum_ = sharedExpertRankNum_ + moeExpertNum_;
     sendExpertNum_ = totalExpertNum_ / aivNum_;
@@ -641,7 +695,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Quant
     floatLocalTemp = receiveDataCastFloatBuf_.Get<float>();
     Cast(floatLocalTemp, xInTensor_, RoundMode::CAST_NONE, axisH_);
     xInQueue_.FreeTensor<XType>(xInTensor_);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     if constexpr (IsSmoothScaleExist) {
         if constexpr (DynamicQuant) {
             SyncFunc<AscendC::HardEvent::V_MTE2>();
@@ -649,28 +703,28 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Quant
         DataCopy(smoothScalesTensor_, scalesGMTensor_[expertIndex * axisH_], axisH_);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
         Mul(floatLocalTemp, floatLocalTemp, smoothScalesTensor_, axisH_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
     }
     if constexpr (DynamicQuant) {
         LocalTensor<float> floatLocalAbsTemp = smoothScalesBuf_.Get<float>();
         rowMaxTensor_ = rowMaxBuf_.Get<float>();
         Abs(floatLocalAbsTemp, floatLocalTemp, axisH_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         ReduceMax(rowMaxTensor_, floatLocalAbsTemp, floatLocalAbsTemp, axisH_, false);
         SyncFunc<AscendC::HardEvent::V_S>();
         dynamicScale = float(127.0) / rowMaxTensor_.GetValue(0);
         SyncFunc<AscendC::HardEvent::S_V>();
         Muls(floatLocalTemp, floatLocalTemp, dynamicScale, axisH_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
     }
     LocalTensor<half> halfLocalTemp = floatLocalTemp.ReinterpretCast<half>();
     LocalTensor<int32_t> int32LocalTemp = floatLocalTemp.ReinterpretCast<int32_t>();
     Cast(int32LocalTemp, floatLocalTemp, RoundMode::CAST_RINT, axisH_);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     SetDeqScale((half)1.000000e+00f);
     PipeBarrier<PIPE_V>();
     Cast(halfLocalTemp, int32LocalTemp, RoundMode::CAST_ROUND, axisH_);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Cast(xOutTensor_, halfLocalTemp, RoundMode::CAST_TRUNC, axisH_);
     floatLocalTemp = xOutTensor_.template ReinterpretCast<float>();
     floatLocalTemp.SetValue(axisH_ / sizeof(float), float(1.0) / dynamicScale);  // int8->float32
@@ -688,10 +742,10 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
     xQueue_.EnQue(xTmpTensor_);
     xTmpTensor_ = xQueue_.DeQue<ExpandXOutType>();
     if constexpr (DynamicQuant || StaticQuant) {
-        pipe_barrier(PIPE_ALL);
+        AscendC::PipeBarrier<PIPE_ALL>();
         xOutFp32Tensor_ = xTmpTensor_.template ReinterpretCast<float>();
         dynamicScalesTensor_.SetValue(dynamicScalesLocalIdx++, xOutFp32Tensor_.GetValue(axisH_ / sizeof(float)));
-        pipe_barrier(PIPE_ALL);
+        AscendC::PipeBarrier<PIPE_ALL>();
     }
     if constexpr (IsNeedAllgater) {
         DataCopy(winTpGatherOutGMTensor_[tokenOffset * axisH_], xTmpTensor_, axisH_);
@@ -737,7 +791,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::WaitD
         SyncFunc<AscendC::HardEvent::MTE2_V>();
         GatherMask(gatherMaskOutTensor, statusFp32Tensor_, gatherTmpTensor, true, mask,
                    {1, (uint16_t)recStatusNumPerCore, 1, 0}, rsvdCnt);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         Sum(statusSumOutTensor, gatherMaskOutTensor, sumParams);
         SyncFunc<AscendC::HardEvent::V_S>();
         sumOfFlag = statusSumOutTensor.GetValue(0);
@@ -875,11 +929,11 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
             xQueue_.EnQue(xTmpTensor_);
             xTmpTensor_ = xQueue_.DeQue<ExpandXOutType>();
             if constexpr (DynamicQuant || StaticQuant) {
-                pipe_barrier(PIPE_ALL);
+                AscendC::PipeBarrier<PIPE_ALL>();
                 xOutFp32Tensor_ = xTmpTensor_.template ReinterpretCast<float>();
                 DataCopyPad(dynamicScalesOutGMTensor_[beginIdx + j], xOutFp32Tensor_[axisH_ / sizeof(float)],
                             dataCopyParamsFloat);
-                pipe_barrier(PIPE_ALL);
+                AscendC::PipeBarrier<PIPE_ALL>();
             }
             if constexpr (IsNeedAllgater) {
                 DataCopy(winTpGatherOutGMTensor_[(beginIdx + j) * axisHCommu_], xTmpTensor_, axisHCommu_);
@@ -909,7 +963,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::AllGatherSetStatusAndWait()
 {
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
     if (startExpertId_ >= totalExpertNum_) {
         return;
     }

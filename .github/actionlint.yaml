@@ -1,21 +1,18 @@
 self-hosted-runner:
   # Labels of self-hosted runner in array of strings.
   labels:
-    - linux-aarch64-a2-0
-    - linux-aarch64-a2-1
-    - linux-aarch64-a2-2
-    - linux-aarch64-a2-4
-    - linux-aarch64-a2-8
     - linux-arm64-npu-static-8
     - linux-aarch64-310p-1
     - linux-aarch64-310p-2
     - linux-aarch64-310p-4
-    - ubuntu-24.04-arm
     - linux-aarch64-a3-1
     - linux-aarch64-a3-2
     - linux-aarch64-a3-4
     - linux-aarch64-a3-8
-    - linux-amd64-cpu-0
-    - linux-amd64-cpu-8
-    - linux-amd64-cpu-16
     - linux-aarch64-a3-0
+    - linux-amd64-cpu-8-hk
+    - linux-amd64-cpu-16-hk
+    - linux-aarch64-a2b3-0
+    - linux-aarch64-a2b3-1
+    - linux-aarch64-a2b3-2
+    - linux-aarch64-a2b3-4

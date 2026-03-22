@@ -16,11 +16,12 @@
 #
 
 import torch
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SwigluOAIAndMul
+
+from vllm_ascend.utils import get_weight_prefetch_method
 
 
 class AscendQuickGELU(QuickGELU):
-
     def forward_oot(self, x: torch.tensor) -> torch.Tensor:
         import torch_npu
 
@@ -29,16 +30,22 @@ class AscendQuickGELU(QuickGELU):
 
 
 class AscendSiluAndMul(SiluAndMul):
-
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         import torch_npu
 
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-        torch.ops.vllm.maybe_prefetch_mlp_down_proj(x)
-        if get_ascend_device_type() == AscendDeviceType._310P:
-            out = torch_npu.npu_swiglu(x.to(torch.float32)).to(torch.float16)
-        else:
-            out = torch_npu.npu_swiglu(x)
-        torch.ops.vllm.maybe_wait_prefetch_done(out)
+        weight_prefetch_method = get_weight_prefetch_method()
+        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
+        out = torch_npu.npu_swiglu(x)
+        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
+
+
+class AscendSwigluOAIAndMul:
+    def swiglu_oai_forward(x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0) -> torch.Tensor:
+        class MinimalSwigluOAIAndMul:
+            def __init__(self):
+                self.alpha = alpha
+                self.limit = limit
+
+        layer = MinimalSwigluOAIAndMul()
+        return SwigluOAIAndMul.forward_native(layer, x)

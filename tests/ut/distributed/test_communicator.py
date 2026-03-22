@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.distributed as dist
 
-from vllm_ascend.distributed.communicator import NPUCommunicator
+from vllm_ascend.distributed.device_communicators.npu_communicator import \
+    NPUCommunicator
 
 
 class TestNPUCommunicator(unittest.TestCase):
@@ -43,7 +44,8 @@ class TestNPUCommunicator(unittest.TestCase):
         gather_sizes = [2, 2]
         input_ = torch.tensor([10, 20, 30, 40])
 
-        comm = NPUCommunicator(cpu_group=dist.group.WORLD)
+        with patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: MagicMock()}, clear=False):
+            comm = NPUCommunicator(cpu_group=dist.group.WORLD)
 
         output = comm.all_to_all(input_,
                                  scatter_sizes=scatter_sizes,
@@ -83,7 +85,8 @@ class TestNPUCommunicator(unittest.TestCase):
 
         input_ = torch.tensor([[10, 20], [30, 40]])
 
-        comm = NPUCommunicator(cpu_group=dist.group.WORLD)
-        output = comm.all_to_all(input_, scatter_dim=0, gather_dim=0)
+        with patch.dict(dist.distributed_c10d._world.pg_map, {dist.group.WORLD: MagicMock()}, clear=False):
+            comm = NPUCommunicator(cpu_group=dist.group.WORLD)
+            output = comm.all_to_all(input_, scatter_dim=0, gather_dim=0)
 
         assert output.tolist() == [[10, 20], [50, 60]]

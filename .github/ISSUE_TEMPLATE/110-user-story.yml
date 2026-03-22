@@ -1,5 +1,5 @@
 name: 📚 User Story
-description: Apply for an user story to be displayed on https://vllm-ascend.readthedocs.io/en/latest/community/user_stories/index.html
+description: Apply for an user story to be displayed on https://docs.vllm.ai/projects/ascend/en/latest/community/user_stories/index.html
 title: "[User Story]: "
 labels: ["user-story"]
 
@@ -18,7 +18,7 @@ body:
       A brief introduction about the background of your use case, like your scenario, hardware size etc.
 - type: textarea
   attributes:
-    label: Bussiness Challenges
+    label: Business Challenges
     description: >
       Tell us how what kind of challenge you faced in this user story.
 - type: textarea
@@ -30,7 +30,7 @@ body:
   attributes:
     label: Extra Info
     description: >
-      Any extra infomation you want to include in this story
+      Any extra information you want to include in this story
 - type: markdown
   attributes:
     value: >

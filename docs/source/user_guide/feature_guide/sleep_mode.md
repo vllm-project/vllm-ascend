@@ -2,7 +2,7 @@
 
 ## Overview
 
-Sleep Mode is an API designed to offload model weights and discard KV cache from NPU memory. This functionality is essential for reinforcement learning (RL) post-training workloads, particularly in online algorithms such as PPO, GRPO, or DPO. During training, the policy model typically performs auto-regressive generation using inference engines like vLLM, followed by forward and backward passes for optimization.
+Sleep Mode is an API designed to offload model weights and discard KV cache from NPU memory. This functionality is essential for reinforcement learning (RL) post-training workloads, particularly in online algorithms such as PPO, GRPO, or DPO. During training, the policy model typically performs autoregressive generation using inference engines like vLLM, followed by forward and backward passes for optimization.
 
 Since the generation and training phases may employ different model parallelism strategies, it becomes crucial to free KV cache and even offload model parameters stored within vLLM during training. This ensures efficient memory utilization and avoids resource contention on the NPU.
 
@@ -23,7 +23,7 @@ The engine (v0/v1) supports two sleep levels to manage memory during idle period
     - Memory: The content of both the model weights and KV cache is forgotten.
     - Use Case: Ideal when switching to a different model or updating the current one.
 
-Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and build from source. If you are using < v0.12.0rc1, remember to set `export COMPILE_CUSTOM_KERNELS=1`.
+Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) and build from source. If you are using < v0.12.0rc1, remember to set `export COMPILE_CUSTOM_KERNELS=1`.
 
 ## Usage
 
@@ -51,7 +51,7 @@ The following is a simple example of how to use sleep mode.
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
         llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
-        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        sampling_params = SamplingParams(temperature=0, max_completion_tokens=10)
         output = llm.generate(prompt, sampling_params)
 
         llm.sleep(level=1)
@@ -71,7 +71,7 @@ The following is a simple example of how to use sleep mode.
 
 - Online serving:
     :::{note}
-    Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicit specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
+    Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicitly specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
     :::
 
     ```bash
@@ -110,7 +110,7 @@ The following is a simple example of how to use sleep mode.
         -d '{
             "model": "Qwen/Qwen2.5-0.5B-Instruct",
             "prompt": "The future of AI is",
-            "max_tokens": 7,
+            "max_completion_tokens": 7,
             "temperature": 0
         }'
     ```

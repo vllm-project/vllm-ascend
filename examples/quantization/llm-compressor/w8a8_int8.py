@@ -1,31 +1,25 @@
 import os
+
 import torch
-
+from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme, QuantizationStrategy, QuantizationType
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, Qwen2VLForConditionalGeneration, Qwen2_5_VLForConditionalGeneration, \
-    AutoTokenizer, AutoProcessor, AutoConfig, AutoImageProcessor
-
 from llmcompressor import oneshot
 from llmcompressor.modifiers.awq import AWQModifier
 from llmcompressor.modifiers.quantization import GPTQModifier, QuantizationModifier
-from compressed_tensors.quantization import QuantizationArgs, QuantizationScheme, QuantizationType, QuantizationStrategy
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+)
 
 W8A8_W_cha_A_ten_static_symmetric = {
     "group_0": QuantizationScheme(
         targets=["Linear"],
         weights=QuantizationArgs(
-            num_bits=8,
-            type=QuantizationType.INT,
-            strategy=QuantizationStrategy.CHANNEL,
-            symmetric=True,
-            dynamic=False
+            num_bits=8, type=QuantizationType.INT, strategy=QuantizationStrategy.CHANNEL, symmetric=True, dynamic=False
         ),
         input_activations=QuantizationArgs(
-            num_bits=8,
-            type=QuantizationType.INT,
-            strategy=QuantizationStrategy.TENSOR,
-            symmetric=True,
-            dynamic=False
+            num_bits=8, type=QuantizationType.INT, strategy=QuantizationStrategy.TENSOR, symmetric=True, dynamic=False
         ),
     ),
 }
@@ -53,19 +47,19 @@ TOKENIZER_DICT = {
 
 def load_environment_variables():
     env_vars = {
-        'model_path': "Qwen/Qwen3-32B",
-        'export_path': "/llm-compressor/export/GPTQ/W8A8_W_cha_A_ten_static_symmetric",
-        'modifier': "GPTQ",
-        'schemes': "W8A8_W_cha_A_ten_static_symmetric",
-        'calib_prompt_path': "HuggingFaceH4/ultrachat_200k"
+        "model_path": "Qwen/Qwen3-32B",
+        "export_path": "/llm-compressor/export/GPTQ/W8A8_W_cha_A_ten_static_symmetric",
+        "modifier": "GPTQ",
+        "schemes": "W8A8_W_cha_A_ten_static_symmetric",
+        "calib_prompt_path": "HuggingFaceH4/ultrachat_200k",
     }
 
     # verify export model path
-    if env_vars['export_path'] is None:
-        env_vars['export_path'] = env_vars['model_path'].rstrip("/") + "-" + env_vars['modifier']
-        if env_vars['schemes'] is not None:
-            env_vars['export_path'] += "-" + env_vars['schemes']
-    os.makedirs(env_vars['export_path'], exist_ok=True)
+    if env_vars["export_path"] is None:
+        env_vars["export_path"] = env_vars["model_path"].rstrip("/") + "-" + env_vars["modifier"]
+        if env_vars["schemes"] is not None:
+            env_vars["export_path"] += "-" + env_vars["schemes"]
+    os.makedirs(env_vars["export_path"], exist_ok=True)
 
     return env_vars
 
@@ -74,19 +68,17 @@ def load_calibration_text_dataset(calib_prompt_path, tokenizer):
     # Load dataset
     for f in os.listdir(calib_prompt_path):
         print(f)
-    if any(f.lower().endswith('.jsonl') for f in os.listdir(calib_prompt_path)):
-        ds = load_dataset('json', data_dir=calib_prompt_path, split='validation')
-    elif any(f.lower().endswith('.parquet') for f in os.listdir(calib_prompt_path)):
+    if any(f.lower().endswith(".jsonl") for f in os.listdir(calib_prompt_path)):
+        ds = load_dataset("json", data_dir=calib_prompt_path, split="validation")
+    elif any(f.lower().endswith(".parquet") for f in os.listdir(calib_prompt_path)):
         ds = load_dataset("parquet", data_dir=calib_prompt_path, split="train[:512]")
     else:
-        raise ValueError("Unsupported calibration file format: {}".format(
-            calib_prompt_path.split('.')[-1]))
+        raise ValueError("Unsupported calibration file format: {}".format(calib_prompt_path.split(".")[-1]))
 
     # Preprocess dataset
     def preprocess(example):
         if tokenizer.chat_template is not None:
-            return {"text": tokenizer.apply_chat_template(
-                example["messages"], tokenize=False)}
+            return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
         else:
             return {"text": example["messages"]}
 
@@ -118,8 +110,8 @@ def quantize_model(model, env_vars, dataset_dict=None):
 
     # define a llmcompressor recipe
     recipe = [
-        MODIFIER_DICT[env_vars['modifier']](
-            config_groups=SCHEMES_DICT[env_vars['schemes']],
+        MODIFIER_DICT[env_vars["modifier"]](
+            config_groups=SCHEMES_DICT[env_vars["schemes"]],
             ignore=ignore,
         ),
     ]
@@ -138,18 +130,16 @@ def save_quantized_model(model, tokenizer, save_path, save_compressed=False):
     tokenizer.save_pretrained(save_path)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # get environment variables
     env_vars = load_environment_variables()
 
     # support model type list
-    config = AutoConfig.from_pretrained(env_vars['model_path'], trust_remote_code=True)
+    config = AutoConfig.from_pretrained(env_vars["model_path"], trust_remote_code=True)
     model_type = config.model_type
 
-    model = MODEL_DICT[model_type].from_pretrained(
-        env_vars['model_path'], torch_dtype="auto", trust_remote_code=True
-    )
-    tokenizer = TOKENIZER_DICT[model_type].from_pretrained(env_vars['model_path'], trust_remote_code=True)
+    model = MODEL_DICT[model_type].from_pretrained(env_vars["model_path"], torch_dtype="auto", trust_remote_code=True)
+    tokenizer = TOKENIZER_DICT[model_type].from_pretrained(env_vars["model_path"], trust_remote_code=True)
 
     ds = load_calibration_text_dataset(env_vars["calib_prompt_path"], tokenizer)
 
@@ -157,4 +147,4 @@ if __name__ == '__main__':
     quantize_model(model, env_vars, ds)
 
     # save the quantized model
-    save_quantized_model(model, tokenizer, env_vars['export_path'], True)
+    save_quantized_model(model, tokenizer, env_vars["export_path"], True)

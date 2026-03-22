@@ -1095,7 +1095,7 @@ ge::graphStatus SFATilingCheck::CheckActualSeqLens()
     if (std::string(opParamInfo_.layoutKV) == "TND" && opParamInfo_.actualSeqLengths.tensor == nullptr) {
         OPS_LOG_E(opName_,
                   "when the layout of key and value is TND, "
-                  "the actualSeqLengths of key and value shoule not be empty.");
+                  "the actualSeqLengths of key and value should not be empty.");
         return ge::GRAPH_PARAM_INVALID;
     }
     if (ge::GRAPH_SUCCESS != CheckActualSeqLensDType() ||

@@ -18,15 +18,14 @@
 
 import torch
 import vllm
-from vllm.model_executor.models.utils import (_embedding_count_expression,
-                                              _flatten_embeddings)
+from vllm.model_executor.models.utils import _embedding_count_expression, _flatten_embeddings
 from vllm.multimodal import NestedTensors
 
 
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
-    is_multimodal: torch.Tensor,
     multimodal_embeddings: NestedTensors,
+    is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -37,8 +36,9 @@ def _merge_multimodal_embeddings(
         This updates ``inputs_embeds`` in place.
     """
     flattened = _flatten_embeddings(multimodal_embeddings)
+    input_dtype = inputs_embeds.dtype
     try:
-        inputs_embeds[is_multimodal] = flattened
+        inputs_embeds[is_multimodal] = flattened.to(dtype=input_dtype)
     except RuntimeError as e:
         num_expected_tokens = is_multimodal.sum().item()
         assert isinstance(num_expected_tokens, int)

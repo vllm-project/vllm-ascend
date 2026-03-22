@@ -37,11 +37,13 @@ def main():
     # Create a sampling params object.
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
     # Create an LLM.
-    llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite",
-              tensor_parallel_size=2,
-              enforce_eager=True,
-              trust_remote_code=True,
-              max_model_len=1024)
+    llm = LLM(
+        model="deepseek-ai/DeepSeek-V2-Lite",
+        tensor_parallel_size=2,
+        enforce_eager=True,
+        trust_remote_code=True,
+        max_model_len=1024,
+    )
 
     # Generate texts from the prompts.
     outputs = llm.generate(prompts, sampling_params)

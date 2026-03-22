@@ -1,6 +1,6 @@
 # Optimization and Tuning
 
-This guide aims to help users to improve vllm-ascend performance on system level. It includes OS configuration, library optimization, deployment guide and so on. Any feedback is welcome.
+This guide aims to help users improve vLLM-Ascend performance at the system level. It includes OS configuration, library optimization, deployment guide, and so on. Any feedback is welcome.
 
 ## Preparation
 
@@ -58,10 +58,10 @@ pip install modelscope pandas datasets gevent sacrebleu rouge_score pybind11 pyt
 VLLM_USE_MODELSCOPE=true
 ```
 
-Please follow the [Installation Guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
+Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
 
 :::{note}
-Make sure your vLLM and vllm-ascend are installed after your python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vllm-ascend before completing section 1.1, the binary files will not use the optimized python.
+Make sure your vLLM and vllm-ascend are installed after your Python configuration is completed, because these packages will build binary files using python in current environment. If you install vLLM and vllm-ascend before completing section 1.1, the binary files will not use the optimized python.
 :::
 
 ## Optimizations
@@ -102,7 +102,7 @@ export PATH=/usr/bin:/usr/local/python/bin:$PATH
 
 #### 2.1. jemalloc
 
-**jemalloc** is a memory allocator that improves performance for multi-thread scenarios and can reduce memory fragmentation. jemalloc uses local thread memory manager to allocate variables, which can avoid lock competition between threads and can hugely optimize performance.
+**jemalloc** is a memory allocator that improves performance for multi-threaded scenarios and can reduce memory fragmentation. jemalloc uses a local thread memory manager to allocate variables, which can avoid lock competition between threads and can hugely optimize performance.
 
 ```{code-block} bash
    :substitutions:
@@ -116,7 +116,7 @@ export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2 $LD_PRELOAD
 
 #### 2.2. Tcmalloc
 
-**Tcmalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex competition and optimizing large object processing flow. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
+**TCMalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex contention and optimizing large object processing flow. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
 ```{code-block} bash
    :substitutions:
@@ -182,3 +182,94 @@ Plus, there are more features for performance optimization in specific scenarios
 - `HCCL_RDMA_TC`: Use this var to configure traffic class of RDMA NIC. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0045.html).
 - `HCCL_RDMA_SL`: Use this var to configure service level of RDMA NIC. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html).
 - `HCCL_BUFFSIZE`: Use this var to control the cache size for sharing data between two NPUs. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html).
+
+### 5. OS Optimization
+
+This section describes operating system–level optimizations applied on the host machine (bare metal or Kubernetes node) to improve performance stability, latency, and throughput for inference workloads.
+
+:::{note}
+These settings must be applied on the host OS and with root privileges. Not inside containers.
+:::
+
+#### 5.1
+
+Set CPU Frequency Governor to `performance`
+
+```shell
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+```
+
+Purpose
+
+- Forces all CPU cores to run under the `performance` governor
+- Disables dynamic frequency scaling (e.g., `ondemand`, `powersave`)
+
+Benefits
+
+- Keeps CPU cores at maximum frequency
+- Reduces latency jitter
+- Improves predictability for inference workloads
+
+#### 5.2 Disable Swap Usage
+
+```shell
+sysctl -w vm.swappiness=0
+```
+
+Purpose
+
+- Minimizes the kernel’s tendency to swap memory pages to disk
+
+Benefits
+
+- Prevents severe latency spikes caused by swapping
+- Improves stability for large in-memory models
+
+Notes
+
+- For inference workloads, swap can introduce second-level latency
+- Recommended values are `0` or `1`
+
+#### 5.3 Disable Automatic NUMA Balancing
+
+```shell
+sysctl -w kernel.numa_balancing=0
+```
+
+Purpose
+
+- Disables the kernel’s automatic NUMA page migration mechanism
+
+Benefits
+
+- Prevents background memory page migrations
+- Reduces unpredictable memory access latency
+- Improves performance stability on NUMA systems
+
+Recommended For
+
+- Multi-socket servers
+- Ascend / NPU deployments with explicit NUMA binding
+- Systems with manually managed CPU and memory affinity
+
+#### 5.4 Increase Scheduler Migration Cost
+
+```shell
+sysctl -w kernel.sched_migration_cost_ns=50000
+```
+
+Purpose
+
+- Increases the cost for the scheduler to migrate tasks between CPU cores
+
+Benefits
+
+- Reduces frequent thread migration
+- Improves CPU cache locality
+- Lowers latency jitter for inference workloads
+  
+Parameter Details
+
+- Unit: nanoseconds (ns)
+- Typical recommended range: 50000–100000
+- Higher values encourage threads to stay on the same CPU core

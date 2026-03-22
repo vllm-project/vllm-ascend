@@ -1,71 +1,112 @@
 # Quantization Guide
 
-Model quantization is a technique that reduces the size and computational requirements of a model by lowering the data precision of the weights and activation values in the model, thereby saving the memory and improving the inference speed.
+Model quantization is a technique that reduces model size and computational overhead by lowering the numerical precision of weights and activations, thereby saving memory and improving inference speed.
 
-Since version 0.9.0rc2, the quantization feature is experimentally supported by vLLM Ascend. Users can enable the quantization feature by specifying `--quantization ascend`. Currently, only Qwen, DeepSeek series models are well tested. We will support more quantization algorithms and models in the future.
+`vLLM Ascend` supports multiple quantization methods. This guide provides instructions for using different quantization tools and running quantized models on vLLM Ascend.
 
-## Install ModelSlim
+> **Note**
+>
+> You can choose to convert the model yourself or use the quantized model we uploaded.
+> See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8>.
+> Before you quantize a model, ensure sufficient RAM is available.
 
-To quantize a model, you should install [ModelSlim](https://gitcode.com/Ascend/msit/tree/master) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
+## Quantization Tools
 
-Install ModelSlim:
+vLLM Ascend supports models quantized by two main tools: `ModelSlim` and `LLM-Compressor`.
+
+### 1. ModelSlim (Recommended)
+
+[ModelSlim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md) is an Ascend-friendly compression tool focused on acceleration, using compression techniques, and built for Ascend hardware. It includes a series of inference optimization technologies such as quantization and compression, aiming to accelerate large language dense models, MoE models, multimodal understanding models, multimodal generation models, etc.
+
+#### Installation
+
+To use ModelSlim for model quantization, install it from its [Git repository](https://gitcode.com/Ascend/msit):
 
 ```bash
-# The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
-git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit/tree/master
+# Install br_release_MindStudio_8.3.0_20261231 version
+git clone https://gitcode.com/Ascend/msit.git -b br_release_MindStudio_8.3.0_20261231
 
 cd msit/msmodelslim
 
 bash install.sh
-pip install accelerate
 ```
 
-## Quantize model
+#### Model Quantization
 
-:::{note}
-You can choose to convert the model yourself or use the quantized model we uploaded.
-See https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8.
-This conversion process requires a larger CPU memory, ensure that the RAM size is greater than 2 TB.
-:::
+The following example shows how to generate W8A8 quantized weights for the [Qwen3-MoE model](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/Qwen3-MOE/README.md).
 
-### Adapts and changes
-1. Ascend does not support the `flash_attn` library. To run the model, you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and comment out certain parts of the code in `modeling_deepseek.py` located in the weights folder.
-2. The current version of transformers does not support loading weights in FP8 quantization format. you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and delete the quantization related fields from `config.json` in the weights folder.
-
-### Generate the W8A8 weights
+**Quantization Script:**
 
 ```bash
-cd example/DeepSeek
+cd example/Qwen3-MOE
 
+# Support multi-card quantization
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
-export MODEL_PATH="/root/.cache/Kimi-K2-Instruct"
-export SAVE_PATH="/root/.cache/Kimi-K2-Instruct-W8A8"
 
-python3 quant_deepseek_w8a8.py --model_path $MODEL_PATH --save_path $SAVE_PATH --batch_size 4
+# Set model and save paths
+export MODEL_PATH="/path/to/your/model"
+export SAVE_PATH="/path/to/your/quantized_model"
+
+# Run quantization script
+python3 quant_qwen_moe_w8a8.py --model_path $MODEL_PATH \
+--save_path $SAVE_PATH \
+--anti_dataset ../common/qwen3-moe_anti_prompt_50.json \
+--calib_dataset ../common/qwen3-moe_calib_prompt_50.json \
+--trust_remote_code True
 ```
 
-Here is the full converted model files except safetensors:
+After quantization completes, the output directory will contain the quantized model files.
+
+For more examples, refer to the [official examples](https://gitcode.com/Ascend/msit/tree/master/msmodelslim/example).
+
+### 2. LLM-Compressor
+
+[LLM-Compressor](https://github.com/vllm-project/llm-compressor) is a unified compressed model library for faster vLLM inference.
+
+#### Installation
 
 ```bash
-.
-|-- config.json
-|-- configuration.json
-|-- configuration_deepseek.py
-|-- generation_config.json
-|-- modeling_deepseek.py
-|-- quant_model_description.json
-|-- quant_model_weight_w8a8_dynamic.safetensors.index.json
-|-- tiktoken.model
-|-- tokenization_kimi.py
-`-- tokenizer_config.json
+pip install llmcompressor
 ```
 
-## Run the model
+#### Model Quantization
 
-Now, you can run the quantized model with vLLM Ascend. Examples for online and offline inference are provided as follows:
+`LLM-Compressor` provides various quantization scheme examples.
 
-### Offline inference
+##### Dense Quantization
+
+An example to generate W8A8 dynamic quantized weights for dense model:
+
+```bash
+# Navigate to LLM-Compressor examples directory
+cd examples/quantization/llm-compressor
+
+# Run quantization script
+python3 w8a8_int8_dynamic.py
+```
+
+##### MoE Quantization
+
+An example to generate W8A8 dynamic quantized weights for MoE model:
+
+```bash
+# Navigate to LLM-Compressor examples directory
+cd examples/quantization/llm-compressor
+
+# Run quantization script
+python3 w8a8_int8_dynamic_moe.py
+```
+
+For more content, refer to the [official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples).
+
+Currently supported quantization types by LLM-Compressor: `W8A8` and `W8A8_DYNAMIC`.
+
+## Running Quantized Models
+
+Once you have a quantized model which is generated by **ModelSlim**, you can use vLLM Ascend for inference by specifying the `--quantization ascend` parameter to enable quantization features, while for models quantized by **LLM-Compressor**, do not need to add this parameter.
+
+### Offline Inference
 
 ```python
 import torch
@@ -76,12 +117,20 @@ prompts = [
     "Hello, my name is",
     "The future of AI is",
 ]
+# Set sampling parameters
 sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
 
-llm = LLM(model="{quantized_model_save_path}",
-          max_model_len=2048,
+llm = LLM(model="/path/to/your/quantized_model",
+          max_model_len=4096,
           trust_remote_code=True,
-          # Enable quantization by specifying `quantization="ascend"`
+          # Set appropriate TP and DP values
+          tensor_parallel_size=2,
+          data_parallel_size=1,
+          # Set an unused port
+          port=8000,
+          # Set serving model name
+          served_model_name="quantized_model",
+          # Specify `quantization="ascend"` to enable quantization for models quantized by ModelSlim
           quantization="ascend")
 
 outputs = llm.generate(prompts, sampling_params)
@@ -91,16 +140,23 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-### Online inference
+### Online Inference
 
-Enable quantization by specifying `--quantization ascend`, for more details, see the [DeepSeek-V3-W8A8 Tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html).
+```bash
+# Corresponding to offline inference
+python -m vllm.entrypoints.api_server \
+    --model /path/to/your/quantized_model \
+    --max-model-len 4096 \
+    --port 8000 \
+    --tensor-parallel-size 2 \
+    --data-parallel-size 1 \
+    --served-model-name quantized_model \
+    --trust-remote-code \
+    --quantization ascend
+```
 
-## FAQs
+## References
 
-### 1. How to solve the KeyError "xxx.layers.0.self_attn.q_proj.weight"?
-
-First, make sure you specify `ascend` as the quantization method. Second, check if your model is converted by the `br_release_MindStudio_8.1.RC2_TR5_20260624` ModelSlim version. Finally, if it still does not work, submit an issue. Maybe some new models need to be adapted.
-
-### 2. How to solve the error "Could not locate the configuration_deepseek.py"?
-
-Please convert DeepSeek series models using `br_release_MindStudio_8.1.RC2_TR5_20260624` ModelSlim, where the missing configuration_deepseek.py error has been fixed.
+- [ModelSlim Documentation](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)
+- [LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)
+- [vLLM Quantization Guide](https://docs.vllm.ai/en/latest/quantization/)

@@ -17,7 +17,7 @@
 
 #include "grouped_matmul_swiglu_quant_weight_nz_tensor_list_utils.h"
 namespace GROUPED_MATMUL_SWIGLU_QUANT_WEIGHT_NZ_TENSOR_LIST {
-/** @brief intenal computation class
+/** @brief internal computation class
 */
 template <class mmType, bool sync = false, typename CHANNELDTYPE = float>
 class GMMSwigluCompute{

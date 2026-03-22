@@ -1,13 +1,10 @@
 import numpy as np
 import torch
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.worker.worker import (OffloadingHandler,
-                                              TransferResult, TransferSpec)
-
-logger = init_logger(__name__)
+from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
 
 
 def expand_block_ids(
@@ -44,7 +41,6 @@ def expand_block_ids(
 
 
 class CpuNpuOffloadingHandler(OffloadingHandler):
-
     def __init__(
         self,
         gpu_block_size: int,
@@ -81,20 +77,22 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
             cpu_shape[num_blocks_idx] = num_cpu_blocks * self.block_size_factor
 
             logger.debug("Allocating CPU tensor of shape %r", cpu_shape)
-            self.cpu_tensors.append((
-                torch.zeros(
-                    cpu_shape,
-                    dtype=gpu_tensor[0].dtype,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                ),
-                torch.zeros(
-                    cpu_shape,
-                    dtype=gpu_tensor[0].dtype,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                ),
-            ))
+            self.cpu_tensors.append(
+                (
+                    torch.zeros(
+                        cpu_shape,
+                        dtype=gpu_tensor[0].dtype,
+                        device="cpu",
+                        pin_memory=pin_memory,
+                    ),
+                    torch.zeros(
+                        cpu_shape,
+                        dtype=gpu_tensor[0].dtype,
+                        device="cpu",
+                        pin_memory=pin_memory,
+                    ),
+                )
+            )
 
     def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
         logger.info("start transfer_async...")
@@ -123,9 +121,7 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         dst_sub_blocks_to_skip = -src_blocks.size % dst_block_size_factor
         src_sub_block_count = src_blocks.size * src_block_size_factor
 
-        assert (
-            src_sub_block_count == dst_blocks.size * dst_block_size_factor -
-            dst_sub_blocks_to_skip)
+        assert src_sub_block_count == dst_blocks.size * dst_block_size_factor - dst_sub_blocks_to_skip
 
         src_to_dst = np.empty((src_sub_block_count, 2), dtype=np.int64)
         expand_block_ids(src_blocks, src_block_size_factor, src_to_dst[:, 0])
@@ -137,18 +133,14 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         )
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
-        event = self.events_pool.pop(
-        ) if self.events_pool else torch.npu.Event()
+        event = self.events_pool.pop() if self.events_pool else torch.npu.Event()
         with torch.npu.stream(stream):
             for src_tensor, dst_tensor in zip(src_tensors, dst_tensors):
                 src_key_cache, src_value_cache = src_tensor[0], src_tensor[1]
                 dst_key_cache, dst_value_cache = dst_tensor[0], dst_tensor[1]
 
-                torch.ops._C_ascend.swap_blocks(src_key_cache, dst_key_cache,
-                                                src_to_dst_tensor)
-                torch.ops._C_ascend.swap_blocks(src_value_cache,
-                                                dst_value_cache,
-                                                src_to_dst_tensor)
+                torch.ops._C_ascend.swap_blocks(src_key_cache, dst_key_cache, src_to_dst_tensor)
+                torch.ops._C_ascend.swap_blocks(src_value_cache, dst_value_cache, src_to_dst_tensor)
 
             event.record(stream)
 
@@ -159,10 +151,30 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
+        finished_job_ids = []
         for job_id, event in self.transfer_events.items():
             if event.query():
-                results.append((job_id, True))
+                results.append(
+                    TransferResult(
+                        job_id=job_id,
+                        success=True,
+                        transfer_size=None,
+                        transfer_time=None,
+                        transfer_type=None,
+                    )
+                )
+                finished_job_ids.append(job_id)
                 self.events_pool.append(event)
-        for job_id, _ in results:
+        for job_id in finished_job_ids:
             del self.transfer_events[job_id]
         return results
+
+    def wait(self, job_ids: set[int]) -> None:
+        """
+        Wait (block) until all specified transfer jobs are completed.
+        """
+        for job_id in job_ids:
+            event = self.transfer_events.get(job_id)
+            if event is not None:
+                # This will block until the NPU event is complete
+                event.synchronize()
