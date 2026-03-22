@@ -806,30 +806,3 @@ class NPUPlatform(Platform):
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
 
-    @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Ensure block_size is compatible with the attention backend.
-        """
-        from vllm.config.cache import CacheConfig
-
-        cache_config = vllm_config.cache_config
-        if cache_config.user_specified_block_size:
-            # User specified --block-size; keep it.
-            return
-
-        from vllm.config.vllm import (
-            get_layers_from_vllm_config,
-            set_current_vllm_config,
-        )
-        from vllm.model_executor.layers.attention_layer_base import (
-            AttentionLayerBase,
-        )
-
-        attn_layers = get_layers_from_vllm_config(
-            vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-        )
-        if not attn_layers:
-            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
-            return
