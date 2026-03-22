@@ -126,7 +126,6 @@ from vllm_ascend.utils import (
     is_moe_model,
     lmhead_tp_enable,
     set_weight_prefetch_method,
-    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -216,6 +215,7 @@ class ExecuteModelState(NamedTuple):
     positions: torch.Tensor
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
+    batch_desc: BatchDescriptor
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -292,27 +292,15 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_sparse_c8_indexer:
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16
-        from vllm_ascend.utils import vllm_version_is
 
-        if vllm_version_is("0.17.0"):
-            self.attn_backend = get_attn_backend(
-                0,
-                self.dtype,
-                None,
-                self.block_size,
-                use_mla=self.model_config.use_mla,
-                use_sparse=self.use_sparse,
-                use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
-            )
-        else:
-            self.attn_backend = get_attn_backend(
-                0,
-                self.dtype,
-                None,
-                use_mla=self.model_config.use_mla,
-                use_sparse=self.use_sparse,
-                use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
-            )
+        self.attn_backend = get_attn_backend(
+            0,
+            self.dtype,
+            None,
+            use_mla=self.model_config.use_mla,
+            use_sparse=self.use_sparse,
+            use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,
+        )
 
         try:
             self.dcp_size = get_dcp_group().world_size
@@ -579,7 +567,8 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL and \
+            self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs_padded = num_reqs
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
@@ -1008,6 +997,7 @@ class NPUModelRunner(GPUModelRunner):
         hidden_states: torch.Tensor,
         aux_hidden_states: torch.Tensor = None,
         sample_hidden_states: torch.Tensor = None,
+        target_model_batch_desc: BatchDescriptor = None,
     ) -> list[list[int]] | None:
         if not self.drafter:
             # Speculative decoding is not enabled.
@@ -1128,6 +1118,7 @@ class NPUModelRunner(GPUModelRunner):
                 next_token_ids=next_token_ids,
                 token_indices_to_sample=token_indices_to_sample,
                 common_attn_metadata=common_attn_metadata,
+                target_model_batch_desc=target_model_batch_desc,
                 sampling_metadata=sampling_metadata,
                 req_scheduled_tokens=req_scheduled_tokens,
                 long_seq_metadata=long_seq_metadata,
@@ -1389,9 +1380,7 @@ class NPUModelRunner(GPUModelRunner):
             self.maybe_get_kv_connector_output(
                 scheduler_output,
                 **(
-                    {"clear_metadata": clear_kv_metadata}
-                    if vllm_version_is("0.17.0")
-                    else {"defer_finalize": not clear_kv_metadata}
+                    {"defer_finalize": not clear_kv_metadata}
                 ),
             ) as kv_connector_output,
         ):
@@ -1470,6 +1459,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions,
                 ec_connector_output,
                 cudagraph_stats,
+                batch_desc,
             )
             self.kv_connector_output = kv_connector_output
         return None
@@ -1512,6 +1502,7 @@ class NPUModelRunner(GPUModelRunner):
             positions,
             ec_connector_output,
             cudagraph_stats,
+            batch_desc,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -1548,6 +1539,7 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states,
                 aux_hidden_states,
                 sample_hidden_states,
+                batch_desc,
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
@@ -2567,17 +2559,14 @@ class NPUModelRunner(GPUModelRunner):
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
                 if self.use_aux_hidden_state_outputs:
-                    if vllm_version_is("0.17.0"):
-                        self.model.set_aux_hidden_state_layers(self.model.get_eagle3_aux_hidden_state_layers())
-                    else:
-                        from vllm.model_executor.models.interfaces import supports_eagle3
-                        if not supports_eagle3(self.model):
-                            raise RuntimeError(
-                                "Model does not support EAGLE3 interface but "
-                                "aux_hidden_state_outputs was requested"
-                            )
-                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
-                        self.model.set_aux_hidden_state_layers(aux_layers)
+                    from vllm.model_executor.models.interfaces import supports_eagle3
+                    if not supports_eagle3(self.model):
+                        raise RuntimeError(
+                            "Model does not support EAGLE3 interface but "
+                            "aux_hidden_state_outputs was requested"
+                        )
+                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                    self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
@@ -2617,7 +2606,9 @@ class NPUModelRunner(GPUModelRunner):
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
-            self.drafter.initialize_attn_backend(kv_cache_config, self.kernel_block_sizes)
+            block_size = (self.kernel_block_sizes[0] if isinstance(
+            self.kernel_block_sizes, list) else self.kernel_block_sizes)
+            self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
@@ -3091,18 +3082,11 @@ class NPUModelRunner(GPUModelRunner):
             max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
-            if vllm_version_is("0.17.0"):
-                assert self.cache_config.cpu_offload_gb == 0, (
-                    "Cannot re-initialize the input batch when CPU weight "
-                    "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                    "for more details."
-                )
-            else:
-                assert self.offload_config.uva.cpu_offload_gb == 0, (
-                    "Cannot re-initialize the input batch when CPU weight "
-                    "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                    "for more details."
-                )
+            assert self.offload_config.uva.cpu_offload_gb == 0, (
+                "Cannot re-initialize the input batch when CPU weight "
+                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                "for more details."
+            )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,
