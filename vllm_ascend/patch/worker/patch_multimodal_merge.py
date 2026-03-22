@@ -18,6 +18,7 @@
 
 import torch
 import vllm
+from vllm.logger import logger
 from vllm.model_executor.models.utils import _embedding_count_expression, _flatten_embeddings
 from vllm.multimodal import NestedTensors
 
@@ -37,20 +38,36 @@ def _merge_multimodal_embeddings(
     """
     flattened = _flatten_embeddings(multimodal_embeddings)
     input_dtype = inputs_embeds.dtype
-    try:
-        inputs_embeds[is_multimodal] = flattened.to(dtype=input_dtype)
-    except RuntimeError as e:
-        num_expected_tokens = is_multimodal.sum().item()
-        assert isinstance(num_expected_tokens, int)
+    num_multimodal_tokens = flattened.shape[0]
+    num_placeholders = is_multimodal.sum().item()
+    assert isinstance(num_placeholders, int)
 
-        if flattened.shape[0] != num_expected_tokens:
-            expr = _embedding_count_expression(multimodal_embeddings)
-            raise ValueError(
-                f"Attempted to assign {expr} = {flattened.shape[0]} "
-                f"multimodal tokens to {num_expected_tokens} placeholders"
-            ) from e
-        else:
+    if num_multimodal_tokens == num_placeholders:
+        try:
+            inputs_embeds[is_multimodal] = flattened.to(dtype=input_dtype)
+        except RuntimeError as e:
             raise ValueError("Error during masked scatter operation") from e
+    elif num_multimodal_tokens < num_placeholders:
+        # When the visual encoder compresses tokens (e.g., via pooling/merge
+        # layers), fewer multimodal embeddings are produced than placeholder
+        # positions. Only overwrite the first num_multimodal_tokens positions
+        # and leave the remaining placeholder positions unchanged.
+        logger.warning_once(
+            "Multimodal token count (%d) is less than placeholder count (%d). "
+            "Only the first %d placeholder positions will be overwritten.",
+            num_multimodal_tokens,
+            num_placeholders,
+            num_multimodal_tokens,
+        )
+        placeholder_indices = is_multimodal.nonzero(as_tuple=True)[0]
+        selected_indices = placeholder_indices[:num_multimodal_tokens]
+        inputs_embeds[selected_indices] = flattened.to(dtype=input_dtype)
+    else:
+        expr = _embedding_count_expression(multimodal_embeddings)
+        raise ValueError(
+            f"Attempted to assign {expr} = {num_multimodal_tokens} "
+            f"multimodal tokens to {num_placeholders} placeholders"
+        )
 
     return inputs_embeds
 
