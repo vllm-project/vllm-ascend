@@ -75,7 +75,67 @@ cd "$VLLM_SRC" && git reset --hard && git clean -fd
 cd "$VLLM_ASCEND_SRC" && git reset --hard && git clean -fd
 ```
 
-## 4) New model onboarding checklist
+## 4) Model type classification
+
+Determine the high-level model type from `config.json`:
+
+```bash
+# check model_type, architectures, and attention-related fields
+rg -n "model_type|architectures|attention_type|sliding_window|mamba|mla|num_nextn_predict" \
+  "$MODEL_PATH/config.json"
+```
+
+Classification:
+
+- **LLM sub-types**: standard full attention / sliding window attention / Mamba (SSM) / multi-latent attention (MLA) / hybrid.
+- **VLM**: any model with vision encoder or multimodal processor.
+- **Whisper / ASR**: encoder-decoder speech model.
+
+## 5) Operator compatibility gate
+
+Scan the model's new modeling code for custom operators:
+
+```bash
+# look for CUDA extensions, triton kernels, custom ops
+rg -n "torch\.ops\.|\.cu\b|triton\.jit|@triton\.jit|load_inline|CUDAExtension" \
+  "$MODEL_PATH"/*.py "$VLLM_SRC"/vllm/model_executor/models/<new_model>.py 2>/dev/null || true
+```
+
+Decision table:
+
+| Operator type | Ascend status | Action |
+| --- | --- | --- |
+| Torch (native PyTorch) | ✅ functional | Note performance uncertainty in report |
+| Triton kernel | ⚠️ uncertain | Verify on Ascend; check accuracy |
+| CUDA kernel with fallback | ❌ CUDA blocked | Use fallback; document path |
+| CUDA kernel, no fallback | ❌ blocked | **Early exit** — file GitHub issue, skip validation |
+
+If early-exit applies, the GitHub issue must include:
+
+- operator name and file location,
+- why no fallback exists,
+- recommended path (e.g., custom Ascend op in `vllm-ascend`).
+
+## 6) Framework-side code analysis
+
+Identify vLLM framework modules changed alongside the new model:
+
+```bash
+# check what non-model files were touched in the upstream commit
+git -C "$VLLM_SRC" diff HEAD~1 --name-only | rg -v "model_executor/models/"
+```
+
+For each changed framework module, check vllm-ascend coverage:
+
+```bash
+# does vllm-ascend already patch this module?
+rg -rn "<module_name>" "$VLLM_ASCEND_SRC"/vllm_ascend/ 2>/dev/null || true
+```
+
+- If covered by vllm-ascend → no action needed; change is inherited automatically.
+- If not covered and contains Ascend-incompatible logic → add minimal override under `$VLLM_ASCEND_SRC/vllm_ascend/`.
+
+## 7) New model onboarding checklist
 
 ```bash
 # architecture mapping check in vLLM
