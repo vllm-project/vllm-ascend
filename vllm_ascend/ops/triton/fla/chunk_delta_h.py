@@ -38,7 +38,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
-    h_update,
     T,
     H: tl.constexpr,
     Hg: tl.constexpr,
@@ -73,7 +72,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     b_h1_bv1 = tl.zeros([128, 64], dtype=tl.float32)
     b_h1_bv2 = tl.zeros([128, 64], dtype=tl.float32)
-    # create b_hupd_bv1 and b_hupd_bv2
 
     v_start1 = 0
     v_start2 = 64
@@ -206,11 +204,9 @@ def chunk_gated_delta_rule_fwd_h(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     h = k.new_empty(B, NT, H, K, V)
-    h_update = k.new_empty(B, NT, H, K, K)
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(u) if save_new_value else None
-    g = g.transpose(1, 2).contiguous()
 
     def grid(meta):
         return (1, N * H)
@@ -226,7 +222,6 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
-        h_update=h_update,
         T=T,
         H=H,
         Hg=Hg,

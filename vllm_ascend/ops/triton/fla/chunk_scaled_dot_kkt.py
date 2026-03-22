@@ -113,7 +113,7 @@ def chunk_scaled_dot_kkt_fwd(
     """
     B, T, Hg, K = k.shape
 
-    H = beta.shape[-1]
+    H = beta.shape[1]
     BT = chunk_size
     if cu_seqlens is not None:
         cu_seqlens = cu_seqlens.cpu()
@@ -127,8 +127,8 @@ def chunk_scaled_dot_kkt_fwd(
 
     chunk_scaled_dot_kkt_fwd_kernel[(NT, 1)](
         k=k,
-        beta=torch.permute(beta, (2, 0, 1)).contiguous(),
-        g_cumsum=torch.permute(g_cumsum, (2, 0, 1)).contiguous(),
+        beta=beta,
+        g_cumsum=g_cumsum,
         A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,

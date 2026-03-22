@@ -138,7 +138,6 @@ def chunk_fwd_o(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
-    g = g.transpose(1, 2).contiguous()
     chunk_fwd_kernel_o[grid](
         q=q,
         k=k,

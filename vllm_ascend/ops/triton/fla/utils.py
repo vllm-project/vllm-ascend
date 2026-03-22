@@ -20,21 +20,27 @@ def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
 
 
 def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
-    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
-
-
-def prepare_final_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    indices = triton.cdiv(prepare_lens(cu_seqlens), chunk_size) + 1
-    return torch.cumsum(indices, 0) - 1
+    cu = cu_seqlens.tolist()
+    seq_ids = []
+    block_ids = []
+    for i in range(len(cu) - 1):
+        n = (cu[i + 1] - cu[i] + chunk_size - 1) // chunk_size
+        for j in range(n):
+            seq_ids.append(i)
+            block_ids.append(j)
+    if not seq_ids:
+        return cu_seqlens.new_empty(0, 2)
+    result = [[seq_ids[i], block_ids[i]] for i in range(len(seq_ids))]
+    return torch.tensor(result, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
 
 
 def prepare_chunk_offsets(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]).cumsum(-1)
-
-
-def prepare_update_chunk_offsets(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size) + 1]).cumsum(-1)
+    cu = cu_seqlens.tolist()
+    offsets = [0]
+    for i in range(len(cu) - 1):
+        n = (cu[i + 1] - cu[i] + chunk_size - 1) // chunk_size
+        offsets.append(offsets[-1] + n)
+    return torch.tensor(offsets, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
 
 
 def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
