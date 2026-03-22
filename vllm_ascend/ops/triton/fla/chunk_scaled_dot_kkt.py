@@ -12,6 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from .prefill_precompute import GDNPrefillPrecomputed
 from .utils import prepare_chunk_indices, safe_exp
 
 
@@ -87,6 +88,7 @@ def chunk_scaled_dot_kkt_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
+    prefill_precomputed: GDNPrefillPrecomputed | None = None,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -115,7 +117,13 @@ def chunk_scaled_dot_kkt_fwd(
 
     H = beta.shape[-1]
     BT = chunk_size
-    if cu_seqlens is not None:
+    if (
+        cu_seqlens is not None
+        and prefill_precomputed is not None
+        and BT == 64
+    ):
+        chunk_indices = prefill_precomputed.chunk_size_64_indices
+    elif cu_seqlens is not None:
         cu_seqlens = cu_seqlens.cpu()
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
         chunk_indices = chunk_indices.npu()

@@ -16,20 +16,107 @@
 # from collections.abc import Iterable
 # mypy: ignore-errors
 
+from itertools import islice
 
 import torch
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
-from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet, Qwen3_5Model
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.ops.triton.fla.prefill_precompute import build_gdn_prefill_precomputed
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.utils import enable_sp
+
+
+_ORIGINAL_QWEN3_5_MODEL_FORWARD = Qwen3_5Model.forward
+
+
+def _has_qwen35_prefill_metadata(model: Qwen3_5Model) -> bool:
+    forward_context = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is None or not isinstance(attn_metadata, dict):
+        return False
+    if get_pcp_group().world_size > 1:
+        return False
+
+    for layer in islice(model.layers, model.start_layer, model.end_layer):
+        if getattr(layer, "layer_type", None) != "linear_attention":
+            continue
+
+        layer_attn_metadata = attn_metadata.get(layer.linear_attn.prefix)
+        if (
+            isinstance(layer_attn_metadata, GDNAttentionMetadata)
+            and layer_attn_metadata.num_prefills > 0
+        ):
+            return True
+    return False
+
+
+@torch.compiler.disable
+def _prepare_qwen35_prefill_precomputed(model: Qwen3_5Model) -> None:
+    forward_context = get_forward_context()
+    forward_context.qwen35_gdn_prefill_precomputed = {}
+
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is None or not isinstance(attn_metadata, dict):
+        return
+    if get_pcp_group().world_size > 1:
+        return
+
+    shared_precomputed = {}
+    precomputed_by_prefix = {}
+    for layer in islice(model.layers, model.start_layer, model.end_layer):
+        if getattr(layer, "layer_type", None) != "linear_attention":
+            continue
+
+        linear_attn = layer.linear_attn
+        layer_attn_metadata = attn_metadata.get(linear_attn.prefix)
+        if not isinstance(layer_attn_metadata, GDNAttentionMetadata):
+            continue
+        if (
+            layer_attn_metadata.num_prefills <= 0
+            or layer_attn_metadata.non_spec_query_start_loc is None
+        ):
+            continue
+
+        cu_seqlens = layer_attn_metadata.non_spec_query_start_loc
+        num_heads = linear_attn.num_v_heads // linear_attn.tp_size
+        cache_key = (cu_seqlens.data_ptr(), num_heads)
+        if cache_key not in shared_precomputed:
+            shared_precomputed[cache_key] = build_gdn_prefill_precomputed(
+                cu_seqlens, num_heads
+            )
+        precomputed_by_prefix[linear_attn.prefix] = shared_precomputed[cache_key]
+
+    forward_context.qwen35_gdn_prefill_precomputed = precomputed_by_prefix
+
+
+class AscendQwen3_5Model(Qwen3_5Model):
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors=None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        forward_context = get_forward_context()
+        forward_context.qwen35_gdn_prefill_precomputed = {}
+        if _has_qwen35_prefill_metadata(self):
+            _prepare_qwen35_prefill_precomputed(self)
+        return _ORIGINAL_QWEN3_5_MODEL_FORWARD(
+            self,
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+        )
 
 
 class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
@@ -71,6 +158,15 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
+        prefill_precomputed = None
+        if attn_metadata.num_prefills > 0:
+            precomputed_by_prefix = getattr(
+                forward_context,
+                "qwen35_gdn_prefill_precomputed",
+                None,
+            )
+            if isinstance(precomputed_by_prefix, dict):
+                prefill_precomputed = precomputed_by_prefix.get(self.prefix)
 
         if not enable_sp():
             mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -192,6 +288,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     cu_seqlens=non_spec_query_start_loc,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
+                    prefill_precomputed=prefill_precomputed,
                 )
                 # Init cache
                 ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
@@ -253,5 +350,5 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
         maybe_save_kv_layer_to_connector("", [])
 
-
+Qwen3_5Model.forward = AscendQwen3_5Model.forward
 Qwen3_5GatedDeltaNet._forward_core = AscendQwen3_5GatedDeltaNet._forward_core

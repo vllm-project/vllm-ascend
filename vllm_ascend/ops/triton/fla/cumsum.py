@@ -12,6 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from .prefill_precompute import GDNPrefillPrecomputed
 from .utils import prepare_chunk_indices
 
 
@@ -83,14 +84,23 @@ def chunk_local_cumsum_scalar(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.Tensor | None = torch.float,
+    prefill_precomputed: GDNPrefillPrecomputed | None = None,
 ):
     if head_first:
         B, H, T = g.shape
     else:
         B, T, H = g.shape
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
-    OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * chunk_size))
-    block_indices = prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE) if cu_seqlens is not None else None
+    if cu_seqlens is not None and prefill_precomputed is not None and chunk_size == 64:
+        OPTIM_BLOCK_SIZE = prefill_precomputed.cumsum_optim_block_size
+        block_indices = prefill_precomputed.cumsum_block_indices
+    else:
+        OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * chunk_size))
+        block_indices = (
+            prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE)
+            if cu_seqlens is not None
+            else None
+        )
     num_blocks = len(block_indices) if cu_seqlens is not None else triton.cdiv(T, OPTIM_BLOCK_SIZE)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (num_blocks, B)
@@ -121,6 +131,7 @@ def chunk_local_cumsum(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    prefill_precomputed: GDNPrefillPrecomputed | None = None,
     **kwargs,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
@@ -134,6 +145,7 @@ def chunk_local_cumsum(
             cu_seqlens=cu_seqlens,
             head_first=head_first,
             output_dtype=output_dtype,
+            prefill_precomputed=prefill_precomputed,
         )
     else:
         raise ValueError(
