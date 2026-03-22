@@ -307,6 +307,26 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 128)
 
+    def test_update_block_size_for_backend_preserves_hybrid_block_size(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.cache_config.block_size = 1024
+        vllm_config.cache_config.user_specified_block_size = False
+
+        self.platform.update_block_size_for_backend(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.block_size, 1024)
+
+    def test_update_block_size_for_backend_preserves_user_block_size(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.is_hybrid = False
+        vllm_config.cache_config.block_size = 512
+        vllm_config.cache_config.user_specified_block_size = True
+
+        self.platform.update_block_size_for_backend(vllm_config)
+
+        self.assertEqual(vllm_config.cache_config.block_size, 512)
+
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
