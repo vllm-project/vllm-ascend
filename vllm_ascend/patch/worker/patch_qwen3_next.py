@@ -22,7 +22,6 @@ from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -156,12 +155,12 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 mixed_qkv_spec,
                 conv_weights_T,
                 conv_state_T,
-                spec_state_indices_tensor[:, 0][:attn_metadata.num_spec_decodes],
+                spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes],
                 self.conv1d.bias,
-                num_accepted_tokens[:attn_metadata.num_spec_decodes],
-                spec_query_start_loc[:attn_metadata.num_spec_decodes + 1],
+                num_accepted_tokens[: attn_metadata.num_spec_decodes],
+                spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                 self.activation,
-                -1
+                -1,
             )
 
         # 1.2: Process the remaining part
@@ -185,12 +184,12 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 mixed_qkv_non_spec,
                 conv_weights_T,
                 conv_state_T,
-                non_spec_state_indices_tensor[:attn_metadata.num_actual_tokens],
+                non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
                 self.conv1d.bias,
                 num_accepted_tokens,
                 None,
                 self.activation,
-                -1
+                -1,
             )
         else:
             mixed_qkv_non_spec = None
