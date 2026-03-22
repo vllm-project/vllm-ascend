@@ -2152,19 +2152,22 @@ class NPUModelRunner(GPUModelRunner):
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
+                if isinstance(builder, GDNAttentionMetadataBuilder):
+                    # NOTE(zxr): The unknown write operations of the Triton operator in the FullGraph mode. 
+                    # Before creating gdn_metadata, set indices to 0 to prevent unexpected write operations.
+                    builder.spec_state_indices_tensor.fill_(0)
+                    builder.non_spec_state_indices_tensor.fill_(0)
                 attn_metadata_i = builder.build(
                     common_prefix_len=cascade_attn_prefix_len,
                     common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
-                # NOTE(zxr): Due to the Triton operator cannot execute branches in FullGraph mode,
+                # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
                 # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
                 if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
                     and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
                     if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
                         attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
-                    elif attn_metadata_i.num_decodes > 0 and attn_metadata_i.num_spec_decodes == 0:
-                        attn_metadata_i.non_spec_state_indices_tensor[attn_metadata_i.num_decodes:].fill_(0)
 
             if ubid is None:
                 assert isinstance(attn_metadata, dict)
