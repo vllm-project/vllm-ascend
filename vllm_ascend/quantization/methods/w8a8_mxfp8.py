@@ -31,6 +31,7 @@ from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
@@ -70,9 +71,15 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        # reshape x for Qwen VL models
+        original_shape = x.shape
+        if x.dim() > 2:
+            x = x.view(-1, x.shape[-1])
         quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
         pertoken_scale = dynamic_scale
         output_dtype = x.dtype
+        if bias is not None and bias.dtype != torch.float32:
+            bias = bias.to(torch.float32)
 
         output = torch_npu.npu_quant_matmul(
             quantized_x,
@@ -85,6 +92,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             output_dtype=output_dtype,
             group_sizes=[1, 1, self.group_size],
         )
+        # reshape output for Qwen VL models
+        if len(original_shape) > 2:
+            output = output.view(*original_shape[:-1], -1)
 
         return output
 
@@ -161,7 +171,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         enable_force_load_balance: bool = True,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
-        **kwargs,
+        pertoken_scale: Any | None = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         expected = global_num_experts - global_redundant_expert_num
         assert router_logits.shape[1] == expected, "Number of global experts mismatch (excluding redundancy)"
@@ -189,23 +202,29 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale,
-            w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            use_int8_w8a8=False,
-            expert_map=expert_map,
-            log2phy=log2phy,
-            dynamic_eplb=self.dynamic_eplb,
-            mc2_mask=kwargs.get("mc2_mask"),
-            use_mxfp_quant=True,
-            act_quant_type=torch.float8_e4m3fn,
-            weight_quant_type=torch.float8_e4m3fn,
-            scale_type=FLOAT8_E8M0FNU_DTYPE,
-            per_token_scale_type=FLOAT8_E8M0FNU_DTYPE,
+            fused_experts_input=build_fused_experts_input(
+                hidden_states=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                quant_type=self.quant_type,
+                dynamic_eplb=self.dynamic_eplb,
+                expert_map=expert_map,
+                global_redundant_expert_num=global_redundant_expert_num,
+                mc2_mask=mc2_mask,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                log2phy=log2phy,
+                pertoken_scale=pertoken_scale,
+                activation=activation,
+                mxfp_act_quant_type=torch.float8_e4m3fn,
+                mxfp_weight_quant_type=torch.float8_e4m3fn,
+                mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_use_bf16=(x.dtype == torch.bfloat16),
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
         )
 
     def process_weights_after_loading(self, layer):
