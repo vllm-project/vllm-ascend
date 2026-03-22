@@ -306,21 +306,5 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
             else:
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
 
-
-_original_attention_init = Qwen3NextGatedDeltaNet.__init__
-
-
-def _patched_attention_init(self, *args, **kwargs) -> None:
-    _original_attention_init(self, *args, **kwargs)
-    self.in_proj_ba = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.num_v_heads * 2,
-            bias=False,
-            quant_config=kwargs.get('quant_config'),
-            prefix=f"{kwargs.get('prefix')}.in_proj_ba",
-        )
-
 Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
 Qwen3NextGatedDeltaNet._forward_core = AscendQwen3Next_GatedDeltaNet._forward_core
-if vllm_version_is("0.17.0"):
-    Qwen3NextGatedDeltaNet.__init__ = _patched_attention_init
