@@ -49,10 +49,10 @@ def chunk_gated_delta_rule_fwd(
         num_decodes = attn_metadata.num_decodes
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
-    chunk_indices_64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_64
-    chunk_offsets_64 = None if prebuilt_meta is None else prebuilt_meta.chunk_offsets_64
-    update_chunk_offsets_64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_64
-    final_chunk_indices_64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_64
+    chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64
+    chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_offsets_chunk64
+    update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
+    final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
     chunk_indices_large_block = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_large_block
     g = chunk_local_cumsum(
         g,
@@ -66,14 +66,14 @@ def chunk_gated_delta_rule_fwd(
         beta=beta,
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_64,
+        chunk_indices=chunk_indices_chunk64,
         output_dtype=torch.float32,
     )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices_large_block=chunk_indices_large_block,
-        chunk_indices_bt=chunk_indices_64,
+        chunk_indices_bt=chunk_indices_chunk64,
         output_dtype=k.dtype,
     )
     w, u = recompute_w_u_fwd(
@@ -83,7 +83,7 @@ def chunk_gated_delta_rule_fwd(
         A=A,
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_64,
+        chunk_indices=chunk_indices_chunk64,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -93,8 +93,8 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices_64,
-        chunk_offsets=chunk_offsets_64,
+        chunk_indices=chunk_indices_chunk64,
+        chunk_offsets=chunk_offsets_chunk64,
     )
 
     if get_pcp_group().world_size > 1:
@@ -104,13 +104,13 @@ def chunk_gated_delta_rule_fwd(
             u=u,
             g=g,
             cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices_64,
-            chunk_offsets=chunk_offsets_64,
-            update_chunk_offsets=update_chunk_offsets_64,
+            chunk_indices=chunk_indices_chunk64,
+            chunk_offsets=chunk_offsets_chunk64,
+            update_chunk_offsets=update_chunk_offsets_chunk64,
             num_decodes=num_decodes,
         )
         all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
-        final_chunk_indices = final_chunk_indices_64
+        final_chunk_indices = final_chunk_indices_chunk64
         if final_chunk_indices is None:
             final_chunk_indices = prepare_final_chunk_indices(cu_seqlens, chunk_size)
         final_h_update = h_update[:, final_chunk_indices, :, :, :]

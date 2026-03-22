@@ -17,6 +17,12 @@ from dataclasses import dataclass
 
 import torch
 import vllm.v1.attention.backends.gdn_attn as gdn_attn
+from vllm.v1.utils import CpuGpuBuffer
+
+_GDN_CHUNK_SIZE = 64
+# Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
+_GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
+_GDN_CUMSUM_WORKING_SET = 2**18
 
 _IS_PATCHED = False
 _ORIGINAL_BUILD = gdn_attn.GDNAttentionMetadataBuilder.build
@@ -24,10 +30,10 @@ _ORIGINAL_BUILD = gdn_attn.GDNAttentionMetadataBuilder.build
 
 @dataclass
 class GDNChunkedPrefillMetadata:
-    chunk_indices_64: torch.Tensor
-    chunk_offsets_64: torch.Tensor
-    update_chunk_offsets_64: torch.Tensor
-    final_chunk_indices_64: torch.Tensor
+    chunk_indices_chunk64: torch.Tensor
+    chunk_offsets_chunk64: torch.Tensor
+    update_chunk_offsets_chunk64: torch.Tensor
+    final_chunk_indices_chunk64: torch.Tensor
     chunk_indices_large_block: torch.Tensor
     block_indices_cumsum: torch.Tensor
     _buffer_slot: object | None = None
@@ -35,18 +41,12 @@ class GDNChunkedPrefillMetadata:
 
 @dataclass
 class _GDNChunkedPrefillBufferSlot:
-    chunk_indices_64_cpu: torch.Tensor
-    chunk_indices_64_device: torch.Tensor
-    chunk_offsets_64_cpu: torch.Tensor
-    chunk_offsets_64_device: torch.Tensor
-    update_chunk_offsets_64_cpu: torch.Tensor
-    update_chunk_offsets_64_device: torch.Tensor
-    final_chunk_indices_64_cpu: torch.Tensor
-    final_chunk_indices_64_device: torch.Tensor
-    chunk_indices_large_block_cpu: torch.Tensor
-    chunk_indices_large_block_device: torch.Tensor
-    block_indices_cumsum_cpu: torch.Tensor
-    block_indices_cumsum_device: torch.Tensor
+    chunk_indices_chunk64: CpuGpuBuffer
+    chunk_offsets_chunk64: CpuGpuBuffer
+    update_chunk_offsets_chunk64: CpuGpuBuffer
+    final_chunk_indices_chunk64: CpuGpuBuffer
+    chunk_indices_large_block: CpuGpuBuffer
+    block_indices_cumsum: CpuGpuBuffer
 
 
 def _next_power_of_2(value: int) -> int:
@@ -107,30 +107,54 @@ def _get_gdn_num_heads(builder) -> int:
 
 
 def _allocate_chunked_prefill_slot(builder, device: torch.device):
-    cpu_kwargs = {
-        "dtype": torch.int32,
-        "device": "cpu",
-        "pin_memory": True,
-    }
-    device_kwargs = {
-        "dtype": torch.int32,
-        "device": device,
-    }
     max_num_batched_tokens = builder.vllm_config.scheduler_config.max_num_batched_tokens
     max_num_seqs = builder.vllm_config.scheduler_config.max_num_seqs
     return _GDNChunkedPrefillBufferSlot(
-        chunk_indices_64_cpu=torch.empty((max_num_batched_tokens, 2), **cpu_kwargs),
-        chunk_indices_64_device=torch.empty((max_num_batched_tokens, 2), **device_kwargs),
-        chunk_offsets_64_cpu=torch.empty((max_num_seqs + 1,), **cpu_kwargs),
-        chunk_offsets_64_device=torch.empty((max_num_seqs + 1,), **device_kwargs),
-        update_chunk_offsets_64_cpu=torch.empty((max_num_seqs + 1,), **cpu_kwargs),
-        update_chunk_offsets_64_device=torch.empty((max_num_seqs + 1,), **device_kwargs),
-        final_chunk_indices_64_cpu=torch.empty((max_num_seqs,), **cpu_kwargs),
-        final_chunk_indices_64_device=torch.empty((max_num_seqs,), **device_kwargs),
-        chunk_indices_large_block_cpu=torch.empty((max_num_batched_tokens, 2), **cpu_kwargs),
-        chunk_indices_large_block_device=torch.empty((max_num_batched_tokens, 2), **device_kwargs),
-        block_indices_cumsum_cpu=torch.empty((max_num_batched_tokens, 2), **cpu_kwargs),
-        block_indices_cumsum_device=torch.empty((max_num_batched_tokens, 2), **device_kwargs),
+        chunk_indices_chunk64=CpuGpuBuffer(
+            max_num_batched_tokens,
+            2,
+            dtype=torch.int32,
+            device=device,
+            pin_memory=True,
+            with_numpy=False,
+        ),
+        chunk_offsets_chunk64=CpuGpuBuffer(
+            max_num_seqs + 1,
+            dtype=torch.int32,
+            device=device,
+            pin_memory=True,
+            with_numpy=False,
+        ),
+        update_chunk_offsets_chunk64=CpuGpuBuffer(
+            max_num_seqs + 1,
+            dtype=torch.int32,
+            device=device,
+            pin_memory=True,
+            with_numpy=False,
+        ),
+        final_chunk_indices_chunk64=CpuGpuBuffer(
+            max_num_seqs,
+            dtype=torch.int32,
+            device=device,
+            pin_memory=True,
+            with_numpy=False,
+        ),
+        chunk_indices_large_block=CpuGpuBuffer(
+            max_num_batched_tokens,
+            2,
+            dtype=torch.int32,
+            device=device,
+            pin_memory=True,
+            with_numpy=False,
+        ),
+        block_indices_cumsum=CpuGpuBuffer(
+            max_num_batched_tokens,
+            2,
+            dtype=torch.int32,
+            device=device,
+            pin_memory=True,
+            with_numpy=False,
+        ),
     )
 
 
@@ -139,10 +163,10 @@ def _ensure_chunk_meta_state(builder, device: torch.device) -> None:
         return
     builder._ascend_gdn_chunk_meta_initialized = True
     builder._ascend_gdn_chunk_meta_device = device
-    builder._ascend_gdn_chunk_size = 64
-    builder._ascend_gdn_large_block_size = 608 * 2
+    builder._ascend_gdn_chunk_size = _GDN_CHUNK_SIZE
+    builder._ascend_gdn_large_block_size = _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE
     gdn_num_heads = _get_gdn_num_heads(builder)
-    cumsum_chunks = max(1, (2**18) // (gdn_num_heads * builder._ascend_gdn_chunk_size))
+    cumsum_chunks = max(1, _GDN_CUMSUM_WORKING_SET // (gdn_num_heads * builder._ascend_gdn_chunk_size))
     builder._ascend_gdn_cumsum_block_size = _next_power_of_2(cumsum_chunks)
     builder._ascend_gdn_chunked_prefill_pool_idx = -1
     builder._ascend_gdn_chunked_prefill_pool = []
@@ -189,29 +213,29 @@ def _build_non_spec_query_start_loc_cpu(
 
 
 def _build_non_spec_chunked_prefill_meta_cpu(builder, cu_seqlens_cpu: torch.Tensor) -> GDNChunkedPrefillMetadata:
-    chunk_counts_64 = _prepare_chunk_counts_cpu(cu_seqlens_cpu, builder._ascend_gdn_chunk_size)
+    chunk_counts_chunk64 = _prepare_chunk_counts_cpu(cu_seqlens_cpu, builder._ascend_gdn_chunk_size)
     chunk_counts_large = _prepare_chunk_counts_cpu(cu_seqlens_cpu, builder._ascend_gdn_large_block_size)
     chunk_counts_cumsum = _prepare_chunk_counts_cpu(cu_seqlens_cpu, builder._ascend_gdn_cumsum_block_size)
-    num_seqs = chunk_counts_64.numel()
-    chunk_indices_64 = torch.empty((int(chunk_counts_64.sum().item()), 2), dtype=torch.int32)
-    chunk_offsets_64 = torch.empty((num_seqs + 1,), dtype=torch.int32)
-    update_chunk_offsets_64 = torch.empty((num_seqs + 1,), dtype=torch.int32)
-    final_chunk_indices_64 = torch.empty((num_seqs,), dtype=torch.int32)
+    num_seqs = chunk_counts_chunk64.numel()
+    chunk_indices_chunk64 = torch.empty((int(chunk_counts_chunk64.sum().item()), 2), dtype=torch.int32)
+    chunk_offsets_chunk64 = torch.empty((num_seqs + 1,), dtype=torch.int32)
+    update_chunk_offsets_chunk64 = torch.empty((num_seqs + 1,), dtype=torch.int32)
+    final_chunk_indices_chunk64 = torch.empty((num_seqs,), dtype=torch.int32)
     chunk_indices_large_block = torch.empty((int(chunk_counts_large.sum().item()), 2), dtype=torch.int32)
     block_indices_cumsum = torch.empty((int(chunk_counts_cumsum.sum().item()), 2), dtype=torch.int32)
 
-    _fill_chunk_indices_cpu(chunk_indices_64, chunk_counts_64)
-    _fill_chunk_offsets_cpu(chunk_offsets_64, chunk_counts_64)
-    _fill_update_chunk_offsets_cpu(update_chunk_offsets_64, chunk_counts_64)
-    _fill_final_chunk_indices_cpu(final_chunk_indices_64, chunk_counts_64)
+    _fill_chunk_indices_cpu(chunk_indices_chunk64, chunk_counts_chunk64)
+    _fill_chunk_offsets_cpu(chunk_offsets_chunk64, chunk_counts_chunk64)
+    _fill_update_chunk_offsets_cpu(update_chunk_offsets_chunk64, chunk_counts_chunk64)
+    _fill_final_chunk_indices_cpu(final_chunk_indices_chunk64, chunk_counts_chunk64)
     _fill_chunk_indices_cpu(chunk_indices_large_block, chunk_counts_large)
     _fill_chunk_indices_cpu(block_indices_cumsum, chunk_counts_cumsum)
 
     return GDNChunkedPrefillMetadata(
-        chunk_indices_64=chunk_indices_64.to(builder._ascend_gdn_chunk_meta_device),
-        chunk_offsets_64=chunk_offsets_64.to(builder._ascend_gdn_chunk_meta_device),
-        update_chunk_offsets_64=update_chunk_offsets_64.to(builder._ascend_gdn_chunk_meta_device),
-        final_chunk_indices_64=final_chunk_indices_64.to(builder._ascend_gdn_chunk_meta_device),
+        chunk_indices_chunk64=chunk_indices_chunk64.to(builder._ascend_gdn_chunk_meta_device),
+        chunk_offsets_chunk64=chunk_offsets_chunk64.to(builder._ascend_gdn_chunk_meta_device),
+        update_chunk_offsets_chunk64=update_chunk_offsets_chunk64.to(builder._ascend_gdn_chunk_meta_device),
+        final_chunk_indices_chunk64=final_chunk_indices_chunk64.to(builder._ascend_gdn_chunk_meta_device),
         chunk_indices_large_block=chunk_indices_large_block.to(builder._ascend_gdn_chunk_meta_device),
         block_indices_cumsum=block_indices_cumsum.to(builder._ascend_gdn_chunk_meta_device),
     )
@@ -226,51 +250,31 @@ def _build_non_spec_chunked_prefill_meta(builder, cu_seqlens_cpu: torch.Tensor) 
         builder._ascend_gdn_chunked_prefill_pool
     )
     slot = builder._ascend_gdn_chunked_prefill_pool[builder._ascend_gdn_chunked_prefill_pool_idx]
-    chunk_counts_64 = _prepare_chunk_counts_cpu(cu_seqlens_cpu, builder._ascend_gdn_chunk_size)
+    chunk_counts_chunk64 = _prepare_chunk_counts_cpu(cu_seqlens_cpu, builder._ascend_gdn_chunk_size)
     chunk_counts_large = _prepare_chunk_counts_cpu(cu_seqlens_cpu, builder._ascend_gdn_large_block_size)
     chunk_counts_cumsum = _prepare_chunk_counts_cpu(cu_seqlens_cpu, builder._ascend_gdn_cumsum_block_size)
-    num_chunk_indices_64 = _fill_chunk_indices_cpu(slot.chunk_indices_64_cpu, chunk_counts_64)
-    num_chunk_offsets_64 = _fill_chunk_offsets_cpu(slot.chunk_offsets_64_cpu, chunk_counts_64)
-    num_update_chunk_offsets_64 = _fill_update_chunk_offsets_cpu(slot.update_chunk_offsets_64_cpu, chunk_counts_64)
-    num_final_chunk_indices_64 = _fill_final_chunk_indices_cpu(slot.final_chunk_indices_64_cpu, chunk_counts_64)
-    num_chunk_indices_large = _fill_chunk_indices_cpu(slot.chunk_indices_large_block_cpu, chunk_counts_large)
-    num_block_indices_cumsum = _fill_chunk_indices_cpu(slot.block_indices_cumsum_cpu, chunk_counts_cumsum)
+    num_chunk_indices_chunk64 = _fill_chunk_indices_cpu(slot.chunk_indices_chunk64.cpu, chunk_counts_chunk64)
+    num_chunk_offsets_chunk64 = _fill_chunk_offsets_cpu(slot.chunk_offsets_chunk64.cpu, chunk_counts_chunk64)
+    num_update_chunk_offsets_chunk64 = _fill_update_chunk_offsets_cpu(
+        slot.update_chunk_offsets_chunk64.cpu, chunk_counts_chunk64
+    )
+    num_final_chunk_indices_chunk64 = _fill_final_chunk_indices_cpu(
+        slot.final_chunk_indices_chunk64.cpu, chunk_counts_chunk64
+    )
+    num_chunk_indices_large = _fill_chunk_indices_cpu(slot.chunk_indices_large_block.cpu, chunk_counts_large)
+    num_block_indices_cumsum = _fill_chunk_indices_cpu(slot.block_indices_cumsum.cpu, chunk_counts_cumsum)
 
-    chunk_indices_64 = slot.chunk_indices_64_device[:num_chunk_indices_64]
-    chunk_indices_64.copy_(
-        slot.chunk_indices_64_cpu[:num_chunk_indices_64],
-        non_blocking=True,
-    )
-    chunk_offsets_64 = slot.chunk_offsets_64_device[:num_chunk_offsets_64]
-    chunk_offsets_64.copy_(
-        slot.chunk_offsets_64_cpu[:num_chunk_offsets_64],
-        non_blocking=True,
-    )
-    update_chunk_offsets_64 = slot.update_chunk_offsets_64_device[:num_update_chunk_offsets_64]
-    update_chunk_offsets_64.copy_(
-        slot.update_chunk_offsets_64_cpu[:num_update_chunk_offsets_64],
-        non_blocking=True,
-    )
-    final_chunk_indices_64 = slot.final_chunk_indices_64_device[:num_final_chunk_indices_64]
-    final_chunk_indices_64.copy_(
-        slot.final_chunk_indices_64_cpu[:num_final_chunk_indices_64],
-        non_blocking=True,
-    )
-    chunk_indices_large_block = slot.chunk_indices_large_block_device[:num_chunk_indices_large]
-    chunk_indices_large_block.copy_(
-        slot.chunk_indices_large_block_cpu[:num_chunk_indices_large],
-        non_blocking=True,
-    )
-    block_indices_cumsum = slot.block_indices_cumsum_device[:num_block_indices_cumsum]
-    block_indices_cumsum.copy_(
-        slot.block_indices_cumsum_cpu[:num_block_indices_cumsum],
-        non_blocking=True,
-    )
+    chunk_indices_chunk64 = slot.chunk_indices_chunk64.copy_to_gpu(num_chunk_indices_chunk64)
+    chunk_offsets_chunk64 = slot.chunk_offsets_chunk64.copy_to_gpu(num_chunk_offsets_chunk64)
+    update_chunk_offsets_chunk64 = slot.update_chunk_offsets_chunk64.copy_to_gpu(num_update_chunk_offsets_chunk64)
+    final_chunk_indices_chunk64 = slot.final_chunk_indices_chunk64.copy_to_gpu(num_final_chunk_indices_chunk64)
+    chunk_indices_large_block = slot.chunk_indices_large_block.copy_to_gpu(num_chunk_indices_large)
+    block_indices_cumsum = slot.block_indices_cumsum.copy_to_gpu(num_block_indices_cumsum)
     return GDNChunkedPrefillMetadata(
-        chunk_indices_64=chunk_indices_64,
-        chunk_offsets_64=chunk_offsets_64,
-        update_chunk_offsets_64=update_chunk_offsets_64,
-        final_chunk_indices_64=final_chunk_indices_64,
+        chunk_indices_chunk64=chunk_indices_chunk64,
+        chunk_offsets_chunk64=chunk_offsets_chunk64,
+        update_chunk_offsets_chunk64=update_chunk_offsets_chunk64,
+        final_chunk_indices_chunk64=final_chunk_indices_chunk64,
         chunk_indices_large_block=chunk_indices_large_block,
         block_indices_cumsum=block_indices_cumsum,
         _buffer_slot=slot,

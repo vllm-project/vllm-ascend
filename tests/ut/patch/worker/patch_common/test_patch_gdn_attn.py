@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import vllm_ascend.patch.worker.patch_gdn_attn  # noqa: F401
+import vllm_ascend.patch.worker.patch_gdn_attn as patch_gdn_attn
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
@@ -274,9 +274,12 @@ def test_builder_prebuilds_non_spec_chunk_metadata_exactly(
     )
     legacy_chunk_indices_large_block = _prepare_chunk_indices(
         non_spec_query_start_loc_cpu,
-        1216,
+        patch_gdn_attn._GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
     )
-    optim_block_size = _next_power_of_2((2**18) // (num_heads * 64))
+    optim_block_size = _next_power_of_2(
+        patch_gdn_attn._GDN_CUMSUM_WORKING_SET
+        // (num_heads * patch_gdn_attn._GDN_CHUNK_SIZE)
+    )
     legacy_block_indices_cumsum = _prepare_chunk_indices(
         non_spec_query_start_loc_cpu,
         optim_block_size,
@@ -284,13 +287,13 @@ def test_builder_prebuilds_non_spec_chunk_metadata_exactly(
 
     prebuilt_meta = getattr(attn_metadata, "non_spec_chunked_prefill_meta", None)
     assert prebuilt_meta is not None
-    assert torch.equal(prebuilt_meta.chunk_indices_64, legacy_chunk_indices_64)
-    assert torch.equal(prebuilt_meta.chunk_offsets_64, legacy_chunk_offsets_64)
+    assert torch.equal(prebuilt_meta.chunk_indices_chunk64, legacy_chunk_indices_64)
+    assert torch.equal(prebuilt_meta.chunk_offsets_chunk64, legacy_chunk_offsets_64)
     assert torch.equal(
-        prebuilt_meta.update_chunk_offsets_64, legacy_update_chunk_offsets_64
+        prebuilt_meta.update_chunk_offsets_chunk64, legacy_update_chunk_offsets_64
     )
     assert torch.equal(
-        prebuilt_meta.final_chunk_indices_64, legacy_final_chunk_indices_64
+        prebuilt_meta.final_chunk_indices_chunk64, legacy_final_chunk_indices_64
     )
     assert torch.equal(
         prebuilt_meta.chunk_indices_large_block,
@@ -299,6 +302,50 @@ def test_builder_prebuilds_non_spec_chunk_metadata_exactly(
     assert torch.equal(
         prebuilt_meta.block_indices_cumsum,
         legacy_block_indices_cumsum,
+    )
+
+
+def test_allocate_chunked_prefill_slot_uses_cpugpubuffer(monkeypatch):
+    class DummyCpuGpuBuffer:
+        def __init__(
+            self,
+            *size,
+            dtype: torch.dtype,
+            device: torch.device,
+            pin_memory: bool,
+            with_numpy: bool = True,
+        ) -> None:
+            self.cpu = torch.zeros(*size, dtype=dtype, device="cpu")
+            self.gpu = torch.zeros_like(self.cpu, device=device)
+            self.dtype = dtype
+            self.device = device
+            self.pin_memory = pin_memory
+            self.with_numpy = with_numpy
+
+    device = torch.device("cpu")
+    builder = _make_builder(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=0,
+    )
+    monkeypatch.setattr(patch_gdn_attn, "CpuGpuBuffer", DummyCpuGpuBuffer)
+
+    slot = patch_gdn_attn._allocate_chunked_prefill_slot(builder, device)
+
+    assert isinstance(slot.chunk_indices_chunk64, DummyCpuGpuBuffer)
+    assert isinstance(slot.chunk_offsets_chunk64, DummyCpuGpuBuffer)
+    assert isinstance(slot.update_chunk_offsets_chunk64, DummyCpuGpuBuffer)
+    assert isinstance(slot.final_chunk_indices_chunk64, DummyCpuGpuBuffer)
+    assert slot.chunk_indices_chunk64.pin_memory is True
+    assert slot.chunk_indices_chunk64.with_numpy is False
+    assert slot.chunk_indices_chunk64.device == device
+    assert slot.chunk_indices_chunk64.cpu.shape == (
+        builder.vllm_config.scheduler_config.max_num_batched_tokens,
+        2,
+    )
+    assert slot.chunk_indices_chunk64.gpu.shape == (
+        builder.vllm_config.scheduler_config.max_num_batched_tokens,
+        2,
     )
 
 
