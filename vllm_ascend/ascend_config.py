@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import warnings
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
@@ -48,9 +47,11 @@ class AscendConfig:
         eplb_config = additional_config.get("eplb_config", {})
         self.eplb_config = EplbConfig(eplb_config)
 
+        weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
+        self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
+
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
-        self._construct_weight_prefetch_config(additional_config)
         self.layer_sharding = additional_config.get("layer_sharding", None)
         if self.layer_sharding:
             logger.info_once(
@@ -158,28 +159,13 @@ class AscendConfig:
             and get_ascend_device_type() != AscendDeviceType.A5
         )
 
-    def _construct_weight_prefetch_config(self, additional_config):
-        weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
-        self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
-        # Deprecated env var handling for backward compatibility
-        if os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", "0") == "1":
-            MAX_PREFETCH_WEIGHT_SIZE: int = 18 * 1024 * 1024
-            gate_up_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
-            down_prefetch_size = int(os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", MAX_PREFETCH_WEIGHT_SIZE))
-            self.weight_prefetch_config.set_mlp_pre_version_compatibale_config(
-                gate_up_prefetch_size, down_prefetch_size
-            )
-            logger.info_once(
-                f"MLP weight prefetch enabled from env variable VLLM_ASCEND_ENABLE_PREFETCH_MLP."
-                f"gate_up_prefetch_size={gate_up_prefetch_size}, "
-                f"down_prefetch_size={down_prefetch_size}."
-            )
-            warnings.warn(
-                "VLLM_ASCEND_ENABLE_PREFETCH_MLP is deprecated and will be removed in a v0.16.0 version. "
-                "Please use weight_prefetch_config in additional-config for now instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+    @staticmethod
+    def _get_compile_ranges(compilation_config):
+        return compilation_config.compile_ranges_endpoints
+
+    @staticmethod
+    def _set_compile_ranges(compilation_config, value):
+        compilation_config.compile_ranges_endpoints = value
 
     def update_compile_ranges_split_points(self):
         vllm_config = self.vllm_config
@@ -187,24 +173,23 @@ class AscendConfig:
             if self.ascend_compilation_config.fuse_allreduce_rms:
                 from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
-                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+                new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
                 new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
                     "set compile_ranges_split_points to "
                     "{new_compile_ranges_split_points} for matmul and allreduce fusion"
                 )
 
         else:
-            new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
+            new_compile_ranges_split_points = self._get_compile_ranges(vllm_config.compilation_config)
             if vllm_config.additional_config.get("ascend_compilation_config", {}).get("fuse_allreduce_rms", True):
                 from vllm_ascend.compilation.passes.allreduce_rmsnorm_fusion_pass import ALLREDUCE_NORM_FUSE_THRESHOLD
 
-                new_compile_ranges_split_points = vllm_config.compilation_config.compile_ranges_split_points
                 new_compile_ranges_split_points.append(ALLREDUCE_NORM_FUSE_THRESHOLD)
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
                 logger.debug(
                     "set compile_ranges_split_points to "
                     "{new_compile_ranges_split_points} for matmul and allreduce fusion"
@@ -218,9 +203,9 @@ class AscendConfig:
                 sp_threshold = get_sp_threshold(vllm_config)
                 new_compile_ranges_split_points.append(sp_threshold)
                 logger.debug(f"add {sp_threshold} to compile_ranges_split_points for sequence parallelism")
-            if len(new_compile_ranges_split_points) > len(vllm_config.compilation_config.compile_ranges_split_points):
+            if len(new_compile_ranges_split_points) > len(self._get_compile_ranges(vllm_config.compilation_config)):
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
-                vllm_config.compilation_config.compile_ranges_split_points = new_compile_ranges_split_points
+                self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)
 
 
 class FinegrainedTPConfig:
@@ -363,27 +348,18 @@ class WeightPrefetchConfig:
     Configuration Object for weight_prefetch_config from additional_config
     """
 
-    mlp_pre_version_compatibale_config: dict = {}
-
     prefetch_ratio: dict = {
         "attn": {
             "qkv": 1.0,
             "o": 1.0,
         },
         "moe": {"gate_up": 0.8},
-        "mlp": {"gate_up": 1, "down": 1.0},
+        "mlp": {"gate_up": 1.0, "down": 1.0},
     }
 
     def __init__(self, weight_prefetch_config: dict):
         self.enabled = weight_prefetch_config.get("enabled", False)
         self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
-
-    def set_mlp_pre_version_compatibale_config(self, gate_up_prefetch_size: int, down_prefetch_size: int):
-        config = {
-            "gate_up": gate_up_prefetch_size,
-            "down": down_prefetch_size,
-        }
-        self.mlp_pre_version_compatibale_config = config
 
 
 class EplbConfig:
