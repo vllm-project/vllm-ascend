@@ -39,58 +39,58 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 
 
-class AclGraphManager(CudaGraphManager):
-    """ACL Cuda Graph Manager for Ascend NPUs."""
+# class AclGraphManager(CudaGraphManager):
+#     """ACL Cuda Graph Manager for Ascend NPUs."""
 
-    @torch.inference_mode()
-    def capture(
-        self,
-        create_forward_fn: Callable[[BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]],
-        progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> None:
-        """Override capture method to set capturing flag to True before capture."""
-        with graph_capture(device=self.device):
-            # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
-            # activations so FULL activations should fit in already allocated
-            # buffers in the graph pool.
-            for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
-                if mode not in self._capture_descs:
-                    continue
+#     @torch.inference_mode()
+#     def capture(
+#         self,
+#         create_forward_fn: Callable[[BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]],
+#         progress_bar_desc: str = "Capturing CUDA graphs",
+#     ) -> None:
+#         """Override capture method to set capturing flag to True before capture."""
+#         with graph_capture(device=self.device):
+#             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
+#             # activations so FULL activations should fit in already allocated
+#             # buffers in the graph pool.
+#             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
+#                 if mode not in self._capture_descs:
+#                     continue
 
-                descs = self._capture_descs[mode]
-                if is_global_first_rank():
-                    descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
-                for desc in descs:
-                    # Prepare inputs and get forward function
-                    forward_fn = create_forward_fn(desc)
+#                 descs = self._capture_descs[mode]
+#                 if is_global_first_rank():
+#                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
+#                 for desc in descs:
+#                     # Prepare inputs and get forward function
+#                     forward_fn = create_forward_fn(desc)
 
-                    # Warmup
-                    forward_fn(CUDAGraphMode.NONE)
+#                     # Warmup
+#                     forward_fn(CUDAGraphMode.NONE)
 
-                    # Capture
-                    logger.debug("CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc)
-                    # Set capturing flag to True before capture, this is only needed for vllm-ascend.
-                    _EXTRA_CTX.capturing = True
-                    if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-                        forward_fn(CUDAGraphMode.PIECEWISE)
-                    else:
-                        assert desc not in self.graphs, f"Graph already captured for {desc}"
-                        graph = torch.cuda.CUDAGraph()
-                        # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
-                        get_offloader().sync_prev_onload()
-                        with torch.cuda.graph(graph, self.pool):
-                            forward_fn(CUDAGraphMode.NONE)
-                            # Join offloader's copy stream after forward to avoid
-                            # unjoined stream error. The last layer's start_prefetch
-                            # forks copy_stream, but wait_prefetch only happens in
-                            # the next forward pass.
-                            get_offloader().join_after_forward()
-                        self.graphs[desc] = graph
-        self._graphs_captured = True
+#                     # Capture
+#                     logger.debug("CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc)
+#                     # Set capturing flag to True before capture, this is only needed for vllm-ascend.
+#                     _EXTRA_CTX.capturing = True
+#                     if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+#                         forward_fn(CUDAGraphMode.PIECEWISE)
+#                     else:
+#                         assert desc not in self.graphs, f"Graph already captured for {desc}"
+#                         graph = torch.cuda.CUDAGraph()
+#                         # Sync offloader's copy stream before capture.
+#                         # Ensure any pre-capture prefetches from offloader are complete.
+#                         get_offloader().sync_prev_onload()
+#                         with torch.cuda.graph(graph, self.pool):
+#                             forward_fn(CUDAGraphMode.NONE)
+#                             # Join offloader's copy stream after forward to avoid
+#                             # unjoined stream error. The last layer's start_prefetch
+#                             # forks copy_stream, but wait_prefetch only happens in
+#                             # the next forward pass.
+#                             get_offloader().join_after_forward()
+#                         self.graphs[desc] = graph
+#         self._graphs_captured = True
 
 
-class ModelAclGraphManager(AclGraphManager, ModelCudaGraphManager):
+class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
     def __init__(
