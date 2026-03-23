@@ -166,7 +166,7 @@ class AscendConfig:
         if vllm_version_is("0.17.0"):
             return compilation_config.compile_ranges_split_points
         else:
-            return compilation_config.compile_ranges_endpoints
+            return compilation_config.compile_ranges_endpoints or []
 
     @staticmethod
     def _set_compile_ranges(compilation_config, value):
