@@ -1628,7 +1628,7 @@ class MooncakeLayerwiseConnectorWorker:
                 try:
                     req_meta_update = self.update_decoder_info(req_id, req_meta)
                 except Exception as e:
-                    logger.error(
+                    logger.warning(
                         f"MooncakeLayerwiseConnector transfer fail for req_id {req_id} in layer_idx "
                         f"{self.current_layer}, update_decoder_info with error: {e}"
                     )
