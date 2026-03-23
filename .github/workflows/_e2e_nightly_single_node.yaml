@@ -39,7 +39,7 @@ on:
       vllm_version:
         required: false
         type: string
-        default: "v0.17.0"
+        default: "v0.18.0"
       is_pr_test:
         required: true
         type: boolean
@@ -125,6 +125,7 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
+          git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .

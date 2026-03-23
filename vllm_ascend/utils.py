@@ -23,6 +23,7 @@ import atexit
 import functools
 import math
 import os
+import re
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
@@ -661,6 +662,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
+        from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
         from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
         from vllm_ascend._310p.ops.vocab_parallel_embedding import (
             AscendParallelLMHead310,
@@ -677,6 +679,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "SharedFusedMoE": AscendSharedFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
+                "MMEncoderAttention": AscendMMEncoderAttention310,
             }
         )
 
@@ -842,15 +845,29 @@ def _is_contain_expert(config: Any):
 
 
 def is_vl_model(vllm_config: VllmConfig):
-    """Checks if the model is a VL model by config"""
+    """Checks if the model is a VL model by config.
+
+    Uses the same criterion as vllm itself (model_config.py): a model is
+    multimodal when its top-level hf_config differs from its hf_text_config
+    (i.e. there is a separate vision sub-config).  The legacy key-name checks
+    are kept as fallbacks for configs that override get_text_config() to return
+    self (rare but possible).
+    """
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
-        hf_config = vllm_config.model_config.hf_config.to_dict()
-        if "thinker_config" in hf_config:
-            # Qwen-Omni-thinker models
+        model_config = vllm_config.model_config
+        # Primary: vllm's own VL detection — hf_config is the top-level
+        # (multimodal) config; hf_text_config is the language-model sub-config.
+        # They are the same object for pure-text models.
+        if model_config.hf_config is not model_config.hf_text_config:
             _IS_VL_MODEL = True
         else:
-            _IS_VL_MODEL = "vision_config" in hf_config
+            # Fallback: check well-known config keys
+            hf_config = model_config.hf_config.to_dict()
+            if "thinker_config" in hf_config or "vision_config" in hf_config:
+                _IS_VL_MODEL = True
+            else:
+                _IS_VL_MODEL = False
     return _IS_VL_MODEL
 
 
@@ -1244,3 +1261,9 @@ def trans_nd_to_nz(cache_tensor: torch.Tensor):
     cache_tensor = cache_tensor.reshape(nz_shape[:-4] + [m1, m0, n1, n0])
     cache_tensor = cache_tensor.permute(*array_trans)
     return cache_tensor
+
+
+def parse_layer_idx(prefix: str) -> int | None:
+    """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
+    match = re.search(r"layers\.(\d+)", prefix)
+    return int(match.group(1)) if match else None

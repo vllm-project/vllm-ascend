@@ -178,6 +178,11 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             if attn_metadata.num_prefills > 0:
                 initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
                 initial_state[~has_initial_state, ...] = 0
+                non_spec_chunked_prefill_meta = getattr(
+                    attn_metadata,
+                    "non_spec_chunked_prefill_meta",
+                    None,
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -190,6 +195,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     initial_state=initial_state,
                     output_final_state=True,
                     cu_seqlens=non_spec_query_start_loc,
+                    prebuilt_meta=non_spec_chunked_prefill_meta,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
