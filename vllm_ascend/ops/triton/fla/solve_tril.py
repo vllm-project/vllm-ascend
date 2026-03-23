@@ -12,8 +12,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
+from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -79,11 +79,7 @@ def solve_tril_16x16_kernel(
             grp_row_start = base_t + g * BT
             global_grp_rows = grp_row_start + offs_bt_rows
 
-            ptr_grp = (
-                A
-                + global_grp_rows[:, None] * H * BT
-                + offs_bt_cols[None, :]
-            )
+            ptr_grp = A + global_grp_rows[:, None] * H * BT + offs_bt_cols[None, :]
             # No mask: out-of-bounds rows load garbage but store phase applies row_mask
             block_BT = tl.load(ptr_grp).to(tl.float32)
 
