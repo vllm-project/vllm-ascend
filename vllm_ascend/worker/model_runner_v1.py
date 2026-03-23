@@ -1235,6 +1235,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     max_num_scheduled_tokens=max_num_scheduled_tokens,
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
+                    force_eager=self.model_config.enforce_eager,
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
 
@@ -1853,6 +1854,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         num_tokens_padded: int | None = None,
         cudagraph_mode: int = 0,
+        allow_dp_padding: bool = False,
     ) -> tuple[bool, torch.Tensor | None, int]:
         """
         Coordinates amongst all DP ranks to determine if and how the full batch
@@ -1896,11 +1898,16 @@ class NPUModelRunner(GPUModelRunner):
 
         num_tokens_across_dp = tensor[0, :]
         max_num_tokens = int(num_tokens_across_dp.max().item())
-        num_tokens_after_padding = torch.tensor(
-            [max_num_tokens] * len(num_tokens_across_dp),
-            device="cpu",
-            dtype=torch.int32,
-        )
+
+        if allow_dp_padding:
+            num_tokens_after_padding = torch.tensor(
+                [max_num_tokens] * len(num_tokens_across_dp),
+                device="cpu",
+                dtype=torch.int32,
+            )
+        else:
+            num_tokens_after_padding = num_tokens_across_dp.cpu()
+
         # Synchronize cudagraph_mode across ranks (take min)
         synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
         return False, num_tokens_after_padding, synced_cudagraph_mode
@@ -1969,6 +1976,7 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_batch_across_dp(
                 num_tokens_padded=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode.value,
+                allow_dp_padding=cudagraph_mode != CUDAGraphMode.NONE,
             )
 
             # Extract DP padding if there is any
