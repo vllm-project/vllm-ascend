@@ -24,7 +24,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager, BatchExecutionDescriptor, ModelCudaGraphManager
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -34,8 +34,8 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 
 
-class AclGraphManager(CudaGraphManager):
-    """ACL Graph Manager for Ascend NPUs."""
+class ModelAclGraphManager(ModelCudaGraphManager):
+    """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
     def __init__(
         self,
@@ -43,7 +43,7 @@ class AclGraphManager(CudaGraphManager):
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
-        model_runner: Any,  # NPUModelRunner type, in case circular import, so we pass it as Any
+        model_runner: Any,
     ):
         super().__init__(
             vllm_config,
@@ -61,6 +61,31 @@ class AclGraphManager(CudaGraphManager):
         # so we need to set graph params before capture full graph.
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
+
+    def capture(
+        self,
+        model: nn.Module,
+        model_state: ModelState,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        has_lora: bool = False,
+        use_aux_hidden_state_outputs: bool = False,
+        progress_bar_desc: str = "Capturing CUDA graphs",
+    ) -> None:
+        model = ModelWithContext(model)
+        return super().capture(
+            model,
+            model_state,
+            input_buffers,
+            block_tables,
+            attn_groups,
+            kv_cache_config,
+            has_lora,
+            use_aux_hidden_state_outputs,
+            progress_bar_desc,
+        )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -94,61 +119,6 @@ class AclGraphManager(CudaGraphManager):
                 positions.shape[0],
             )
         return ret
-
-
-class ModelAclGraphManager(ModelCudaGraphManager, AclGraphManager):
-    """ACL Model Cuda Graph Manager for Ascend NPUs."""
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-        model_runner: Any,
-    ):
-        # ModelCudaGraphManager don't need model_runner parameter
-        ModelCudaGraphManager.__init__(
-            self,
-            vllm_config,
-            device,
-            cudagraph_mode,
-            decode_query_len,
-        )
-        # AclGraphManager need model_runner parameter
-        AclGraphManager.__init__(
-            self,
-            vllm_config,
-            device,
-            cudagraph_mode,
-            decode_query_len,
-            model_runner,
-        )
-
-    def capture(
-        self,
-        model: nn.Module,
-        model_state: ModelState,
-        input_buffers: InputBuffers,
-        block_tables: BlockTables,
-        attn_groups: list[list[AttentionGroup]],
-        kv_cache_config: KVCacheConfig,
-        has_lora: bool = False,
-        use_aux_hidden_state_outputs: bool = False,
-        progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> None:
-        model = ModelWithContext(model)
-        return super().capture(
-            model,
-            model_state,
-            input_buffers,
-            block_tables,
-            attn_groups,
-            kv_cache_config,
-            has_lora,
-            use_aux_hidden_state_outputs,
-            progress_bar_desc,
-        )
 
 
 class ModelWithContext(nn.Module):
