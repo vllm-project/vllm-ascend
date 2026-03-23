@@ -62,7 +62,7 @@ jobs:
 
     - name: Build and push
       if: ${{ github.event_name != 'workflow_dispatch' }}
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         # For now, we only build amd64 lint image
         platforms: 'linux/amd64'
@@ -75,7 +75,7 @@ jobs:
 
     - name: Build and push
       if: ${{ github.event_name == 'workflow_dispatch' }}
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         # For now, we only build amd64 lint image
         platforms: 'linux/amd64'
