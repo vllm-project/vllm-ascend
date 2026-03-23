@@ -8,7 +8,7 @@
 
 ### 1. 架构分析 Prompt
 
-```
+```text
 请分析 Qwen2.5-Math-RM-72B 奖励模型与 vLLM 的兼容性：
 
 模型信息：
@@ -31,7 +31,7 @@
 
 ### 2. 适配代码生成 Prompt
 
-```
+```text
 请为 Qwen2.5-Math-RM-72B 生成 vLLM Ascend 适配代码：
 
 要求：
@@ -48,7 +48,7 @@
 
 ### 3. 测试用例生成 Prompt
 
-```
+```text
 请为 Qwen2.5-Math-RM-72B 奖励模型生成 pytest 测试用例：
 
 测试要求：
@@ -65,7 +65,7 @@
 
 ### 4. 文档生成 Prompt
 
-```
+```text
 请为 Qwen2.5-Math-RM-72B 生成部署教程文档：
 
 文档要求：
