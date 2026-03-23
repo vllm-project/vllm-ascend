@@ -69,6 +69,7 @@ class NPUModelRunner(GPUModelRunner):
             self.device,
             self.compilation_config.cudagraph_mode,
             decode_query_len=self.decode_query_len,
+            model_runner=self,
         )
 
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
