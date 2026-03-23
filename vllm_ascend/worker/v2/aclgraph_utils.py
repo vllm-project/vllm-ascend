@@ -27,7 +27,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager, CudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -39,8 +39,8 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 
 
-class ModelAclGraphManager(ModelCudaGraphManager):
-    """ACL Model Cuda Graph Manager for Ascend NPUs."""
+class AclGraphManager(CudaGraphManager):
+    """ACL Cuda Graph Manager for Ascend NPUs."""
 
     def __init__(
         self,
@@ -148,18 +148,29 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         return ret
 
 
-class ModelWithContext(nn.Module):
-    """Define a wrapper model to inject forward context.
-    so we can inherit vllm's CudaGraphManager._capture_full_graph.
-    """
+class ModelAclGraphManager(ModelCudaGraphManager, AclGraphManager):
+    """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
-    def __init__(self, original_model):
-        super().__init__()
-        self.original_model = original_model
-
-    def forward(self, *args, **kwargs):
-        # In warmup phase, capturing=False by default.
-        # when capturing cudagraph, we need to set capturing=True in forward context.
-        _EXTRA_CTX.capturing = True
-
-        return self.original_model(*args, **kwargs)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        model_runner: Any,
+    ):
+        ModelCudaGraphManager.__init__(
+            self,
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+        )
+        AclGraphManager.__init__(
+            self,
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            model_runner,
+        )

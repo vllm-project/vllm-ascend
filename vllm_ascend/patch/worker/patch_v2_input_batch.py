@@ -22,5 +22,5 @@ import vllm
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
-vllm.v1.worker.gpu.cudagraph_utils.InputBatch.make_dummy = AscendInputBatch.make_dummy
-vllm.v1.worker.gpu.model_runner.InputBatch.make_dummy = AscendInputBatch.make_dummy
+vllm.v1.worker.gpu.cudagraph_utils.InputBatch = AscendInputBatch
+vllm.v1.worker.gpu.model_runner.InputBatch = AscendInputBatch
