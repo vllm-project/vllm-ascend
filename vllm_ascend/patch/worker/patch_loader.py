@@ -2,7 +2,7 @@ import vllm
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 
-class AutoWeightsLoaderWithTrans(AutoWeightsLoader):
+class AutoWeightsLoaderWithPreprocess(AutoWeightsLoader):
     def _preprocess(self):
         for _, v in self.module.named_parameters():
             if getattr(v, "transposed", False):
@@ -14,4 +14,4 @@ class AutoWeightsLoaderWithTrans(AutoWeightsLoader):
         super().load_weights(*args, **kwargs)
 
 
-vllm.model_executor.models.utils.AutoWeightsLoader = AutoWeightsLoaderWithTrans
+vllm.model_executor.models.utils.AutoWeightsLoader = AutoWeightsLoaderWithPreprocess

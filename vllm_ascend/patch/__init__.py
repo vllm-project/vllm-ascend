@@ -542,3 +542,14 @@
 #    Future Plan:
 #       The maybe_remap_kv_scale_name function of the community is reconstructed to support
 #       multiple backends.
+#
+# ** 24. File: worker/patch_loader.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
+#    Why:
+#       Some weights require transpose or de-quantization before weight reload.
+#    How：
+#       Add preprocess function to preprocess weights before reload
+#    Future Plan:
+#       Migrate preprocess to update_weights in Worker.
+#       Refer to: https://github.com/vllm-project/vllm/pull/31943
