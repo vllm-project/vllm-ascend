@@ -1406,7 +1406,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.fa_quant_layer:
                 attn_params = attn_params + (
                     weak_ref_tensors(dequant_scale_q_nope),
-                    weak_ref_tensors(self.fak_descale_float)
+                    weak_ref_tensors(self.fak_descale_float),
                 )  # type: ignore
             else:
                 attn_params = attn_params + (None, None)  # type: ignore
