@@ -55,10 +55,12 @@ class AclGraphManager(CudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
         self.model_runner = model_runner
+        # capture_sizes sorts in ascending order.
+        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
         # vllm-ascend need to update graph params of attention backend.
         # so we need to set graph params before capture full graph.
         if super().needs_capture():
-            set_graph_params(self.cudagraph_sizes)
+            set_graph_params(self.capture_sizes)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -68,6 +70,8 @@ class AclGraphManager(CudaGraphManager):
         assert self.model_runner.cudagraph_and_dp_padding is not None
 
         positions = self.model_runner.input_buffers.positions[:num_tokens]
+        # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
+        # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.Tensor([num_tokens] * self.model_runner.dp_size, device=self.device)
         with set_forward_context(
             self.model_runner.input_batch.attn_metadata,
