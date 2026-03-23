@@ -12,9 +12,9 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 from vllm_ascend.ops.triton.fla.utils import prepare_chunk_offsets, safe_exp
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
 @triton.heuristics(
