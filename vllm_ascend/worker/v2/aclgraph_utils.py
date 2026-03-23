@@ -102,7 +102,6 @@ class ModelAclGraphManager(AclGraphManager, ModelCudaGraphManager):
         model_runner: Any,
     ):
         super().__init__(
-            self,
             vllm_config,
             device,
             cudagraph_mode,
