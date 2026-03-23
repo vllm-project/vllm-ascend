@@ -9,7 +9,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM, get_sp
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 
 
-def maybe_remap_indexer_rot_name(name: str, params_dict: dict) -> str | None:
+def maybe_remap_indexer_rot_name(name: str, params_dict: dict) -> str:
     replace_scale_names = ["indexer.q_rot", "indexer.k_rot"]
     for scale_name in replace_scale_names:
         if name.endswith(scale_name):
