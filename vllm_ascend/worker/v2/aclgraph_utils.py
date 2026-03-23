@@ -99,6 +99,32 @@ class AclGraphManager(CudaGraphManager):
 class ModelAclGraphManager(ModelCudaGraphManager, AclGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        model_runner: Any,
+    ):
+        # ModelCudaGraphManager don't need model_runner parameter
+        ModelCudaGraphManager.__init__(
+            self,
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+        )
+        # AclGraphManager need model_runner parameter
+        AclGraphManager.__init__(
+            self,
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            model_runner,
+        )
+
     def capture(
         self,
         model: nn.Module,
