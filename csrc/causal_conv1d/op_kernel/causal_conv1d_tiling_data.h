@@ -10,25 +10,40 @@
  */
 
 /*!
- * \file causal_conv1d_tiling_key.h
- * \brief causal_conv1d tiling key declare
+ * \file causal_conv1d_tiling_data.h
+ * \brief tiling data struct
  */
 
-#ifndef __CAUSAL_CONV1D_TILING_KEY_H__
-#define __CAUSAL_CONV1D_TILING_KEY_H__
+#ifndef CAUSAL_CONV1D_TILING_DATA_H_
+#define CAUSAL_CONV1D_TILING_DATA_H_
 
-#include "ascendc/host_api/tiling/template_argument.h"
+#include <cstdint>
 
-#define CAUSAL_CONV1D_TPL_SCH_MODE_DEFAULT 0
+struct CausalConv1dTilingData {
+    int64_t dim;
+    int64_t cuSeqlen;
+    int64_t seqLen;
+    int64_t inputMode;
+    int64_t runMode;
 
-ASCENDC_TPL_ARGS_DECL(CausalConv1d,
-    ASCENDC_TPL_UINT_DECL(
-        schMode, 1, ASCENDC_TPL_UI_LIST, CAUSAL_CONV1D_TPL_SCH_MODE_DEFAULT)
-);
+    int64_t width;
 
-ASCENDC_TPL_SEL(
-    ASCENDC_TPL_ARGS_SEL(
-        ASCENDC_TPL_UINT_SEL(
-            schMode, ASCENDC_TPL_UI_LIST, CAUSAL_CONV1D_TPL_SCH_MODE_DEFAULT)));
+    int64_t stateLen;
+    int64_t numCacheLines;
 
-#endif // __CAUSAL_CONV1D_TILING_KEY_H__
+    int64_t batch;
+
+    int64_t activationMode;
+    int64_t padSlotId;
+
+    int64_t hasBias;
+
+    int64_t dimTileSize;
+    int64_t blocksPerSeq;
+
+    int64_t hasNumAcceptedTokens;
+
+    int64_t hasCacheIndices;
+    int64_t hasInitialStateMode;
+};
+#endif // CAUSAL_CONV1D_TILING_DATA_H_
