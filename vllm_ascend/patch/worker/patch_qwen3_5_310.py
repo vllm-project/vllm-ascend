@@ -24,7 +24,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from vllm_ascend._310p.ops.chunk_gate_delta_rule_new import chunk_gated_delta_rule_pytorch
+from vllm_ascend._310p.ops.chunk_gate_delta_rule import chunk_gated_delta_rule_pytorch
 from vllm_ascend._310p.ops.fused_gdn_gating import fused_gdn_gating_pytorch
 from vllm_ascend._310p.ops.fused_recurrent_gated_delta_rule import fused_recurrent_gated_delta_rule_pytorch
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
