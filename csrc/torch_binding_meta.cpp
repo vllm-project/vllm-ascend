@@ -485,19 +485,21 @@ npu_copy_and_expand_eagle_inputs_meta(
             out_new_token_indices, out_hidden_state_mapping};
 }
 
-at::Tensor causal_conv1d_fn_meta(
-    const at::Tensor& mixed_qkv_non_spec_T,
-    const at::Tensor& conv_weights,
-    const c10::optional<at::Tensor>& bias_opt,
-    c10::string_view activation, 
+at::Tensor npu_causal_conv1d_custom_meta(
+    const at::Tensor& x,
+    const at::Tensor& weight,
     const at::Tensor& conv_state,
-    const at::Tensor&  has_initial_state,
-    const at::Tensor& non_spec_state_indices_tensor,
-    const at::Tensor& non_spec_query_start_loc,
-    int64_t  pad_slot_id)
+    const c10::optional<at::Tensor>& bias_opt,
+    at::IntArrayRef query_start_loc_opt,
+    at::IntArrayRef cache_indices_opt,
+    at::IntArrayRef initial_state_mode_opt,
+    at::IntArrayRef num_accepted_tokens_opt,
+    int64_t  activation_mode,
+    int64_t  pad_slot_id,
+    int64_t  run_mode)
 {
 
-    at::Tensor output = at::empty_symint(mixed_qkv_non_spec_T.sym_sizes(), mixed_qkv_non_spec_T.options());
+    at::Tensor output = at::empty_symint(x.sym_sizes(), x.options());
     return output;
 }
   
@@ -611,7 +613,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
-    ops.impl("causal_conv1d_fn", &vllm_ascend::meta::causal_conv1d_fn_meta);
+    ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
     // moe_grouped_matmul
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
