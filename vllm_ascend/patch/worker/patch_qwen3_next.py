@@ -24,20 +24,18 @@ from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
-from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
-from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.patch.worker.qwen_gdn_post_load import (
+from vllm_ascend.patch.worker.patch_qwen_gdn_common import (
     get_packed_qwen_gdn_conv1d_weights,
-    get_qwen_gdn_projected_states,
     process_modules_after_loading,
     process_qwen_gdn_module_after_loading,
     register_post_load_processor,
+    run_qwen3_next_gdn_input_projection,
 )
 from vllm_ascend.utils import enable_sp, vllm_version_is
 
@@ -72,17 +70,8 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, projected_states_ba = get_qwen_gdn_projected_states(self, hidden_states)
-        num_tokens = projected_states_qkvz.size(0)
-
-        mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
-            projected_states_qkvz,
-            projected_states_ba,
-            triton.cdiv(self.num_k_heads, self.tp_size),
-            triton.cdiv(self.num_v_heads, self.tp_size),
-            self.head_k_dim,
-            self.head_v_dim,
-        )
+        mixed_qkv, z, b, a = run_qwen3_next_gdn_input_projection(self, hidden_states)
+        num_tokens = mixed_qkv.size(0)
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)

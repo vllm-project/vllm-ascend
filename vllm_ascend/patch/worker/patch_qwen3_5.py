@@ -30,12 +30,12 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.patch.worker.qwen_gdn_post_load import (
+from vllm_ascend.patch.worker.patch_qwen_gdn_common import (
     get_packed_qwen_gdn_conv1d_weights,
-    get_qwen_gdn_projected_states,
     process_modules_after_loading,
     process_qwen_gdn_module_after_loading,
     register_post_load_processor,
+    run_qwen3_5_gdn_input_projection,
 )
 from vllm_ascend.utils import enable_sp, vllm_version_is
 
@@ -60,17 +60,8 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        num_tokens = hidden_states.size(0)
-
-        projected_states_qkvz, projected_states_ba = get_qwen_gdn_projected_states(self, hidden_states)
-        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-        z_size = self.value_dim // self.tp_size
-        mixed_qkv, z = projected_states_qkvz.split([qkv_size, z_size], dim=-1)
-        z = z.reshape(z.size(0), -1, self.head_v_dim)
-        b, a = projected_states_ba.chunk(2, dim=-1)
-
-        b = b.contiguous()
-        a = a.contiguous()
+        mixed_qkv, z, b, a = run_qwen3_5_gdn_input_projection(self, hidden_states)
+        num_tokens = mixed_qkv.size(0)
 
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),

@@ -22,6 +22,9 @@ import torch
 import vllm.model_executor.model_loader.base_loader as model_loader_base
 import vllm.model_executor.model_loader.utils as model_loader_utils
 from torch import nn
+from vllm.triton_utils import triton
+
+from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 
 PostLoadProcessor = Callable[[nn.Module, torch.device], None]
 
@@ -214,3 +217,31 @@ def get_qwen_gdn_projected_states(
     projected_states_qkvz = _run_qwen_gdn_linear(module.in_proj_qkvz, hidden_states)
     projected_states_ba = _run_qwen_gdn_linear(module.in_proj_ba, hidden_states)
     return projected_states_qkvz, projected_states_ba
+
+
+def run_qwen3_5_gdn_input_projection(
+    module: nn.Module,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    projected_states_qkvz, projected_states_ba = get_qwen_gdn_projected_states(module, hidden_states)
+    qkv_size = (module.key_dim * 2 + module.value_dim) // module.tp_size
+    z_size = module.value_dim // module.tp_size
+    mixed_qkv, z = projected_states_qkvz.split([qkv_size, z_size], dim=-1)
+    z = z.reshape(z.size(0), -1, module.head_v_dim)
+    b, a = projected_states_ba.chunk(2, dim=-1)
+    return mixed_qkv, z, b.contiguous(), a.contiguous()
+
+
+def run_qwen3_next_gdn_input_projection(
+    module: nn.Module,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    projected_states_qkvz, projected_states_ba = get_qwen_gdn_projected_states(module, hidden_states)
+    return fused_qkvzba_split_reshape_cat(
+        projected_states_qkvz,
+        projected_states_ba,
+        triton.cdiv(module.num_k_heads, module.tp_size),
+        triton.cdiv(module.num_v_heads, module.tp_size),
+        module.head_k_dim,
+        module.head_v_dim,
+    )
