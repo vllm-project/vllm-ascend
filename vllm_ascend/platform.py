@@ -231,12 +231,6 @@ class NPUPlatform(Platform):
                 else ascend_compilation_config
             )
 
-        # MoE models use sp_min_token_num=1 (from get_sp_min_token_num). Override
-        # the value set by patched get_sequence_parallelism_threshold for MoE.
-        pass_config = vllm_config.compilation_config.pass_config
-        if pass_config.enable_sp and is_moe_model(vllm_config):
-            pass_config.sp_min_token_num = 1
-
         ascend_config.update_compile_ranges_split_points()
 
         if model_config and hasattr(model_config.hf_text_config, "index_topk"):
