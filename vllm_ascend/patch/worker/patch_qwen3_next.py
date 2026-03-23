@@ -159,8 +159,8 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 conv_state_T,
                 spec_state_indices_tensor[:, 0][:attn_metadata.num_spec_decodes],
                 self.conv1d.bias,
-                num_accepted_tokens,
-                spec_query_start_loc,
+                num_accepted_tokens[:attn_metadata.num_spec_decodes],
+                spec_query_start_loc[:attn_metadata.num_spec_decodes + 1],
                 self.activation,
                 -1
             )

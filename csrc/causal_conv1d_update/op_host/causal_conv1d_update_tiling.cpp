@@ -166,7 +166,7 @@ ge::graphStatus CausalConv1dUpdate::GetOpParam() {
     // x: (batch, dim) or (batch, seqLen, dim)
     auto xShapePtr = context_->GetInputShape(X_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, xShapePtr);
-    xShape_ = EnsureNotScalar(xShapePtr->GetStorageShape());
+    xShape_ = EnsureNotScalar_UPDATE(xShapePtr->GetStorageShape());
     OP_CHECK_IF(
         xShape_.GetDimNum() != 2 && xShape_.GetDimNum() != 3,
         OP_LOGE(context_, "x must be 2D/3D: (batch, dim) or (batch, seqlen, dim) or (num_tokens, dim)"),
@@ -174,7 +174,7 @@ ge::graphStatus CausalConv1dUpdate::GetOpParam() {
 
     auto locShapePtr = context_->GetOptionalInputShape(QUERY_LOC_INDEX);
     if (locShapePtr != nullptr && locShapePtr->GetStorageShape().GetDimNum() != 0) {
-        locShape_ = EnsureNotScalar(locShapePtr->GetStorageShape());
+        locShape_ = EnsureNotScalar_UPDATE(locShapePtr->GetStorageShape());
         OP_CHECK_IF(locShape_.GetDimNum() != 1, OP_LOGE(context_, "query_start_loc must be 1D: (batch + 1,)"), return ge::GRAPH_FAILED);
         OP_CHECK_IF(locShape_.GetDim(0) < 2, OP_LOGE(context_, "query_start_loc must be >= 2"), return ge::GRAPH_FAILED);
         OP_CHECK_IF(xShape_.GetDimNum() != 2, OP_LOGE(context_, "x must be 2D as input (num_tokens, dim) if using query_start_loc"), return ge::GRAPH_FAILED);
@@ -202,7 +202,7 @@ ge::graphStatus CausalConv1dUpdate::GetOpParam() {
 
     auto wShapePtr = context_->GetInputShape(WEIGHT_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, wShapePtr);
-    wShape_ = EnsureNotScalar(wShapePtr->GetStorageShape());
+    wShape_ = EnsureNotScalar_UPDATE(wShapePtr->GetStorageShape());
     OP_CHECK_IF(wShape_.GetDimNum() != 2, OP_LOGE(context_, "weight must be 2D: (dim, width)"), return ge::GRAPH_FAILED);
 
     width_ = wShape_.GetDim(0);
@@ -212,7 +212,7 @@ ge::graphStatus CausalConv1dUpdate::GetOpParam() {
     // conv_state: (num_cache_lines, state_len, dim)
     auto convStateShapePtr = context_->GetInputShape(CONV_STATE_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, convStateShapePtr);
-    convStateShape_ = EnsureNotScalar(convStateShapePtr->GetStorageShape());
+    convStateShape_ = EnsureNotScalar_UPDATE(convStateShapePtr->GetStorageShape());
     stateLen_ = convStateShape_.GetDim(1);
     OP_CHECK_IF(
         convStateShape_.GetDimNum() != 3, OP_LOGE(context_, "conv_state must be 3D: (num_cache_lines, state_len, dim)"),
@@ -224,7 +224,7 @@ ge::graphStatus CausalConv1dUpdate::GetOpParam() {
     auto indicesShapePtr = context_->GetOptionalInputShape(CONV_STATE_INDICES_INDEX);
     // OP_CHECK_NULL_WITH_CONTEXT(context_, indicesShapePtr);
     if (indicesShapePtr != nullptr && indicesShapePtr->GetStorageShape().GetDimNum() != 0) {
-        stateIndicesShape_ = EnsureNotScalar(indicesShapePtr->GetStorageShape());
+        stateIndicesShape_ = EnsureNotScalar_UPDATE(indicesShapePtr->GetStorageShape());
         OP_CHECK_IF(stateIndicesShape_.GetDimNum() != 1, OP_LOGE(context_, "conv_state_indices must be 1D"), return ge::GRAPH_FAILED);
         OP_CHECK_IF(stateIndicesShape_.GetDim(0) != batch_, OP_LOGE(context_, "conv_state_indices.size must equal batch"), return ge::GRAPH_FAILED);
         hasIndices_ = 1;
@@ -233,7 +233,7 @@ ge::graphStatus CausalConv1dUpdate::GetOpParam() {
     // bias: (dim) optional (allow empty optional tensor)
     auto biasShapePtr = context_->GetOptionalInputShape(BIAS_INDEX);
     if (biasShapePtr != nullptr && biasShapePtr->GetStorageShape().GetDimNum() != 0) {
-        biasShape_ = EnsureNotScalar(biasShapePtr->GetStorageShape());
+        biasShape_ = EnsureNotScalar_UPDATE(biasShapePtr->GetStorageShape());
         OP_CHECK_IF(biasShape_.GetDimNum() != 1, OP_LOGE(context_, "bias must be 1D: (dim,)"), return ge::GRAPH_FAILED);
         OP_CHECK_IF(biasShape_.GetDim(0) != dim_, OP_LOGE(context_, "bias.size must equal dim"), return ge::GRAPH_FAILED);
         hasBias_ = 1;
@@ -241,7 +241,7 @@ ge::graphStatus CausalConv1dUpdate::GetOpParam() {
 
     auto numShapePtr = context_->GetOptionalInputShape(NUM_ACCEPT_INDEX);
     if (numShapePtr != nullptr && numShapePtr->GetStorageShape().GetDimNum() != 0) {
-        numShape_ = EnsureNotScalar(numShapePtr->GetStorageShape());
+        numShape_ = EnsureNotScalar_UPDATE(numShapePtr->GetStorageShape());
         OP_CHECK_IF(numShape_.GetDimNum() != 1, OP_LOGE(context_, "num_accepted_tokens must be 1D: (batch,)"), return ge::GRAPH_FAILED);
         OP_CHECK_IF(numShape_.GetDim(0) != batch_, OP_LOGE(context_, "num_accepted_tokens.size must equal batch"), return ge::GRAPH_FAILED);
         hasNumAccept_ = 1;
