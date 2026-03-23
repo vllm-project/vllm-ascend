@@ -43,6 +43,8 @@
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
+#include "lightning_attention_decode/lightning_attention_docode_torch_adpt.h"
+#include "lightning_attention_prefill/lightning_attention_prefill_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
@@ -927,4 +929,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
+
+    // lightning_attentioin_decode
+    ops.def(
+        "npu_lightning_attention_prefill(Tensor query, Tensor key, Tensor value, Tensor slope_rate, "
+        "                                int block_size, Tensor? kv_history=None, int[]? actual_seq_len=None) -> (Tensor, Tensor)"
+    );
+    ops.impl("npu_lightning_attention_prefill", torch::kPrivateUse1, &vllm_ascend::npu_lightning_attention_prefill);
+    
+    // lightning_attention_prefill
+    ops.def(
+        "npu_lightning_attention_decode(Tensor query, Tensor key, Tensor value, Tensor kv_caches_ref, "
+        "                               Tensor slope_rate, Tensor slot_ids) -> Tensor"
+    );
+    ops.impl("npu_lightning_attention_decode", torch::kPrivateUse1, &vllm_ascend::npu_lightning_attention_decode);
 }
