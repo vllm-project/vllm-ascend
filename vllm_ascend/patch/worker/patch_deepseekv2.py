@@ -39,7 +39,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             ("qkv_proj", "v_proj", "v"),
         ]
         if self.use_mha:
-            stacked_params_mapping.extend(mha_params_mapping) # type: ignore[arg-type]
+            stacked_params_mapping.extend(mha_params_mapping)  # type: ignore[arg-type]
         else:
             stacked_params_mapping.extend(mla_params_mapping)
 
