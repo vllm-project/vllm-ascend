@@ -1,0 +1,10 @@
+model_name: Qwen2.5-Math-RM-72B
+hardware: ascend
+
+tasks:
+  - name: math_reward_scoring
+    metrics:
+      - name: accuracy
+        value: 0.0
+    num_fewshot: 0
+    trust_remote_code: true
