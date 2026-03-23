@@ -139,6 +139,7 @@ checkout_src() {
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
     pip uninstall -y vllm vllm-ascend || true
+    cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
     rm -rf "$WORKSPACE/vllm" "$WORKSPACE/vllm-ascend"
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
@@ -170,19 +171,10 @@ install_vllm() {
 
 install_aisbench() {
     echo "====> Install AISBench benchmark"
-    
-    export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
-    : "${AIS_BENCH_TAG:=v3.0-20250930-master}"  
 
     BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
 
-    if [ -d "$BENCH_DIR" ]; then
-        echo "Removing existing benchmark directory..."
-        rm -rf "$BENCH_DIR"
-    fi
-
-    git clone -b "${AIS_BENCH_TAG}" --depth 1 \
-        "${AIS_BENCH_URL}" "${BENCH_DIR}"
+    cp -r /tmp/aisbench-backup "$BENCH_DIR"
 
     cd "$BENCH_DIR"
     pip install -e . \

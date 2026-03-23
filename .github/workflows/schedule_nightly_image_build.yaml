@@ -38,6 +38,9 @@ jobs:
 
       - name: Build image
         id: build-image
+        env:
+          GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           TARGET="${{ matrix.target }}"
           IMAGE_TAG="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${TARGET}"
@@ -50,6 +53,8 @@ jobs:
             --build-arg CANN_VERSION="8.5.1" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
+            --build-arg GITEE_USERNAME="${GITEE_USERNAME}" \
+            --build-arg GITEE_TOKEN="${GITEE_TOKEN}" \
             -t "$IMAGE_TAG" .
 
           echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
