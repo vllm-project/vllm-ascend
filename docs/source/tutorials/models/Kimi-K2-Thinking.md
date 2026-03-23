@@ -113,12 +113,24 @@ Run the following script to start the vLLM server on Multi-NPU:
 For an Atlas 800 A3 (64G*16) node, tensor-parallel-size should be at least 16.
 
 ```bash
-vllm serve Kimi-K2-Thinking \
---served-model-name kimi-k2-thinking \
---tensor-parallel-size 16 \
---enable-expert-parallel \
---trust-remote-code \
---no-enable-prefix-caching
+#!/bin/bash
+export VLLM_USE_MODELSCOPE=True
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export OMP_PROC_BIND=false
+export HCCL_OP_EXPANSION_MODE=AIV
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+vllm serve "moonshotai/Kimi-K2-Thinking" \
+  --tensor-parallel-size 16 \
+  --port 8000 \
+  --max-model-len 8192 \
+  --max-num-batched-tokens 8192 \
+  --max-num-seqs 12 \
+  --gpu-memory-utilization 0.9 \
+  --trust-remote-code \
+  --enable-expert-parallel \
+  --no-enable-prefix-caching
 ```
 
 Once your server is started, you can query the model with input prompts.

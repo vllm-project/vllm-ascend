@@ -33,7 +33,7 @@ from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.patch.worker.patch_qwen3_5 import to_int64_tuple
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, vllm_version_is
 
 
 class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
@@ -125,7 +125,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache[forward_context.virtual_engine if vllm_version_is("0.18.0") else 0]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -241,6 +241,11 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
             initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
 
             initial_state[~has_initial_state, ...] = 0
+            non_spec_chunked_prefill_meta = getattr(
+                attn_metadata,
+                "non_spec_chunked_prefill_meta",
+                None,
+            )
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -253,6 +258,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
+                prebuilt_meta=non_spec_chunked_prefill_meta,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
