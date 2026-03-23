@@ -1,22 +1,15 @@
 import typing
-from typing import Optional
 from collections.abc import Callable, Iterable
-
 import torch
 
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
-    SharedFusedMoE
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2ForCausalLM, get_spec_layer_idx_from_weight_name)
-from vllm.model_executor.models.utils import (is_pp_missing_parameter)
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM, get_spec_layer_idx_from_weight_name
+from vllm.model_executor.models.utils import is_pp_missing_parameter
 
-def maybe_remap_indexer_rot_name(name: str, params_dict: dict) -> Optional[str]:
-    replace_scale_names = [
-        "indexer.q_rot", "indexer.k_rot"
-    ]
+def maybe_remap_indexer_rot_name(name: str, params_dict: dict) -> str | None:
+    replace_scale_names = ["indexer.q_rot", "indexer.k_rot"]
     for scale_name in replace_scale_names:
         if name.endswith(scale_name):
             remap_name = name.replace(scale_name, f"mla_attn.mla_attn.{scale_name}")
@@ -25,13 +18,11 @@ def maybe_remap_indexer_rot_name(name: str, params_dict: dict) -> Optional[str]:
             else:
                 return remap_name.replace("mla_attn", "attn")
     return name
-    
-class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
+
+class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
+        rocm_aiter_moe_shared_expert_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -59,11 +50,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -99,9 +86,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 # QKV fusion is optional, fall back to normal
                 # weight loading if it's not enabled
                 # if go with fusion option, then update name
-                if (
-                    param_name == "fused_qkv_a_proj"
-                ) and name_mapped not in params_dict:
+                if (param_name == "fused_qkv_a_proj") and name_mapped not in params_dict:
                     continue
                 else:
                     name = name_mapped
@@ -133,15 +118,10 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                     # Determine split axis based on op type
                     # gate/up: ColumnParallel → split along dim 0
                     # down: RowParallel → split along dim 1
-                    split_dim = (
-                        1
-                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
-                        else 0
-                    )
+                    split_dim = 1 if ("down_proj.weight" in name and loaded_weight.ndim > 1) else 0
                     total = loaded_weight.shape[split_dim]
                     assert total % num_chunks == 0, (
-                        f"Shared expert weight dim {total} "
-                        f"not divisible by num_chunks {num_chunks}"
+                        f"Shared expert weight dim {total} not divisible by num_chunks {num_chunks}"
                     )
                     chunk_size = total // num_chunks
 
@@ -187,9 +167,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
                         # other available replicas.
-                        weight_loader = typing.cast(
-                            Callable[..., bool], param.weight_loader
-                        )
+                        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
                         success = weight_loader(
                             param,
                             weight_to_load,
@@ -225,15 +203,12 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                             continue
 
                         param = params_dict[name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         weight_loader(param, loaded_weight)
             if name is not None and not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
 
         return loaded_params
 
-    
 DeepseekV2ForCausalLM.load_weights = CustomDeepseekV2ForCausalLM.load_weights
 

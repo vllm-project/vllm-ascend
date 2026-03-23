@@ -584,7 +584,9 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             return AscendLinearMethod(scheme)
-        elif isinstance(layer, AttentionLayerBase) and (self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)):
+        elif isinstance(layer, AttentionLayerBase) and (
+            self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)
+        ):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             return AscendKVCacheMethod(scheme)
         elif isinstance(layer, FusedMoE):

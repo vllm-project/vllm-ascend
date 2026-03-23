@@ -77,12 +77,10 @@ class AscendSFAQuantAttentionMethod:
         for name in extra_module_names:
             setattr(layer, name, torch.nn.Module())
         params_dict = {}
-        params_dict["indexer.q_rot"] = torch.empty((self.index_head_dim, self.index_head_dim),
-                                            dtype=torch.float32)
-        params_dict["indexer.k_rot"] = torch.empty((self.index_head_dim, self.index_head_dim),
-                                                dtype=torch.float32)
+        params_dict["indexer.q_rot"] = torch.empty((self.index_head_dim, self.index_head_dim), dtype=torch.float32)
+        params_dict["indexer.k_rot"] = torch.empty((self.index_head_dim, self.index_head_dim), dtype=torch.float32)
         for name, weight in params_dict.items():
-            module_name, weight_name = name.split('.')
+            module_name, weight_name = name.split(".")
             module = getattr(layer, module_name)
             weight_param = torch.nn.Parameter(weight, requires_grad=False)
             module.register_parameter(weight_name, weight_param)
