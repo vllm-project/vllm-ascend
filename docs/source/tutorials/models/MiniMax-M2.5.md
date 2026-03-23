@@ -299,7 +299,7 @@ print(resp.choices[0].message.content)
 Or send a request using curl:
 
 ```{code-block} bash
-curl http://127.0.0.1:8000/v1/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "MiniMax-M2.5",

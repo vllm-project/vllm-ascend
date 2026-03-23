@@ -3,9 +3,8 @@ from unittest.mock import Mock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.methods.w4a16 import (AscendW4A16FusedMoEMethod,
-                                                    pack_to_int32,
-                                                    unpack_from_int32)
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.quantization.methods.w4a16 import AscendW4A16FusedMoEMethod, pack_to_int32, unpack_from_int32
 
 
 class TestUnpackFromInt32(TestBase):
@@ -268,3 +267,41 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             torch.equal(layer.w13_weight_packed.data, original_w13_data))
         self.assertTrue(
             torch.equal(layer.w2_weight_packed.data, original_w2_data))
+
+    @patch("vllm_ascend.quantization.methods.w4a16._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w4a16.select_experts")
+    def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_select_experts, mock_extra_ctx):
+        tokens = 3
+        hidden_size = self.output_size
+        layer = self.build_layer()
+        x = torch.randn(tokens, hidden_size, dtype=torch.float32)
+        router_logits = torch.randn(tokens, self.experts, dtype=torch.float32)
+        topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
+        topk_ids = torch.randint(0, self.experts, (tokens, 2), dtype=torch.int64)
+        mc2_mask = torch.tensor([1, 0, 1], dtype=torch.bool)
+        pertoken_scale = torch.randn(tokens, dtype=torch.float32)
+
+        mock_select_experts.return_value = (topk_weights, topk_ids)
+        mock_comm = Mock()
+        mock_comm.fused_experts.return_value = torch.randn(tokens, hidden_size, dtype=torch.float32)
+        mock_extra_ctx.moe_comm_method = mock_comm
+        mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+
+        self.quant_method.apply(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=2,
+            renormalize=True,
+            global_num_experts=self.experts,
+            activation="gelu",
+            apply_router_weight_on_input=True,
+            mc2_mask=mc2_mask,
+            pertoken_scale=pertoken_scale,
+        )
+
+        fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_experts_input.activation, "gelu")
+        self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
+        self.assertIs(fused_experts_input.routing.mc2_mask, mc2_mask)
+        self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)
