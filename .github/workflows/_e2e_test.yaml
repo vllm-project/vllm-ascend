@@ -90,12 +90,14 @@ jobs:
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
+        id: run-singlecard-light
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
           set -o pipefail
+          LOG_FILE=/tmp/e2e-singlecard-light-part${{ matrix.part }}.log
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard-light \
@@ -103,22 +105,24 @@ jobs:
               --auto-partition-size 1 \
               --auto-upgrade-estimated-times \
               --continue-on-error \
-              2>&1 | tee /tmp/e2e-singlecard-light-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard-light \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              2>&1 | tee /tmp/e2e-singlecard-light-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           fi
-          exit ${PIPESTATUS[0]}
+          STATUS=${PIPESTATUS[0]}
+          [ -f "$LOG_FILE" ] && echo "log_path=$LOG_FILE" >> $GITHUB_OUTPUT
+          exit $STATUS
 
       - name: Summarize singlecard-light failure
-        if: ${{ always() }}
+        if: ${{ always() && steps.run-singlecard-light.outputs.log_path != '' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run singlecard-light test" \
-            --log-file /tmp/e2e-singlecard-light-part${{ matrix.part }}.log \
+            --log-file ${{ steps.run-singlecard-light.outputs.log_path }} \
             --output "$GITHUB_STEP_SUMMARY"
 
 
@@ -195,12 +199,14 @@ jobs:
           uv pip install -v -e .
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run e2e test
+        id: run-singlecard-full
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         shell: bash
         run: |
           set -o pipefail
+          LOG_FILE=/tmp/e2e-singlecard-full-part${{ matrix.part }}.log
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard \
@@ -208,22 +214,24 @@ jobs:
               --auto-partition-size 2 \
               --auto-upgrade-estimated-times \
               --continue-on-error \
-              2>&1 | tee /tmp/e2e-singlecard-full-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-singlecard \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 2 \
-              2>&1 | tee /tmp/e2e-singlecard-full-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           fi
-          exit ${PIPESTATUS[0]}
+          STATUS=${PIPESTATUS[0]}
+          [ -f "$LOG_FILE" ] && echo "log_path=$LOG_FILE" >> $GITHUB_OUTPUT
+          exit $STATUS
 
       - name: Summarize singlecard-full failure
-        if: ${{ always() }}
+        if: ${{ always() && steps.run-singlecard-full.outputs.log_path != '' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run singlecard-full test" \
-            --log-file /tmp/e2e-singlecard-full-part${{ matrix.part }}.log \
+            --log-file ${{ steps.run-singlecard-full.outputs.log_path }} \
             --output "$GITHUB_STEP_SUMMARY"
 
       - name: Upload timing data
@@ -298,11 +306,13 @@ jobs:
           uv pip install -v -e .
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run vllm-project/vllm-ascend test (light)
+        id: run-2card-light
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
           set -o pipefail
+          LOG_FILE=/tmp/e2e-2card-light-part${{ matrix.part }}.log
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-2card-light \
@@ -310,22 +320,24 @@ jobs:
               --auto-partition-size 1 \
               --auto-upgrade-estimated-times \
               --continue-on-error \
-              2>&1 | tee /tmp/e2e-2card-light-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-2card-light \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              2>&1 | tee /tmp/e2e-2card-light-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           fi
-          exit ${PIPESTATUS[0]}
+          STATUS=${PIPESTATUS[0]}
+          [ -f "$LOG_FILE" ] && echo "log_path=$LOG_FILE" >> $GITHUB_OUTPUT
+          exit $STATUS
 
       - name: Summarize multicard-2-light failure
-        if: ${{ always() }}
+        if: ${{ always() && steps.run-2card-light.outputs.log_path != '' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run multicard-2-light test" \
-            --log-file /tmp/e2e-2card-light-part${{ matrix.part }}.log \
+            --log-file ${{ steps.run-2card-light.outputs.log_path }} \
             --output "$GITHUB_STEP_SUMMARY"
 
 
@@ -401,11 +413,13 @@ jobs:
           uv pip install -v -e .
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run vllm-project/vllm-ascend test (full)
+        id: run-2card-full
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
           set -o pipefail
+          LOG_FILE=/tmp/e2e-2card-full-part${{ matrix.part }}.log
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-2-cards \
@@ -413,22 +427,24 @@ jobs:
               --auto-partition-size 1 \
               --auto-upgrade-estimated-times \
               --continue-on-error \
-              2>&1 | tee /tmp/e2e-2card-full-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-2-cards \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              2>&1 | tee /tmp/e2e-2card-full-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           fi
-          exit ${PIPESTATUS[0]}
+          STATUS=${PIPESTATUS[0]}
+          [ -f "$LOG_FILE" ] && echo "log_path=$LOG_FILE" >> $GITHUB_OUTPUT
+          exit $STATUS
 
       - name: Summarize multicard-2-full failure
-        if: ${{ always() }}
+        if: ${{ always() && steps.run-2card-full.outputs.log_path != '' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run multicard-2-full test " \
-            --log-file /tmp/e2e-2card-full-part${{ matrix.part }}.log \
+            --log-file ${{ steps.run-2card-full.outputs.log_path }} \
             --output "$GITHUB_STEP_SUMMARY"
 
 
@@ -442,23 +458,27 @@ jobs:
           retention-days: 5
 
       - name: Run vllm-project/vllm-ascend test (non triton)
+        id: run-non-triton
         if: ${{ inputs.type == 'full' && matrix.part == 0 }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
           set -o pipefail
+          LOG_FILE=/tmp/e2e-non-triton.log
           python3 -m pip uninstall -y triton-ascend
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py \
-            2>&1 | tee /tmp/e2e-non-triton.log
-          exit ${PIPESTATUS[0]}
+            2>&1 | tee "$LOG_FILE"
+          STATUS=${PIPESTATUS[0]}
+          [ -f "$LOG_FILE" ] && echo "log_path=$LOG_FILE" >> $GITHUB_OUTPUT
+          exit $STATUS
 
       - name: Summarize non-triton failure
-        if: ${{ always() && inputs.type == 'full' && matrix.part == 0 }}
+        if: ${{ always() && steps.run-non-triton.outputs.log_path != '' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run multicard-2-full test (non triton)" \
-            --log-file /tmp/e2e-non-triton.log \
+            --log-file ${{ steps.run-non-triton.outputs.log_path }} \
             --output "$GITHUB_STEP_SUMMARY"
 
   e2e-4-cards-full:
@@ -524,11 +544,13 @@ jobs:
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
+        id: run-4card-full
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
           set -o pipefail
+          LOG_FILE=/tmp/e2e-4card-full-part${{ matrix.part }}.log
           if [ "${{ inputs.continue_on_error }}" = "true" ]; then
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-4-cards \
@@ -536,22 +558,24 @@ jobs:
               --auto-partition-size 1 \
               --auto-upgrade-estimated-times \
               --continue-on-error \
-              2>&1 | tee /tmp/e2e-4card-full-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           else
             python3 .github/workflows/scripts/run_suite.py \
               --suite e2e-multicard-4-cards \
               --auto-partition-id "${{ matrix.part }}" \
               --auto-partition-size 1 \
-              2>&1 | tee /tmp/e2e-4card-full-part${{ matrix.part }}.log
+              2>&1 | tee "$LOG_FILE"
           fi
-          exit ${PIPESTATUS[0]}
+          STATUS=${PIPESTATUS[0]}
+          [ -f "$LOG_FILE" ] && echo "log_path=$LOG_FILE" >> $GITHUB_OUTPUT
+          exit $STATUS
 
       - name: Summarize multicard-4-full failure
-        if: ${{ always() }}
+        if: ${{ always() && steps.run-4card-full.outputs.log_path != '' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run vllm-project/vllm-ascend test for V1 Engine" \
-            --log-file /tmp/e2e-4card-full-part${{ matrix.part }}.log \
+            --log-file ${{ steps.run-4card-full.outputs.log_path }} \
             --output "$GITHUB_STEP_SUMMARY"
 
 
@@ -620,23 +644,27 @@ jobs:
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
+        id: run-310p-singlecard
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
           set -o pipefail
+          LOG_FILE=/tmp/e2e-310p-singlecard.log
           pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py \
           tests/e2e/310p/singlecard/test_vl_model_singlecard.py \
-          2>&1 | tee /tmp/e2e-310p-singlecard.log
-          exit ${PIPESTATUS[0]}
+          2>&1 | tee "$LOG_FILE"
+          STATUS=${PIPESTATUS[0]}
+          [ -f "$LOG_FILE" ] && echo "log_path=$LOG_FILE" >> $GITHUB_OUTPUT
+          exit $STATUS
 
       - name: Summarize 310p singlecard failure
-        if: ${{ always() && inputs.contains_310 }}
+        if: ${{ always() && steps.run-310p-singlecard.outputs.log_path != '' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run vllm-project/vllm-ascend test" \
-            --log-file /tmp/e2e-310p-singlecard.log \
+            --log-file ${{ steps.run-310p-singlecard.outputs.log_path }} \
             --output "$GITHUB_STEP_SUMMARY"
 
   e2e_310p-4cards:
@@ -695,23 +723,27 @@ jobs:
           uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
+        id: run-310p-4cards
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
           set -o pipefail
+          LOG_FILE=/tmp/e2e-310p-4cards.log
           pytest -sv --durations=0 \
           tests/e2e/310p/multicard/test_dense_model_multicard.py \
           tests/e2e/310p/multicard/test_moe_model_multicard.py \
           tests/e2e/310p/multicard/test_vl_model_multicard.py \
-          2>&1 | tee /tmp/e2e-310p-4cards.log
-          exit ${PIPESTATUS[0]}
+          2>&1 | tee "$LOG_FILE"
+          STATUS=${PIPESTATUS[0]}
+          [ -f "$LOG_FILE" ] && echo "log_path=$LOG_FILE" >> $GITHUB_OUTPUT
+          exit $STATUS
 
       - name: Summarize 310p multicards failure
-        if: ${{ always() && inputs.contains_310 }}
+        if: ${{ always() && steps.run-310p-4cards.outputs.log_path != '' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run vllm-project/vllm-ascend test" \
-            --log-file /tmp/e2e-310p-4cards.log \
+            --log-file ${{ steps.run-310p-4cards.outputs.log_path }} \
             --output "$GITHUB_STEP_SUMMARY"
