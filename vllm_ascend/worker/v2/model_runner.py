@@ -402,4 +402,4 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
-        return num_reqs_padded, query_start_loc_np
+        return query_start_loc_np, num_reqs_padded
