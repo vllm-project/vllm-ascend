@@ -46,7 +46,7 @@ def recompute_w_u_fwd_kernel(
     """
     i_t_o = tl.program_id(0)
     i_b = tl.program_id(1)
-    
+
     # Compute sequence boundaries
     if IS_VARLEN:
         i_n, i_t = (
@@ -66,7 +66,7 @@ def recompute_w_u_fwd_kernel(
     mask_t_2d = mask_t[:, None]
     offs_t_2d = global_offs_t[:, None]
     offs_bt = tl.arange(0, BT)[None, :]
-    
+
     # Pre-compute V and K offsets
     offs_v = tl.arange(0, BV)[None, :]
     offs_k = tl.arange(0, BK)[None, :]
@@ -84,7 +84,7 @@ def recompute_w_u_fwd_kernel(
         ptr_beta = beta + bos + i_h * T + global_offs_t
         b_g = tl.exp(tl.load(ptr_g, mask=mask_t, other=0.0).to(tl.float32))
         b_beta = tl.load(ptr_beta, mask=mask_t, other=0.0).to(tl.float32)
-        
+
         # Pre-compute fused scaling factors in float32
         b_beta_2d = b_beta[:, None]
         b_beta_g_2d = b_beta[:, None] * b_g[:, None]
@@ -93,15 +93,15 @@ def recompute_w_u_fwd_kernel(
         # Keep v * beta in float32, but convert to float16 for dot product
         ptr_v = v + (bos * H + i_h) * V + offs_t_2d * (H * V) + offs_v
         b_v = tl.load(ptr_v, mask=mask_v, other=0.0)
-        b_v_scaled = (b_v.to(tl.float32) * b_beta_2d)  # Scale and convert to fp16
+        b_v_scaled = b_v.to(tl.float32) * b_beta_2d  # Scale and convert to fp16
         b_u = tl.dot(b_A, b_v_scaled)  # fp16 @ fp16
         ptr_u = u + (bos * H + i_h) * V + offs_t_2d * (H * V) + offs_v
         tl.store(ptr_u, b_u.to(ptr_u.dtype.element_ty), mask=mask_v)
-        
+
         # K computation: w = A @ (k * beta * g)
         ptr_k = k + (bos * Hg + i_h // (H // Hg)) * K + offs_t_2d * (Hg * K) + offs_k
         b_k = tl.load(ptr_k, mask=mask_k, other=0.0)
-        b_k_scaled = (b_k.to(tl.float32) * b_beta_g_2d)  # Scale and convert to fp16
+        b_k_scaled = b_k.to(tl.float32) * b_beta_g_2d  # Scale and convert to fp16
         b_w = tl.dot(b_A, b_k_scaled)  # fp16 @ fp16
         ptr_w = w + (bos * H + i_h) * K + offs_t_2d * (H * K) + offs_k
         tl.store(ptr_w, b_w.to(ptr_w.dtype.element_ty), mask=mask_k)
@@ -130,7 +130,7 @@ def recompute_w_u_fwd(
     w = k.new_empty(B, T, H, K)
     beta = beta.transpose(1, 2).contiguous()
     g_cumsum = g_cumsum.transpose(1, 2).contiguous()
-    
+
     # Launch one kernel per chunk, inner loop processes all heads
     recompute_w_u_fwd_kernel[(NT, B)](
         k=k,
