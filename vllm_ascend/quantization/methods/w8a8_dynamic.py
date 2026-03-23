@@ -187,6 +187,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         n_shared_experts = layer.n_shared_experts
+        if n_shared_experts is None:
+            n_shared_experts = 0
         valid_global_expert_num = global_num_experts - global_redundant_expert_num - n_shared_experts
         if zero_expert_num == 0 or zero_expert_type is None:
             assert router_logits.shape[1] == valid_global_expert_num, (

@@ -20,6 +20,7 @@ from functools import wraps
 
 import torch
 import torch.nn.functional as F
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
@@ -61,6 +62,14 @@ class FusedMoEEvents:
     before_routed_experts: torch.npu.Event
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
+
+
+def mock_false():
+    return False
+
+
+def mock_true():
+    return True
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -530,13 +539,19 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         routed_input_transform: torch.nn.Module | None = None,
         **kwargs,
     ):
+        ascend_config = get_ascend_config()
+        if ascend_config.mix_placement:
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_false
+            rocm_aiter_ops.is_fused_moe_enabled = mock_false
         AscendFusedMoE.__init__(self, **kwargs)
+        if ascend_config.mix_placement:
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_true
+            rocm_aiter_ops.is_fused_moe_enabled = mock_true
 
         self._routed_input_transform = routed_input_transform
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
-        ascend_config = get_ascend_config()
         self.multistream_overlap_shared_expert = (
             ascend_config.multistream_overlap_shared_expert and self._shared_experts is not None
         )
