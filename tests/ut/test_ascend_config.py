@@ -13,12 +13,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, get_ascend_config, init_ascend_config
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendConfig(TestBase):
@@ -112,3 +113,40 @@ class TestAscendConfig(TestBase):
         clear_ascend_config()
         with self.assertRaises(RuntimeError):
             get_ascend_config()
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_sparse_c8_without_layer_filter(self, mock_fix_incompatible_config, mock_get_ascend_device_type):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.model_config = MagicMock()
+        test_vllm_config.model_config.hf_text_config = MagicMock(index_topk=2048)
+        test_vllm_config.additional_config = {
+            "enable_sparse_c8": True,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.enable_sparse_c8)
+        self.assertTrue(ascend_config.is_sparse_c8_layer("model.layers.0.attn"))
+        self.assertTrue(ascend_config.is_sparse_c8_layer("model.layers.17.attn"))
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_sparse_c8_with_layer_filter(self, mock_fix_incompatible_config, mock_get_ascend_device_type):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.model_config = MagicMock()
+        test_vllm_config.model_config.hf_text_config = MagicMock(index_topk=2048)
+        test_vllm_config.additional_config = {
+            "enable_sparse_c8": True,
+            "sparse_c8_layers": [1, "model.layers.3", "decoder.layers.5.attn"],
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.is_sparse_c8_layer("model.layers.1.attn"))
+        self.assertTrue(ascend_config.is_sparse_c8_layer("model.layers.3.attn"))
+        self.assertTrue(ascend_config.is_sparse_c8_layer("decoder.layers.5.attn"))
+        self.assertFalse(ascend_config.is_sparse_c8_layer("model.layers.2.attn"))
+        self.assertFalse(ascend_config.is_sparse_c8_layer("decoder.layers.6.attn"))

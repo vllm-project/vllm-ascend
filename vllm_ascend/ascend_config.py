@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import TYPE_CHECKING
+import re
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -153,11 +155,77 @@ class AscendConfig:
         # Disable Sparse C8 for A5
         # A5 has not been fully validated for this path and may carry hidden risks.
         # TODO(rjg-lyh): Enable A5 support after sufficient validation.
+        sparse_c8_layers = additional_config.get("sparse_c8_layers", None)
         self.enable_sparse_c8 = (
             additional_config.get("enable_sparse_c8", False)
             and use_sparse
             and get_ascend_device_type() != AscendDeviceType.A5
         )
+        self.sparse_c8_layers = sparse_c8_layers
+        self._sparse_c8_layer_filter_enabled = sparse_c8_layers is not None
+        self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers(sparse_c8_layers)
+        if self.enable_sparse_c8 and self._sparse_c8_layer_filter_enabled:
+            logger.info_once(
+                "Sparse C8 indexer layer filtering enabled with config: "
+                f"{sparse_c8_layers}."
+            )
+
+    @staticmethod
+    def _parse_sparse_c8_layers(sparse_c8_layers: Any) -> tuple[set[int], set[str]]:
+        if sparse_c8_layers is None:
+            return set(), set()
+
+        if isinstance(sparse_c8_layers, (str, int)):
+            sparse_c8_layers = [sparse_c8_layers]
+        elif not isinstance(sparse_c8_layers, Iterable):
+            raise TypeError(
+                "additional_config['sparse_c8_layers'] must be an int, str, "
+                "or an iterable of ints / strs."
+            )
+
+        layer_ids: set[int] = set()
+        layer_names: set[str] = set()
+        for entry in sparse_c8_layers:
+            if isinstance(entry, int):
+                layer_ids.add(entry)
+                continue
+            if isinstance(entry, str):
+                for token in entry.split(","):
+                    token = token.strip().rstrip(".")
+                    if not token:
+                        continue
+                    if token.isdigit():
+                        layer_ids.add(int(token))
+                    else:
+                        layer_names.add(token)
+                continue
+            raise TypeError(
+                "additional_config['sparse_c8_layers'] only supports int / "
+                f"str entries, but got {type(entry).__name__}."
+            )
+        return layer_ids, layer_names
+
+    @staticmethod
+    def _extract_layer_ids(layer_name: str) -> set[int]:
+        return {int(match) for match in re.findall(r"(?:^|\.)(\d+)(?:\.|$)", layer_name)}
+
+    def is_sparse_c8_layer(self, layer_name: str | None) -> bool:
+        if not self.enable_sparse_c8:
+            return False
+        if not self._sparse_c8_layer_filter_enabled:
+            return True
+        if layer_name is None:
+            return False
+
+        normalized_layer_name = layer_name.rstrip(".")
+        if any(
+            normalized_layer_name == candidate or normalized_layer_name.startswith(f"{candidate}.")
+            for candidate in self._sparse_c8_layer_names
+        ):
+            return True
+
+        layer_ids = self._extract_layer_ids(normalized_layer_name)
+        return any(layer_id in self._sparse_c8_layer_ids for layer_id in layer_ids)
 
     @staticmethod
     def _get_compile_ranges(compilation_config):
