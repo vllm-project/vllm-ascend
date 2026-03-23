@@ -149,7 +149,7 @@ def chunk_fwd_o(
     # Partition NT_max chunks across programs to balance NPU core utilization.
     # With 40 vector cores and N*H programs per core dimension:
     # NT_PER_PROG=8 → ceil(161/8)=21 progs per head × 8 heads = 168 blocks
-    NT_PER_PROG = max(1, NT_max // 20)
+    NT_PER_PROG = max(1, NT_max // max(1, get_vectorcore_num() // 2))
     NUM_PROG_T = triton.cdiv(NT_max, NT_PER_PROG)
 
     def grid(meta):
