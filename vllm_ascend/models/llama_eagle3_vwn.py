@@ -181,8 +181,8 @@ class VwnLlamaDecoderLayer(LlamaDecoderLayer):
         expanded_factor = getattr(config, "vwn_r", 1)
         wider_dim = int(self.hidden_size * expanded_factor)
         self.wider_dim = wider_dim
-
-        if getattr(config, "eable_pre_vmn", True):
+        pre_vwn_version = getattr(config, "pre_vwn_version", 0)
+        if pre_vwn_version == 0:
             self.pre_vwn_layer = PreVwnLayerV0(
                 vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.pre_vwn_layer"),
