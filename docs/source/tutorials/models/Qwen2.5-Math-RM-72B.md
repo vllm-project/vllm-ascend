@@ -337,16 +337,16 @@ pytest test_qwen2_5_math_rm_72b.py::TestQwen2_5_Math_RM_72B_Performance -v
 1. **基础功能测试**:
 
 模型加载、tokenizer、对话模板
-2. **奖励模型场景**: 
+2. **奖励模型场景**:
 
 数学问题评分、答案质量评估
-3. **边界条件**: 
+3. **边界条件**:
 
 空输入、超长输入、特殊字符
-4. **性能测试**: 
+4. **性能测试**:
 
 延迟、吞吐量、内存使用
-5. **vLLM 适配**: 
+5. **vLLM 适配**:
 
 双后端切换、插件验证
 
@@ -354,7 +354,7 @@ pytest test_qwen2_5_math_rm_72b.py::TestQwen2_5_Math_RM_72B_Performance -v
 
 ### 问题 1: 模型加载失败
 
-**症状**: 
+**症状**:
 
 `ModuleNotFoundError: No module named 'transformers'`
 
@@ -370,7 +370,7 @@ pip install transformers==4.55.2
 
 ### 问题 2: 内存不足
 
-**症状**: 
+**症状**:
 
 `CUDA out of memory` 或 `NPU out of memory`
 
@@ -392,7 +392,7 @@ model = AutoModel.from_pretrained(
 
 ### 问题 3: vLLM 导入失败
 
-**症状**: 
+**症状**:
 
 `ImportError: cannot import name 'AutoVideoProcessor'`
 
@@ -469,10 +469,10 @@ logger.info(f"Inference latency: {latency*1000:.2f}ms")
 
 ---
 
-**作者**: 
+**作者**:
 
-yuhongming-2026 
-**更新日期**: 
+yuhongming-2026
+**更新日期**:
 
 2026-03-22  
 **文档版本**:
