@@ -18,6 +18,7 @@
 
 
 import torch
+from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
@@ -29,10 +30,44 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.patch.worker.patch_qwen_gdn_common import (
+    get_packed_qwen_gdn_conv1d_weights,
+    run_qwen3_5_gdn_input_projection,
+)
 from vllm_ascend.utils import enable_sp, vllm_version_is
 
 
 class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        mixed_qkv, z, b, a = run_qwen3_5_gdn_input_projection(self, hidden_states)
+        num_tokens = mixed_qkv.size(0)
+
+        core_attn_out = torch.zeros(
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        torch.ops.vllm.gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+        )
+
+        z_shape_og = z.shape
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -67,7 +102,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache[forward_context.virtual_engine if vllm_version_is("0.18.0") else 0]
-        conv_state = self_kv_cache[0].transpose(-1, -2)
+        conv_state = self_kv_cache[0]
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
@@ -78,7 +113,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+        conv_weights = get_packed_qwen_gdn_conv1d_weights(self)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -102,16 +137,16 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
                 max_query_len=spec_state_indices_tensor.size(-1),
+                weight_is_packed=True,
                 validate_data=False,
             )
 
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             if mixed_qkv_non_spec is not None:
-                conv_weights_T = conv_weights.transpose(0, 1)
                 mixed_qkv_non_spec = torch.ops._C_ascend.causal_conv1d_fn(
                     mixed_qkv_non_spec,
-                    conv_weights_T,
+                    conv_weights,
                     self.conv1d.bias,
                     activation=self.activation,
                     conv_state=self_kv_cache[0],
@@ -128,6 +163,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
+                weight_is_packed=True,
                 validate_data=True,
             )
         else:
@@ -260,4 +296,5 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         maybe_save_kv_layer_to_connector("", [])
 
 
+Qwen3_5GatedDeltaNet.forward = AscendQwen3_5GatedDeltaNet.forward
 Qwen3_5GatedDeltaNet._forward_core = AscendQwen3_5GatedDeltaNet._forward_core
