@@ -5,6 +5,8 @@ e2e-singlecard:
   estimated_time: 69
 - name: tests/e2e/singlecard/test_auto_fit_max_mode_len.py
   estimated_time: 70
+- name: tests/e2e/singlecard/test_eager_mode_acc.py
+  estimated_time: 255
 - name: tests/e2e/singlecard/test_aclgraph_accuracy.py
   estimated_time: 839
 - name: tests/e2e/singlecard/test_aclgraph_batch_invariant.py
