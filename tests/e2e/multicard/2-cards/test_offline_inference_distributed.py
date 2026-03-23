@@ -27,7 +27,7 @@ from unittest.mock import patch
 import pytest
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
@@ -91,6 +91,7 @@ def test_qwen3_w4a8_dynamic_tp2(model):
         vllm_model.generate_greedy(prompts, max_tokens)
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_qwen3_moe_sp_tp2() -> None:
     example_prompts = [
         "Hello, my name is",
@@ -111,6 +112,7 @@ def test_qwen3_moe_sp_tp2() -> None:
 
 @pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "2048"})
+@wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_deepseek_w4a8_accuracy_tp2(model):
     prompts = [
         "Hello, my name is",
@@ -243,6 +245,7 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free()
 def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
     short_example_prompts = [
         "Hello ",
@@ -270,6 +273,7 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free()
 def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
     short_example_prompts = [
         "Hello ",
