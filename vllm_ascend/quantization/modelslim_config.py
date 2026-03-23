@@ -784,16 +784,13 @@ class AscendModelSlimConfig(QuantizationConfig):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")
         self.enable_fa_quant = fa_quant_type != ""
         self.kvcache_quant_layers = []
-        if self.enable_fa_quant:
-            for key in self.quant_description:
-                if "fa_k.scale" in key:
-                    _id = "".join(re.findall(r"\.(\d+)\.", key))
-                    self.kvcache_quant_layers.append(int(_id))
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
-        if self.enable_indexer_quant:
+        if self.enable_fa_quant or self.enable_indexer_quant:
             for key in self.quant_description:
+                _id = "".join(re.findall(r"\.(\d+)\.", key))
+                if "fa_k.scale" in key:
+                    self.kvcache_quant_layers.append(int(_id))
                 if "indexer.quant_type" in key:
-                    _id = "".join(re.findall(r"\.(\d+)\.", key))
                     self.indexer_quant_layers.append(int(_id))
