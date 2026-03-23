@@ -20,34 +20,37 @@ import types
 import torch
 
 
-def _get_moe_attr_name(model) -> str:
+def get_moe_attr_name(model) -> str:
     model_type = getattr(model.config, "model_type", None)
     return "block_sparse_moe" if model_type in ["minimax", "minimax_m2"] else "mlp"
 
 
 def get_expert_map(self, layer_id):
-    moe_attr = _get_moe_attr_name(self)
+    moe_attr = get_moe_attr_name(self)
     return getattr(self.model.layers[layer_id], moe_attr).experts.expert_map
 
 
 def get_log2phy_map(self, layer_id):
-    moe_attr = _get_moe_attr_name(self)
+    moe_attr = get_moe_attr_name(self)
     return getattr(self.model.layers[layer_id], moe_attr).experts.get_log2phy_map()
 
 
 def get_all_moe_loads(self):
-    moe_attr = _get_moe_attr_name(self)
+    moe_attr = get_moe_attr_name(self)
     num_dense_layers = getattr(self.model.config, "first_k_dense_replace", 0)
     num_layers = self.model.config.num_hidden_layers
     all_moe_loads = torch.stack(
-        [getattr(self.model.layers[layer_id], moe_attr).experts.moe_load for layer_id in range(num_dense_layers, num_layers)],
+        [
+            getattr(self.model.layers[layer_id], moe_attr).experts.moe_load
+            for layer_id in range(num_dense_layers, num_layers)
+        ],
         dim=0,
     )
     return all_moe_loads
 
 
 def clear_all_moe_loads(self):
-    moe_attr = _get_moe_attr_name(self)
+    moe_attr = get_moe_attr_name(self)
     num_dense_layers = getattr(self.model.config, "first_k_dense_replace", 0)
     num_layers = self.model.config.num_hidden_layers
     for layer_id in range(num_dense_layers, num_layers):

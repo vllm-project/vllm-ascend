@@ -24,6 +24,7 @@ from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.eplb.utils import get_moe_attr_name
 
 
 class VllmEplbAdaptor:
@@ -37,8 +38,7 @@ class VllmEplbAdaptor:
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
 
-        model_type = getattr(self.model.config, "model_type", None)
-        self.moe_attr_name = "block_sparse_moe" if model_type in ["minimax", "minimax_m2"] else "mlp"
+        self.moe_attr_name = get_moe_attr_name(self.model)
         self.num_local_experts = getattr(
             self.model.model.layers[-1], self.moe_attr_name
         ).experts.local_num_experts
