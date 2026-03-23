@@ -23,6 +23,7 @@ import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.utils import AttentionGroup
+from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -34,6 +35,7 @@ class AscendModelState(DefaultModelState):
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
+        cudagraph_mode: CUDAGraphMode,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
@@ -41,12 +43,20 @@ class AscendModelState(DefaultModelState):
         for_capture: bool = False,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            # Use padded sizes - padding is handled by model_runner.prepare_attn.
+            num_reqs = input_batch.num_reqs_after_padding
+            num_tokens = input_batch.num_tokens_after_padding
+        else:
+            # For piecewise cudagraphs and eager, use unpadded sizes.
+            num_reqs = input_batch.num_reqs
+            num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
-            num_reqs=input_batch.num_reqs,
-            num_tokens=input_batch.num_tokens,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
