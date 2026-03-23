@@ -8,6 +8,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader,
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM, get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 
+
 def maybe_remap_indexer_rot_name(name: str, params_dict: dict) -> str | None:
     replace_scale_names = ["indexer.q_rot", "indexer.k_rot"]
     for scale_name in replace_scale_names:
@@ -207,5 +208,6 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 loaded_params.add(name)
 
         return loaded_params
+
 
 DeepseekV2ForCausalLM.load_weights = CustomDeepseekV2ForCausalLM.load_weights
