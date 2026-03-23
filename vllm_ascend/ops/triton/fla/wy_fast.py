@@ -77,7 +77,7 @@ def recompute_w_u_fwd_kernel(
     for i_h in range(H):
         # Load A matrix (BT×BT) - keep in float16 to reduce memory bandwidth
         ptr_A = A + (bos * H + i_h) * BT + offs_t_2d * (H * BT) + offs_bt
-        b_A = tl.load(ptr_A, mask=mask_t_2d, other=0.0)  # Keep in float16
+        b_A = tl.load(ptr_A, mask=mask_t_2d, other=0.0).to(tl.float32)  # Keep in float16
 
         # Load g and beta, compute exp(g) and fused scale factors
         ptr_g = g + bos + i_h * T + global_offs_t
@@ -93,7 +93,7 @@ def recompute_w_u_fwd_kernel(
         # Keep v * beta in float32, but convert to float16 for dot product
         ptr_v = v + (bos * H + i_h) * V + offs_t_2d * (H * V) + offs_v
         b_v = tl.load(ptr_v, mask=mask_v, other=0.0)
-        b_v_scaled = (b_v.to(tl.float32) * b_beta_2d).to(tl.float16)  # Scale and convert to fp16
+        b_v_scaled = (b_v.to(tl.float32) * b_beta_2d)  # Scale and convert to fp16
         b_u = tl.dot(b_A, b_v_scaled)  # fp16 @ fp16
         ptr_u = u + (bos * H + i_h) * V + offs_t_2d * (H * V) + offs_v
         tl.store(ptr_u, b_u.to(ptr_u.dtype.element_ty), mask=mask_v)
@@ -101,7 +101,7 @@ def recompute_w_u_fwd_kernel(
         # K computation: w = A @ (k * beta * g)
         ptr_k = k + (bos * Hg + i_h // (H // Hg)) * K + offs_t_2d * (Hg * K) + offs_k
         b_k = tl.load(ptr_k, mask=mask_k, other=0.0)
-        b_k_scaled = (b_k.to(tl.float32) * b_beta_g_2d).to(tl.float16)  # Scale and convert to fp16
+        b_k_scaled = (b_k.to(tl.float32) * b_beta_g_2d)  # Scale and convert to fp16
         b_w = tl.dot(b_A, b_k_scaled)  # fp16 @ fp16
         ptr_w = w + (bos * H + i_h) * K + offs_t_2d * (H * K) + offs_k
         tl.store(ptr_w, b_w.to(ptr_w.dtype.element_ty), mask=mask_k)
