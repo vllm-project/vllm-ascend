@@ -24,7 +24,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager, BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager, BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -96,7 +96,7 @@ class AclGraphManager(CudaGraphManager):
         return ret
 
 
-class ModelAclGraphManager(AclGraphManager):
+class ModelAclGraphManager(ModelCudaGraphManager, AclGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
     def capture(
