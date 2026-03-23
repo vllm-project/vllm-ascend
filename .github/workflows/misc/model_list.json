@@ -241,6 +241,7 @@
       "wemaster/deepseek_mtp_main_random_bf16",
       "wemaster/deepseek_mtp_main_random_w8a8_part",
       "xlangai/OpenCUA-7B",
+      "Eco-Tech/GLM-5-w4a8",
       "Eco-Tech/GLM-4.7-W8A8-floatmtp",
       "MiniMax/MiniMax-M2.5"
     ]
