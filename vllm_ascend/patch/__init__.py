@@ -145,9 +145,10 @@
 #    How：
 #       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
 #       MiniMax model_type when method is eagle3/extract_hidden_states.
-#       SpeculativeConfig is a Pydantic dataclass (`@config`); after replacing the
-#       method, call `pydantic.dataclasses.rebuild_dataclass(..., force=True)` so
-#       the compiled validator picks up the patch (BaseModel.model_rebuild N/A).
+#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
+#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
+#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
+#       then `pydantic.dataclasses.rebuild_dataclass(..., force=True)`.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/37512
 #    Future Plan:
