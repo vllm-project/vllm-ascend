@@ -645,7 +645,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
                 return True
-        return False    
+        return False
 
     def enabling_fa_quant(self, vllm_config, layer_name) -> bool:
         is_decode_instance = (

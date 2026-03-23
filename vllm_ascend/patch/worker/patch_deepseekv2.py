@@ -1,7 +1,7 @@
 import typing
 from collections.abc import Callable, Iterable
-import torch
 
+import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
@@ -63,9 +63,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
-            )
+            is_fusion_moe_shared_experts_layer = rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -211,4 +209,3 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         return loaded_params
 
 DeepseekV2ForCausalLM.load_weights = CustomDeepseekV2ForCausalLM.load_weights
-
