@@ -18,7 +18,7 @@ from .utils import prepare_chunk_indices
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H"])
 def solve_tril_16x16_kernel(
     A,
     Ad,
@@ -134,7 +134,7 @@ def solve_tril_16x16_kernel(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H"])
 def merge_16x16_to_32x32_inverse_kernel(
     A,
     Ad,
@@ -198,7 +198,7 @@ def merge_16x16_to_32x32_inverse_kernel(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H"])
 def merge_16x16_to_64x64_inverse_kernel(
     A,
     Ad,

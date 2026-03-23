@@ -25,7 +25,7 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
 @triton.jit(
-    do_not_specialize=["num_tokens", "front_core_num", "num_tokens_each_front_core", "num_tokens_each_tail_core"]
+    do_not_specialize=["num_tokens", "front_core_num", "num_tokens_each_front_core", "num_tokens_each_tail_core", "mrope_section_t", "mrope_section_h", "mrope_section_w"]
 )
 def split_qkv_rmsnorm_mrope_kernel(
     in_qkv_ptr: torch.Tensor,

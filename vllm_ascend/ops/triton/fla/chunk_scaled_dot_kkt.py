@@ -21,7 +21,7 @@ from .utils import prepare_chunk_indices, safe_exp
         "USE_G": lambda args: args["g_cumsum"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "B"])
 def chunk_scaled_dot_kkt_fwd_kernel(
     k,
     beta,  # [H, B, T]
