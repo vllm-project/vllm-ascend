@@ -19,6 +19,7 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
+    vllm_version_is,
 )
 
 
@@ -53,13 +54,14 @@ def set_ascend_forward_context(
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
-        "virtual_engine": virtual_engine,
         "num_tokens": num_tokens,
         "num_tokens_across_dp": num_tokens_across_dp,
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
     }
+    if vllm_version_is("0.18.0"):
+        forward_context_kwargs["virtual_engine"] = virtual_engine
 
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
