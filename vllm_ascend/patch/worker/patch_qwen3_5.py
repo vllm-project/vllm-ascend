@@ -32,29 +32,12 @@ from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.patch.worker.patch_qwen_gdn_common import (
     get_packed_qwen_gdn_conv1d_weights,
-    process_modules_after_loading,
-    process_qwen_gdn_module_after_loading,
-    register_post_load_processor,
     run_qwen3_5_gdn_input_projection,
 )
 from vllm_ascend.utils import enable_sp, vllm_version_is
 
 
-def _process_qwen3_5_gdn_weights_after_loading(
-    model: torch.nn.Module, target_device: torch.device
-) -> None:
-    process_modules_after_loading(
-        model,
-        target_device,
-        Qwen3_5GatedDeltaNet,
-        process_qwen_gdn_module_after_loading,
-    )
-
-
 class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
-    def process_weights_after_loading(self) -> None:
-        process_qwen_gdn_module_after_loading(self)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -313,7 +296,5 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         maybe_save_kv_layer_to_connector("", [])
 
 
-register_post_load_processor(_process_qwen3_5_gdn_weights_after_loading)
 Qwen3_5GatedDeltaNet.forward = AscendQwen3_5GatedDeltaNet.forward
-Qwen3_5GatedDeltaNet.process_weights_after_loading = AscendQwen3_5GatedDeltaNet.process_weights_after_loading
 Qwen3_5GatedDeltaNet._forward_core = AscendQwen3_5GatedDeltaNet._forward_core
