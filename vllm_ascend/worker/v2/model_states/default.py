@@ -38,6 +38,7 @@ class AscendModelState(DefaultModelState):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
