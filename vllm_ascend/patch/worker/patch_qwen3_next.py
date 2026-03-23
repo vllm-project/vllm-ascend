@@ -31,7 +31,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, vllm_version_is
 
 
 class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
