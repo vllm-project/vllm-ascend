@@ -584,9 +584,13 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             return AscendLinearMethod(scheme)
+<<<<<<< HEAD
         elif isinstance(layer, AttentionLayerBase) and (
             self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)
         ):
+=======
+        elif isinstance(layer, AttentionLayerBase) and (self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)):
+>>>>>>> b28997d0... add deepseek 3.2 C8 rot tensor
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             return AscendKVCacheMethod(scheme)
         elif isinstance(layer, FusedMoE):
@@ -645,7 +649,11 @@ class AscendModelSlimConfig(QuantizationConfig):
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
                 return True
+<<<<<<< HEAD
         return False
+=======
+        return False    
+>>>>>>> b28997d0... add deepseek 3.2 C8 rot tensor
 
     def enabling_fa_quant(self, vllm_config, layer_name) -> bool:
         is_decode_instance = (
