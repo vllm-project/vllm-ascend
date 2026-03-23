@@ -13,8 +13,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import (is_pp_missing_parameter)
 from vllm._aiter_ops import rocm_aiter_ops
 
-NUM_HIDDEN_LAYERS = 4
-
 def maybe_remap_indexer_rot_name(name: str, params_dict: dict) -> Optional[str]:
     replace_scale_names = [
         "indexer.q_rot", "indexer.k_rot"
@@ -74,11 +72,6 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            import re
-            layer_idx = re.findall(r"\d+", name)
-            if len(layer_idx) > 0 and int(layer_idx[0]) >= NUM_HIDDEN_LAYERS:
-                continue
-
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
