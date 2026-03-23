@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef LIGHTNING_ATTENTION_DECODE_TORCH_ADPT_H
-#define LIGHTNING_ATTENTION_DECODE_TORCH_ADPT_H
+#ifndef LIGHTNING_ATTENTION_PREFILL_TORCH_ADPT_H
+#define LIGHTNING_ATTENTION_PREFILL_TORCH_ADPT_H
 
 namespace vllm_ascend {
     std::tuple<at::Tensor, at::Tensor> npu_lightning_attention_prefill(
