@@ -19,7 +19,7 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-
+from vllm.v1.outputs import LogprobsTensors
 
 @triton.jit
 def _topk_log_softmax_kernel(
@@ -83,3 +83,67 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
     )
     return logprobs
+
+
+@triton.jit
+def _ranks_kernel(
+    output_ptr,
+    logits_ptr,
+    logits_stride,
+    token_ids_ptr,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    row_ptr = logits_ptr + req_idx * logits_stride
+
+    token_id = tl.load(token_ids_ptr + req_idx)
+    x = tl.load(row_ptr + token_id)
+
+    n_vec = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
+    for i in range(0, vocab_size, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
+        n_vec += (logits > x).to(tl.int32)
+    n = tl.sum(n_vec)
+    tl.store(output_ptr + req_idx, n)
+    
+    
+    
+def compute_topk_logprobs(
+    logits: torch.Tensor,
+    num_logprobs: int,
+    sampled_token_ids: torch.Tensor,
+) -> LogprobsTensors:
+    assert num_logprobs >= 0
+    batch_size, vocab_size = logits.shape
+    if num_logprobs == 0:
+        logprob_token_ids = sampled_token_ids.unsqueeze(-1)
+    else:
+        topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+        logprob_token_ids = torch.cat(
+            (sampled_token_ids.unsqueeze(-1), topk_indices), dim=1
+        )
+
+    # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
+    # logprobs tensor. Instead, we only compute and return the logprobs of
+    # the topk + 1 tokens.
+    logprobs = compute_token_logprobs(logits, logprob_token_ids)
+    token_ranks = torch.empty(
+        batch_size,
+        dtype=torch.int64,
+        device=logits.device,
+    )
+    _ranks_kernel[(batch_size,)](
+        token_ranks,
+        logits,
+        logits.stride(0),
+        sampled_token_ids,
+        vocab_size,
+        BLOCK_SIZE=8 * 1024,
+    )
+    return LogprobsTensors(
+        logprob_token_ids=logprob_token_ids,
+        logprobs=logprobs,
+        selected_token_ranks=token_ranks,
+    )
