@@ -551,5 +551,5 @@
 #    How：
 #       Add preprocess function to preprocess weights before reload
 #    Future Plan:
-#       Migrate preprocess to update_weights in Worker.
+#       Migrate preprocess to update_weights in Worker after VeRL and vllm-ascend move to it.
 #       Refer to: https://github.com/vllm-project/vllm/pull/31943
