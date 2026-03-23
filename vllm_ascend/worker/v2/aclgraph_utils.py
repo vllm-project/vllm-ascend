@@ -17,8 +17,11 @@
 # This file is a part of the vllm-ascend project.
 #
 from typing import Any
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -26,9 +29,11 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 from vllm.logger import logger
+from vllm.model_executor.offloader.base import get_offloader
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
@@ -62,30 +67,52 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         if super().needs_capture():
             set_graph_params(self.capture_sizes)
 
+    @torch.inference_mode()
     def capture(
         self,
-        model: nn.Module,
-        model_state: ModelState,
-        input_buffers: InputBuffers,
-        block_tables: BlockTables,
-        attn_groups: list[list[AttentionGroup]],
-        kv_cache_config: KVCacheConfig,
-        has_lora: bool = False,
-        use_aux_hidden_state_outputs: bool = False,
+        create_forward_fn: Callable[[BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        model = ModelWithContext(model)
-        return super().capture(
-            model,
-            model_state,
-            input_buffers,
-            block_tables,
-            attn_groups,
-            kv_cache_config,
-            has_lora,
-            use_aux_hidden_state_outputs,
-            progress_bar_desc,
-        )
+        """Override capture method to set capturing flag to True before capture."""
+        with graph_capture(device=self.device):
+            # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
+            # activations so FULL activations should fit in already allocated
+            # buffers in the graph pool.
+            for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
+                if mode not in self._capture_descs:
+                    continue
+
+                descs = self._capture_descs[mode]
+                if is_global_first_rank():
+                    descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
+                for desc in descs:
+                    # Prepare inputs and get forward function
+                    forward_fn = create_forward_fn(desc)
+
+                    # Warmup
+                    forward_fn(CUDAGraphMode.NONE)
+
+                    # Capture
+                    logger.debug("CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc)
+                    # Set capturing flag to True before capture, this is only needed for vllm-ascend.
+                    _EXTRA_CTX.capturing = True
+                    if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                        forward_fn(CUDAGraphMode.PIECEWISE)
+                    else:
+                        assert desc not in self.graphs, f"Graph already captured for {desc}"
+                        graph = torch.cuda.CUDAGraph()
+                        # Sync offloader's copy stream before capture.
+                        # Ensure any pre-capture prefetches from offloader are complete.
+                        get_offloader().sync_prev_onload()
+                        with torch.cuda.graph(graph, self.pool):
+                            forward_fn(CUDAGraphMode.NONE)
+                            # Join offloader's copy stream after forward to avoid
+                            # unjoined stream error. The last layer's start_prefetch
+                            # forks copy_stream, but wait_prefetch only happens in
+                            # the next forward pass.
+                            get_offloader().join_after_forward()
+                        self.graphs[desc] = graph
+        self._graphs_captured = True
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
