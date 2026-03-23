@@ -240,6 +240,25 @@ def _patch_speculative_minimax_whitelist() -> None:
                 "patch may not apply.",
                 e,
             )
+        # If `VllmConfig` was imported before this patch ran, its pydantic-core schema
+        # for the nested `speculative_config` field may still embed the *pre-patch*
+        # SpeculativeConfig validators. `create_speculative_config()` calls
+        # `SpeculativeConfig(...)` directly (uses updated class validator), but
+        # `VllmConfig(..., speculative_config=...)` validates via the parent's cached
+        # nested schema and can still raise the whitelist error unless we rebuild.
+        try:
+            from vllm.config.vllm import VllmConfig  # type: ignore
+        except Exception:
+            pass
+        else:
+            try:
+                rebuild_dataclass(VllmConfig, force=True)  # type: ignore[arg-type]
+            except Exception as e:
+                logger.warning(
+                    "rebuild_dataclass(VllmConfig) failed (%s); VllmConfig(...) may "
+                    "still use stale nested SpeculativeConfig validation.",
+                    e,
+                )
 
 
 def _patch_eagle3_registry_alias() -> None:
