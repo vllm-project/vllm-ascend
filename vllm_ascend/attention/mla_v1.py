@@ -40,6 +40,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
     post_process_after_loading_for_shard_weight_series,
@@ -1075,12 +1076,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
             k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
 
-            torch_npu.atb.npu_paged_cache_load(
+            DeviceOperator.mla_cache_load(
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
                 context_seq_len_npu,
-                seq_starts=prefill_metadata.chunked_context.starts[i],
+                prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
             )
