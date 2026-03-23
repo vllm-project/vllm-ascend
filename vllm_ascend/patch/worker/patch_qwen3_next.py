@@ -34,8 +34,9 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.patch.worker.qwen_gdn_post_load import (
     get_packed_qwen_gdn_conv1d_weights,
+    get_qwen_gdn_projected_states,
     process_modules_after_loading,
-    process_qwen_gdn_conv1d_weight_after_loading,
+    process_qwen_gdn_module_after_loading,
     register_post_load_processor,
 )
 from vllm_ascend.utils import enable_sp, vllm_version_is
@@ -48,13 +49,13 @@ def _process_qwen3_next_gdn_weights_after_loading(
         model,
         target_device,
         Qwen3NextGatedDeltaNet,
-        process_qwen_gdn_conv1d_weight_after_loading,
+        process_qwen_gdn_module_after_loading,
     )
 
 
 class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
     def process_weights_after_loading(self) -> None:
-        process_qwen_gdn_conv1d_weight_after_loading(self)
+        process_qwen_gdn_module_after_loading(self)
 
     def forward(
         self,
@@ -71,8 +72,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        projected_states_qkvz, projected_states_ba = get_qwen_gdn_projected_states(self, hidden_states)
         num_tokens = projected_states_qkvz.size(0)
 
         mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat(
@@ -328,6 +328,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
 
 
 register_post_load_processor(_process_qwen3_next_gdn_weights_after_loading)
+Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
 Qwen3NextGatedDeltaNet.process_weights_after_loading = AscendQwen3Next_GatedDeltaNet.process_weights_after_loading
 Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
 Qwen3NextGatedDeltaNet._forward_core = AscendQwen3Next_GatedDeltaNet._forward_core

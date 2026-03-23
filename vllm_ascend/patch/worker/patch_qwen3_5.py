@@ -18,6 +18,7 @@
 
 
 import torch
+from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
@@ -31,8 +32,9 @@ from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.patch.worker.qwen_gdn_post_load import (
     get_packed_qwen_gdn_conv1d_weights,
+    get_qwen_gdn_projected_states,
     process_modules_after_loading,
-    process_qwen_gdn_conv1d_weight_after_loading,
+    process_qwen_gdn_module_after_loading,
     register_post_load_processor,
 )
 from vllm_ascend.utils import enable_sp, vllm_version_is
@@ -45,13 +47,52 @@ def _process_qwen3_5_gdn_weights_after_loading(
         model,
         target_device,
         Qwen3_5GatedDeltaNet,
-        process_qwen_gdn_conv1d_weight_after_loading,
+        process_qwen_gdn_module_after_loading,
     )
 
 
 class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
     def process_weights_after_loading(self) -> None:
-        process_qwen_gdn_conv1d_weight_after_loading(self)
+        process_qwen_gdn_module_after_loading(self)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        num_tokens = hidden_states.size(0)
+
+        projected_states_qkvz, projected_states_ba = get_qwen_gdn_projected_states(self, hidden_states)
+        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        z_size = self.value_dim // self.tp_size
+        mixed_qkv, z = projected_states_qkvz.split([qkv_size, z_size], dim=-1)
+        z = z.reshape(z.size(0), -1, self.head_v_dim)
+        b, a = projected_states_ba.chunk(2, dim=-1)
+
+        b = b.contiguous()
+        a = a.contiguous()
+
+        core_attn_out = torch.zeros(
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        torch.ops.vllm.gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+        )
+
+        z_shape_og = z.shape
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def _forward_core(
         self,
@@ -282,5 +323,6 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
 
 register_post_load_processor(_process_qwen3_5_gdn_weights_after_loading)
+Qwen3_5GatedDeltaNet.forward = AscendQwen3_5GatedDeltaNet.forward
 Qwen3_5GatedDeltaNet.process_weights_after_loading = AscendQwen3_5GatedDeltaNet.process_weights_after_loading
 Qwen3_5GatedDeltaNet._forward_core = AscendQwen3_5GatedDeltaNet._forward_core
