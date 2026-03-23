@@ -23,6 +23,7 @@ import atexit
 import functools
 import math
 import os
+import re
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
@@ -62,7 +63,7 @@ _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
-_DYNAMIC_EPLB_BUFFER_SIZE = 1  # num_experts * num_layers * 64 byte
+_DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
@@ -842,15 +843,29 @@ def _is_contain_expert(config: Any):
 
 
 def is_vl_model(vllm_config: VllmConfig):
-    """Checks if the model is a VL model by config"""
+    """Checks if the model is a VL model by config.
+
+    Uses the same criterion as vllm itself (model_config.py): a model is
+    multimodal when its top-level hf_config differs from its hf_text_config
+    (i.e. there is a separate vision sub-config).  The legacy key-name checks
+    are kept as fallbacks for configs that override get_text_config() to return
+    self (rare but possible).
+    """
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
-        hf_config = vllm_config.model_config.hf_config.to_dict()
-        if "thinker_config" in hf_config:
-            # Qwen-Omni-thinker models
+        model_config = vllm_config.model_config
+        # Primary: vllm's own VL detection — hf_config is the top-level
+        # (multimodal) config; hf_text_config is the language-model sub-config.
+        # They are the same object for pure-text models.
+        if model_config.hf_config is not model_config.hf_text_config:
             _IS_VL_MODEL = True
         else:
-            _IS_VL_MODEL = "vision_config" in hf_config
+            # Fallback: check well-known config keys
+            hf_config = model_config.hf_config.to_dict()
+            if "thinker_config" in hf_config or "vision_config" in hf_config:
+                _IS_VL_MODEL = True
+            else:
+                _IS_VL_MODEL = False
     return _IS_VL_MODEL
 
 
@@ -1211,3 +1226,42 @@ def get_rope_dim(vllm_config):
             rope_dim = int(model_config.hf_text_config.rotary_dim)
 
     return rope_dim
+
+
+def calc_split_factor(num_list: list[int]):
+    total = sum(num_list)
+    split_factor_list = []
+    for num in num_list:
+        split_factor_list.append(total / num)
+    return split_factor_list
+
+
+# NOTE: The last two dimensions of ND are transferred to NZ
+def trans_nd_to_nz(cache_tensor: torch.Tensor):
+    assert len(cache_tensor.shape) >= 2
+    batch = cache_tensor.shape[:-2]
+    a, b = cache_tensor.shape[-2], cache_tensor.shape[-1]
+
+    dtype = cache_tensor.dtype
+    if dtype == torch.int8:
+        a0, b0 = 16, 32
+    else:
+        a0, b0 = 16, 16
+
+    nz_shape = list(batch) + [math.ceil(b / b0), math.ceil(a / a0), a0, b0]
+
+    # Generate the axis order for the transpose operation.
+    offset = len(cache_tensor.shape) - 2
+    base = [2, 0, 1, 3]
+    array_trans = [i for i in range(offset)] + [i + offset for i in base]
+    # Perform shape transformation and transpose operation.
+    *_, n1, m1, m0, n0 = nz_shape
+    cache_tensor = cache_tensor.reshape(nz_shape[:-4] + [m1, m0, n1, n0])
+    cache_tensor = cache_tensor.permute(*array_trans)
+    return cache_tensor
+
+
+def parse_layer_idx(prefix: str) -> int | None:
+    """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
+    match = re.search(r"layers\.(\d+)", prefix)
+    return int(match.group(1)) if match else None

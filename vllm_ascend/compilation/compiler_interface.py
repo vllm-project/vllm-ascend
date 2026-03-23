@@ -17,6 +17,7 @@
 #
 import copy
 import functools
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -32,6 +33,8 @@ from vllm.config.utils import Range
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
+
+logger = logging.getLogger(__name__)
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -83,6 +86,10 @@ def npugraph_ex_compile(
     config.mode = "reduce-overhead"
     # execute FX graph in eager mode before graph mode to optimize FX graph.
     config.debug.run_eagerly = True
+    # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
+    # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
+    # and cause copy_between_host_and_device error.
+    config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
     if ascend_compilation_config.enable_static_kernel:
         config.experimental_config.aclgraph._aclnn_static_shape_kernel = True
         # According to the cudagraph_capture_size configuration, set the shapes
@@ -133,6 +140,21 @@ class AscendCompiler(CompilerInterface):
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
         graph = copy.deepcopy(graph)
+
+        from torch._guards import detect_fake_mode
+
+        current_fake_mode = detect_fake_mode()
+        if current_fake_mode is not None:
+            example_inputs = [
+                current_fake_mode.from_tensor(inp)
+                if (
+                    isinstance(inp, torch.Tensor)
+                    and hasattr(inp, "fake_mode")
+                    and inp.fake_mode is not current_fake_mode
+                )
+                else inp
+                for inp in example_inputs
+            ]
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex:

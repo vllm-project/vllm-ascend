@@ -122,7 +122,7 @@ Not supported yet.
 After starting the service, verify functionality using a `curl` request:
 
 ```shell
-curl http://<IP>:<Port>/v1/completions \
+curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen-2.5-7b-instruct",

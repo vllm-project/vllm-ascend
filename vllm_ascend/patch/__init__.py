@@ -259,6 +259,20 @@
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
+# ** 7a. File: worker/patch_gdn_attn.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilder.build`
+#    Why:
+#       Qwen3.5/Qwen3Next GDN prefill on NPU needs prebuilt varlen chunk metadata
+#       to avoid forward-time host round-trips that break async scheduling.
+#    How：
+#       Monkey-patch the upstream builder in-place, keep upstream code untouched,
+#       and attach prebuilt device metadata bundle onto the returned attention
+#       metadata object for Ascend-specific consumers.
+#    Future Plan:
+#       Remove this patch when upstream exposes a backend hook for extending GDN
+#       metadata or when the optimization is accepted upstream directly.
+#
 # ** 8. File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
@@ -528,3 +542,17 @@
 #    Future Plan:
 #       Remove this patch when:
 #       design a dispatch mechanism for batch_memcpy_kernel.
+#
+# ** 23. File: worker/patch_weight_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
+#    Why:
+#       The C8 weight quantized by modelslim will modify the model structure,
+#       and the scale and offset required for kvcache quantization will increase.
+#       In addition, the names of the quantization parameters are different from
+#       those in the community.
+#    How：
+#       we have enhanced the maybe_remap_kv_scale_name function.
+#    Future Plan:
+#       The maybe_remap_kv_scale_name function of the community is reconstructed to support
+#       multiple backends.
