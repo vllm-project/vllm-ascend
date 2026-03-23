@@ -1260,5 +1260,3 @@ def trans_nd_to_nz(cache_tensor: torch.Tensor):
     cache_tensor = cache_tensor.reshape(nz_shape[:-4] + [m1, m0, n1, n0])
     cache_tensor = cache_tensor.permute(*array_trans)
     return cache_tensor
-
-

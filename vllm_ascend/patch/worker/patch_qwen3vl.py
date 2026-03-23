@@ -19,7 +19,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 
 def tensor_parallel_wrap(func):
-
     def wrap(*args, **kwargs):
         deepstack_input_embeds = func(*args, **kwargs)
         if deepstack_input_embeds is None:
@@ -32,8 +31,7 @@ def tensor_parallel_wrap(func):
             flash_comm_v1_enabled = False
         if flash_comm_v1_enabled:
             deepstack_input_embeds.tensors = {
-                k: v.chunk(tp_size)[tp_rank]
-                for k, v in deepstack_input_embeds.tensors.items()
+                k: v.chunk(tp_size)[tp_rank] for k, v in deepstack_input_embeds.tensors.items()
             }
         return deepstack_input_embeds
 
