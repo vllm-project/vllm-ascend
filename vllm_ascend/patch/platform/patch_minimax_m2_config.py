@@ -198,6 +198,29 @@ def _patch_speculative_minimax_whitelist() -> None:
     _patched_verify_args._vllm_ascend_minimax_eagle3_patched = True  # type: ignore[attr-defined]
     SpeculativeConfig._verify_args = _patched_verify_args  # type: ignore[assignment]
 
+    # SpeculativeConfig is `@config` i.e. a **Pydantic dataclass**, not BaseModel.
+    # After class creation, validators are compiled into the core schema; assigning
+    # `SpeculativeConfig._verify_args = ...` alone does NOT update that pipeline (so
+    # method 1 logging never runs). Rebuild the dataclass schema so construction
+    # uses the patched method — analogous to BaseModel.model_rebuild(force=True).
+    try:
+        from pydantic.dataclasses import rebuild_dataclass  # type: ignore
+    except Exception as e:
+        logger.warning(
+            "Cannot import rebuild_dataclass (%s); SpeculativeConfig eagle3 whitelist "
+            "patch may not apply at instance construction time.",
+            e,
+        )
+    else:
+        try:
+            rebuild_dataclass(SpeculativeConfig, force=True)  # type: ignore[arg-type]
+        except Exception as e:
+            logger.warning(
+                "rebuild_dataclass(SpeculativeConfig) failed (%s); eagle3 whitelist "
+                "patch may not apply.",
+                e,
+            )
+
 
 def _patch_eagle3_registry_alias() -> None:
     """Register Eagle3MiniMaxM2ForCausalLM architecture alias if missing."""
