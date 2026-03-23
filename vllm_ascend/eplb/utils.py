@@ -20,7 +20,7 @@ import types
 import torch
 
 
-def _get_moe_attr_name(model) -> str:
+def get_moe_attr_name(model) -> str:
     model_type = getattr(model.config, "model_type", None)
     return "block_sparse_moe" if model_type in ["minimax", "minimax_m2"] else "mlp"
 
