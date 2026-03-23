@@ -33,7 +33,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.utils import is_vl_model, parse_layer_idx
+from vllm_ascend.utils import is_vl_model, parse_layer_idx, vllm_version_is
 
 
 class IndexerWrapper(nn.Module):
@@ -183,7 +183,7 @@ def mla_forward(
         attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
     else:
         attn_metadata = forward_context.attn_metadata
-    kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+    kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine if vllm_version_is("0.18.0") else 0]
     self.mla_attn.impl.forward(
         self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
     )
