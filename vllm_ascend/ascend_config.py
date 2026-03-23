@@ -15,7 +15,6 @@
 # limitations under the License.
 import os
 import re
-from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
@@ -155,54 +154,69 @@ class AscendConfig:
         # Disable Sparse C8 for A5
         # A5 has not been fully validated for this path and may carry hidden risks.
         # TODO(rjg-lyh): Enable A5 support after sufficient validation.
-        sparse_c8_layers = additional_config.get("sparse_c8_layers", None)
         self.enable_sparse_c8 = (
             additional_config.get("enable_sparse_c8", False)
             and use_sparse
             and get_ascend_device_type() != AscendDeviceType.A5
         )
-        self.sparse_c8_layers = sparse_c8_layers
-        self._sparse_c8_layer_filter_enabled = sparse_c8_layers is not None
-        self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers(sparse_c8_layers)
-        if self.enable_sparse_c8 and self._sparse_c8_layer_filter_enabled:
-            logger.info_once(
-                "Sparse C8 indexer layer filtering enabled with config: "
-                f"{sparse_c8_layers}."
+        if "sparse_c8_layers" in additional_config:
+            logger.warning_once(
+                "additional_config['sparse_c8_layers'] is deprecated and ignored. "
+                "Sparse C8 layer selection now comes from quant_model_description.json."
             )
+
+        quant_config = getattr(vllm_config, "quant_config", None)
+        self._sparse_c8_layer_config_present = self._has_sparse_c8_layer_config(quant_config)
+        self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers_from_quant_config(
+            quant_config
+        )
+        self._sparse_c8_layer_filter_enabled = self._sparse_c8_layer_config_present
+        if self.enable_sparse_c8:
+            if self._sparse_c8_layer_filter_enabled:
+                if self._sparse_c8_layer_ids or self._sparse_c8_layer_names:
+                    logger.info_once(
+                        "Sparse C8 layer filtering enabled from quant_model_description.json. "
+                        "Only layers with '*.indexer.quant_type = INT8_DYNAMIC' will use Sparse C8."
+                    )
+                else:
+                    logger.info_once(
+                        "Sparse C8 layer filtering enabled from quant_model_description.json, "
+                        "but no layer is marked with '*.indexer.quant_type = INT8_DYNAMIC'. "
+                        "All sparse MLA layers will fallback to the non-C8 path."
+                    )
+            else:
+                logger.warning_once(
+                    "Sparse C8 is enabled, but quant_model_description.json does not provide any "
+                    "layerwise '*.indexer.quant_type = INT8_DYNAMIC' entries. "
+                    "Falling back to the legacy all-layer Sparse C8 behavior."
+                )
 
     @staticmethod
-    def _parse_sparse_c8_layers(sparse_c8_layers: Any) -> tuple[set[int], set[str]]:
-        if sparse_c8_layers is None:
-            return set(), set()
+    def _has_sparse_c8_layer_config(quant_config: Any) -> bool:
+        quant_description = getattr(quant_config, "quant_description", None)
+        if not isinstance(quant_description, dict):
+            return False
+        return any(isinstance(key, str) and key.endswith(".indexer.quant_type") for key in quant_description)
 
-        if isinstance(sparse_c8_layers, (str, int)):
-            sparse_c8_layers = [sparse_c8_layers]
-        elif not isinstance(sparse_c8_layers, Iterable):
-            raise TypeError(
-                "additional_config['sparse_c8_layers'] must be an int, str, "
-                "or an iterable of ints / strs."
-            )
+    @classmethod
+    def _parse_sparse_c8_layers_from_quant_config(cls, quant_config: Any) -> tuple[set[int], set[str]]:
+        quant_description = getattr(quant_config, "quant_description", None)
+        if not isinstance(quant_description, dict):
+            return set(), set()
 
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
-        for entry in sparse_c8_layers:
-            if isinstance(entry, int):
-                layer_ids.add(entry)
+        suffix = ".indexer.quant_type"
+        for key, value in quant_description.items():
+            if not isinstance(key, str) or not key.endswith(suffix):
                 continue
-            if isinstance(entry, str):
-                for token in entry.split(","):
-                    token = token.strip().rstrip(".")
-                    if not token:
-                        continue
-                    if token.isdigit():
-                        layer_ids.add(int(token))
-                    else:
-                        layer_names.add(token)
+            if value != "INT8_DYNAMIC":
                 continue
-            raise TypeError(
-                "additional_config['sparse_c8_layers'] only supports int / "
-                f"str entries, but got {type(entry).__name__}."
-            )
+            layer_name = key[: -len(suffix)].rstrip(".")
+            if not layer_name:
+                continue
+            layer_names.add(layer_name)
+            layer_ids.update(cls._extract_layer_ids(layer_name))
         return layer_ids, layer_names
 
     @staticmethod

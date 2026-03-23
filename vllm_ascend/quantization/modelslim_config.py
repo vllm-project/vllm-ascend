@@ -377,10 +377,14 @@ def get_quant_type_for_layer(
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
     # Attention
-    if layer_type == "attention" and "fa_quant_type" in quant_description:
-        return quant_description["fa_quant_type"]
-    if layer_type == "attention" and "indexer_quant_type" in quant_description:
-        return quant_description["indexer_quant_type"]
+    if layer_type == "attention":
+        layer_indexer_quant_type = quant_description.get(f"{prefix}.indexer.quant_type")
+        if layer_indexer_quant_type is not None:
+            return layer_indexer_quant_type
+        if "fa_quant_type" in quant_description:
+            return quant_description["fa_quant_type"]
+        if "indexer_quant_type" in quant_description:
+            return quant_description["indexer_quant_type"]
     # Linear / MoE
     return get_linear_quant_type(quant_description, prefix, packed_modules_mapping)
 
@@ -642,8 +646,13 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def is_indexer_quant_layer(self, prefix):
         if self.enable_indexer_quant:
-            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
-            if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
+            if self.has_layerwise_indexer_quant_config:
+                normalized_prefix = prefix.rstrip(".")
+                return any(
+                    normalized_prefix == candidate or normalized_prefix.startswith(f"{candidate}.")
+                    for candidate in self.indexer_quant_layer_prefixes
+                )
+            else:
                 return True
         return False
 
@@ -790,10 +799,18 @@ class AscendModelSlimConfig(QuantizationConfig):
                     _id = "".join(re.findall(r"\.(\d+)\.", key))
                     self.kvcache_quant_layers.append(int(_id))
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
-        self.enable_indexer_quant = indexer_quant_type != ""
+        self.has_layerwise_indexer_quant_config = False
+        self.indexer_quant_layer_prefixes = []
         self.indexer_quant_layers = []
-        if self.enable_indexer_quant:
-            for key in self.quant_description:
-                if "indexer.quant_type" in key:
-                    _id = "".join(re.findall(r"\.(\d+)\.", key))
-                    self.indexer_quant_layers.append(int(_id))
+        for key, value in self.quant_description.items():
+            if not isinstance(key, str) or not key.endswith(".indexer.quant_type"):
+                continue
+            self.has_layerwise_indexer_quant_config = True
+            if value != "INT8_DYNAMIC":
+                continue
+            layer_prefix = key[: -len(".indexer.quant_type")].rstrip(".")
+            self.indexer_quant_layer_prefixes.append(layer_prefix)
+            _id = "".join(re.findall(r"\.(\d+)\.", layer_prefix))
+            if _id.isdigit():
+                self.indexer_quant_layers.append(int(_id))
+        self.enable_indexer_quant = bool(indexer_quant_type) or self.has_layerwise_indexer_quant_config
