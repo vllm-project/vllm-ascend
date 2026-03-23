@@ -250,6 +250,7 @@ jobs:
           - name: accuracy-group-1
             os: linux-aarch64-a2b3-1
             model_list:
+              - Qwen3-VL-8B-Instruct-W8A8
               - Qwen3-8B
               - Qwen2-Audio-7B-Instruct
               - Qwen3-8B-W8A8
@@ -276,7 +277,7 @@ jobs:
               - Qwen3-Omni-30B-A3B-Instruct
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: v0.17.0
+      vllm: v0.18.0
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
