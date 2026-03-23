@@ -74,6 +74,7 @@ from vllm_ascend.utils import (
     flashcomm2_enable,
     get_flashcomm2_reorgnized_batch_ids,
     get_weight_prefetch_method,
+    is_vl_model,
     matmul_allreduce_enable,
     mlp_tp_enable,
     oproj_tp_enable,
@@ -419,6 +420,23 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
 
 
 class SequenceColumnParallelOp(CustomColumnParallelOp):
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.is_vl_first_layer = False
+
+    def update_attrs(self):
+        super().update_attrs()
+        # For VL models, inputs_embeds at layer 0 comes from the vision encoder
+        # as full [N, H] — it has NOT been reduce-scattered. We detect this
+        # statically at init time so the branch is a constant to dynamo.
+        from vllm.config import get_current_vllm_config
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        vllm_config = get_current_vllm_config()
+        _is_vl = is_vl_model(vllm_config)
+        _layer_idx = extract_layer_index(self.prefix)
+        self.is_vl_first_layer = bool(_is_vl and _layer_idx == 0)
+
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         """Linear layer with column parallelism.
 
@@ -431,7 +449,10 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        if not self.is_vl_first_layer:
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        else:
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, False)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
