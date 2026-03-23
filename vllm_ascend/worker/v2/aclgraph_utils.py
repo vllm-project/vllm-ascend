@@ -42,31 +42,6 @@ from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_grap
 class AclGraphManager(CudaGraphManager):
     """ACL Cuda Graph Manager for Ascend NPUs."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-        model_runner: Any,
-    ):
-        super().__init__(
-            vllm_config,
-            device,
-            cudagraph_mode,
-            decode_query_len,
-        )
-        # set model runner attribute, so we can access attributes model runner
-        # when call `run_fullgraph` method in CudaGraphManager,
-        # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
-        self.model_runner = model_runner
-        # capture_sizes sorts in ascending order.
-        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
-        # vllm-ascend need to update graph params of attention backend.
-        # so we need to set graph params before capture full graph.
-        if super().needs_capture():
-            set_graph_params(self.capture_sizes)
-
     @torch.inference_mode()
     def capture(
         self,
@@ -114,6 +89,36 @@ class AclGraphManager(CudaGraphManager):
                         self.graphs[desc] = graph
         self._graphs_captured = True
 
+
+class ModelAclGraphManager(AclGraphManager, ModelCudaGraphManager):
+    """ACL Model Cuda Graph Manager for Ascend NPUs."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        model_runner: Any,
+    ):
+        super().__init__(
+            self,
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+        )
+        # set model runner attribute, so we can access attributes model runner
+        # when call `run_fullgraph` method in CudaGraphManager,
+        # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
+        self.model_runner = model_runner
+        # capture_sizes sorts in ascending order.
+        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        # vllm-ascend need to update graph params of attention backend.
+        # so we need to set graph params before capture full graph.
+        if super().needs_capture():
+            set_graph_params(self.capture_sizes)
+
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
@@ -146,31 +151,3 @@ class AclGraphManager(CudaGraphManager):
                 positions.shape[0],
             )
         return ret
-
-
-class ModelAclGraphManager(ModelCudaGraphManager, AclGraphManager):
-    """ACL Model Cuda Graph Manager for Ascend NPUs."""
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-        model_runner: Any,
-    ):
-        ModelCudaGraphManager.__init__(
-            self,
-            vllm_config,
-            device,
-            cudagraph_mode,
-            decode_query_len,
-        )
-        AclGraphManager.__init__(
-            self,
-            vllm_config,
-            device,
-            cudagraph_mode,
-            decode_query_len,
-            model_runner,
-        )
