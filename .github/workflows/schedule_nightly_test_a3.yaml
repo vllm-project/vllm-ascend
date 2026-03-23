@@ -258,9 +258,18 @@ jobs:
           - name: deepseek-v3-2-w8a8
             os: linux-aarch64-a3-16
             config_file_path: DeepSeek-V3.2-W8A8.yaml
+          - name: glm-4.7-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: GLM-4.7.yaml
           - name: kimi-k2-thinking
             os: linux-aarch64-a3-16
             config_file_path: Kimi-K2-Thinking.yaml
+          - name: kimi-k2.5
+            os: linux-aarch64-a3-16
+            config_file_path: Kimi-K2.5.yaml
+          - name: minimax-m2-5
+            os: linux-aarch64-a3-16
+            config_file_path: MiniMax-M2.5-A3.yaml
           - name: mtpx-deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
             config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml

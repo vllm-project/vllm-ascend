@@ -109,7 +109,7 @@ def clean_up():
 
 
 def main():
-    MODEL_PATH = "Qwen3/Qwen3-Omni-30B-A3B-Thinking"
+    MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
     llm = LLM(
         model=MODEL_PATH,
         tensor_parallel_size=2,
@@ -123,7 +123,7 @@ def main():
         temperature=0.6,
         top_p=0.95,
         top_k=20,
-        max_completion_tokens=16384,
+        max_tokens=16384,
     )
 
     processor = Qwen3OmniMoeProcessor.from_pretrained(MODEL_PATH)
@@ -175,6 +175,11 @@ if __name__ == "__main__":
 
 Run the following script to start the vLLM server on Multi-NPU:
 For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 1, and for 32 GB of memory, tensor-parallel-size should be at least 2.
+
+```bash
+export HCCL_BUFFSIZE=512
+export HCCL_OP_EXPANSION_MODE=AIV
+```
 
 ```bash
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking --tensor-parallel-size 2 --enable_expert_parallel

@@ -17,7 +17,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 ### Model Weight
 
 - `DeepSeek-V3.2-Exp`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
-- `DeepSeek-V3.2-Exp-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
+- `DeepSeek-V3.2-Exp-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
 - `DeepSeek-V3.2`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. Model weight in BF16 not found now.
 - `DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
@@ -564,7 +564,6 @@ Before you start, please
             "kv_port": "30000",
             "engine_id": "0",
             "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
                         "prefill": {
                                 "dp_size": 2,
                                 "tp_size": 16
@@ -639,7 +638,6 @@ Before you start, please
             "kv_port": "30000",
             "engine_id": "0",
             "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
                         "prefill": {
                                 "dp_size": 2,
                                 "tp_size": 16
@@ -716,7 +714,6 @@ Before you start, please
             "kv_port": "30100",
             "engine_id": "1",
             "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
                         "prefill": {
                                 "dp_size": 2,
                                 "tp_size": 16
@@ -793,7 +790,6 @@ Before you start, please
             "kv_port": "30100",
             "engine_id": "1",
             "kv_connector_extra_config": {
-                        "use_ascend_direct": true,
                         "prefill": {
                                 "dp_size": 2,
                                 "tp_size": 16
