@@ -146,40 +146,6 @@ class NPUModelRunner(GPUModelRunner):
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
 
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        intermediate_tensors: IntermediateTensors | None = None,
-        dummy_run: bool = False,
-        skip_attn_for_dummy_run: bool = False,
-    ) -> ModelRunnerOutput | IntermediateTensors | None:
-        """Override GPUModelRunner.execute_model for Ascend NPUs by there reasons:
-        1. when run fullgraph, we need to use ret value of `get_cudagraph_and_dp_padding`
-        to set forward_context in `run_fullgraph`.
-        """
-
-        # use closure to store return value of get_cudagraph_and_dp_padding in model runner.
-        def wrapper(func):
-            @functools.wraps(func)
-            def inner(*args, **kwargs):
-                self.cudagraph_and_dp_padding = func(*args, **kwargs)
-                return self.cudagraph_and_dp_padding
-
-            return inner
-
-        if self.cudagraph_and_dp_padding is None:
-            vllm.v1.worker.gpu.model_runner.get_cudagraph_and_dp_padding = wrapper(
-                vllm.v1.worker.gpu.model_runner.get_cudagraph_and_dp_padding
-            )
-
-        return super().execute_model(
-            scheduler_output,
-            intermediate_tensors,
-            dummy_run,
-            skip_attn_for_dummy_run,
-        )
-
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,

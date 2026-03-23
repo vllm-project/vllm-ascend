@@ -16,22 +16,81 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+from typing import Any
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import ModelCudaGraphManager
+from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager, BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
+from vllm.logger import logger
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 
 
-class ModelAclGraphManager(ModelCudaGraphManager):
+class AclGraphManager(CudaGraphManager):
+    """ACL Graph Manager for Ascend NPUs."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        use_aux_hidden_state_outputs: bool,
+        device: torch.device,
+        model_runner: Any,  # NPUModelRunner type, in case circular import, so we pass it as Any
+    ):
+        # set model runner attribute, so we can access attributes model runner
+        # when call `run_fullgraph` method in CudaGraphManager,
+        # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
+        self.model_runner = model_runner
+        super().__init__(
+            vllm_config,
+            use_aux_hidden_state_outputs,
+            device,
+        )
+        # vllm-ascend need to update graph params of attention backend.
+        # so we need to set graph params before capture full graph.
+        if super().needs_capture():
+            set_graph_params(self.cudagraph_sizes)
+
+    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Override run_fullgraph to update full graph params in run_fullgraph."""
+        num_tokens = desc.num_tokens
+        logger.info_once(f"run_fullgraph with num_tokens={num_tokens}")
+        ret = super().run_fullgraph(desc)
+        assert self.model_runner.cudagraph_and_dp_padding is not None
+
+        positions = self.model_runner.input_buffers.positions[:num_tokens]
+        num_tokens_across_dp = torch.Tensor([num_tokens] * self.model_runner.dp_size, device=self.device)
+        with set_forward_context(
+            self.model_runner.input_batch.attn_metadata,
+            self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=desc.cg_mode,
+            num_tokens_across_dp=num_tokens_across_dp,
+            batch_descriptor=None,  # Full graph model don't need batch_descriptor
+            slot_mapping=self.model_runner.input_batch.slot_mappings,
+        ):
+            forward_context = get_forward_context()
+            update_full_graph_params(
+                # FIXME(Ronald1995): support hybrid attn backend
+                list(self.model_runner.attn_backends.values())[0],
+                self.model_runner.update_stream,
+                forward_context,
+                num_tokens,
+                self.vllm_config,
+                self.model_runner.speculative_config,
+                positions.shape[0],
+            )
+        return ret
+
+
+class ModelAclGraphManager(AclGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
     def capture(
