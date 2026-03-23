@@ -47,8 +47,8 @@ Python 3.11
 ### 3. 安装依赖
 
 ```bash
-# 设置 Python 路径
-export PATH=/usr/local/python3.11.13/bin:$PATH
+# Ensure Python 3.11 is in your PATH. For example, using a virtual environment:
+# python3.11 -m venv venv && source venv/bin/activate
 
 # 安装 transformers
 pip install transformers==4.55.2
@@ -70,7 +70,7 @@ pip install vllm-ascend
 ```bash
 # 使用 huggingface-cli
 huggingface-cli download Qwen/Qwen2.5-Math-RM-72B \
-  --local-dir /data/Qwen2.5-Math-RM-72B \
+  --local-dir <path_to_your_model>/Qwen2.5-Math-RM-72B \
   --local-dir-use-symlinks False
 ```
 
