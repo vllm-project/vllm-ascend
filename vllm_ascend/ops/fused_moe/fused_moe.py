@@ -259,6 +259,12 @@ class AscendMoERunner(DefaultMoERunner):
         else:
             self.moe_forward = torch.ops.vllm.moe_forward_shared
 
+    @property
+    def use_dp_chunking(self) -> bool:
+        """Ascend uses its own forward_impl path, not the FlashInfer Cutlass
+        chunked path. Always return False to stay on forward_impl."""
+        return False
+
     def forward_impl(
         self,
         layer: torch.nn.Module,
