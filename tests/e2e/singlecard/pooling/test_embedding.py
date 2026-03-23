@@ -70,7 +70,6 @@ def test_embed_models_using_prefix_caching_correctness(model: str):
             runner="pooling",
             max_model_len=None,
             cudagraph_capture_sizes=[4],
-            enable_prefix_caching=True,
     ) as vllm_runner_with_caching:
         vllm_outputs_with_caching = vllm_runner_with_caching.embed(queries)
 
