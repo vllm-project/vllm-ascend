@@ -77,6 +77,10 @@ class BaseDeviceAdaptor:
             )
 
     @staticmethod
+    def normalize_mxfp8_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
+        return scale
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
@@ -217,6 +221,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
+    def normalize_mxfp8_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
+        if scale is None or scale.ndim != 2:
+            return scale
+        if scale.shape[-1] % 2 != 0:
+            raise ValueError(f"Invalid MXFP8 scale shape: {tuple(scale.shape)}")
+        return scale.reshape(scale.shape[0], scale.shape[1] // 2, 2)
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
@@ -233,12 +245,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             )
 
         if dynamic_scale is None:
-            return torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
+            hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
 
-        if dynamic_scale.ndim == 2:
-            dynamic_scale = dynamic_scale.reshape(dynamic_scale.shape[0], dynamic_scale.shape[1] // 2, 2)
-
-        return hidden_states, dynamic_scale
+        return hidden_states, A5DeviceAdaptor.normalize_mxfp8_scale_layout(dynamic_scale)
 
     @staticmethod
     def npu_grouped_matmul_swiglu_quant(
@@ -275,7 +284,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
         )
-        return out, out_scale, None
+        return out, A5DeviceAdaptor.normalize_mxfp8_scale_layout(out_scale), None
 
     @staticmethod
     def get_quant_gmm2_kwargs(

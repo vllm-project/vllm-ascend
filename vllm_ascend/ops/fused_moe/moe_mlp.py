@@ -129,7 +129,7 @@ def quant_apply_mlp(
         quantized_hidden_states = None
     else:
         unquantized_hidden_states = None
-        pertoken_scale = dynamic_scale
+        pertoken_scale = DeviceOperator.normalize_mxfp8_scale_layout(dynamic_scale) if use_mxfp_quant else dynamic_scale
         quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
