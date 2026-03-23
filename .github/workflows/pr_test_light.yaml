@@ -80,7 +80,8 @@ jobs:
               - 'tests/e2e/310p/**'
               - 'vllm_ascend/worker/model_runner_v1.py'
               - 'vllm_ascend/attention/attention_v1.py'
-              - 'vllm_ascend/ops/fused_moe/**'
+              - 'vllm_ascend/ops/**'
+              - 'vllm_ascend/patch/**'
               - 'CMakeLists.txt'
 
   ut:
