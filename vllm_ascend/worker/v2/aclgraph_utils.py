@@ -39,57 +39,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 
 
-# class AclGraphManager(CudaGraphManager):
-#     """ACL Cuda Graph Manager for Ascend NPUs."""
-
-#     @torch.inference_mode()
-#     def capture(
-#         self,
-#         create_forward_fn: Callable[[BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]],
-#         progress_bar_desc: str = "Capturing CUDA graphs",
-#     ) -> None:
-#         """Override capture method to set capturing flag to True before capture."""
-#         with graph_capture(device=self.device):
-#             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
-#             # activations so FULL activations should fit in already allocated
-#             # buffers in the graph pool.
-#             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
-#                 if mode not in self._capture_descs:
-#                     continue
-
-#                 descs = self._capture_descs[mode]
-#                 if is_global_first_rank():
-#                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
-#                 for desc in descs:
-#                     # Prepare inputs and get forward function
-#                     forward_fn = create_forward_fn(desc)
-
-#                     # Warmup
-#                     forward_fn(CUDAGraphMode.NONE)
-
-#                     # Capture
-#                     logger.debug("CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc)
-#                     # Set capturing flag to True before capture, this is only needed for vllm-ascend.
-#                     _EXTRA_CTX.capturing = True
-#                     if desc.cg_mode == CUDAGraphMode.PIECEWISE:
-#                         forward_fn(CUDAGraphMode.PIECEWISE)
-#                     else:
-#                         assert desc not in self.graphs, f"Graph already captured for {desc}"
-#                         graph = torch.cuda.CUDAGraph()
-#                         # Sync offloader's copy stream before capture.
-#                         # Ensure any pre-capture prefetches from offloader are complete.
-#                         get_offloader().sync_prev_onload()
-#                         with torch.cuda.graph(graph, self.pool):
-#                             forward_fn(CUDAGraphMode.NONE)
-#                             # Join offloader's copy stream after forward to avoid
-#                             # unjoined stream error. The last layer's start_prefetch
-#                             # forks copy_stream, but wait_prefetch only happens in
-#                             # the next forward pass.
-#                             get_offloader().join_after_forward()
-#                         self.graphs[desc] = graph
-#         self._graphs_captured = True
-
-
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
@@ -150,3 +99,47 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 positions.shape[0],
             )
         return ret
+
+    def capture(
+        self,
+        model: nn.Module,
+        model_state: ModelState,
+        input_buffers: InputBuffers,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        has_lora: bool = False,
+        use_aux_hidden_state_outputs: bool = False,
+        progress_bar_desc: str = "Capturing CUDA graphs",
+    ) -> None:
+        """Capture CUDA graphs for model forward pass."""
+        model = ModelWithContext(model)
+        return super().capture(
+            model,
+            model_state,
+            input_buffers,
+            block_tables,
+            attn_groups,
+            kv_cache_config,
+            has_lora,
+            use_aux_hidden_state_outputs,
+            progress_bar_desc,
+        )
+
+
+class ModelWithContext(nn.Module):
+    """Define a wrapper model to inject forward context.
+    so we can inherit vllm's CudaGraphManager._capture_full_graph.
+    """
+
+    def __init__(self, original_model):
+        super().__init__()
+        self.original_model = original_model
+
+    def forward(self, *args, **kwargs):
+        # In warmup phase, capturing=False by default.
+        # when capturing, we need to set capturing=True in forward context.
+        if torch.npu.is_current_stream_capturing():
+            _EXTRA_CTX.capturing = True
+
+        return self.original_model(*args, **kwargs)
