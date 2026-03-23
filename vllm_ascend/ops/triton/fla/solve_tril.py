@@ -377,13 +377,16 @@ def solve_tril(
 
     Ai = torch.empty(B, T, H, BT, device=A.device, dtype=output_dtype)
     merge_fn = merge_16x16_to_32x32_inverse_kernel if BT == 32 else merge_16x16_to_64x64_inverse_kernel
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    NT_total = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+
+    if cu_seqlens is not None and chunk_indices_bt is None:
+        chunk_indices_bt = prepare_chunk_indices(cu_seqlens, BT)
+    chunk_indices = chunk_indices_bt
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
     if BT == 64:
         # Process multiple 64-row blocks per kernel to reduce launch overhead
         MERGE_BATCH = 1
-        NT_merge = triton.cdiv(NT_total, MERGE_BATCH)
+        NT_merge = triton.cdiv(NT, MERGE_BATCH)
         merge_fn[NT_merge, B * H](
             A=A,
             Ad=Ad,
@@ -394,12 +397,12 @@ def solve_tril(
             H=H,
             BT=BT,
             MERGE_BATCH=MERGE_BATCH,
-            NT_CHUNKS=NT_total,
+            NT_CHUNKS=NT,
             num_warps=4,
             num_stages=3,
         )
     else:
-        merge_fn[NT_total, B * H](
+        merge_fn[NT, B * H](
             A=A,
             Ad=Ad,
             Ai=Ai,
