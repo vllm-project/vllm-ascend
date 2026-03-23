@@ -42,7 +42,6 @@ from vllm_ascend.utils import (
     flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
-    is_vl_model,
     refresh_block_size,
     update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
@@ -171,6 +170,20 @@ class NPUPlatform(Platform):
     @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        cache_config = vllm_config.cache_config
+        if cache_config.user_specified_block_size:
+            # User specified --block-size; keep it.
+            return
+        model_config = vllm_config.model_config
+        if model_config is not None and model_config.is_hybrid:
+            # Hybrid attention+mamba models rely on the model-specific sizing
+            # logic rather than the generic platform default.
+            return
+
+        super().update_block_size_for_backend(vllm_config)
 
     @classmethod
     def set_device(cls, device: torch.device):
@@ -406,11 +419,6 @@ class NPUPlatform(Platform):
             vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if enable_sp(vllm_config):
-            assert not is_vl_model(vllm_config), """Flash Comm V1 is not supported for VL models. \
-                Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
-                For optimal performance with VL models, we recommend enabling Sequence Parallelism \
-                via --compilation-config '{"pass_config": {"enable_sp": true}}'."""
-
             assert vllm_config.parallel_config.tensor_parallel_size > 1, (
                 "Flash Comm v1 is only supported when tp_size > 1."
             )
