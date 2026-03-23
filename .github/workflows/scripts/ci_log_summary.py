@@ -977,6 +977,8 @@ def main() -> None:
     if args.run_id is not None:
         result = process_run(args.run_id, repo=args.repo)
     else:
+        if not args.log_file.exists() or args.log_file.stat().st_size == 0:
+            return
         log_text = args.log_file.read_text(encoding="utf-8", errors="replace")
         result = process_local_log(log_text, job_name=args.step_name)
 
