@@ -32,9 +32,6 @@ TENSOR_PARALLELS = [1]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 async def test_models(model: str, tp_size: int) -> None:
-    pytest.skip(
-        "EPLB output is different without EPLB, see issue: https://github.com/vllm-project/vllm-ascend/issues/7408",
-    )
     encode_port = get_open_port()
     pd_port = get_open_port()
     vllm_server_args = [
