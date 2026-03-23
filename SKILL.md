@@ -25,6 +25,7 @@
 ```
 
 **AI 输出摘要**:
+
 - 奖励模型不能直接使用 AsyncLLMEngine（专为生成模型设计）
 - 主要障碍：输出格式不匹配（标量 vs token 序列）、推理方式不同
 - 推荐方案：使用 vLLM 模型加载器 + 自定义推理逻辑
@@ -44,7 +45,9 @@
 请生成完整的 Python 代码。
 ```
 
-**生成的代码**: `vllm_reward_adapter.py`
+**生成的代码**: 
+
+`vllm_reward_adapter.py`
 
 ### 3. 测试用例生成 Prompt
 
@@ -61,7 +64,9 @@
 请生成完整的测试代码。
 ```
 
-**生成的代码**: `test_qwen2_5_math_rm_72b.py`
+**生成的代码**: 
+
+`test_qwen2_5_math_rm_72b.py`
 
 ### 4. 文档生成 Prompt
 
@@ -80,21 +85,27 @@
 请生成 Markdown 格式的完整文档。
 ```
 
-**生成的文档**: `qwen2_5_math_rm_72b_deployment.md`
+**生成的文档**: 
+
+`qwen2_5_math_rm_72b_deployment.md`
 
 ## 适配开发流程
 
 ### 阶段 1: 问题分析（Task 2 - 10分）
 
-**交付物**: `SKILL_PROBLEM_ANALYSIS.md`
+**交付物**:
+
+`SKILL_PROBLEM_ANALYSIS.md`
 
 **关键发现**:
+
 1. **Git LFS 下载问题**: 文件损坏，使用 HuggingFace Hub 重新下载
 2. **版本兼容性问题**: transformers 5.3.0 与模型代码不兼容，降级到 4.43.0
 3. **配置缺失**: config.json 缺少 pad_token_id，手动添加
 4. **vLLM 适配限制**: 奖励模型无法直接使用 vLLM 的生成优化
 
 **解决方案**:
+
 - 使用 HuggingFace 镜像加速下载
 - 版本锁定：transformers==4.43.0
 - 配置修复：添加 "pad_token_id": 151643
@@ -102,6 +113,7 @@
 ### 阶段 2: 适配开发（Task 3 - 20分）
 
 **交付物**:
+
 - `vllm_reward_adapter.py` - vLLM 适配器
 - `test_qwen2_5_math_rm_72b.py` - 测试用例
 - `qwen2_5_math_rm_72b_deployment.md` - 部署教程
@@ -143,6 +155,7 @@ class VLLMRewardAdapter:
 ```
 
 **适配收益**:
+
 - 模型加载时间减少 25%
 - 单条推理时间减少 15%
 - 批量吞吐量提升 22%
@@ -184,27 +197,36 @@ class VLLMRewardAdapter:
 
 ### 挑战 1: 奖励模型与 vLLM 的架构差异
 
-**问题**: vLLM 专为生成模型设计，奖励模型输出标量分数
+**问题**: 
+
+vLLM 专为生成模型设计，奖励模型输出标量分数
 
 **解决方案**: 
+
 - 使用 vLLM 的模型加载器加载模型
 - 实现自定义的前向传播逻辑
 - 保持 Transformers 作为回退
 
 ### 挑战 2: 版本兼容性
 
-**问题**: transformers 5.3.0 与模型代码不兼容
+**问题**:
+
+transformers 5.3.0 与模型代码不兼容
 
 **解决方案**:
+
 - 锁定 transformers==4.43.0 用于模型推理
 - 升级到 transformers==4.55.2 用于 vLLM 适配
 - 使用双版本策略
 
 ### 挑战 3: vLLM 模块路径变化
 
-**问题**: vLLM 0.11.0 更改了模块路径
+**问题**: 
+
+vLLM 0.11.0 更改了模块路径
 
 **解决方案**:
+
 ```python
 # 兼容新旧版本
 try:
@@ -266,7 +288,15 @@ except ImportError:
 
 ---
 
-**创建日期**: 2026-03-22  
-**适配版本**: v3.0.0  
-**状态**: 生产就绪 ✅  
-**AI 辅助**: 是 ✅
+**创建日期**:
+
+2026-03-22  
+**适配版本**: 
+
+v3.0.0  
+**状态**: 
+
+生产就绪 ✅  
+**AI 辅助**: 
+
+是 ✅
