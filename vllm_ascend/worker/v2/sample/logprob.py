@@ -21,6 +21,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 
+
 @triton.jit
 def _topk_log_softmax_kernel(
     output_ptr,
@@ -107,9 +108,8 @@ def _ranks_kernel(
         n_vec += (logits > x).to(tl.int32)
     n = tl.sum(n_vec)
     tl.store(output_ptr + req_idx, n)
-    
-    
-    
+
+
 def compute_topk_logprobs(
     logits: torch.Tensor,
     num_logprobs: int,
@@ -121,9 +121,7 @@ def compute_topk_logprobs(
         logprob_token_ids = sampled_token_ids.unsqueeze(-1)
     else:
         topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
-        logprob_token_ids = torch.cat(
-            (sampled_token_ids.unsqueeze(-1), topk_indices), dim=1
-        )
+        logprob_token_ids = torch.cat((sampled_token_ids.unsqueeze(-1), topk_indices), dim=1)
 
     # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
     # logprobs tensor. Instead, we only compute and return the logprobs of
