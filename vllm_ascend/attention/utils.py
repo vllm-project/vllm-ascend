@@ -123,7 +123,7 @@ class AscendPrefillContextParallelMetadata:
     # the max number of unpadded tokens in all ranks
     max_num_tokens_across_pcp: int = 0
 
-    # to be renamed 每个rank上处理的pad前的token数
+    # the number of scheduled tokens on the current rank before padding
     total_num_scheduled_tokens: int = 0
 
 
