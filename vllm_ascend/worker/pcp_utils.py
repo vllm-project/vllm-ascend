@@ -131,7 +131,7 @@ class PCPManager:
         self.pcp_pads_logits_hybrid_attn = torch.ones(self.max_num_reqs, dtype=torch.int32) * (self.pcp_world_size - 1)
         self.pcp_padded_tokens_fla = 0
         self.pcp_padded_tokens_length = 0
-        self.num_scheduled_tokens_padded = None
+        self.num_scheduled_tokens_padded: np.ndarray | None = None
         self.max_num_tokens_across_pcp = 0
         self.pcp_tokens_padded = None
         self.total_num_scheduled_tokens = 0
