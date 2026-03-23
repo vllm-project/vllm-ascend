@@ -358,7 +358,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             self.set_finished_request(req_meta.req_id)
         self.request_queue.task_done()
 
-        logger.info(
+        logger.debug(
             "Storing KV cache for %d out of %d blocks (skip_block_num=%d) for request %s",
             len(keys),
             total_block,
