@@ -207,6 +207,7 @@ GET /health
 ```
 
 **响应示例**:
+
 ```json
 {
   "status": "healthy",
@@ -231,6 +232,7 @@ Content-Type: application/json
 ```
 
 **响应示例**:
+
 ```json
 {
   "reward_score": 0.85,
@@ -262,6 +264,7 @@ Content-Type: application/json
 ```
 
 **响应示例**:
+
 ```json
 {
   "scores": [0.85, 0.82],
@@ -331,19 +334,32 @@ pytest test_qwen2_5_math_rm_72b.py::TestQwen2_5_Math_RM_72B_Performance -v
 
 ### 测试覆盖范围
 
-1. **基础功能测试**: 模型加载、tokenizer、对话模板
-2. **奖励模型场景**: 数学问题评分、答案质量评估
-3. **边界条件**: 空输入、超长输入、特殊字符
-4. **性能测试**: 延迟、吞吐量、内存使用
-5. **vLLM 适配**: 双后端切换、插件验证
+1. **基础功能测试**:
+
+模型加载、tokenizer、对话模板
+2. **奖励模型场景**: 
+
+数学问题评分、答案质量评估
+3. **边界条件**: 
+
+空输入、超长输入、特殊字符
+4. **性能测试**: 
+
+延迟、吞吐量、内存使用
+5. **vLLM 适配**: 
+
+双后端切换、插件验证
 
 ## 故障排除
 
 ### 问题 1: 模型加载失败
 
-**症状**: `ModuleNotFoundError: No module named 'transformers'`
+**症状**: 
+
+`ModuleNotFoundError: No module named 'transformers'`
 
 **解决方案**:
+
 ```bash
 # 检查 Python 路径
 export PATH=/usr/local/python3.11.13/bin:$PATH
@@ -354,9 +370,12 @@ pip install transformers==4.55.2
 
 ### 问题 2: 内存不足
 
-**症状**: `CUDA out of memory` 或 `NPU out of memory`
+**症状**: 
+
+`CUDA out of memory` 或 `NPU out of memory`
 
 **解决方案**:
+
 ```python
 # 使用 CPU 加载
 model = AutoModel.from_pretrained(
@@ -373,9 +392,12 @@ model = AutoModel.from_pretrained(
 
 ### 问题 3: vLLM 导入失败
 
-**症状**: `ImportError: cannot import name 'AutoVideoProcessor'`
+**症状**: 
+
+`ImportError: cannot import name 'AutoVideoProcessor'`
 
 **解决方案**:
+
 ```bash
 # 升级 transformers
 pip install transformers>=4.55.2
@@ -383,9 +405,12 @@ pip install transformers>=4.55.2
 
 ### 问题 4: API 服务无法启动
 
-**症状**: `Address already in use`
+**症状**: 
+
+`Address already in use`
 
 **解决方案**:
+
 ```bash
 # 查找占用端口的进程
 lsof -i :8000
@@ -444,6 +469,12 @@ logger.info(f"Inference latency: {latency*1000:.2f}ms")
 
 ---
 
-**作者**: AI Assistant  
-**更新日期**: 2026-03-22  
-**文档版本**: 1.0.0
+**作者**: 
+
+yuhongming-2026 
+**更新日期**: 
+
+2026-03-22  
+**文档版本**:
+
+1.0.0
