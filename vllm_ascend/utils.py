@@ -697,6 +697,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
+
 def register_ascend_pluggable_layers(vllm_config: VllmConfig | None = None):
     global _ASCEND_LAYER_IS_REIGISTERED
     if _ASCEND_LAYER_IS_REIGISTERED:
