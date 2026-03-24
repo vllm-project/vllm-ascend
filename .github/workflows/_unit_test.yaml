@@ -42,6 +42,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install uv
 
       - name: Checkout vllm-project/vllm repo
@@ -71,8 +72,10 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+        shell: bash
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          set -o pipefail
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
             --ignore tests/ut/model_loader/netloader/test_netloader_elastic.py \
             --ignore tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
@@ -81,7 +84,18 @@ jobs:
             --ignore tests/ut/kv_connector/test_mooncake_connector.py \
             --ignore tests/ut/worker/test_worker_v1.py \
             --ignore tests/ut/spec_decode/test_mtp_proposer.py \
-            --ignore tests/ut/kv_connector/test_mooncake_layerwise_connector.py
+            --ignore tests/ut/kv_connector/test_mooncake_layerwise_connector.py \
+            2>&1 | tee /tmp/unit-test.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize unit test failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --mode ut \
+            --step-name "Run unit test" \
+            --log-file /tmp/unit-test.log \
+            --output "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged

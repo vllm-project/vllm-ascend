@@ -17,7 +17,7 @@ from vllm.distributed.parallel_state import (
     init_model_parallel_group,
     patch_tensor_parallel_group,
 )
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
@@ -217,6 +217,8 @@ class SpecDecodeBaseProposer(EagleProposer):
                 self.model.config.image_token_index = model.config.image_token_id
             elif self.get_model_name(model) == "PixtralForConditionalGeneration":
                 self.model.config.image_token_index = model.config.vision_config.image_token_id
+            elif self.get_model_name(model) == "KimiK25ForConditionalGeneration":
+                self.model.config.image_token_index = model.config.media_placeholder_token_id
             else:
                 self.model.config.image_token_index = model.config.image_token_index
             target_language_model = model.get_language_model()
@@ -388,7 +390,8 @@ class SpecDecodeBaseProposer(EagleProposer):
                     : num_reqs * self.decode_threshold
                 ]
 
-            builder = self.runner.attn_groups[0][0].get_metadata_builder()
+            assert len(self.draft_attn_groups) > 0
+            builder = self.draft_attn_groups[0].get_metadata_builder()
             # update the tensor's address for each step.
             for draft_step in range(self.num_speculative_tokens):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -436,7 +439,6 @@ class SpecDecodeBaseProposer(EagleProposer):
                 target_positions=model_positions,
                 inputs_embeds=None,
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
-                is_dummy=True,
                 num_tokens=num_tokens,
             )
             forward_context = get_forward_context()
@@ -455,6 +457,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         next_token_ids: torch.Tensor,
         token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
+        target_model_batch_desc: BatchDescriptor,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         req_scheduled_tokens=None,
@@ -494,23 +497,6 @@ class SpecDecodeBaseProposer(EagleProposer):
         assert self.runner is not None
         if self.use_cuda_graph and num_tokens <= self.runner.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.runner.cudagraph_dispatcher._bs_to_padded_graph_size[num_tokens]
-            if not (
-                self.speculative_config.disable_padded_drafter_batch
-                and self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
-            ):
-                # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
-                # should have been done in model runner but not. For example, at prefill stage, target model
-                # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
-                # while draft model is run in graph model, which means we should pad the `query_start_loc`.
-                # Need to be fixed in the future.
-                num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
-                    num_input_tokens, common_attn_metadata.num_reqs, common_attn_metadata.num_reqs
-                )
-                common_attn_metadata.num_reqs = num_reqs_padded
-                common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
-                common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
-                common_attn_metadata.seq_lens = self.runner.seq_lens.gpu[:num_reqs_padded]
-                common_attn_metadata.seq_lens_cpu = self.runner.seq_lens.cpu[:num_reqs_padded]
         else:
             num_input_tokens = num_tokens
 
@@ -523,11 +509,29 @@ class SpecDecodeBaseProposer(EagleProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_input_tokens, uniform_decode=True, has_lora=has_lora
+                num_tokens=num_input_tokens, uniform_decode=target_model_batch_desc.uniform, has_lora=has_lora
             )
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
+            # should have been done in model runner but not. For example, at prefill stage, target model
+            # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
+            # while draft model is run in graph model, which means we should pad the `query_start_loc`.
+            # Need to be fixed in the future.
+            num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                num_input_tokens, common_attn_metadata.num_reqs, common_attn_metadata.num_reqs
+            )
+            common_attn_metadata.num_reqs = num_reqs_padded
+            common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
+            common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
+            common_attn_metadata.block_table_tensor = self._pad_tensor(
+                common_attn_metadata.block_table_tensor, num_reqs_padded
+            )
+            common_attn_metadata.seq_lens = self.runner.seq_lens.gpu[:num_reqs_padded]
+            common_attn_metadata.seq_lens_cpu = self.runner.seq_lens.cpu[:num_reqs_padded]
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -550,7 +554,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        builder = self.runner.attn_groups[0][0].get_metadata_builder()
+        assert len(self.draft_attn_groups) > 0
+        builder = self.draft_attn_groups[0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
 
         if self.uses_mrope:
@@ -696,7 +701,6 @@ class SpecDecodeBaseProposer(EagleProposer):
         inputs_embeds,
         multi_steps_attn_metadata,
         num_tokens,
-        is_dummy=False,
         is_prefill=None,
     ) -> torch.Tensor:
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
@@ -749,7 +753,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                     self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: last_hidden_states.shape[0]],
                 )
 
-        if lmhead_tp_enable() and not is_dummy:
+        if lmhead_tp_enable():
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
@@ -760,7 +764,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
         logits = self.model.compute_logits(sample_hidden_states)
 
-        if lmhead_tp_enable() and num_indices < logits.shape[0] and not is_dummy:
+        if lmhead_tp_enable() and num_indices < logits.shape[0]:
             logits = logits[:num_indices]
             token_indices_to_sample = token_indices_to_sample[:num_indices]
 
@@ -873,7 +877,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             )
 
             num_indices = token_indices_to_sample.shape[0]
-            if lmhead_tp_enable() and not is_dummy:
+            if lmhead_tp_enable():
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
@@ -885,7 +889,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
             logits = self.model.compute_logits(sample_hidden_states)
 
-            if lmhead_tp_enable() and num_indices < logits.shape[0] and not is_dummy:
+            if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
 
@@ -1100,15 +1104,17 @@ class SpecDecodeBaseProposer(EagleProposer):
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
         if draft_step == 1:
-            if aclgraph_runtime_mode == CUDAGraphMode.FULL and (pad_size := input_batch_size - batch_size) > 0:
+            if aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 common_attn_metadata.num_reqs = input_batch_size
                 common_attn_metadata.block_table_tensor = self._pad_tensor(
-                    common_attn_metadata.block_table_tensor, pad_size
+                    common_attn_metadata.block_table_tensor, input_batch_size
                 )
-                common_attn_metadata.seq_lens = self._pad_tensor(common_attn_metadata.seq_lens, pad_size)
-                common_attn_metadata.seq_lens_cpu = self._pad_tensor(common_attn_metadata.seq_lens_cpu, pad_size)
+                common_attn_metadata.seq_lens = self._pad_tensor(common_attn_metadata.seq_lens, input_batch_size)
+                common_attn_metadata.seq_lens_cpu = self._pad_tensor(
+                    common_attn_metadata.seq_lens_cpu, input_batch_size
+                )
                 common_attn_metadata.num_computed_tokens_cpu = self._pad_tensor(
-                    common_attn_metadata.num_computed_tokens_cpu, pad_size
+                    common_attn_metadata.num_computed_tokens_cpu, input_batch_size
                 )
                 common_attn_metadata.query_start_loc = self.arange[: input_batch_size + 1]
                 common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
@@ -1535,8 +1541,10 @@ class SpecDecodeBaseProposer(EagleProposer):
 
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
+        assert len(self.draft_attn_groups) > 0
+        attn_backend = self.draft_attn_groups[0].backend
         update_full_graph_params(
-            self.runner.attn_backend,
+            attn_backend,
             self.update_stream,
             forward_context,
             num_tokens,
@@ -1546,10 +1554,14 @@ class SpecDecodeBaseProposer(EagleProposer):
         )
 
     # padding tensor into desired size
-    def _pad_tensor(self, tensor, pad_size):
-        pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
-        padded_tensor = F.pad(tensor, pad, mode="constant", value=0)
-        return padded_tensor
+    def _pad_tensor(self, tensor, desired_size):
+        pad_size = desired_size - tensor.shape[0]
+        if pad_size > 0:
+            pad = [0] * (2 * tensor.dim() - 1) + [pad_size]
+            tensor = F.pad(tensor, pad, mode="constant", value=0)
+        else:
+            tensor = tensor[:desired_size]
+        return tensor
 
     def maybe_pad_and_reduce(
         self,

@@ -153,6 +153,18 @@ class BaseDeviceAdaptor:
             output_dtype=fallback_output_dtype,
         )[0]
 
+    @staticmethod
+    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+        torch_npu.atb.npu_paged_cache_load(
+            cache_kv_c,
+            cache_k_pe,
+            block_table,
+            context_seq_len_npu,
+            seq_starts=seq_starts,
+            key=key,
+            value=value,
+        )
+
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
@@ -356,6 +368,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             output_dtype=output_dtype,
             **gmm2_kwargs,
         )[0]
+
+    @staticmethod
+    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+        torch_npu.npu_gather_pa_kv_cache(
+            cache_kv_c,
+            cache_k_pe,
+            block_table,
+            context_seq_len_npu,
+            seq_offset=seq_offset,
+            key=key,
+            value=value,
+        )
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:

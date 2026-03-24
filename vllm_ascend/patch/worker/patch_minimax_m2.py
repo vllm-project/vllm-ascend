@@ -28,6 +28,8 @@ from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.models.minimax_m2 import MiniMaxM2Attention, MiniMaxM2Model, MiniMaxM2MoE
 from vllm.platforms import current_platform
 
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
+
 FP8_DTYPES = tuple(
     getattr(torch, dtype_name)
     for dtype_name in (
@@ -172,3 +174,31 @@ def _patched_load_weights(
 
 
 MiniMaxM2Model.load_weights = _patched_load_weights
+
+
+def _patch_forward(
+    self,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    qkv, _ = self.qkv_proj(hidden_states)
+    cos, sin = get_cos_and_sin_slice()
+    q, k, v = torch.ops.vllm.split_qkv_tp_rmsnorm_rope(
+        input=qkv,
+        q_weight=self.q_norm.weight,
+        k_weight=self.k_norm.weight,
+        q_hidden_size=self.q_size,
+        kv_hidden_size=self.kv_size,
+        head_dim=self.head_dim,
+        rotary_dim=getattr(self.rotary_emb, "rotary_dim", self.head_dim),
+        eps=self.q_norm.variance_epsilon,
+        tp_world=self.q_norm.tp_world,
+        cos=cos,
+        sin=sin,
+    )
+    attn_output = self.attn(q, k, v)
+    output, _ = self.o_proj(attn_output)
+    return output
+
+
+MiniMaxM2Attention.forward = _patch_forward
