@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from numpy import uint
 import numpy as np
 import torch
 from vllm.config import VllmConfig
@@ -366,7 +367,7 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np: np.ndarray,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_desc_num_reqs: int | None = None,
-    ) -> int:
+    ) -> tuple[np.ndarray, int]:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
