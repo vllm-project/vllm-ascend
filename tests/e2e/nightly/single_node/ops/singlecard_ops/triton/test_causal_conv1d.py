@@ -272,11 +272,9 @@ def test_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim,
         conv_state_indices=padded_state_indices,
         pad_slot_id=PAD_SLOT_ID,
     )
-    out_ref = causal_conv1d_update_ref(x_ref[:batch_size],
-                                       conv_state_ref,
-                                       weight,
-                                       bias,
-                                       activation=activation)
+    out_ref = causal_conv1d_update_ref(
+        x_ref[:batch_size].transpose(1, 2), conv_state_ref, weight, bias, activation=activation
+    ).transpose(1, 2)
 
     assert torch.equal(conv_state[conv_state_indices, :], conv_state_ref)
     assert torch.equal(conv_state[unused_states_bool],
