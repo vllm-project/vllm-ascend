@@ -707,7 +707,7 @@ def register_ascend_pluggable_layers(vllm_config: VllmConfig | None = None):
     global REGISTERED_ASCEND_LAYERS
     REGISTERED_ASCEND_LAYERS = {
         "RelPosAttention": AscendRelPosAttention,
-        "CustomQwen2Decoder": AscendCustomQwen2Decoder
+        "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         # Add Ascend PluggableLayer here.
     }
 
