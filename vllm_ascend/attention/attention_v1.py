@@ -208,6 +208,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     Handles attention mask generation and metadata preparation for
     Ascend FlashAttention backend.
     """
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
