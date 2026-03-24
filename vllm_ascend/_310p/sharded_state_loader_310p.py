@@ -59,8 +59,10 @@ class ShardedStateLoader310(ShardedStateLoader):
         if quant_config is None:
             quantize_type = "FLOAT"
         else:
-            qd = getattr(quant_config, "quant_description", None) or {}
-            quantize_type = qd.get("model_quant_type", "FLOAT")
+            try:
+                quantize_type = quant_config.quant_description.get("model_quant_type", "FLOAT")
+            except AttributeError:
+                quantize_type = "FLOAT"
         quant_description["model_quant_type"] = quantize_type
         quant_description["version"] = "1.0.0"
         state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
