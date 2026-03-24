@@ -16,9 +16,10 @@
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
 import argparse
-import re
 import sys
 from datetime import datetime
+
+import regex as re
 
 p = re.compile(r"@(?P<user>[A-Za-z0-9-_]+)[^\`]*\`(?P<sha>[0-9a-fA-F]+)\`\s*[-–—]\s*(?P<date>.+)$")
 
