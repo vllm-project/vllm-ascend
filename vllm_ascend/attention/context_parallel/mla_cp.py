@@ -61,7 +61,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     CPChunkedContextMetadata,
     _npu_attention_update,
     _process_attn_out_lse,
-    _npu_update_dycp_attn,
+    _npu_update_dycp_attn_with_mask,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
@@ -116,7 +116,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         fast_build: bool = False,
     ) -> AscendMLAMetadata:
         metadata_cls = super().build(common_prefix_len, common_attn_metadata)
-        if self.common_pcp_size > 1:
+        if self.common_pcp_size > 1 and self.dycp_size == 1:
             self.slot_mapping[: self.num_decode_tokens] = self.slot_mapping[
                 : self.num_decode_tokens * self.common_pcp_size : self.common_pcp_size
             ]
@@ -363,7 +363,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         update_stream,
         forward_context,
         num_tokens,
-        num_dycp_reqs,
+        num_dycp_reqs: int = 0,
         vllm_config=None,
         speculative_config=None,
         num_dcp_pcp_tokens=None,
@@ -439,7 +439,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     out=[attn_output, softmax_lse],
                 )
                 torch.npu.graph_task_update_end(update_stream)
-
                 event.record(update_stream)
 
     def forward(
@@ -460,7 +459,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         dycp_metadata, dp_metadata = split_attn_metadata(attn_metadata, attn_metadata.num_dycp_reqs, self.dycp_size)
         num_decode_tokens = attn_metadata.num_decode_tokens
-        if self.common_pcp_size > 1 and attn_metadata.num_dycp_reqs:
+        if self.common_pcp_size > 1 and attn_metadata.num_dycp_reqs and attn_metadata.decode == 0:
             if dycp_metadata:
                 cp_hidden_states = hidden_states[num_decode_tokens: num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size]
                 self._forward_common(layer_name, cp_hidden_states, kv_cache, dycp_metadata, need_gather_q_kv, output[num_decode_tokens: num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size])
@@ -942,11 +941,14 @@ class AscendMlaCPImpl(AscendMLAImpl):
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
-        if self.dycp_size > 1 and num_dycp_reqs > 0:
-            attn_output[:num_dycp_reqs] = _npu_update_dycp_attn(num_dycp_reqs, attn_output, softmax_lse)
-            return self._v_up_proj(attn_output)
-        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
-        attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
+        # if self.dycp_size > 1 and num_dycp_reqs > 0:
+        #     attn_output[:num_dycp_reqs] = _npu_update_dycp_attn_with_mask(num_dycp_reqs, attn_output, softmax_lse)
+        #     return self._v_up_proj(attn_output)
+        dycp_group = get_dycp_group()
+        attn_output = _npu_update_dycp_attn_with_mask(attn_metadata.dycp_mask, attn_output, softmax_lse, dycp_group)
+        # TODO(XIAOCHEN): support dcp
+        # attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
+        # attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
 
     def _out_lse_reshape(self, attn_out: torch.Tensor, attn_lse: torch.Tensor) -> torch.Tensor:
