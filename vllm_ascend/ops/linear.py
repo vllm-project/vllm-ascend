@@ -24,7 +24,12 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import (
+    divide,
+    split_tensor_along_last_dim,
+    tensor_model_parallel_all_reduce,
+)
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
@@ -39,7 +44,14 @@ from vllm.model_executor.layers.linear import (  # noqa
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
+from vllm_ascend.ops.linear_op import (
+    dump_tp_attn_qkv_tensors_if_needed,
+    dump_tp_down_input_if_needed,
+    dump_tp_gate_up_tensors_if_needed,
+    dump_tp_row_output_if_needed,
+    get_parallel_op,
+    get_replicated_op,
+)
 from vllm_ascend.utils import enable_sp, maybe_trans_nz
 
 
@@ -158,7 +170,17 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_)
+        output = super().forward(input_)
+        dump_tp_attn_qkv_tensors_if_needed(
+            prefix=self.prefix,
+            input_tensor=input_,
+            output_tensor=output,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            comm_group=get_tp_group(),
+            source_prefix="AscendQKVParallelLinear",
+        )
+        return output
 
 
 class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -310,9 +332,68 @@ class AscendRowParallelLinear(RowParallelLinear):
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         if self.custom_op is not None:
-            return self.custom_op.apply(input_)
+            output = self.custom_op.apply(input_)
+            comm_mode = "custom" if self.tp_size > 1 else "local"
+            dump_tp_row_output_if_needed(
+                prefix=self.prefix,
+                output=output,
+                tp_rank=self.tp_rank,
+                comm_mode=comm_mode,
+                source="AscendRowParallelLinear.custom",
+            )
+            return output
 
-        return super().forward(input_)
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        if "down_proj" in self.prefix:
+            dump_tp_down_input_if_needed(
+                prefix=self.prefix,
+                input_tensor=input_parallel,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+                comm_group=get_tp_group(),
+                source="AscendRowParallelLinear.down_input",
+            )
+
+        assert self.quant_method is not None
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+
+        if self.reduce_results and self.tp_size > 1:
+            dump_tp_row_output_if_needed(
+                prefix=self.prefix,
+                output=output_parallel,
+                tp_rank=self.tp_rank,
+                comm_mode="pre_all_reduce",
+                source="AscendRowParallelLinear.pre_all_reduce",
+            )
+            output = tensor_model_parallel_all_reduce(output_parallel)
+            comm_mode = "all_reduce"
+            post_advance_decode_step = False
+        else:
+            output = output_parallel
+            comm_mode = "local"
+            post_advance_decode_step = True
+
+        if not self.return_bias:
+            output_for_dump: torch.Tensor | tuple[torch.Tensor, Parameter | None] = output
+        else:
+            output_bias = self.bias if self.skip_bias_add else None
+            output_for_dump = (output, output_bias)
+
+        dump_tp_row_output_if_needed(
+            prefix=self.prefix,
+            output=output_for_dump,
+            tp_rank=self.tp_rank,
+            comm_mode=comm_mode,
+            source="AscendRowParallelLinear",
+            advance_decode_step=post_advance_decode_step,
+        )
+        return output_for_dump
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):
@@ -401,7 +482,40 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
-        return super().forward(input_)
+        output = super().forward(input_)
+        dump_tp_attn_qkv_tensors_if_needed(
+            prefix=self.prefix,
+            input_tensor=input_,
+            output_tensor=output,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            comm_group=get_tp_group(),
+            source_prefix="AscendColumnParallelLinear",
+        )
+        if any(
+            tag in self.prefix
+            for tag in (
+                "gate_up_proj",
+                "gate_proj",
+                "up_proj",
+                "dense_h_to_4h",
+                "c_fc",
+                "fc1",
+                ".w1",
+                ".w3",
+            )
+        ):
+            output_tensor = output[0] if isinstance(output, tuple) else output
+            dump_tp_gate_up_tensors_if_needed(
+                prefix=self.prefix,
+                input_tensor=input_,
+                output_tensor=output_tensor,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+                comm_group=get_tp_group(),
+                source_prefix="AscendColumnParallelLinear",
+            )
+        return output
 
 
 class AscendReplicatedLinear(ReplicatedLinear):
