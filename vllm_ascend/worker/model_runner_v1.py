@@ -2152,13 +2152,6 @@ class NPUModelRunner(GPUModelRunner):
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
-                if isinstance(builder, GDNAttentionMetadataBuilder):
-                    # TODO(zxr): The fill_0 operation below is intended to prevent unexpected kvcache write
-                    #  operations of the Mamba Triton operator in FullGraph mode. However, this issue seems
-                    #  to have been resolved in vLLM 0.18.0. These operations should be verified and removed
-                    #  once it is confirmed that no unexpected kvcache writes will occur anymore.
-                    builder.spec_state_indices_tensor.fill_(0)
-                    builder.non_spec_state_indices_tensor.fill_(0)
                 attn_metadata_i = builder.build(
                     common_prefix_len=cascade_attn_prefix_len,
                     common_attn_metadata=common_attn_metadata,
