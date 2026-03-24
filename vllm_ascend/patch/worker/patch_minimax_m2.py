@@ -273,6 +273,13 @@ def _get_eagle3_aux_hidden_state_layers(self: "MiniMaxM2ForCausalLM") -> tuple[i
     return _get_eagle3_default_aux_hidden_state_layers(self)
 
 
+# vLLM 0.18+: `supports_eagle3(model)` is `isinstance(model, SupportsEagle3)` (see
+# `vllm.model_executor.models.interfaces`). The protocol requires `supports_eagle3`
+# on the class; monkey-patched methods alone are insufficient, otherwise
+# model_runner_v1 raises:
+# "Model does not support EAGLE3 interface but aux_hidden_state_outputs was requested".
+MiniMaxM2ForCausalLM.supports_eagle3 = True  # type: ignore[misc]
+
 MiniMaxM2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers  # type: ignore[attr-defined]
 MiniMaxM2ForCausalLM.get_eagle3_default_aux_hidden_state_layers = (  # type: ignore[attr-defined]
     _get_eagle3_default_aux_hidden_state_layers
