@@ -58,7 +58,6 @@ class AscendRelPosAttention(RelPosAttention):
                 next_tokens=2147483647,
                 num_heads=self.num_heads,
             )
-
         else:
             x = torch_npu.npu_prompt_flash_attention(
                 q,
@@ -72,7 +71,5 @@ class AscendRelPosAttention(RelPosAttention):
             )
 
         x = x.view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1))
-
         x = self.proj(x)
-
         return x
