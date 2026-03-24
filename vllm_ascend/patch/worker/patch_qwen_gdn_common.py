@@ -92,107 +92,8 @@ def get_packed_qwen_gdn_conv1d_weights(module: nn.Module) -> torch.Tensor:
     return conv_weight.view(conv_weight.size(0), conv_weight.size(2))
 
 
-def _copy_tensor_attrs(target: torch.Tensor, source: torch.Tensor) -> None:
-    for attr_name, attr_value in vars(source).items():
-        setattr(target, attr_name, attr_value)
-
-
-def _fuse_tensor_data(lhs_meta: torch.Tensor, rhs_meta: torch.Tensor) -> torch.Tensor:
-    lhs = lhs_meta.data
-    rhs = rhs_meta.data
-    lhs_output_dim = getattr(lhs_meta, "output_dim", None)
-    rhs_output_dim = getattr(rhs_meta, "output_dim", None)
-
-    if lhs_output_dim is not None or rhs_output_dim is not None:
-        if lhs_output_dim != rhs_output_dim:
-            raise RuntimeError("mismatched output_dim")
-        cat_dim = lhs_output_dim
-        if lhs.dim() != rhs.dim() or any(lhs.size(i) != rhs.size(i) for i in range(lhs.dim()) if i != cat_dim):
-            raise RuntimeError("output_dim tensor shapes do not align for fusion")
-        return torch.cat((lhs, rhs), dim=cat_dim).contiguous()
-
-    if lhs.shape == rhs.shape and torch.equal(lhs, rhs):
-        return lhs.contiguous()
-
-    if lhs.dim() == rhs.dim() and lhs.dim() > 0 and lhs.shape[1:] == rhs.shape[1:]:
-        return torch.cat((lhs, rhs), dim=0).contiguous()
-
-    raise RuntimeError("tensor shapes do not align for fusion")
-
-
-def _replace_parameter_with_fused_data(module: nn.Module, name: str, fused_data: torch.Tensor) -> None:
-    old_param = module._parameters[name]
-    if old_param is None:
-        raise RuntimeError(f"parameter {name} is unexpectedly None")
-    new_param = nn.Parameter(fused_data, requires_grad=old_param.requires_grad)
-    _copy_tensor_attrs(new_param, old_param)
-    module._parameters[name] = new_param
-
-
-def _replace_buffer_with_fused_data(module: nn.Module, name: str, fused_data: torch.Tensor) -> None:
-    old_buffer = module._buffers[name]
-    if old_buffer is None:
-        raise RuntimeError(f"buffer {name} is unexpectedly None")
-    _copy_tensor_attrs(fused_data, old_buffer)
-    module._buffers[name] = fused_data
-
-
-def _fuse_linear_modules_inplace(dst_module: nn.Module, src_module: nn.Module) -> bool:
-    if type(dst_module) is not type(src_module):
-        return False
-    if getattr(dst_module, "input_size", None) != getattr(src_module, "input_size", None):
-        return False
-    if getattr(dst_module, "tp_size", None) != getattr(src_module, "tp_size", None):
-        return False
-    if type(getattr(dst_module, "quant_method", None)) is not type(getattr(src_module, "quant_method", None)):
-        return False
-
-    dst_params = dict(dst_module.named_parameters(recurse=False))
-    src_params = dict(src_module.named_parameters(recurse=False))
-    if dst_params.keys() != src_params.keys():
-        return False
-
-    dst_buffers = dict(dst_module.named_buffers(recurse=False))
-    src_buffers = dict(src_module.named_buffers(recurse=False))
-    if dst_buffers.keys() != src_buffers.keys():
-        return False
-
-    try:
-        for name, dst_param in dst_params.items():
-            fused_data = _fuse_tensor_data(dst_param, src_params[name])
-            _replace_parameter_with_fused_data(dst_module, name, fused_data)
-        for name, dst_buffer in dst_buffers.items():
-            fused_data = _fuse_tensor_data(dst_buffer, src_buffers[name])
-            _replace_buffer_with_fused_data(dst_module, name, fused_data)
-    except RuntimeError:
-        return False
-
-    dst_module.output_sizes = list(dst_module.output_sizes) + list(src_module.output_sizes)
-    dst_module.output_size = sum(dst_module.output_sizes)
-    if hasattr(dst_module, "output_partition_sizes"):
-        dst_module.output_partition_sizes = [size // dst_module.tp_size for size in dst_module.output_sizes]
-    if hasattr(dst_module, "update_param_tp_status"):
-        dst_module.update_param_tp_status()
-    return True
-
-
-def process_qwen_gdn_input_proj_after_loading(module: nn.Module) -> None:
-    qkvz_proj = module.in_proj_qkvz
-    ba_proj = module.in_proj_ba
-    module._ascend_qkvzba_is_fused = False
-    module._ascend_qkvz_local_output_size = qkvz_proj.output_size // qkvz_proj.tp_size
-    module._ascend_ba_local_output_size = ba_proj.output_size // ba_proj.tp_size
-
-    if not _fuse_linear_modules_inplace(qkvz_proj, ba_proj):
-        return
-
-    module._ascend_qkvzba_is_fused = True
-    module.in_proj_ba = nn.Identity()
-
-
 def process_qwen_gdn_module_after_loading(module: nn.Module) -> None:
     process_qwen_gdn_conv1d_weight_after_loading(module)
-    process_qwen_gdn_input_proj_after_loading(module)
 
 
 def _run_qwen_gdn_linear(linear: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -206,14 +107,6 @@ def get_qwen_gdn_projected_states(
     module: nn.Module,
     hidden_states: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if getattr(module, "_ascend_qkvzba_is_fused", False):
-        projected_states_qkvzba = _run_qwen_gdn_linear(module.in_proj_qkvz, hidden_states)
-        projected_states_qkvz, projected_states_ba = projected_states_qkvzba.split(
-            [module._ascend_qkvz_local_output_size, module._ascend_ba_local_output_size],
-            dim=-1,
-        )
-        return projected_states_qkvz, projected_states_ba
-
     projected_states_qkvz = _run_qwen_gdn_linear(module.in_proj_qkvz, hidden_states)
     projected_states_ba = _run_qwen_gdn_linear(module.in_proj_ba, hidden_states)
     return projected_states_qkvz, projected_states_ba
