@@ -317,7 +317,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                     for local_conv_offset, local_conv_size in zip(local_conv_offsets, local_conv_sizes):
                         local_addr_offset = (i * conv_shape[1] + local_conv_offset) * get_dtype_size(conv_dtype)
                         remote_addr_offset = (
-                            (i * conv_shape[1] * tp_ratio) + (self.tp_rank % tp_ratio) * local_conv_size
+                            (i * conv_shape[1] + local_conv_offset) * tp_ratio
+                            + (self.tp_rank % tp_ratio) * local_conv_size
                         ) * get_dtype_size(conv_dtype)
                         src_list.append(local_conv_addr + local_block_ids[0] * local_conv_len + local_addr_offset)
                         dst_list.append(remote_conv_addr + remote_block_ids[0] * remote_conv_len + remote_addr_offset)
@@ -765,7 +766,6 @@ class MooncakeLayerwiseConnectorScheduler:
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         params = request.kv_transfer_params
-        do_virtual = params.get("do_virtual")
         logger.debug(
             "MooncakeLayerwiseConnector update_state_after_alloc: num_external_tokens=%s, kv_transfer_params=%s",
             num_external_tokens,
@@ -773,6 +773,7 @@ class MooncakeLayerwiseConnectorScheduler:
         )
 
         if params is not None and params.get("do_remote_prefill"):
+            do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
             remote_cached_tokens = request.num_computed_tokens
             # Get unhashed blocks to pull from remote.
@@ -1508,9 +1509,9 @@ class MooncakeLayerwiseConnectorWorker:
             # get reshape and cache event
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
-            if (
-                type(attn_metadata) is dict and not getattr(attn_metadata[layer_name], "reshape_cache_event", None)
-            ) or (not getattr(attn_metadata, "reshape_cache_event", None)):
+            if (self.use_mla and not hasattr(attn_metadata[layer_name], "reshape_cache_event")) or (
+                not self.use_mla and not hasattr(attn_metadata, "reshape_cache_event")
+            ):
                 reshape_cache_event = torch.npu.Event()
                 reshape_cache_event.record()
             elif self.use_mla:
@@ -1625,7 +1626,14 @@ class MooncakeLayerwiseConnectorWorker:
             for req_id, req_meta in connector_metadata.requests.items():
                 if len(req_meta.local_block_ids[layer_group_idx]) == 0:
                     continue
-                req_meta_update = self.update_decoder_info(req_id, req_meta)
+                try:
+                    req_meta_update = self.update_decoder_info(req_id, req_meta)
+                except Exception as e:
+                    logger.warning(
+                        f"MooncakeLayerwiseConnector transfer fail for req_id {req_id} in layer_idx "
+                        f"{self.current_layer}, update_decoder_info with error: {e}"
+                    )
+                    continue
                 logger.debug(f"Add request {req_id} to kv send layer thread. {req_meta_update=}")
                 layer_send_task.send_request[req_id] = req_meta_update
 
@@ -1680,6 +1688,7 @@ class MooncakeLayerwiseConnectorWorker:
                     f"from {req_meta.remote_host}:{req_meta.remote_port}"
                     f"fail with error: {e}"
                 )
+                raise e
             assert req_meta.remote_engine_id != self.engine_id, (
                 f"Conflict engine id {req_meta.remote_engine_id} with local engine id {self.local_engine_id}."
             )
