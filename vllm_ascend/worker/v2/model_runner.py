@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from numpy import uint
 import numpy as np
 import torch
 from vllm.config import VllmConfig
