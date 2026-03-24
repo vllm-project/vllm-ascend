@@ -21,9 +21,6 @@
 name: Nightly Image Build Schedule
 
 on:
-  schedule:
-    # UTC+8: 20:00 — cache warm-up ahead of nightly tests at 23:45
-    - cron: '0 12 * * *'
   workflow_dispatch:
 
 jobs:
