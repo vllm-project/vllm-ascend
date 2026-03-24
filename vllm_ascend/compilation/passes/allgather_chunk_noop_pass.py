@@ -36,5 +36,5 @@ class AllGatherChunkNoOpCleanupPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph) -> None:
         self.begin()
         matched_count = self.patterns.apply(graph)
-        logger.info("AllGatherChunkNoOpCleanupPass replaced %s patterns", matched_count)
+        logger.debug("AllGatherChunkNoOpCleanupPass replaced %s patterns", matched_count)
         self.end_and_log()

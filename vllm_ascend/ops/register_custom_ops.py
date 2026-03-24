@@ -90,7 +90,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
             x = F.pad(x, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(x, 0)
     else:
-        if enable_sp_by_pass():  # TODO: do pad
+        if enable_sp_by_pass():
             return get_ep_group().reduce_scatter(x.view(-1, *x.shape[1:]), 0)
         # padding
         dp_size = get_dp_group().world_size
