@@ -32,8 +32,6 @@ class AscendRequestState(RequestState):
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
-        model_dtype: torch.dtype,
-        cache_draft_logits: bool,
     ):
         super().__init__(
             max_num_reqs,
@@ -42,8 +40,6 @@ class AscendRequestState(RequestState):
             num_speculative_steps,
             vocab_size,
             device,
-            model_dtype,
-            cache_draft_logits,
         )
         # vllm gpu_model_runner_v2 deprecate the seqs_lens_cpu attribute,
         # because they think most attention backends do not need it.
