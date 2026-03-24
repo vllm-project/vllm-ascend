@@ -1,10 +1,7 @@
 from contextlib import contextmanager
 
 import torch
-import vllm
 from vllm.logger import logger
-
-from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 
 @contextmanager
