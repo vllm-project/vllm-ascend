@@ -42,7 +42,6 @@ from vllm_ascend.utils import (
     flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
-    is_vl_model,
     refresh_block_size,
     update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
@@ -420,11 +419,6 @@ class NPUPlatform(Platform):
             vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if enable_sp(vllm_config):
-            assert not is_vl_model(vllm_config), """Flash Comm V1 is not supported for VL models. \
-                Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
-                For optimal performance with VL models, we recommend enabling Sequence Parallelism \
-                via --compilation-config '{"pass_config": {"enable_sp": true}}'."""
-
             assert vllm_config.parallel_config.tensor_parallel_size > 1, (
                 "Flash Comm v1 is only supported when tp_size > 1."
             )
@@ -557,7 +551,7 @@ class NPUPlatform(Platform):
         attn_metadata: dict[str, Any],
         vllm_config: VllmConfig,
         dp_metadata,
-        virtual_engine: int = 0,
+        virtual_engine: int = 0,  # ToDo:: Remove me when upgrade to vllm 0.19.0 from 0.18.0
         num_tokens: int = 0,
         num_tokens_across_dp: torch.Tensor | None = None,
         cudagraph_runtime_mode=None,

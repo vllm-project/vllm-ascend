@@ -258,6 +258,9 @@ jobs:
           - name: deepseek-v3-2-w8a8
             os: linux-aarch64-a3-16
             config_file_path: DeepSeek-V3.2-W8A8.yaml
+          - name: glm-5-w4a8
+            os: linux-aarch64-a3-16
+            config_file_path: GLM-5.yaml
           - name: glm-4.7-w8a8
             os: linux-aarch64-a3-16
             config_file_path: GLM-4.7.yaml
