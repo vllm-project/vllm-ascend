@@ -40,10 +40,10 @@ Row parallel op follows a similar approach - inherit from RowColumnParallelOp an
 get_row_parallel_op.
 """
 
-import re
 from functools import lru_cache
 from types import SimpleNamespace
 
+import regex as re
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F

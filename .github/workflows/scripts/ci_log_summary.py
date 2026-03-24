@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import re
 import shutil
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 """
 Generate CI failure summaries from a local pytest log or a GitHub Actions run.

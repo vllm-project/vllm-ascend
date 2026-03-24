@@ -11,10 +11,9 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-import triton
-import triton.language as tl
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
 
