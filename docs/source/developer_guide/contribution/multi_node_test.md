@@ -99,7 +99,7 @@ Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml]
         with:
         soc_version: a3
         runner: linux-aarch64-a3-0
-        image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+        image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-|ci_vllm_version|-a3'
         replicas: 1
         size: ${{ matrix.test_config.size }}
         config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -140,7 +140,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
             containers:
             - name: vllm-leader
                 imagePullPolicy: Always
-                image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3
+                image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-|ci_vllm_version|-a3
                 env:
                 - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml
@@ -193,7 +193,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
             containers:
             - name: vllm-worker
                 imagePullPolicy: Always
-                image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3
+                image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-|ci_vllm_version|-a3
                 env:
                 - name: CONFIG_YAML_PATH
                     value: DeepSeek-V3.yaml

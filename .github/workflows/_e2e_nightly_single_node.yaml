@@ -40,6 +40,11 @@ on:
         required: false
         type: string
         default: "v0.18.0"
+      vllm_ascend_ref:
+        required: false
+        type: string
+        default: ""
+        description: "vllm-ascend branch/tag/sha to checkout on dispatch (updates code in the image)"
       should_run:
         required: true
         type: boolean
@@ -81,57 +86,69 @@ jobs:
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
           pip install uv
       
-      - name: uninstall vlm vllm-ascend and remove code (if pr test)
+      - name: Checkout vllm-ascend from branch (if dispatch with ref)
+        if: ${{ github.event_name != 'pull_request' && inputs.vllm_ascend_ref != '' }}
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm-ascend
+          ref: ${{ inputs.vllm_ascend_ref }}
+          path: ./temp-vllm-ascend
+          fetch-depth: 1
+
+      - name: Update vllm-ascend in workspace and reinstall (if dispatch with ref)
+        if: ${{ github.event_name != 'pull_request' && inputs.vllm_ascend_ref != '' }}
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip uninstall -y vllm-ascend || true
+          cp -r /vllm-workspace/vllm-ascend/benchmark /tmp/aisbench-backup || true
+          rm -rf /vllm-workspace/vllm-ascend
+          mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
+          cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark || true
+          git config --global --add safe.directory /vllm-workspace/vllm-ascend
+          pip install uc-manager
+          uv pip install -r /vllm-workspace/vllm-ascend/requirements-dev.txt
+          uv pip install -v -e /vllm-workspace/vllm-ascend
+
+      - name: Uninstall vllm/vllm-ascend and remove code (if PR)
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           pip uninstall -y vllm vllm-ascend || true
           cp -r /vllm-workspace/vllm-ascend/benchmark /tmp/aisbench-backup || true
           rm -rf /vllm-workspace/vllm /vllm-workspace/vllm-ascend
 
-      - name: Checkout vllm-project/vllm repo
+      - name: Checkout vllm-project/vllm repo (if PR)
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm_version }}
-          path: ./temp-vllm 
+          path: ./temp-vllm
           fetch-depth: 1
 
-      - name: Checkout vllm-project/vllm-ascend repo
+      - name: Checkout vllm-project/vllm-ascend repo (if PR)
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/checkout@v6
         with:
           path: ./temp-vllm-ascend
           fetch-depth: 1
 
-      - name: Move code to /vllm-workspace
+      - name: Setup environment from source (if PR)
         if: ${{ github.event_name == 'pull_request' }}
-        run: |
-          mv ./temp-vllm /vllm-workspace/vllm
-          mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
-          ls -R /vllm-workspace
-
-      - name: Install vllm-project/vllm from source
-        if: ${{ github.event_name == 'pull_request' }}
-        working-directory: /vllm-workspace/vllm
-        run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
-      
-      - name: Install vllm-project/vllm-ascend
-        if: ${{ github.event_name == 'pull_request' }}
-        working-directory: /vllm-workspace/vllm-ascend
+        shell: bash -l {0}
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
+          mv ./temp-vllm /vllm-workspace/vllm
+          mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
+
+          VLLM_TARGET_DEVICE=empty uv pip install -e /vllm-workspace/vllm
+
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          uv pip install -r /vllm-workspace/vllm-ascend/requirements-dev.txt
+          uv pip install -v -e /vllm-workspace/vllm-ascend
 
-      - name: Install aisbench
-        if: ${{ github.event_name == 'pull_request' }}
-        shell: bash -l {0}
-        run: |
           cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
           cd /vllm-workspace/vllm-ascend/benchmark
           pip install pytest asyncio pytest-asyncio

@@ -24,6 +24,17 @@ on:
       # Run test at 23:45 Beijing time (UTC+8)
       - cron: "45 15 * * *"
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch or tag to test (defaults to the branch selected above)'
+        required: false
+        default: ''
+        type: string
+      test_filter:
+        description: 'Tests to run — space-separated names or "all". E.g.: test_custom_op qwen3-32b multi-node-deepseek-dp'
+        required: false
+        default: 'all'
+        type: string
   pull_request:
     branches:
       - 'main'
@@ -54,13 +65,18 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'nightly-test')
     uses: ./.github/workflows/_parse_trigger.yaml
+    with:
+      runner: linux-aarch64-a2b3-0
+      branch: ${{ inputs.branch || '' }}
 
   build-image:
     name: Build nightly-a2 image
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: [parse-trigger]
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
+      vllm_version: ${{ needs.parse-trigger.outputs.vllm_version }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -97,10 +113,11 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ needs.parse-trigger.outputs.vllm_version }}-a2'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -131,7 +148,7 @@ jobs:
     with:
       soc_version: a2
       runner: linux-amd64-cpu-8-hk
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ needs.parse-trigger.outputs.vllm_version }}-a2'
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}

@@ -24,6 +24,10 @@ on:
         required: true
         type: string
         description: "Build target: 'a2' or 'a3'"
+      vllm_version:
+        required: true
+        type: string
+        description: "The vLLM version to build the image"
     secrets:
       HW_USERNAME:
         required: false
@@ -53,7 +57,7 @@ jobs:
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          IMAGE="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ inputs.target }}"
+          IMAGE="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ inputs.vllm_version }}-${{ inputs.target }}"
           docker build \
             --network host \
             --platform linux/arm64 \
@@ -68,4 +72,4 @@ jobs:
       - name: Push image to SWR
         if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
-          docker push swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ inputs.target }}
+          docker push swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ inputs.vllm_version }}-${{ inputs.target }}

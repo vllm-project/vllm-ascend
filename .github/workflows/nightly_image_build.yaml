@@ -22,13 +22,19 @@ name: Nightly Image Build Schedule
 
 on:
   workflow_dispatch:
-    # Next step: Add more inputs here if needed, e.g. vllm version, vllm-ascend version, image tag, etc.
+    inputs:
+      vllm_version:
+        description: "vLLM version to build the image"
+        required: false
+        default: 'v0.18.0'
+        type: string
 
 jobs:
   build-a2:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
+      vllm_version: ${{ inputs.vllm_version }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -38,6 +44,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
+      vllm_version: ${{ inputs.vllm_version }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}

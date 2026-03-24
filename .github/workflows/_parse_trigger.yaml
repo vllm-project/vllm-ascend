@@ -24,6 +24,16 @@ on:
         required: false
         type: string
         default: linux-aarch64-a2b3-0
+      branch:
+        required: false
+        type: string
+        default: ''
+        description: "Branch to test; 'releases-v0.13.0' → vllm_version='v0.13.0'"
+      vllm_version:
+        required: false
+        type: string
+        default: 'v0.18.0'
+        description: "Fallback vLLM version when branch carries no version info"
     outputs:
       run:
         description: "Whether nightly tests should run"
@@ -34,6 +44,9 @@ on:
       ref:
         description: "The vllm-ascend ref (commit SHA for PRs, branch/tag name otherwise)"
         value: ${{ jobs.parse.outputs.ref }}
+      vllm_version:
+        description: "The vLLM version used for nightly image tag"
+        value: ${{ jobs.parse.outputs.vllm_version }}
 
 jobs:
   parse:
@@ -43,6 +56,7 @@ jobs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
       ref: ${{ steps.parse.outputs.ref }}
+      vllm_version: ${{ steps.parse.outputs.vllm_version }}
     steps:
       - name: Parse trigger
         id: parse
@@ -50,6 +64,16 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
+
+            // Derive vllm_version from:
+            //   - dispatch: inputs.branch (e.g. 'releases-v0.13.0' → 'v0.13.0')
+            //   - pull_request: PR target branch (so a PR into releases-v0.13.0 uses nightly-v0.13.0 image)
+            //   - fallback: inputs.vllm_version default
+            const versionBranch = eventName === 'pull_request'
+              ? context.payload.pull_request.base.ref
+              : '${{ inputs.branch }}';
+            const verMatch = versionBranch.match(/releases-(v\d+\.\d+\.\d+)/);
+            core.setOutput('vllm_version', verMatch ? verMatch[1] : '${{ inputs.vllm_version }}');
 
             function parseNightlyComment(body) {
               if (!body) return null;
@@ -65,6 +89,9 @@ jobs:
               if (eventName === 'pull_request') {
                 return context.payload.pull_request.head.sha;
               }
+              // For dispatch: prefer explicit branch input over the running workflow ref
+              const branchInput = '${{ inputs.branch }}';
+              if (branchInput) return branchInput;
               return (context.ref || '').replace(/^refs\/(heads|tags)\//, '') || 'main';
             }
 
