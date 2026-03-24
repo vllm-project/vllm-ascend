@@ -161,7 +161,6 @@ def extract_last_width(x, start_loc, width):
         "stride_conv_state_seq", "stride_conv_state_dim", "stride_conv_state_tok", "stride_state_indices", "stride_o_seq",
         "stride_o_dim", "stride_o_token"]
 )
-@triton.jit
 def _causal_conv1d_update_kernel_npu_tiled(
     # Pointers
     x_ptr,  # (batch, dim, seqlen) OR (num_tokens, dim) for varlen
