@@ -987,7 +987,9 @@ def calculate_dp_buffer_size() -> int:
 # and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
 # significantly improve communication performance of MC2 ops dispatch/combine.
 def is_hierarchical_communication_enabled():
-    return os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
+    return (
+        os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
+    ) or get_ascend_config().enable_mc2_hierarchy_comm
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
