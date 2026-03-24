@@ -20,6 +20,8 @@ FROM quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_TAG=v0.3.8.post1
 ARG SOC_VERSION="ascend910_9391"
+ARG SCCACHE_GHA_ENABLED="false"
+ARG MATRIX_ARCH
 
 COPY . /vllm-workspace/vllm-ascend/
 # Define environments
@@ -32,16 +34,33 @@ RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 WORKDIR /workspace
 
+RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
+    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,required=false \
+    if [ "${SCCACHE_GHA_ENABLED}" = "true" ]; then \
+        bash /vllm-workspace/vllm-ascend/tools/sccache_installer.sh; \
+    fi
+
 # Install Mooncake dependencies
-RUN apt-get update -y && \
+RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
+    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,required=false \
+    apt-get update -y && \
     apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
     ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    if [ "${SCCACHE_GHA_ENABLED}" = "true" ]; then \
+        export ACTIONS_RESULTS_URL=$(cat /run/secrets/ACTIONS_RESULTS_URL 2>/dev/null || echo ""); \
+        export ACTIONS_RUNTIME_TOKEN=$(cat /run/secrets/ACTIONS_RUNTIME_TOKEN 2>/dev/null || echo ""); \
+        export ACTIONS_CACHE_SERVICE_V2=on; \
+        export SCCACHE_GHA_ENABLED=${SCCACHE_GHA_ENABLED}; \
+        SCCACHE_CMAKE_FLAG="-DENABLE_SCCACHE=ON"; \
+    else \
+        SCCACHE_CMAKE_FLAG=""; \
+    fi && \
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
-    mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
+    mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON ${SCCACHE_CMAKE_FLAG} && \
     make -j$(nproc) && make install && \
     rm -fr /vllm-workspace/Mooncake/build && \
     rm -rf /var/cache/apt/* && \
@@ -59,11 +78,20 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm
 # Install vllm-ascend
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 # Installing vllm-ascend on x86 can pull upstream triton back in alongside triton-ascend. Remove it immediately after this step.
-RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
+    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,required=false \
+    export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    if [ "${SCCACHE_GHA_ENABLED}" = "true" ]; then \
+        export ACTIONS_RESULTS_URL=$(cat /run/secrets/ACTIONS_RESULTS_URL 2>/dev/null || echo ""); \
+        export ACTIONS_RUNTIME_TOKEN=$(cat /run/secrets/ACTIONS_RUNTIME_TOKEN 2>/dev/null || echo ""); \
+        export ACTIONS_CACHE_SERVICE_V2=on; \
+        export SCCACHE_GHA_ENABLED=${SCCACHE_GHA_ENABLED}; \
+    fi && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    if [ -f /usr/bin/sccache ]; then rm -f /usr/bin/sccache; fi && \
     if [ "$(uname -i)" = "x86_64" ]; then python3 -m pip uninstall -y triton; fi && \
     python3 -m pip cache purge
 
