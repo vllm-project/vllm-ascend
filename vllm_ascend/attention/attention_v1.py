@@ -17,7 +17,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar
 
 import torch
 import torch_npu
