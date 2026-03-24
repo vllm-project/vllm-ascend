@@ -188,7 +188,10 @@ class TestPrepareAndFinalize(unittest.TestCase):
     @patch('vllm_ascend.ascend_forward_context.get_forward_context')
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp",
            return_value=False)
-    def test_allgather_prepare_finalize(self, mock_enable_sp,
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp_by_pass",
+        return_value=False)
+    def test_allgather_prepare_finalize(self, mock_enable_sp_by_pass,
+                                        mock_enable_sp,
                                         mock_get_forward_context,
                                         mock_get_dp_group):
         # Mock forward context
