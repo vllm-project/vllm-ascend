@@ -615,6 +615,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendRowParallelLinear,
     )
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
@@ -655,6 +656,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RMSNormGated": AscendRMSNormGated,
         "Conv2dLayer": AscendConv2dLayer,
         "Conv3dLayer": AscendConv3dLayer,
+        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
