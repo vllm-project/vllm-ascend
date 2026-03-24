@@ -25,7 +25,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
-from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
+from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
@@ -33,7 +33,6 @@ from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     trans_rope_weight,
     transdata,
-    wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
@@ -50,11 +49,12 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     _round_up,
     dispose_layer,
+    dsa_calculation_sub_stream,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
-    get_weight_prefetch_method,
     maybe_trans_nz,
+    npu_stream_switch,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -445,6 +445,17 @@ class AscendSFAImpl(MLAAttentionImpl):
         # use original TP o_proj weight in PD mix stage, and full gather
         # for o_proj weight for prefill stage.
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+
+        # multistream overlap in sfa
+        # When multistream_overlap_dsa is True, sfa_v1.py overlaps cube, vector, and communication workloads
+        # to increase latency hiding during inference. However, due to the complexity of combining multiple
+        # features, this is currently only supported for the enable_dsa_cp_with_layer_shard scenario.
+        # TODO(rjg-lyh): Once feature stacking is fully stabilized, extend support to all scenarios.
+        self.multistream_overlap_dsa = (
+            ascend_config.multistream_overlap_dsa
+            and self.enable_dsa_cp_with_layer_shard
+            and not self.use_sparse_c8_indexer
+        )
 
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
@@ -1014,6 +1025,191 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return attn_output
 
+    def forward_with_multistream_overlap(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,  # query in unified attn
+        kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        attn_metadata: M,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.enable_dsa_cp_with_layer_shard is True
+        assert self.use_sparse_c8_indexer is False
+
+        main_stream = torch.npu.current_stream()
+        before_dsa = main_stream.record_event()
+
+        cos = attn_metadata.cos
+        sin = attn_metadata.sin
+        slot_mapping = attn_metadata.slot_mapping
+
+        assert attn_metadata.dsa_cp_context is not None
+        slot_mapping_cp = attn_metadata.dsa_cp_context.slot_mapping_cp
+        actual_seq_lengths_query = attn_metadata.dsa_cp_context.actual_seq_lengths_query
+        actual_seq_lengths_key = attn_metadata.dsa_cp_context.actual_seq_lengths_key
+
+        with npu_stream_switch(dsa_calculation_sub_stream(), enabled=self.multistream_overlap_dsa):
+            # Ensure the sub stream wait for hidden_states to be ready.
+            torch.npu.current_stream().wait_event(before_dsa)
+            k_li, _ = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            after_indexer_preprocess = torch.npu.current_stream().record_event()
+
+        assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
+        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+
+        after_fused_qkv_a_proj = main_stream.record_event()
+        with npu_stream_switch(dsa_calculation_sub_stream(), enabled=self.multistream_overlap_dsa):
+            # Ensure W_weight calculation after fused_qkv_a_proj.
+            torch.npu.current_stream().wait_event(after_fused_qkv_a_proj)
+            weights, _ = self.weights_proj(hidden_states)
+
+        q_c, kv_no_split = qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+            dim=-1,
+        )
+        assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
+        q_c = self.q_a_layernorm(q_c)
+
+        after_q_a_layernorm = main_stream.record_event()
+        with npu_stream_switch(dsa_calculation_sub_stream(), enabled=self.multistream_overlap_dsa):
+            # Ensure W_q calculation after q_a_layernorm.
+            torch.npu.current_stream().wait_event(after_q_a_layernorm)
+            q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
+            after_indexer_wq = torch.npu.current_stream().record_event()
+
+        assert slot_mapping_cp is not None
+        k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
+
+        # main stream waits for k_li
+        main_stream.wait_event(after_indexer_preprocess)
+
+        assert k_pe is not None
+        assert k_nope is not None
+        assert k_li is not None
+        fused_kv_no_split, kv_ag_handle = all_gather_async(
+            torch.cat(
+                [
+                    k_pe.view(-1, k_pe.shape[-1]),
+                    k_nope.view(-1, k_nope.shape[-1]),
+                    k_li.view(-1, k_li.shape[-1]),
+                ],
+                dim=1,
+            ),
+            get_tp_group(),
+            async_op=True,
+        )
+
+        main_stream.wait_event(after_indexer_wq)
+
+        q_nope, q_pe = (
+            self.q_proj(q_c)[0]
+            .view(-1, self.local_num_heads, self.qk_head_dim)
+            .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        )
+
+        after_q_proj = main_stream.record_event()
+
+        # Convert from (B, N, P) to (N, B, P)
+        q_nope = q_nope.transpose(0, 1)
+        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+        ql_nope = torch.bmm(q_nope, self.W_UK_T)
+        # Convert from (N, B, L) to (B, N, L)
+        ql_nope = ql_nope.transpose(0, 1)
+
+        with npu_stream_switch(dsa_calculation_sub_stream(), enabled=self.multistream_overlap_dsa):
+            q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]
+            if HAS_TRITON:
+                q_li = rope_forward_triton_siso(
+                    q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+                )
+            else:
+                q_li_pe, q_li_nope = torch.split(
+                    q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
+                )  # [b,s,64,64+64]
+
+                q_li_pe = q_li_pe.unsqueeze(2)
+                q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+                q_li_pe = q_li_pe.squeeze(2)
+                q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)  # [b*s,64,128]
+            # Ensure the sub stream wait for q_pe to be ready.
+            torch.npu.current_stream().wait_event(after_q_proj)
+            q_pe = self.rope_single(q_pe, cos, sin)
+
+        if kv_ag_handle is not None:
+            kv_ag_handle.wait()
+
+        for layer in self.layer_sharding_kwargs or []:
+            if is_hidden_layer(layer):
+                reach_layer_for_shard_weight_series(layer)
+
+        if kv_cache is not None:
+            assert fused_kv_no_split is not None
+            k_pe, k_nope, k_li = fused_kv_no_split.split(
+                [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim], dim=-1
+            )
+            k_nope = k_nope.view(k_nope.shape[0], 1, -1)
+            k_pe = k_pe.view(k_pe.shape[0], 1, -1)
+            DeviceOperator.reshape_and_cache(
+                key=k_nope[: attn_metadata.num_actual_tokens],
+                value=k_pe[: attn_metadata.num_actual_tokens],
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
+            )
+
+        k_li = self._get_full_kv(k_li, attn_metadata)
+
+        if kv_cache is not None:
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event = torch.npu.Event()
+            torch_npu.npu_scatter_nd_update_(
+                kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
+            )  # b, s, n, d
+            if self.is_kv_producer:
+                attn_metadata.reshape_cache_event.record()
+
+        # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
+        # So two branches are maintained temporarily.
+        # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
+        if self.use_torch_npu_lightning_indexer:
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[2],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+                query=q_li,
+                key=kv_cache[2],
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+
+        attn_output = self._execute_sparse_flash_attention_process(
+            ql_nope, q_pe, kv_cache, topk_indices, attn_metadata, actual_seq_lengths_query, actual_seq_lengths_key
+        )
+
+        attn_output = self._v_up_proj(attn_output)
+
+        output[...] = self.o_proj(attn_output)[0]
+
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+
+        return output
+
     def forward(
         self,
         layer_name,
@@ -1031,6 +1227,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
+
+        if self.multistream_overlap_dsa:
+            result = self.forward_with_multistream_overlap(layer_name, hidden_states, kv_cache, attn_metadata, output)
+            return result
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
@@ -1072,10 +1272,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            weight_prefetch_method = get_weight_prefetch_method()
-            weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-                inputs=self.fused_qkv_a_proj.weight, dependency=hidden_states
-            )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1085,8 +1281,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_c = self.q_a_layernorm(q_c)
 
             k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
-
-            wait_for_kv_layer_from_connector(layer_name)
 
             if self.enable_dsa_cp:
                 assert slot_mapping_cp is not None
@@ -1207,13 +1401,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
         attn_output = self._v_up_proj(attn_output)
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
-            inputs=self.o_proj.weight,
-            dependency=attn_output,
-            max_size=MAX_O_PROJ_PREFETCH_SIZE,
-            linear_layer=self.o_proj,
-        )
 
         if self.enable_dsa_cp_with_o_proj_tp:
             # When using SFA-CP with pd mixed, o_proj has two cases:
