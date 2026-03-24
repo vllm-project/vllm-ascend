@@ -41,7 +41,7 @@ repos:
   hooks:
   - id: clang-format
     exclude: ^csrc/.*
-    types_or: [c++, cuda]
+    types_or: [c++]
     args: [--style=file, --verbose]
 
 - repo: https://github.com/igorshubovych/markdownlint-cli

@@ -17,7 +17,19 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
-"""Lint: detect `with a() and b():` or `with a() or b():`."""
+"""Lint: detect `with a() and b():` (boolean op in with-statement context).
+
+Using `and`/`or` to combine context managers is almost always a bug:
+
+    with ctx_a() and ctx_b():   # BUG: only ctx_b is entered
+    with ctx_a() or  ctx_b():   # BUG: only ctx_a is entered
+
+The correct way to combine context managers is:
+
+    with ctx_a(), ctx_b():          # comma-separated
+    with (ctx_a(), ctx_b()):        # parenthesized (Python 3.10+)
+    with contextlib.ExitStack() ... # ExitStack
+"""
 
 import ast
 import sys
