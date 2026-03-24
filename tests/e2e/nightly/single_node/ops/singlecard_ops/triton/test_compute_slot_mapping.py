@@ -101,10 +101,10 @@ def test_compute_slot_mapping_npu_kernel():
         )
 
          # ========== Verify results ==========
-        assert torch.allclose(slot_mappings, ref_slot_mappings, rtol=1e-3, atol=1e-3), \
+        assert torch.equal(slot_mappings, ref_slot_mappings), \
             f"ascend output differs from gpu reference.\n" \
             f"Max diff: {torch.max(torch.abs(slot_mappings - ref_slot_mappings))}\n" \
-            f"Mean diff: {torch.mean(torch.abs(slot_mappings - ref_slot_mappings))}"
+            f"Mean diff: {torch.mean(torch.abs(slot_mappings - ref_slot_mappings).float())}"
 
     except Exception as e:
         print(f'Error during executionm: {e}')
