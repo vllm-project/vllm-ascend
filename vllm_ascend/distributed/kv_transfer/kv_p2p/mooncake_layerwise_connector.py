@@ -765,6 +765,7 @@ class MooncakeLayerwiseConnectorScheduler:
         return 0, False
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
+        params = request.kv_transfer_params
         logger.debug(
             "MooncakeLayerwiseConnector update_state_after_alloc: num_external_tokens=%s, kv_transfer_params=%s",
             num_external_tokens,
@@ -772,7 +773,6 @@ class MooncakeLayerwiseConnectorScheduler:
         )
 
         if params is not None and params.get("do_remote_prefill"):
-            params = request.kv_transfer_params
             do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
             remote_cached_tokens = request.num_computed_tokens
