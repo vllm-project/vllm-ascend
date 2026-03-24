@@ -141,6 +141,8 @@ e2e-multicard-2-cards:
   estimated_time: 164
 - name: tests/e2e/multicard/2-cards/test_sp_pass.py
   estimated_time: 198
+- name: tests/e2e/multicard/2-cards/test_sequence_parallelism_moe.py
+  estimated_time: 120
 e2e-multicard-4-cards:
 - name: tests/e2e/multicard/4-cards/test_qwen3_next.py
   estimated_time: 1868
