@@ -17,7 +17,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.utils import npu_stream_switch, prefetch_stream
+from vllm_ascend.utils import is_vl_model, npu_stream_switch, prefetch_stream
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -37,17 +37,13 @@ def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch
     return residual
 
 
-def _maybe_all_gather_and_maybe_unpad_impl(
-    x: torch.Tensor, label: bool, is_ep_comm: bool = False, is_first_allgather: bool = False
-) -> torch.Tensor:
+def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_comm: bool = False) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
         return x
 
     flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
-    if forward_context.is_multimodal_model and flash_comm_v1_enabled and is_first_allgather:
-        return x
     if flash_comm_v1_enabled and label:
         dp_metadata = forward_context.dp_metadata
         if dp_metadata is None or not is_ep_comm:
@@ -79,7 +75,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
         return tensor_model_parallel_all_reduce(x)
 
     if not getattr(forward_context, "flash_comm_v1_enabled", False) or (
-        forward_context.is_draft_model and forward_context.is_multimodal_model
+        forward_context.is_draft_model and is_vl_model()
     ):
         return tensor_model_parallel_all_reduce(x)
 
@@ -103,12 +99,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
         return get_ep_group().reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
 
 
-def _maybe_all_gather_and_maybe_unpad_fake(
-    x: torch.Tensor, label: bool, is_ep_comm: bool = False, is_first_allgather: bool = False
-) -> torch.Tensor:
-    forward_context = get_forward_context()
-    if forward_context.is_multimodal_model and _EXTRA_CTX.flash_comm_v1_enabled and is_first_allgather:
-        return x
+def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor, label: bool, is_ep_comm: bool = False) -> torch.Tensor:
     if _EXTRA_CTX.flash_comm_v1_enabled and label:
         return torch.empty(
             (x.shape[0] * get_tensor_model_parallel_world_size(), *x.shape[1:]), device=x.device, dtype=x.dtype
