@@ -20,7 +20,7 @@ FROM ascendai/python:3.11-ubuntu22.04
 ARG TARGETARCH
 
 RUN apt-get update -y && \
-    apt-get install -y curl git gcc g++ cmake libnuma-dev jq && \
+    apt-get install -y curl git gcc g++ cmake libnuma-dev jq wget xz-utils shellcheck && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
