@@ -24,6 +24,8 @@ _server_cmd: &server_cmd
   - "0.8"
   - "--max-num-seqs"
   - "64"
+  - "--compilation_config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
 _benchmarks: &benchmarks
   perf:
@@ -44,8 +46,8 @@ _benchmarks: &benchmarks
     max_out_len: 32768
     batch_size: 32
     top_k: 20
-    baseline: 95
-    threshold: 5
+    baseline: 96
+    threshold: 3
 
 # ==========================================
 # ACTUAL TEST CASES
