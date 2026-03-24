@@ -96,6 +96,10 @@ QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
         "mm_projector.proj.0": "mm_projector.linear_1",
         "mm_projector.proj.2": "mm_projector.linear_2",
     },
+    "qwen2_5_vl": {
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    },
 }
 
 # key: model_type
