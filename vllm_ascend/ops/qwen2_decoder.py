@@ -1,22 +1,25 @@
 from typing import Callable, Optional
 
 import torch
-import torch_npu
 import torch.nn as nn
-
-from vllm.model_executor.models.deepencoder2 import CustomQwen2Decoder
-
-
+import torch_npu
 from transformers import Qwen2Config
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Model, Qwen2DecoderLayer, Qwen2Attention, eager_attention_forward
 
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.models.qwen2.modeling_qwen2 import (
+    Qwen2Model,
+    Qwen2DecoderLayer,
+    Qwen2Attention,
+    eager_attention_forward,
+)
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
+from vllm.model_executor.models.deepencoder2 import CustomQwen2Decoder
+
 
 class AscendCustomQwen2Decoder(CustomQwen2Decoder):
     def __init__(
@@ -35,8 +38,16 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
         hidden_act: str = "silu",
         initializer_range: float = 0.02,
     ):
-        super().__init__(decoder_layer,max_position_embeddings,hidden_dimension,num_attention_heads,num_key_value_heads,
-        intermediate_size,vocab_size,attn_implementation,rms_norm_eps,rope_theta,attention_dropout,hidden_act,initializer_range)
+        super().__init__(
+            decoder_layer,
+            max_position_embeddings,
+            hidden_dimension,
+            num_attention_heads,
+            num_key_value_heads,
+            intermediate_size,
+            vocab_size,
+            attn_implementation,
+            rms_norm_eps,rope_theta,attention_dropout,hidden_act,initializer_range)
 
         # config
         config = Qwen2Config(
@@ -117,10 +128,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 batch_size, sequence_length = input_tensor.shape[0], input_tensor.shape[1]
 
                 if token_type_ids is None:
-                    # 如果没有token_type_ids，使用标准因果mask
-                    return self._create_standard_causal_mask(
-                        batch_size, sequence_length, dtype, device, attention_mask
-                    )
+                    return self._create_standard_causal_mask(batch_size, sequence_length, dtype, device, attention_mask)
                 # ==========================================
                 # NPU优化：向量化并行Mask生成 (替代循环)
                 # ==========================================
@@ -135,7 +143,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 # token_type_ids: [batch, seq_len], 0=non-causal(image), 1=causal(text)
                 # 1. 创建image token位置掩码 [batch, seq_len]
                 is_image = (token_type_ids == 0).unsqueeze(-1).to(dtype=dtype, device=device)  # [batch, seq_len, 1]
-                is_text = (token_type_ids == 1).unsqueeze(-1).to(dtype=dtype, device=device)   # [batch, seq_len, 1]
+                is_text = (token_type_ids == 1).unsqueeze(-1).to(dtype=dtype, device=device)  # [batch, seq_len, 1]
                 # 2. Image tokens之间的双向注意力 (全连接)
                 # image_attention: [batch, seq_len, seq_len]
                 image_attention = torch.bmm(is_image, is_image.transpose(1, 2))
@@ -145,8 +153,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 # 先做矩阵乘法得到 [B, L, L] 的 text-text 关系对
                 text_to_text_base = torch.bmm(is_text, is_text.transpose(1, 2))
                 # 创建因果三角阵
-                causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), 
-                                                device=device, dtype=dtype))
+                causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), device=device, dtype=dtype))
                 text_to_text = text_to_text_base * causal_mask.unsqueeze(0)
                 # 5. 合并所有注意力模式
                 combined_mask = image_attention + text_to_image + text_to_text
@@ -165,10 +172,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
             def _create_standard_causal_mask(self, batch_size, seq_len, dtype, device, attention_mask):
                 """标准因果mask (当没有token_type_ids时使用)"""
                 min_dtype = torch.finfo(dtype).min
-                mask = torch.triu(
-                    torch.full((seq_len, seq_len), min_dtype, dtype=dtype, device=device),
-                    diagonal=1
-                )
+                mask = torch.triu(torch.full((seq_len, seq_len), min_dtype, dtype=dtype, device=device), diagonal=1)
                 mask = mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
                 if attention_mask is not None and attention_mask.dim() == 2:
                     padding_mask = attention_mask[:, None, None, :].to(dtype=dtype)
@@ -188,13 +192,13 @@ class AscendQwen2Model(Qwen2Model):
     
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
++       attention_mask: torch.Tensor | None = None,
++       position_ids: torch.LongTensor | None = None,
++       past_key_values: Cache | None = None,
++       inputs_embeds: torch.FloatTensor | None = None,
++       use_cache: bool | None = None,
++       cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -259,7 +263,7 @@ class AscendQwen2Model(Qwen2Model):
 
 class AscendQwen2DecoderLayer(Qwen2DecoderLayer):
     def __init__(self, config: Qwen2Config, layer_idx: int):
-        super().__init__(config,layer_idx)
+        super().__init__(config, layer_idx)
         self.self_attn = AscendQwen2Attention(config=config, layer_idx=layer_idx)
         self.input_layernorm = AscendQwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = AscendQwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -317,11 +321,11 @@ class AscendQwen2Attention(Qwen2Attention):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: torch.Tensor | None,
++       past_key_values: Cache | None = None,
++       cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
