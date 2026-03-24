@@ -1626,7 +1626,14 @@ class MooncakeLayerwiseConnectorWorker:
             for req_id, req_meta in connector_metadata.requests.items():
                 if len(req_meta.local_block_ids[layer_group_idx]) == 0:
                     continue
-                req_meta_update = self.update_decoder_info(req_id, req_meta)
+                try:
+                    req_meta_update = self.update_decoder_info(req_id, req_meta)
+                except Exception as e:
+                    logger.warning(
+                        f"MooncakeLayerwiseConnector transfer fail for req_id {req_id} in layer_idx "
+                        f"{self.current_layer}, update_decoder_info with error: {e}"
+                    )
+                    continue
                 logger.debug(f"Add request {req_id} to kv send layer thread. {req_meta_update=}")
                 layer_send_task.send_request[req_id] = req_meta_update
 
@@ -1681,6 +1688,7 @@ class MooncakeLayerwiseConnectorWorker:
                     f"from {req_meta.remote_host}:{req_meta.remote_port}"
                     f"fail with error: {e}"
                 )
+                raise e
             assert req_meta.remote_engine_id != self.engine_id, (
                 f"Conflict engine id {req_meta.remote_engine_id} with local engine id {self.local_engine_id}."
             )
