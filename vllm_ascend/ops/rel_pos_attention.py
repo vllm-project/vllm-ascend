@@ -1,6 +1,5 @@
 import torch
 import torch_npu
-
 from vllm.model_executor.models.deepencoder import RelPosAttention, add_decomposed_rel_pos
 
 
