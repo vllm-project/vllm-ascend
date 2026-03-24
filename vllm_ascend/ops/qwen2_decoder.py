@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import torch_npu
 from transformers import Qwen2Config
-
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -51,7 +50,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
             rope_theta,
             attention_dropout,
             hidden_act,
-            initializer_range
+            initializer_range,
         )
 
         # config
@@ -68,7 +67,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
             attention_dropout=attention_dropout,
             hidden_act=hidden_act,
             initializer_range=initializer_range,
-            _attn_implementation=attn_implementation, 
+            _attn_implementation=attn_implementation,
         )
 
         #
@@ -87,7 +86,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 position_ids=None,
                 past_key_values=None,
                 inputs_embeds=None,
-                token_type_ids=None,  # ⭐
+                token_type_ids=None, 
                 use_cache=None,
                 output_attentions=None,
                 output_hidden_states=None,
@@ -194,7 +193,6 @@ class AscendQwen2Model(Qwen2Model):
             [AscendQwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = AscendQwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
 
     def forward(
         self,
