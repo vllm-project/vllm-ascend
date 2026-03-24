@@ -32,7 +32,14 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, vllm_version_is
+
+
+def to_int64_tuple(t):
+    t = t.to(torch.int64)
+    if t.dim() == 0:
+        return (t.item(),)
+    return tuple(t.tolist())
 
 
 class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
@@ -127,7 +134,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache[forward_context.virtual_engine if vllm_version_is("0.18.0") else 0]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -170,16 +177,19 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         if attn_metadata.num_prefills > 0:
             if mixed_qkv_non_spec is not None:
                 conv_weights_T = conv_weights.transpose(0, 1)
-                mixed_qkv_non_spec = torch.ops._C_ascend.causal_conv1d_fn(
+                activation_num = 1 if self.activation else 0
+                mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
                     conv_weights_T,
-                    self.conv1d.bias,
-                    activation=self.activation,
                     conv_state=self_kv_cache[0],
-                    has_initial_state=has_initial_state,
-                    non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-                    non_spec_query_start_loc=non_spec_query_start_loc,
+                    bias_opt=self.conv1d.bias,
+                    query_start_loc_opt=to_int64_tuple(non_spec_query_start_loc),
+                    cache_indices_opt=to_int64_tuple(non_spec_state_indices_tensor),
+                    initial_state_mode_opt=to_int64_tuple(has_initial_state),
+                    num_accepted_tokens_opt=[],
+                    activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
+                    run_mode=0,
                 )
         elif attn_metadata.num_decodes > 0:
             mixed_qkv_non_spec = causal_conv1d_update(

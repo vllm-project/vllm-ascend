@@ -40,6 +40,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
     post_process_after_loading_for_shard_weight_series,
@@ -1055,8 +1056,19 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
 
-        chunk_outputs = []
-        chunk_lses = []
+        if iters == 0:
+            return prefix_output, prefix_lse
+
+        num_tokens = q_nope.size(0)
+        D = self.v_head_dim
+        H = self.num_heads
+
+        if prefix_lse.dim() == 2:
+            prefix_lse = prefix_lse.transpose(0, 1).unsqueeze(-1)
+        prefix_output = prefix_output.to(torch.float32)
+        prefix_lse = prefix_lse.to(torch.float32)
+        out_list = [prefix_output.reshape(num_tokens * H, D)]
+        lse_list = [prefix_lse.reshape(num_tokens * H)]
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
@@ -1064,12 +1076,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
             k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
 
-            torch_npu.atb.npu_paged_cache_load(
+            DeviceOperator.mla_cache_load(
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
                 context_seq_len_npu,
-                seq_starts=prefill_metadata.chunked_context.starts[i],
+                prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
             )
@@ -1105,42 +1117,15 @@ class AscendMLAImpl(MLAAttentionImpl):
                 actual_seq_lengths=actual_seq_lengths_q,
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
             )
-            chunk_outputs.append(chunk_out)
-            chunk_lses.append(chunk_lse)
+            if chunk_lse.dim() == 2:
+                chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
+            chunk_out = chunk_out.to(torch.float32)
+            chunk_lse = chunk_lse.to(torch.float32)
+            out_list.append(chunk_out.reshape(num_tokens * H, D))
+            lse_list.append(chunk_lse.reshape(num_tokens * H))
 
-        if len(chunk_outputs) > 0:
-            num_tokens = q_nope.size(0)
-            D = self.v_head_dim
-            H = self.num_heads
-
-            # Normalize prefix output/lse to [num_tokens, H, D] and [num_tokens, H, 1]
-            prefix_output = prefix_output.to(torch.float32)
-            prefix_lse = prefix_lse.to(torch.float32)
-            if prefix_lse.dim() == 2:
-                prefix_lse = prefix_lse.transpose(0, 1).unsqueeze(-1)
-
-            # Concat output and lse: [num_tokens, H, D+1]
-            all_out_lse = [torch.cat([prefix_output, prefix_lse], dim=-1)]
-            for chunk_out, chunk_lse in zip(chunk_outputs, chunk_lses):
-                chunk_out = chunk_out.to(torch.float32)
-                chunk_lse = chunk_lse.to(torch.float32)
-                if chunk_lse.dim() == 2:
-                    chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
-                all_out_lse.append(torch.cat([chunk_out, chunk_lse], dim=-1))
-
-            # Stack and split: [N, num_tokens, H, D+1]
-            all_out_lse = torch.stack(all_out_lse, dim=0)
-            N = all_out_lse.size(0)
-            out_flat, lse_flat = torch.split(all_out_lse, [D, 1], dim=-1)
-
-            # Flatten and unbind for npu_attention_update
-            out_list = out_flat.view(N, num_tokens * H, D).unbind(0)
-            lse_list = lse_flat.view(N, num_tokens * H).unbind(0)
-
-            output_final, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
-            return output_final.view(num_tokens, H, D), None
-
-        return prefix_output, prefix_lse
+        output_final, _ = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
+        return output_final.view(num_tokens, H, D), None
 
     def _forward_prefill(
         self,
