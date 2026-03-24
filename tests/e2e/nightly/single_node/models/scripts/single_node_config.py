@@ -26,6 +26,7 @@ class SingleNodeConfig:
     name: str
     model: str
     envs: dict[str, Any] = field(default_factory=dict)
+    special_dependencies: dict[str, Any] = field(default_factory=dict)
     prompts: list[str] = field(default_factory=lambda: PROMPTS)
     api_keyword_args: dict[str, Any] = field(default_factory=lambda: API_KEYWORD_ARGS)
     benchmarks: dict[str, Any] = field(default_factory=dict)
@@ -48,6 +49,8 @@ class SingleNodeConfig:
             self.api_keyword_args = API_KEYWORD_ARGS
         if self.benchmarks is None:
             self.benchmarks = {}
+        if self.special_dependencies is None:
+            self.special_dependencies = {}
         if self.test_content is None:
             self.test_content = []
 
@@ -100,6 +103,7 @@ class SingleNodeConfigLoader:
         "name",
         "model",
         "envs",
+        "special_dependencies",
         "prompts",
         "api_keyword_args",
         "benchmarks",
@@ -169,6 +173,7 @@ class SingleNodeConfigLoader:
                     name=case["name"],
                     model=case["model"],
                     envs=case.get("envs", {}),
+                    special_dependencies=case.get("special_dependencies", {}),
                     server_cmd=full_cmd,
                     epd_server_cmds=case.get("epd_server_cmds", []),
                     epd_proxy_args=case.get("epd_proxy_args", []),
