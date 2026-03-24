@@ -704,8 +704,9 @@ def register_ascend_pluggable_layers(vllm_config: VllmConfig | None = None):
         return
 
     from vllm.model_executor.custom_op import PluggableLayer
-    from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
+    
     from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
+    from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
 
     global REGISTERED_ASCEND_LAYERS
     REGISTERED_ASCEND_LAYERS = {
