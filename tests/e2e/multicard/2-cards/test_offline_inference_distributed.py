@@ -245,6 +245,7 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free()
 def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
     short_example_prompts = [
         "Hello ",
@@ -263,6 +264,7 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
         additional_config={"layer_sharding": ["q_b_proj", "o_proj"]},
         reasoning_parser="deepseek_v3",
         tokenizer_mode="deepseek_v32",
+        gpu_memory_utilization=0.8,
     ) as vllm_model:
         vllm_model.generate_greedy(short_example_prompts, max_tokens)
         vllm_model.generate_greedy(long_example_prompts, max_tokens)
@@ -272,6 +274,7 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free()
 def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
     short_example_prompts = [
         "Hello ",
@@ -290,6 +293,7 @@ def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
         additional_config={"layer_sharding": ["q_b_proj", "o_proj"], "enable_sparse_c8": True},
         reasoning_parser="deepseek_v3",
         tokenizer_mode="deepseek_v32",
+        gpu_memory_utilization=0.8,
     ) as vllm_model:
         vllm_model.generate_greedy(short_example_prompts, max_tokens)
         vllm_model.generate_greedy(long_example_prompts, max_tokens)

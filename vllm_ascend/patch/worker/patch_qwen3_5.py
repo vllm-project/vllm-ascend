@@ -22,6 +22,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
+from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -29,7 +30,14 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, vllm_version_is
+
+
+def to_int64_tuple(t):
+    t = t.to(torch.int64)
+    if t.dim() == 0:
+        return (t.item(),)
+    return tuple(t.tolist())
 
 
 class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
@@ -66,7 +74,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache[forward_context.virtual_engine if vllm_version_is("0.18.0") else 0]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -109,16 +117,19 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         if attn_metadata.num_prefills > 0:
             if mixed_qkv_non_spec is not None:
                 conv_weights_T = conv_weights.transpose(0, 1)
-                mixed_qkv_non_spec = torch.ops._C_ascend.causal_conv1d_fn(
+                activation_num = 1 if self.activation else 0
+                mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
                     conv_weights_T,
-                    self.conv1d.bias,
-                    activation=self.activation,
                     conv_state=self_kv_cache[0],
-                    has_initial_state=has_initial_state,
-                    non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-                    non_spec_query_start_loc=non_spec_query_start_loc,
+                    bias_opt=self.conv1d.bias,
+                    query_start_loc_opt=to_int64_tuple(non_spec_query_start_loc),
+                    cache_indices_opt=to_int64_tuple(non_spec_state_indices_tensor),
+                    initial_state_mode_opt=to_int64_tuple(has_initial_state),
+                    num_accepted_tokens_opt=[],
+                    activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
+                    run_mode=0,
                 )
         elif attn_metadata.num_decodes > 0:
             mixed_qkv_non_spec = causal_conv1d_update(
@@ -178,6 +189,11 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             if attn_metadata.num_prefills > 0:
                 initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
                 initial_state[~has_initial_state, ...] = 0
+                non_spec_chunked_prefill_meta = getattr(
+                    attn_metadata,
+                    "non_spec_chunked_prefill_meta",
+                    None,
+                )
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
@@ -190,6 +206,7 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     initial_state=initial_state,
                     output_final_state=True,
                     cu_seqlens=non_spec_query_start_loc,
+                    prebuilt_meta=non_spec_chunked_prefill_meta,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
@@ -254,4 +271,54 @@ class AscendQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         maybe_save_kv_layer_to_connector("", [])
 
 
+class AscendQwen3NextAttention(Qwen3NextAttention):
+    def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
+        qkv, _ = self.qkv_proj(hidden_states)
+        if "qwen3_5" in self.config.model_type:
+            cos_sin = self.rotary_emb.cos_sin_cache[positions]
+            if cos_sin.device != qkv.device:
+                cos_sin = cos_sin.to(qkv.device)
+            if cos_sin.dtype != qkv.dtype:
+                cos_sin = cos_sin.to(qkv.dtype)
+
+            q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+                qkv=qkv,
+                q_weight=1.0 + self.q_norm.weight,
+                k_weight=1.0 + self.k_norm.weight,
+                cos_sin=cos_sin,
+                num_q_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_dim,
+                eps=self.config.rms_norm_eps,
+                mrope_section=self.rotary_emb.mrope_section,
+                is_interleaved=self.rotary_emb.mrope_interleaved,
+                rope_dim=self.rotary_emb.rotary_dim,
+                has_gate=self.attn_output_gate,
+            )
+        else:
+            if self.attn_output_gate:
+                q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
+                orig_shape = q_gate.shape[:-1]
+                q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
+                q, gate = torch.chunk(q_gate, 2, dim=-1)
+                q = q.reshape(*orig_shape, -1)
+                gate = gate.reshape(*orig_shape, -1)
+            else:
+                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+            q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(-1, self.num_heads * self.head_dim)
+            k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(-1, self.num_kv_heads * self.head_dim)
+
+            q, k = self.rotary_emb(positions, q, k)
+
+        attn_output = self.attn(q, k, v)
+
+        if self.attn_output_gate:
+            gate = torch.sigmoid(gate)
+            attn_output = attn_output * gate
+
+        output[:], _ = self.o_proj(attn_output)
+
+
 Qwen3_5GatedDeltaNet._forward_core = AscendQwen3_5GatedDeltaNet._forward_core
+Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
