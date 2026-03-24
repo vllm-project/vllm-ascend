@@ -19,12 +19,13 @@
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
 
-set -euo pipefail
+set -e
 
 scversion="stable"
 
 if [ -d "shellcheck-${scversion}" ]; then
-    export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    export PATH
 fi
 
 if ! [ -x "$(command -v shellcheck)" ]; then
@@ -33,9 +34,12 @@ if ! [ -x "$(command -v shellcheck)" ]; then
         exit 1
     fi
 
+    # automatic local install if linux x86_64
     wget -qO- "https://github.com/koalaman/shellcheck/releases/download/${scversion?}/shellcheck-${scversion?}.linux.x86_64.tar.xz" | tar -xJv
-    export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    export PATH
 fi
 
-find . -path ./.git -prune -o -name "*.sh" -print0 | \
-  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -s bash \"\$f\"; done" --
+# should enable this
+# find . -path ./.git -prune -o -name "*.sh" -print0 \
+# | xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash "{}"'

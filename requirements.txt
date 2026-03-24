@@ -7,7 +7,6 @@ packaging
 pip
 pybind11
 pyyaml
-regex
 scipy
 pandas
 psutil
