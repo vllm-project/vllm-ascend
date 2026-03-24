@@ -47,6 +47,44 @@ def _iter_seq_ranges(batch_size: int, seq_len: int, cu_seqlens: torch.Tensor | N
     return [(i, int(cu_seqlens[i].item()), int(cu_seqlens[i + 1].item())) for i in range(len(cu_seqlens) - 1)]
 
 
+def _normalize_chunk_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    cu_seqlens: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool]:
+    """
+    Normalize inputs to [B, T, H, D] / [B, T, H] while preserving TND support.
+    Returns normalized tensors and a flag indicating whether input was TND.
+    """
+    input_was_tnd = False
+
+    if q.ndim == 3:
+        if cu_seqlens is None:
+            raise ValueError("TND inputs require `cu_seqlens` for variable-length layout.")
+        if k.ndim != 3 or v.ndim != 3:
+            raise ValueError("When q is TND, k and v must also be TND.")
+        if g.ndim != 2 or beta.ndim != 2:
+            raise ValueError("When q is TND, g and beta must be shape [T, H].")
+        q = q.unsqueeze(0)
+        k = k.unsqueeze(0)
+        v = v.unsqueeze(0)
+        g = g.unsqueeze(0)
+        beta = beta.unsqueeze(0)
+        input_was_tnd = True
+    elif q.ndim == 4:
+        if k.ndim != 4 or v.ndim != 4:
+            raise ValueError("When q is 4D, k and v must also be 4D.")
+        if g.ndim != 3 or beta.ndim != 3:
+            raise ValueError("When q is 4D, g and beta must be shape [B, T, H].")
+    else:
+        raise ValueError(f"Unsupported q ndim={q.ndim}; expected 3D(TND) or 4D(BTHD).")
+
+    return q, k, v, g, beta, input_was_tnd
+
+
 def _torch_chunk_gated_delta_rule_chunked(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -165,8 +203,8 @@ def chunk_gated_delta_rule_pytorch(
     """
     if head_first:
         raise DeprecationWarning("head_first=True is not supported in 310P fallback.")
-    if beta.ndim != 3:
-        raise ValueError("chunk_gated_delta_rule expects beta with shape [B, T, H].")
+    q, k, v, g, beta, input_was_tnd = _normalize_chunk_inputs(q, k, v, g, beta, cu_seqlens)
+
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError("Variable-length mode expects batch size B=1.")
 
@@ -213,6 +251,9 @@ def chunk_gated_delta_rule_pytorch(
         )
         out[b_idx, start:end] = out_seq[0]
         states[seq_idx] = final_state[0]
+
+    if input_was_tnd:
+        out = out[0]
 
     if output_final_state:
         return out, states
