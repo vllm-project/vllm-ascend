@@ -102,7 +102,7 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history, seq_len):
     return [output, kvsums]
 
 
-def execute_lightning_attention_prefill_case(self, batch_size, head_num, max_seq_len, head_dim, block_size,
+def execute_lightning_attention_prefill_case(batch_size, head_num, max_seq_len, head_dim, block_size,
                                                 has_kv_history=False, actual_seq_len=None, dtype=torch.float16,
                                                 slope_rate=None):
 
@@ -157,7 +157,7 @@ def execute_lightning_attention_prefill_case(self, batch_size, head_num, max_seq
 
 
 @torch.inference_mode()
-def test_lightning_attention_prefill_pad(self):
+def test_lightning_attention_prefill_pad():
     batch_size = 1
     head_num = 4
     max_seq_len = 8192
@@ -169,7 +169,7 @@ def test_lightning_attention_prefill_pad(self):
     torch.npu.reset_peak_memory_stats()
 
 @torch.inference_mode()
-def test_lightning_attention_prefill_unpad_1(self):
+def test_lightning_attention_prefill_unpad_1():
     batch_size = 1
     head_num = 8
     max_seq_len = 16
@@ -181,7 +181,7 @@ def test_lightning_attention_prefill_unpad_1(self):
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
-def test_lightning_attention_prefill_unpad_2(self):
+def test_lightning_attention_prefill_unpad_2():
     batch_size = 4
     head_num = 8
     max_seq_len = 2048
@@ -196,7 +196,7 @@ def test_lightning_attention_prefill_unpad_2(self):
     torch.npu.reset_peak_memory_stats()
 
 @torch.inference_mode()
-def test_lightning_attention_prefill_unpad_3(self):
+def test_lightning_attention_prefill_unpad_3():
     batch_size = 3
     head_num = 8
     max_seq_len = 384
@@ -210,7 +210,7 @@ def test_lightning_attention_prefill_unpad_3(self):
     torch.npu.reset_peak_memory_stats()
 
 @torch.inference_mode()
-def test_lightning_attention_prefill_unpad_4(self):
+def test_lightning_attention_prefill_unpad_4():
     batch_size = 1
     head_num = 4
     max_seq_len = 256
@@ -225,7 +225,7 @@ def test_lightning_attention_prefill_unpad_4(self):
     torch.npu.reset_peak_memory_stats()
 
 @torch.inference_mode()
-def test_lightning_attention_prefill_with_kv_history(self):
+def test_lightning_attention_prefill_with_kv_history():
     batch_size = 4
     head_num = 8
     max_seq_len = 1024
@@ -240,7 +240,7 @@ def test_lightning_attention_prefill_with_kv_history(self):
     torch.npu.reset_peak_memory_stats()
 
 @torch.inference_mode()
-def test_lightning_attention_prefill_fp32(self):
+def test_lightning_attention_prefill_fp32():
     batch_size = 1
     head_num = 16
     max_seq_len = 256

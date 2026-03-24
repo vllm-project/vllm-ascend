@@ -56,7 +56,7 @@ def reference_lightning_attention_decode(query, key, value, slope_rate, kv_histo
     return output, kv_caches.to(dtype)
 
 
-def execute_lightning_attention_decode_case(self, q_batch_size, kv_cache_batch, head_num, head_dim,
+def execute_lightning_attention_decode_case(q_batch_size, kv_cache_batch, head_num, head_dim,
                                             dtype=torch.float16):
     query_cpu = torch.randn(q_batch_size, head_num, 1, head_dim).to(dtype)
     key_cpu = torch.randn(q_batch_size, head_num, 1, head_dim).to(dtype)
@@ -93,7 +93,7 @@ def execute_lightning_attention_decode_case(self, q_batch_size, kv_cache_batch, 
 
 
 @torch.inference_mode()
-def test_lightning_attention_decode_same_batch(self):
+def test_lightning_attention_decode_same_batch():
     q_batch_size = 256
     head_num = 8
     head_dim = 128
@@ -103,7 +103,7 @@ def test_lightning_attention_decode_same_batch(self):
     torch.npu.reset_peak_memory_stats()
 
 @torch.inference_mode()
-def test_lightning_attention_decode_different_batch(self):
+def test_lightning_attention_decode_different_batch():
     q_batch_size = 1
     kv_cache_batch = 256
     head_num = 8
@@ -114,7 +114,7 @@ def test_lightning_attention_decode_different_batch(self):
     torch.npu.reset_peak_memory_stats()
 
 @torch.inference_mode()
-def test_lightning_attention_decode_fp32(self):
+def test_lightning_attention_decode_fp32():
     q_batch_size = 100
     head_num = 16
     head_dim = 128
