@@ -18,9 +18,10 @@
 #
 
 
-import vllm
+# 显式导入模块，确保模块被加载后再进行 patch
+from vllm.v1.worker.gpu import cudagraph_utils, model_runner
 
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
-vllm.v1.worker.gpu.cudagraph_utils.InputBatch = AscendInputBatch
-vllm.v1.worker.gpu.model_runner.InputBatch = AscendInputBatch
+cudagraph_utils.InputBatch = AscendInputBatch
+model_runner.InputBatch = AscendInputBatch

@@ -16,10 +16,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import vllm
+from vllm.v1.worker.gpu import model_runner
 
 from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 # vllm-ascend need to initialize slot mapping as torch.int32 dtype,
 # but vllm default is torch.int64 dtype.
-vllm.v1.worker.gpu.model_runner.BlockTables = AscendBlockTables
+model_runner.BlockTables = AscendBlockTables

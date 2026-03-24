@@ -17,10 +17,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import vllm
+from vllm.v1.worker.gpu import model_runner
 
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 
 # prepare_attn in AscendModelState is different from vllm,
 # we need to override init_model_state.
-vllm.v1.worker.gpu.model_runner.init_model_state = init_asecnd_model_state
+model_runner.init_model_state = init_asecnd_model_state
