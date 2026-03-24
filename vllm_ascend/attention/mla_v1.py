@@ -1063,8 +1063,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         D = self.v_head_dim
         H = self.num_heads
 
-        if prefix_lse.dim() == 2:
-            prefix_lse = prefix_lse.transpose(0, 1).unsqueeze(-1)
+        assert prefix_lse.dim() == 3, (
+            f"[EXPERIMENT] prefix_lse expected dim=3, got dim={prefix_lse.dim()}, "
+            f"shape={prefix_lse.shape}"
+        )
         prefix_output = prefix_output.to(torch.float32)
         prefix_lse = prefix_lse.to(torch.float32)
         out_list = [prefix_output.reshape(num_tokens * H, D)]
@@ -1117,8 +1119,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 actual_seq_lengths=actual_seq_lengths_q,
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
             )
-            if chunk_lse.dim() == 2:
-                chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
+            assert chunk_lse.dim() == 3, (
+                f"[EXPERIMENT] chunk_lse (iter={i}) expected dim=3, got dim={chunk_lse.dim()}, "
+                f"shape={chunk_lse.shape}"
+            )
             chunk_out = chunk_out.to(torch.float32)
             chunk_lse = chunk_lse.to(torch.float32)
             out_list.append(chunk_out.reshape(num_tokens * H, D))
