@@ -48,8 +48,11 @@ class NPUWorker310(NPUWorker):
             max_size=max_size,
         )
 
-        quant_config = self.vllm_config.quant_config
-        ShardedStateLoader310.generate_quant_description(self.model_runner.model, path, quant_config)
+        ShardedStateLoader310.generate_quant_description(
+            self.model_runner.model,
+            path,
+            self.vllm_config.quant_config,
+        )
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
