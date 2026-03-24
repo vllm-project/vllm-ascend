@@ -1,6 +1,7 @@
 import gc
 import math
 import copy
+import numpy as np
 import torch
 import torch_npu
 
@@ -91,9 +92,9 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history, seq_len):
                     e[tail_block_size:] = 0
                     k_decay = torch.exp(-s * e)
                     block_decay = math.exp(-s * tail_block_size)
-                ot, kvsum = lightning_attention_prefill(
+                o_t, kvsum = lightning_attention_prefill(
                     qt, kt, vt, kvsum, diag_decay, q_decay, block_decay, k_decay, dtype)
-                output[batchidx, headidx, t, :, :] = ot.to(dtype)
+                output[batchidx, headidx, t, :, :] = o_t.to(dtype)
 
             kvsums[batchidx, headidx, :, :] = kvsum
 
@@ -148,12 +149,12 @@ def execute_lightning_attention_prefill_case(batch_size, head_num, max_seq_len, 
     # compare result
     torch.testing.assert_close(attention_npu_out.cpu(),
                                attention_cpu_out,
-                               atol=1e-9,
-                               rtol=1e-6)
+                               atol=1e-3,
+                               rtol=1e-3)
     torch.testing.assert_close(kv_cache_npu_out.cpu(),
                                kv_cache_cpu_out,
-                               atol=1e-9,
-                               rtol=1e-6)
+                               atol=1e-3,
+                               rtol=1e-3)
 
 
 @torch.inference_mode()

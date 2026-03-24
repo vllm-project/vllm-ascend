@@ -43,7 +43,7 @@
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
-#include "lightning_attention_decode/lightning_attention_docode_torch_adpt.h"
+#include "lightning_attention_decode/lightning_attention_decode_torch_adpt.h"
 #include "lightning_attention_prefill/lightning_attention_prefill_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/util/Exception.h>

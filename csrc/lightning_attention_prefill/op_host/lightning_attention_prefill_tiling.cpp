@@ -126,7 +126,7 @@ ge::graphStatus LightningAttentionPrefillTiling::GetWorkspaceSize()
     uint32_t pWorkspaceSize = dataSize * blockSize_ * blockSize_;
     // workspace to store Ointra, which is type float with shape BLOCK_SIZE * HEAD_DIM
     uint32_t oIntraWorkspaceSize = calcTypeSize_ * tilingData_.laBaseParams.get_eleCountPerBlock();
-    // workspace to store Ointer/updated Ki, which is type float16/bfloat16/float32 with shape BLOCK_SIZE * HEAD_DIM
+    // workspace to store O_inter/updated Ki, which is type float16/bfloat16/float32 with shape BLOCK_SIZE * HEAD_DIM
     uint32_t updatedKeyWorkspaceSize = calcTypeSize_ * tilingData_.laBaseParams.get_eleCountPerBlock();
     workspaceSize_ += (pWorkspaceSize + oIntraWorkspaceSize + updatedKeyWorkspaceSize) *
             actualUsedAivNum_;

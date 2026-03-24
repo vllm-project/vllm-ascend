@@ -441,7 +441,7 @@ __aicore__ inline void LightningAttentionPrefill<T>::ComputeOInter(uint32_t offs
 {
     float qDecay;
     uint32_t mm3BaseM = tiling_->mm3TilingData.baseM;
-    // Step 1: calculate Ointer = matmul(Q, KV)
+    // Step 1: calculate O_inter = matmul(Q, KV)
     auto kvCacheTensor = kvCacheBuf_.Get<float>();
     mm3.SetWorkspace(oInterWorkspaceGM_);
     mm3.SetTensorA(queryGM_[offset]);
@@ -458,7 +458,7 @@ __aicore__ inline void LightningAttentionPrefill<T>::ComputeOInter(uint32_t offs
         auto oInterTensor = pOutQueue_.AllocTensor<float>();
         mm3.template GetTensorC<false>(oInterTensor, false, true);
         // headDim <= 128, which means only M will split, N will not split
-        // Step 2: update Ointer with decay
+        // Step 2: update O_inter with decay
         for (uint32_t b = 0; b < mm3BaseM; b++) {
             qDecay = qDecayTensor.GetValue(computeRound * mm3BaseM + b);
             AscendC::PipeBarrier<PIPE_V>();
@@ -469,7 +469,7 @@ __aicore__ inline void LightningAttentionPrefill<T>::ComputeOInter(uint32_t offs
         for (uint32_t attentionRelativeOffset = 0; attentionRelativeOffset < eleCountPerOinterSplit_;
              attentionRelativeOffset += eleCountOFinal_) {
             CopyOIntraIn(attentionBaseOffset + attentionRelativeOffset);
-            // Step 3: Add Ointer and Cast
+            // Step 3: Add O_inter and Cast
             CalculateOFinal(oInterTensor, attentionRelativeOffset);
             // Step 4: Save to O
             CopyAttentionOut(offset + attentionBaseOffset + attentionRelativeOffset);

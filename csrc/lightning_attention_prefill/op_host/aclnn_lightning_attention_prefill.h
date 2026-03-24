@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-/* funtion: aclnnLightningAttentionPrefillGetWorkspaceSize
+/* function: aclnnLightningAttentionPrefillGetWorkspaceSize
  * parameters :
  * query : required
  * key : required
@@ -47,7 +47,7 @@ aclnnStatus aclnnLightningAttentionPrefillGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-/* funtion: aclnnLightningAttentionPrefill
+/* function: aclnnLightningAttentionPrefill
  * parameters :
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
