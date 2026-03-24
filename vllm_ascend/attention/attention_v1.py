@@ -242,7 +242,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 got {self.decode_threshold}"
             )
 
-        AscendAttentionMetadataBuilder.reorder_batch_threshold = self.decode_threshold
+        self.reorder_batch_threshold = self.decode_threshold
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
