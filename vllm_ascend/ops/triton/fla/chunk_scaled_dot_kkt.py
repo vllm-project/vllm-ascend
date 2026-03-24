@@ -115,13 +115,7 @@ def chunk_scaled_dot_kkt_fwd(
 
     H = beta.shape[-1]
     BT = chunk_size
-    if cu_seqlens is not None:
-        cu_seqlens = cu_seqlens.cpu()
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-        chunk_indices = chunk_indices.npu()
-        cu_seqlens = cu_seqlens.npu()
-    else:
-        chunk_indices = None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 

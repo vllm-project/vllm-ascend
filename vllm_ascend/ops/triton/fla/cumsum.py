@@ -12,7 +12,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_indices
+from .utils import prepare_chunk_indices, prepare_num_total_chunks
 
 
 @triton.heuristics(
@@ -91,7 +91,9 @@ def chunk_local_cumsum_scalar(
     assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
     OPTIM_BLOCK_SIZE = triton.next_power_of_2((2**18) // (H * chunk_size))
     block_indices = prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE) if cu_seqlens is not None else None
-    num_blocks = len(block_indices) if cu_seqlens is not None else triton.cdiv(T, OPTIM_BLOCK_SIZE)
+    num_blocks = prepare_num_total_chunks(cu_seqlens, OPTIM_BLOCK_SIZE) if cu_seqlens is not None else triton.cdiv(
+        T, OPTIM_BLOCK_SIZE
+    )
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (num_blocks, B)
     chunk_local_cumsum_scalar_kernel[grid](

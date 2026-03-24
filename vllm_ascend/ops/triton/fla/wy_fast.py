@@ -13,7 +13,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_indices
+from .utils import prepare_chunk_indices, prepare_num_total_chunks
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -108,7 +108,7 @@ def recompute_w_u_fwd(
     BT = A.shape[-1]
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else prepare_num_total_chunks(cu_seqlens, BT)
 
     BK = 64
     BV = 64

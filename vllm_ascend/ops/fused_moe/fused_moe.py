@@ -69,16 +69,23 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
 
     def process_weights_after_loading(self, layer):
+        print(f"process_weights_after_loading:{getattr(layer.w13_weight, "weight_loader", False)}")
+        print(f"process_weights_after_loading:{getattr(layer.w2_weight, "weight_loader", False)}")
+        
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
         layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+        # layer.w13_weight.data = w13_data
 
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+
+        print(f"process_weights_after_loading:{getattr(layer.w13_weight, "weight_loader", False)}")
+        print(f"process_weights_after_loading:{getattr(layer.w2_weight, "weight_loader", False)}")
 
     def apply(
         self,

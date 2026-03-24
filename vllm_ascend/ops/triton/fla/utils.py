@@ -9,32 +9,120 @@
 # ruff: noqa: E501
 import contextlib
 import functools
+import weakref
 from collections.abc import Callable
 
 import torch
 from vllm.triton_utils import tl, triton
+
+_PREPARE_CACHE = {}
+
+
+def _get_prepare_cache_key(cu_seqlens: torch.LongTensor, chunk_size: int, name: str) -> tuple[str, int, int, int]:
+    return name, id(cu_seqlens), int(cu_seqlens._version), chunk_size
+
+
+def _get_cached_prepare_result(cu_seqlens: torch.LongTensor, chunk_size: int, name: str):
+    key = _get_prepare_cache_key(cu_seqlens, chunk_size, name)
+    cached = _PREPARE_CACHE.get(key)
+    if cached is None:
+        return None
+
+    tensor_ref, value = cached
+    if tensor_ref() is cu_seqlens:
+        return value
+
+    _PREPARE_CACHE.pop(key, None)
+    return None
+
+
+def _cache_prepare_result(cu_seqlens: torch.LongTensor, chunk_size: int, name: str, value):
+    key = _get_prepare_cache_key(cu_seqlens, chunk_size, name)
+    _PREPARE_CACHE[key] = (weakref.ref(cu_seqlens), value)
+    return value
 
 
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
 
 
+def prepare_num_chunks(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
+    cached = _get_cached_prepare_result(cu_seqlens, chunk_size, "num_chunks")
+    if cached is not None:
+        return cached
+
+    lens = prepare_lens(cu_seqlens)
+    return _cache_prepare_result(cu_seqlens, chunk_size, "num_chunks", (lens + chunk_size - 1) // chunk_size)
+
+
+def prepare_num_total_chunks(cu_seqlens: torch.LongTensor, chunk_size: int) -> int:
+    cached = _get_cached_prepare_result(cu_seqlens, chunk_size, "num_total_chunks")
+    if cached is not None:
+        return cached
+
+    total_chunks = int(prepare_num_chunks(cu_seqlens, chunk_size).sum().item())
+    return _cache_prepare_result(cu_seqlens, chunk_size, "num_total_chunks", total_chunks)
+
+
 def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
-    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
+    cached = _get_cached_prepare_result(cu_seqlens, chunk_size, "chunk_indices")
+    if cached is not None:
+        return cached
+
+    num_chunks = prepare_num_chunks(cu_seqlens, chunk_size)
+    total_chunks = prepare_num_total_chunks(cu_seqlens, chunk_size)
+    if total_chunks == 0:
+        return _cache_prepare_result(
+            cu_seqlens,
+            chunk_size,
+            "chunk_indices",
+            torch.empty(0, 2, dtype=cu_seqlens.dtype, device=cu_seqlens.device),
+        )
+
+    sequence_ids = torch.repeat_interleave(
+        torch.arange(len(num_chunks), dtype=cu_seqlens.dtype, device=cu_seqlens.device),
+        num_chunks,
+        output_size=total_chunks,
+    )
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens, chunk_size)[:-1]
+    chunk_ids = torch.arange(total_chunks, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+    chunk_ids = chunk_ids - torch.repeat_interleave(chunk_offsets, num_chunks, output_size=total_chunks)
+    return _cache_prepare_result(cu_seqlens, chunk_size, "chunk_indices", torch.stack([sequence_ids, chunk_ids], 1))
 
 
 def prepare_final_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    indices = triton.cdiv(prepare_lens(cu_seqlens), chunk_size) + 1
-    return torch.cumsum(indices, 0) - 1
+    cached = _get_cached_prepare_result(cu_seqlens, chunk_size, "final_chunk_indices")
+    if cached is not None:
+        return cached
+
+    return _cache_prepare_result(
+        cu_seqlens,
+        chunk_size,
+        "final_chunk_indices",
+        torch.cumsum(prepare_num_chunks(cu_seqlens, chunk_size), 0) - 1,
+    )
 
 
 def prepare_chunk_offsets(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]).cumsum(-1)
+    cached = _get_cached_prepare_result(cu_seqlens, chunk_size, "chunk_offsets")
+    if cached is not None:
+        return cached
+
+    chunk_offsets = torch.empty_like(cu_seqlens)
+    chunk_offsets[0] = 0
+    torch.cumsum(prepare_num_chunks(cu_seqlens, chunk_size), dim=0, out=chunk_offsets[1:])
+    return _cache_prepare_result(cu_seqlens, chunk_size, "chunk_offsets", chunk_offsets)
 
 
 def prepare_update_chunk_offsets(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size) + 1]).cumsum(-1)
+    cached = _get_cached_prepare_result(cu_seqlens, chunk_size, "update_chunk_offsets")
+    if cached is not None:
+        return cached
+
+    chunk_offsets = torch.empty_like(cu_seqlens)
+    chunk_offsets[0] = 0
+    torch.cumsum(prepare_num_chunks(cu_seqlens, chunk_size) + 1, dim=0, out=chunk_offsets[1:])
+    return _cache_prepare_result(cu_seqlens, chunk_size, "update_chunk_offsets", chunk_offsets)
 
 
 def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
