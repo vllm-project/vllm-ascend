@@ -41,6 +41,8 @@ e2e-singlecard:
   estimated_time: 258
 - name: tests/e2e/singlecard/test_vlm.py
   estimated_time: 495
+- name: tests/e2e/singlecard/test_multi_instance.py
+  estimated_time: 120
 - name: tests/e2e/singlecard/test_xlite.py
   estimated_time: 135
 - name: tests/e2e/singlecard/compile/test_norm_quant_fusion.py
@@ -125,8 +127,6 @@ e2e-multicard-2-cards:
   estimated_time: 180
 - name: tests/e2e/multicard/2-cards/test_offline_inference_distributed.py::test_qwen3_w4a4_distributed_tp2
   estimated_time: 202
-- name: tests/e2e/multicard/2-cards/test_pipeline_parallel.py
-  estimated_time: 357
 - name: tests/e2e/multicard/2-cards/test_prefix_caching.py
   estimated_time: 470
 - name: tests/e2e/multicard/2-cards/test_quantization.py
@@ -163,3 +163,5 @@ e2e-multicard-4-cards:
   is_skipped: true
 - name: tests/e2e/multicard/4-cards/spec_decode/test_mtp_qwen3_next.py
   estimated_time: 1340
+- name: tests/e2e/multicard/4-cards/test_pipeline_parallel.py
+  estimated_time: 357
