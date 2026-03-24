@@ -70,7 +70,6 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
             _attn_implementation=attn_implementation,
         )
 
-        #
         self.model = self._create_custom_model(AscendQwen2Model, config)
 
         del self.model.embed_tokens
@@ -86,7 +85,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 position_ids=None,
                 past_key_values=None,
                 inputs_embeds=None,
-                token_type_ids=None, 
+                token_type_ids=None,
                 use_cache=None,
                 output_attentions=None,
                 output_hidden_states=None,
