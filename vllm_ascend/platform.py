@@ -193,10 +193,8 @@ class NPUPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         default_max_cg_capture_size = cls._get_default_max_cudagraph_capture_size(vllm_config)
-        if default_max_cg_capture_size is None:
-            return
-
-        vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
+        if default_max_cg_capture_size is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
