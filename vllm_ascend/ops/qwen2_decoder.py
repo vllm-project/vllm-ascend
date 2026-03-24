@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -134,15 +134,6 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 # ==========================================
                 # NPU优化：向量化并行Mask生成 (替代循环)
                 # ==========================================
-                # 创建基础mask矩阵 [seq_len, seq_len]
-                mask = torch.full(
-                    (sequence_length, sequence_length),
-                    fill_value=min_dtype,
-                    dtype=dtype,
-                    device=device,
-                )
-                # 向量化生成batch中每个样本的mask
-                # token_type_ids: [batch, seq_len], 0=non-causal(image), 1=causal(text)
                 # 1. 创建image token位置掩码 [batch, seq_len]
                 is_image = (token_type_ids == 0).unsqueeze(-1).to(dtype=dtype, device=device)  # [batch, seq_len, 1]
                 is_text = (token_type_ids == 1).unsqueeze(-1).to(dtype=dtype, device=device)  # [batch, seq_len, 1]
