@@ -20,21 +20,21 @@ import torch_npu
 from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
 )
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
 from vllm_ascend.utils import enable_sp, vllm_version_is
 
 
@@ -161,7 +161,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            mixed_qkv_spec = causal_conv1d_update(
+            mixed_qkv_spec = causal_conv1d_update_npu(
                 mixed_qkv_spec,
                 conv_state,
                 conv_weights,
@@ -193,7 +193,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     run_mode=0,
                 )
         elif attn_metadata.num_decodes > 0:
-            mixed_qkv_non_spec = causal_conv1d_update(
+            mixed_qkv_non_spec = causal_conv1d_update_npu(
                 mixed_qkv_non_spec,
                 conv_state,
                 conv_weights,
