@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-import triton.runtime.driver as driver
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import get_vectorcore_num, tl, triton
 
 
 @triton.jit
@@ -45,19 +44,6 @@ def _min_p_kernel(
                 tl.store(logits_out_ptr + req_idx * logits_stride + offsets, logits, mask=mask)
 
 
-def get_npu_properties():
-    if not torch.npu.is_available():
-        raise RuntimeError("NPU is not available.")
-    device = torch.npu.current_device()
-    if driver is None:
-        return {"num_vectorcore": 24}
-    return driver.active.utils.get_device_properties(device)
-
-
-def get_num_vectorcore():
-    return get_npu_properties().get("num_vectorcore", 24)
-
-
 def apply_min_p(logits: torch.Tensor, min_p: torch.Tensor) -> None:
     if logits.numel() == 0:
         return
@@ -68,7 +54,7 @@ def apply_min_p(logits: torch.Tensor, min_p: torch.Tensor) -> None:
     assert min_p.is_contiguous(), "The min_p tensor must be contiguous."
     assert min_p.dim() == 1 and min_p.size(0) == num_reqs, "The shape of min_p must be (num_reqs,)."
 
-    vec_core = get_num_vectorcore()
+    vec_core = get_vectorcore_num()
     core_nums = min(num_reqs, vec_core)
 
     assert core_nums != 0, "core_nums can not be zero."
