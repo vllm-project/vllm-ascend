@@ -23,6 +23,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -30,7 +31,6 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_prefill_inputs,
 )
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import set_weight_prefetch_method
@@ -41,14 +41,14 @@ from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import block_table_wrapper, model_states_wrapper, torch_cuda_wrapper
+from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with torch_cuda_wrapper(), block_table_wrapper(), model_states_wrapper():
+        with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to

@@ -1,4 +1,4 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/input_batch.py
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/block_table.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -16,11 +16,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
-
 import vllm
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
+from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
-vllm.v1.worker.gpu.cudagraph_utils.InputBatch = AscendInputBatch
-vllm.v1.worker.gpu.model_runner.InputBatch = AscendInputBatch
+# vllm-ascend need to initialize slot mapping as torch.int32 dtype,
+# but vllm default is torch.int64 dtype.
+vllm.v1.worker.gpu.model_runner.BlockTables = AscendBlockTables

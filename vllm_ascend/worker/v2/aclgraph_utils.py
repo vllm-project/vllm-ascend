@@ -17,23 +17,19 @@
 # This file is a part of the vllm-ascend project.
 #
 from typing import Any
-from collections.abc import Callable
 
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager, CudaGraphManager
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
-from vllm.logger import logger
-from vllm.model_executor.offloader.base import get_offloader
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
@@ -72,12 +68,11 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         num_tokens = desc.num_tokens
         logger.info_once(f"run_fullgraph with num_tokens={num_tokens}")
         ret = super().run_fullgraph(desc)
-        assert self.model_runner.cudagraph_and_dp_padding is not None
 
         positions = self.model_runner.input_buffers.positions[:num_tokens]
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
-        num_tokens_across_dp = torch.Tensor([num_tokens] * self.model_runner.dp_size, device=self.device)
+        num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens, device=self.device)
         with set_forward_context(
             self.model_runner.input_batch.attn_metadata,
             self.vllm_config,
