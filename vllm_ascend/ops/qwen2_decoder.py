@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
@@ -11,9 +11,9 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2Model,
-    Qwen2DecoderLayer,
     Qwen2Attention,
+    Qwen2DecoderLayer,
+    Qwen2Model,
     eager_attention_forward,
 )
 from transformers.processing_utils import Unpack
@@ -47,7 +47,12 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
             intermediate_size,
             vocab_size,
             attn_implementation,
-            rms_norm_eps,rope_theta,attention_dropout,hidden_act,initializer_range)
+            rms_norm_eps,
+            rope_theta,
+            attention_dropout,
+            hidden_act,
+            initializer_range
+        )
 
         # config
         config = Qwen2Config(
@@ -63,7 +68,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
             attention_dropout=attention_dropout,
             hidden_act=hidden_act,
             initializer_range=initializer_range,
-            _attn_implementation=attn_implementation,  # ⭐
+            _attn_implementation=attn_implementation, 
         )
 
         #
@@ -112,7 +117,6 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 )
 
                 return outputs
-
 
             def _create_npu_optimized_mask(
                 self,
@@ -182,6 +186,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
 
         return CustomQwen2ModelInner(config)
 
+
 class AscendQwen2Model(Qwen2Model):
     def __init__(self, config: Qwen2Config):
         super().__init__(config)
@@ -189,7 +194,8 @@ class AscendQwen2Model(Qwen2Model):
             [AscendQwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = AscendQwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-    
+
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -261,6 +267,7 @@ class AscendQwen2Model(Qwen2Model):
             past_key_values=past_key_values if use_cache else None,
         )
 
+
 class AscendQwen2DecoderLayer(Qwen2DecoderLayer):
     def __init__(self, config: Qwen2Config, layer_idx: int):
         super().__init__(config, layer_idx)
@@ -300,6 +307,7 @@ class AscendQwen2DecoderLayer(Qwen2DecoderLayer):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
+
 
 def optimized_apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     # npu_rotary_mul 要求 cos/sin 的形状与 q/k 匹配或可广播
@@ -360,7 +368,6 @@ class AscendQwen2Attention(Qwen2Attention):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
-
 
 
 class AscendQwen2RMSNorm(nn.Module):
