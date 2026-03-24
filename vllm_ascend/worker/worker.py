@@ -116,6 +116,15 @@ class NPUWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        # In multiprocess (mp) worker subprocesses, vllm.triton_utils.HAS_TRITON
+        # is evaluated before torch_npu is imported (triggered by
+        # multiproc_executor.py's `from vllm.config import VllmConfig`).
+        # At that point the NPU triton driver is not yet active, so HAS_TRITON
+        # ends up False and the Triton op modules are skipped in ops/__init__.py.
+        # Now that the device is fully initialized via super().__init__(), we
+        # re-check triton availability and register the ops if needed.
+        self._try_register_triton_ops_after_device_init()
+
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -322,6 +331,56 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+
+    def _try_register_triton_ops_after_device_init(self) -> None:
+        """Re-register Triton ops after NPU device initialization.
+
+        In mp worker subprocesses, `vllm.triton_utils.HAS_TRITON` is evaluated
+        before torch_npu is imported (vllm.config transitively imports
+        vllm.triton_utils at process startup, before vllm-ascend worker code
+        runs). At that early point the NPU triton driver is not yet active, so
+        HAS_TRITON=False and the Triton op modules are skipped in
+        ops/__init__.py.  After super().__init__() the NPU device is fully
+        initialized, so we re-check and, if triton is now available, patch
+        vllm.triton_utils and register the ops.
+        """
+        import sys
+
+        triton_utils = sys.modules.get("vllm.triton_utils")
+        if triton_utils is None or triton_utils.HAS_TRITON:
+            # Either not imported yet (shouldn't happen) or already True – ok.
+            return
+
+        try:
+            from triton.backends import backends
+
+            active_drivers = [x.driver for x in backends.values() if x.driver and x.driver.is_active()]
+            if len(active_drivers) != 1:
+                return
+
+            import triton as _real_triton
+            import triton.language as _real_tl
+
+            triton_utils.HAS_TRITON = True
+            triton_utils.triton = _real_triton
+            triton_utils.tl = _real_tl
+            importing_mod = sys.modules.get("vllm.triton_utils.importing")
+            if importing_mod is not None:
+                importing_mod.HAS_TRITON = True
+
+            # Register op modules that were skipped due to early HAS_TRITON=False.
+            for mod_name in [
+                "vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope",
+                "vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope",
+                "vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope",
+            ]:
+                if mod_name not in sys.modules:
+                    import importlib
+
+                    importlib.import_module(mod_name)
+            logger.debug("Triton ops re-registered after NPU device initialization.")
+        except Exception as e:
+            logger.debug("Triton re-initialization after device init failed: %s", e)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

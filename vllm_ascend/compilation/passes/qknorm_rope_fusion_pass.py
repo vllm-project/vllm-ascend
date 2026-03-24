@@ -192,6 +192,10 @@ class QKNormRopeFusionPass(VllmInductorPass):
         super().__init__(vllm_config)
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="qknorm_rope_fusion_pass")
 
+        if not hasattr(torch.ops.vllm, "qkv_rmsnorm_rope"):
+            logger.debug("QKNorm and Rope fusion not enabled: qkv_rmsnorm_rope op not registered (Triton unavailable)")
+            return
+
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16,):
             logger.debug("QKNorm and Rope fusion not enabled: unsupported dtype %s", dtype)
