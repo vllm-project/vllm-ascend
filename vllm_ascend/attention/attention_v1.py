@@ -208,12 +208,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     Handles attention mask generation and metadata preparation for
     Ascend FlashAttention backend.
     """
-
-    # Does this backend/builder reorder the batch?
-    # If not, set this to None. Otherwise set it to the query
-    # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: int = 1
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
