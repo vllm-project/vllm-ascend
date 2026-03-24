@@ -44,6 +44,11 @@ def validate_cmp(y_cal, y_ref, dtype, device='npu'):
         raise ValueError(
             'Invalid parameter \"dtype\" is found : {}'.format(dtype))
 
+def to_int64_tuple(t):
+    t = t.to(torch.int64)
+    if t.dim() == 0:
+        return (t.item(),)
+    return tuple(t.tolist())
 
 @pytest.mark.parametrize('has_initial_state', [False, True])
 @pytest.mark.parametrize('itype', [torch.bfloat16])
