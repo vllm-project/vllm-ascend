@@ -10,6 +10,12 @@ permissions:
 jobs:
   triage:
     runs-on: ubuntu-latest
+    if: |
+      startsWith(github.event.issue.title, '[Bug]:') ||
+      startsWith(github.event.issue.title, '[Installation]:') ||
+      startsWith(github.event.issue.title, '[Usage]:') ||
+      startsWith(github.event.issue.title, '[Doc]:') ||
+      startsWith(github.event.issue.title, '[Misc]:')
     steps:
     - uses: github/issue-labeler@v3.4 
       with:
