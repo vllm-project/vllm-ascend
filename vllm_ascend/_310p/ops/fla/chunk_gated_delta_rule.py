@@ -47,7 +47,7 @@ def _iter_seq_ranges(batch_size: int, seq_len: int, cu_seqlens: torch.Tensor | N
     return [(i, int(cu_seqlens[i].item()), int(cu_seqlens[i + 1].item())) for i in range(len(cu_seqlens) - 1)]
 
 
-def _torch_chunk_gated_delta_rule_transformers_ref(
+def _torch_chunk_gated_delta_rule_chunked(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -59,7 +59,7 @@ def _torch_chunk_gated_delta_rule_transformers_ref(
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
-    Reference implementation adapted from Transformers:
+    Chunked torch implementation aligned with the Qwen3-Next torch path:
     transformers/models/qwen3_next/modular_qwen3_next.py::torch_chunk_gated_delta_rule
 
     Shapes:
@@ -200,7 +200,7 @@ def chunk_gated_delta_rule_pytorch(
         beta_seq = beta[b_idx, start:end].unsqueeze(0)
         init_seq_state = states[seq_idx].unsqueeze(0)
 
-        out_seq, final_state = _torch_chunk_gated_delta_rule_transformers_ref(
+        out_seq, final_state = _torch_chunk_gated_delta_rule_chunked(
             query=q_seq,
             key=k_seq,
             value=v_seq,
