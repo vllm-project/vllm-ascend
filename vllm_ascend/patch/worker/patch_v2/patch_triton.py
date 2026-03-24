@@ -1,4 +1,4 @@
-from vllm.v1.worker.gpu import input_batch, sample
+from vllm.v1.worker.gpu import input_batch
 from vllm.v1.worker.gpu.sample import gumbel, logprob, penalties
 
 from vllm_ascend.worker.v2.input_batch import post_update
