@@ -1,12 +1,10 @@
 import torch
 import torch_npu
-import torch.nn as nn
 
 from vllm.model_executor.models.deepencoder import RelPosAttention, add_decomposed_rel_pos
 
 
 class AscendRelPosAttention(RelPosAttention):
-    
     def __init__(
         self,
         dim: int,
@@ -27,11 +25,10 @@ class AscendRelPosAttention(RelPosAttention):
         """
         super().__init__(dim, num_heads, qkv_bias, use_rel_pos, rel_pos_zero_init, input_size)
 
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, H, W, _ = x.shape
         # qkv with shape (3, B, nHead, H * W, C)
-        qkv = (self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4))
+        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         # q, k, v with shape (B * nHead, H * W, C)
         q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
 
