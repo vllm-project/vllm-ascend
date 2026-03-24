@@ -193,12 +193,12 @@ class AscendQwen2Model(Qwen2Model):
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
-+       attention_mask: torch.Tensor | None = None,
-+       position_ids: torch.LongTensor | None = None,
-+       past_key_values: Cache | None = None,
-+       inputs_embeds: torch.FloatTensor | None = None,
-+       use_cache: bool | None = None,
-+       cache_position: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -322,8 +322,8 @@ class AscendQwen2Attention(Qwen2Attention):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None,
-+       past_key_values: Cache | None = None,
-+       cache_position: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
