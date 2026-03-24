@@ -39,7 +39,7 @@ on:
       vllm_version:
         required: false
         type: string
-        default: "v0.17.0"
+        default: "v0.18.0"
       is_pr_test:
         required: true
         type: boolean
@@ -88,6 +88,7 @@ jobs:
         if: ${{ inputs.is_pr_test }}
         run: |
           pip uninstall -y vllm vllm-ascend || true
+          cp -r /vllm-workspace/vllm-ascend/benchmark /tmp/aisbench-backup || true
           rm -rf /vllm-workspace/vllm /vllm-workspace/vllm-ascend
 
       - name: Checkout vllm-project/vllm repo
@@ -132,9 +133,9 @@ jobs:
 
       - name: Install aisbench
         if: ${{ inputs.is_pr_test }}
-        shell: bash -l {0} 
+        shell: bash -l {0}
         run: |
-          git clone -b v3.0-20250930-master --depth 1 https://gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
+          cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
           cd /vllm-workspace/vllm-ascend/benchmark
           pip install pytest asyncio pytest-asyncio
           pip install -e . -r requirements/api.txt -r requirements/extra.txt
