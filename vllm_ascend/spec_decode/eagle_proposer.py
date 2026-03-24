@@ -580,6 +580,7 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
+        # FIXME(lilinsiman)
         common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
         if self.pcp_size * self.dcp_size > 1:
@@ -1153,6 +1154,7 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
+        # FIXME(lilinsiman)
         common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
         common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
         common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
