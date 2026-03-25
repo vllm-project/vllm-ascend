@@ -20,12 +20,26 @@ import os
 
 import torch
 import torch_npu
+import vllm.envs as envs
 from vllm.logger import logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.triton_utils import HAS_TRITON
 
 # in case recursive call in reduce_sum.
 torch_sum = torch.sum
+
+
+def vllm_is_batch_invariant() -> bool:
+    """Check if batch-invariant mode is enabled.
+
+    This is a compatibility wrapper for the vllm function that was removed
+    in recent upstream vLLM refactoring.
+    """
+    # Try to access from envs module, fall back to environment variable
+    if hasattr(envs, 'VLLM_BATCH_INVARIANT'):
+        return bool(envs.VLLM_BATCH_INVARIANT)
+    else:
+        # Fallback to environment variable for older vLLM versions
+        return bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0")))
 
 
 if HAS_TRITON:
