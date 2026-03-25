@@ -1,0 +1,44 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# This workflow builds nightly images as a layer-cache warm-up at 20:00 Beijing time.
+# The nightly test workflows (Nightly-A2, Nightly-A3) each rebuild the image fresh
+# before running tests, so this schedule only serves to pre-populate the build cache.
+name: Nightly Image Build Schedule
+
+on:
+  workflow_dispatch:
+    # Next step: Add more inputs here if needed, e.g. vllm version, vllm-ascend version, image tag, etc.
+
+jobs:
+  build-a2:
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: a2
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+  build-a3:
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: a3
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}

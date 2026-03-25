@@ -633,40 +633,34 @@ npu_copy_and_expand_eagle_inputs(
             out_new_token_indices, out_hidden_state_mapping};
 }
 
-at::Tensor causal_conv1d_fn(
-    const at::Tensor& mixed_qkv_non_spec_T,
-    const at::Tensor& conv_weights,
-    const c10::optional<at::Tensor>& bias_opt,
-    c10::string_view activation, 
+at::Tensor npu_causal_conv1d_custom(
+    const at::Tensor& x,
+    const at::Tensor& weight,
     const at::Tensor& conv_state,
-    const at::Tensor&  has_initial_state,
-    const at::Tensor& non_spec_state_indices_tensor,
-    const at::Tensor& non_spec_query_start_loc,
-    int64_t  pad_slot_id)
+    const c10::optional<at::Tensor>& bias_opt,
+    at::IntArrayRef query_start_loc_opt,
+    at::IntArrayRef cache_indices_opt,
+    at::IntArrayRef initial_state_mode_opt,
+    at::IntArrayRef num_accepted_tokens_opt,
+    int64_t  activation_mode,
+    int64_t  pad_slot_id,
+    int64_t  run_mode)
 {
-    at::Tensor x=mixed_qkv_non_spec_T; //不需要转置
-    at::Tensor weight=conv_weights;//不需要转置
-    c10::optional<at::Tensor> biasOptional =bias_opt;
-    at::Tensor convStates= conv_state;
-    at::Tensor queryStartLoc=non_spec_query_start_loc;
-    at::Tensor cacheIndices=non_spec_state_indices_tensor;
-    at::Tensor hasInitialState=has_initial_state;
-    int64_t activationMode=(activation.empty()?0:1);
-    int64_t padSlotId=pad_slot_id;
-
-    at::Tensor output = at::empty(mixed_qkv_non_spec_T.sizes(), mixed_qkv_non_spec_T.options());
+    at::Tensor output = at::empty(x.sizes(), x.options());
     EXEC_NPU_CMD(aclnnCausalConv1d,
-                    x,                 
+                    x,
                     weight,
-                    biasOptional,                  
-                    convStates,             
-                    queryStartLoc,                     
-                    cacheIndices,
-                    hasInitialState,  
-                    activationMode,    
-                    padSlotId,            
+                    bias_opt,
+                    conv_state,
+                    query_start_loc_opt,
+                    cache_indices_opt,
+                    initial_state_mode_opt,
+                    num_accepted_tokens_opt,
+                    activation_mode,
+                    pad_slot_id,
+                    run_mode,
                     output
-                ); 
+                );
 
     return output;
 }
@@ -697,7 +691,7 @@ std::vector<at::Tensor> moe_grouped_matmul(
     y.emplace_back(y_0);
     at::TensorList result = at::TensorList(y);
 
-    EXEC_NPU_CMD(aclnnMoeGroupedMatmul,
+    EXEC_NPU_CMD(aclnnMoeGroupedMatmulWeightNz,
                 x_list, weight_list, group_list, transpose_weight, result);
 
     return y;
@@ -895,18 +889,20 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor out_is_masked_token_mask, Tensor out_new_token_indices, Tensor out_hidden_state_mapping)"
     );
     ops.impl("npu_copy_and_expand_eagle_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_eagle_inputs);
-    // causal_conv1d_fn    
     ops.def(
-        "causal_conv1d_fn(Tensor mixed_qkv_non_spec_T, "
-        "                         Tensor conv_weights, "
-        "                         Tensor? bias_opt, "
-        "                         str activation, "
+        "npu_causal_conv1d_custom(Tensor x, "
+        "                         Tensor weight, "
         "                         Tensor conv_state, "
-        "                         Tensor has_initial_state, "
-        "                         Tensor non_spec_state_indices_tensor, "
-        "                         Tensor non_spec_query_start_loc, "
-        "                         int pad_slot_id) -> (Tensor output)");
-    ops.impl("causal_conv1d_fn", torch::kPrivateUse1, &vllm_ascend::causal_conv1d_fn);
+        "                         Tensor? bias_opt, "
+        "                         int[] query_start_loc_opt, "
+        "                         int[] cache_indices_opt, "
+        "                         int[] initial_state_mode_opt, "
+        "                         int[] num_accepted_tokens_opt, "
+        "                         int activation_mode, "
+        "                         int pad_slot_id, "
+        "                         int run_mode"
+        ") -> (Tensor output)");
+    ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
     ops.def(
         "moe_grouped_matmul("
             "Tensor x,"

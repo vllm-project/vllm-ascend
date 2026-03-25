@@ -29,6 +29,7 @@ from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
@@ -660,7 +661,12 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
-        from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
+        from vllm_ascend._310p.ops.layernorm import (
+            AscendGemmaRMSNorm310,
+            AscendRMSNorm310,
+            AscendRMSNormGated310,
+        )
+        from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
         from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
         from vllm_ascend._310p.ops.vocab_parallel_embedding import (
             AscendParallelLMHead310,
@@ -673,10 +679,12 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "RotaryEmbedding": AscendRotaryEmbedding310,
                 "RMSNorm": AscendRMSNorm310,
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
+                "RMSNormGated": AscendRMSNormGated310,
                 "FusedMoE": AscendFusedMoE310,
                 "SharedFusedMoE": AscendSharedFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
+                "MMEncoderAttention": AscendMMEncoderAttention310,
             }
         )
 
@@ -756,8 +764,8 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
-def enable_sp_by_pass(vllm_config: VllmConfig):
-    return not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
+def enable_sp_by_pass():
+    return get_ascend_config().enable_sp_by_pass
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
@@ -783,7 +791,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp()
+    return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
 
 
 def prefill_context_parallel_enable() -> bool:
@@ -842,15 +850,29 @@ def _is_contain_expert(config: Any):
 
 
 def is_vl_model(vllm_config: VllmConfig):
-    """Checks if the model is a VL model by config"""
+    """Checks if the model is a VL model by config.
+
+    Uses the same criterion as vllm itself (model_config.py): a model is
+    multimodal when its top-level hf_config differs from its hf_text_config
+    (i.e. there is a separate vision sub-config).  The legacy key-name checks
+    are kept as fallbacks for configs that override get_text_config() to return
+    self (rare but possible).
+    """
     global _IS_VL_MODEL
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
-        hf_config = vllm_config.model_config.hf_config.to_dict()
-        if "thinker_config" in hf_config:
-            # Qwen-Omni-thinker models
+        model_config = vllm_config.model_config
+        # Primary: vllm's own VL detection — hf_config is the top-level
+        # (multimodal) config; hf_text_config is the language-model sub-config.
+        # They are the same object for pure-text models.
+        if model_config.hf_config is not model_config.hf_text_config:
             _IS_VL_MODEL = True
         else:
-            _IS_VL_MODEL = "vision_config" in hf_config
+            # Fallback: check well-known config keys
+            hf_config = model_config.hf_config.to_dict()
+            if "thinker_config" in hf_config or "vision_config" in hf_config:
+                _IS_VL_MODEL = True
+            else:
+                _IS_VL_MODEL = False
     return _IS_VL_MODEL
 
 
@@ -1244,3 +1266,9 @@ def trans_nd_to_nz(cache_tensor: torch.Tensor):
     cache_tensor = cache_tensor.reshape(nz_shape[:-4] + [m1, m0, n1, n0])
     cache_tensor = cache_tensor.permute(*array_trans)
     return cache_tensor
+
+
+def parse_layer_idx(prefix: str) -> int | None:
+    """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
+    match = re.search(r"layers\.(\d+)", prefix)
+    return int(match.group(1)) if match else None
