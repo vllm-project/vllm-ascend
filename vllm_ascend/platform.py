@@ -429,6 +429,7 @@ class NPUPlatform(Platform):
             **********************************************************************************\033[0m
             """
             logger.warning(warning_message)
+            update_aclgraph_sizes(vllm_config)
             if vllm_config.speculative_config:
                 num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
                 uniform_decode_query_len = num_spec_tokens + 1
