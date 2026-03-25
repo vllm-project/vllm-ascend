@@ -90,7 +90,7 @@ class SpecDecodeBaseProposer(EagleProposer):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, runner)
-
+        self.runner = runner
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
@@ -370,7 +370,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
-                seq_lens_cpu=self.runner.seq_lens.cpu,
+                seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
                 seq_lens=self.runner.seq_lens.gpu[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_tokens,
@@ -544,7 +544,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 common_attn_metadata.block_table_tensor, num_reqs_padded
             )
             common_attn_metadata.seq_lens = self.runner.seq_lens.gpu[:num_reqs_padded]
-            common_attn_metadata.seq_lens_cpu = self.runner.seq_lens.cpu[:num_reqs_padded]
+            common_attn_metadata.seq_lens_cpu = self.runner.optimistic_seq_lens_cpu[:num_reqs_padded]
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -1190,10 +1190,10 @@ class SpecDecodeBaseProposer(EagleProposer):
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_max_model_len, 1)
-
-        common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
-        exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
-        common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
+        if common_attn_metadata.seq_lens_cpu is not None:
+            common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
+            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
+            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
         common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions[0])
@@ -1258,7 +1258,7 @@ class SpecDecodeBaseProposer(EagleProposer):
 
     def prepare_next_token_ids_padded(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -1278,11 +1278,9 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
+        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(common_attn_metadata.seq_lens_cpu[i].item())
-                for i in range(num_reqs)
-            ]
+            [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
