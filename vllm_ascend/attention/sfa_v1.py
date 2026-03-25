@@ -356,8 +356,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     # Supports forward using the all-gather o_proj weight for decode requests when Sharded CP is enabled.
     o_proj_full_pool: torch.Tensor | None = None
 
-    # qk_hadamard tensor shared when dsa c8 enabled
-    qk_hadamard: torch.Tensor | None = None
+    # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
+    q_hadamard: torch.Tensor | None = None
+    k_hadamard: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -525,8 +526,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
-        if self.use_sparse_c8_indexer and AscendSFAImpl.qk_hadamard is None:
-            AscendSFAImpl.qk_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
+        if self.use_sparse_c8_indexer and AscendSFAImpl.q_hadamard is None:
+            AscendSFAImpl.q_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
+                128**0.5
+            )
+        if self.use_sparse_c8_indexer and AscendSFAImpl.k_hadamard is None:
+            AscendSFAImpl.k_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
                 128**0.5
             )
 
@@ -890,7 +895,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
         if self.use_sparse_c8_indexer:
-            k_li = k_li @ AscendSFAImpl.qk_hadamard
+            k_li = k_li @ AscendSFAImpl.k_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
             k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
@@ -930,7 +935,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.use_sparse_c8_indexer:
             q_li_shape_ori = q_li.shape
-            q_li = q_li @ AscendSFAImpl.qk_hadamard
+            q_li = q_li @ AscendSFAImpl.q_hadamard
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)
 
