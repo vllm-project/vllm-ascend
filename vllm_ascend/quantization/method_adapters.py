@@ -214,13 +214,18 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         weight_param = self.quant_method.get_weight(
             num_experts, intermediate_size_per_partition, hidden_size, params_dtype
         )
+        # Extract is_transposed attributes(If Present)
+        _is_transposed = weight_param.pop("_is_transposed", None)
         for param_key, param_value in weight_param.items():
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
+            # Set is_transposed attribute if the weight is transposed(e.g. for AWQ)
+            if _is_transposed is not None:
+                set_weight_attrs(param, {"is_transposed": _is_transposed})
             set_weight_attrs(param, extra_weight_attrs)
 
         extra_weight_attrs.update({"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
-        per_group_param = ["weight_scale_second", "weight_offset_second", "scale_bias"] + (
+        per_group_param = ["weight_scale_second", "weight_offset_second", "scale_bias", "qzeros", "scales"] + (
             ["weight_scale", "weight_offset"]
             if hasattr(self.quant_method, "group_size") and self.quant_method.group_size > 0
             else []
@@ -228,9 +233,13 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
             num_experts, intermediate_size_per_partition, hidden_size, params_dtype
         )
+        _is_transposed = dynamic_quant_param.pop("_is_transposed", None)
+
         for param_key, param_value in dynamic_quant_param.items():
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
+            if _is_transposed is not None:
+                set_weight_attrs(param, {"is_transposed": _is_transposed})
             set_weight_attrs(param, extra_weight_attrs)
             if any(fields in param_key for fields in per_group_param):
                 param.quant_method = FusedMoeWeightScaleSupported.GROUP.value
