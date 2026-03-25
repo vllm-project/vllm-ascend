@@ -100,15 +100,10 @@ def get_token_bin_counts_and_mask_triton(
     core_num = get_vectorcore_num()
     n_rows, n_cols = tokens.shape
     if num_seqs is not None and num_seqs > 0:
-        assert n_rows == num_seqs, (
-            f"tokens rows must match num_seqs: "
-            f"tokens.shape[0]={n_rows}, num_seqs={num_seqs}"
-        )
+        assert n_rows == num_seqs, f"tokens rows must match num_seqs: tokens.shape[0]={n_rows}, num_seqs={num_seqs}"
     n_rows = num_seqs if num_seqs is not None else n_rows
 
-    bin_counts = torch.zeros(
-        (n_rows, vocab_size), dtype=torch.int32, device=tokens.device
-    )
+    bin_counts = torch.zeros((n_rows, vocab_size), dtype=torch.int32, device=tokens.device)
     if not tokens.is_contiguous():
         tokens = tokens.contiguous()
     if not bin_counts.is_contiguous():

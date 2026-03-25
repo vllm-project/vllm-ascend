@@ -4,15 +4,12 @@
 # apply_all_penalties for AscendSampler - uses Triton-Ascend kernels on NPU.
 
 import torch
-
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
 
 
-def _convert_to_tensors(
-    output_token_ids: list[list[int]], vocab_size: int, device: torch.device
-) -> torch.Tensor:
+def _convert_to_tensors(output_token_ids: list[list[int]], vocab_size: int, device: torch.device) -> torch.Tensor:
     """Convert output_token_ids (list of lists) to padded tensor."""
     output_tokens_tensor = make_tensor_with_pad(
         output_token_ids,

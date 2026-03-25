@@ -65,41 +65,22 @@ def apply_all_penalties_kernel(
             vocab_offsets = vocab_start + tl.arange(0, BLOCK_SIZE)
             mask = vocab_offsets < vocab_size
 
-            logits_offset = (
-                seq_idx * stride_logits_seq + vocab_offsets * stride_logits_vocab
-            )
-            prompt_mask_offset = (
-                seq_idx * stride_prompt_mask_seq
-                + vocab_offsets * stride_prompt_mask_vocab
-            )
-            output_mask_offset = (
-                seq_idx * stride_output_mask_seq
-                + vocab_offsets * stride_output_mask_vocab
-            )
-            counts_offset = (
-                seq_idx * stride_bin_counts_seq
-                + vocab_offsets * stride_bin_counts_vocab
-            )
+            logits_offset = seq_idx * stride_logits_seq + vocab_offsets * stride_logits_vocab
+            prompt_mask_offset = seq_idx * stride_prompt_mask_seq + vocab_offsets * stride_prompt_mask_vocab
+            output_mask_offset = seq_idx * stride_output_mask_seq + vocab_offsets * stride_output_mask_vocab
+            counts_offset = seq_idx * stride_bin_counts_seq + vocab_offsets * stride_bin_counts_vocab
 
             logits = tl.load(logits_ptr + logits_offset, mask=mask, other=0.0)
-            prompt_mask_val = tl.load(
-                prompt_mask_ptr + prompt_mask_offset, mask=mask, other=False
-            )
-            output_mask_val = tl.load(
-                output_mask_ptr + output_mask_offset, mask=mask, other=False
-            )
+            prompt_mask_val = tl.load(prompt_mask_ptr + prompt_mask_offset, mask=mask, other=False)
+            output_mask_val = tl.load(output_mask_ptr + output_mask_offset, mask=mask, other=False)
             output_bin_counts = tl.load(
                 output_bin_counts_ptr + counts_offset,
                 mask=mask,
                 other=0,
             ).to(tl.float32)
 
-            need_repetition_penalty = (
-                prompt_mask_val | output_mask_val
-            ).to(tl.int1)
-            penalty_factor = tl.where(
-                need_repetition_penalty, repetition_penalty, 1.0
-            )
+            need_repetition_penalty = (prompt_mask_val | output_mask_val).to(tl.int1)
+            penalty_factor = tl.where(need_repetition_penalty, repetition_penalty, 1.0)
             scaling = tl.where(
                 (logits > 0.0).to(tl.int1),
                 1.0 / penalty_factor,
@@ -124,9 +105,7 @@ def apply_penalties_triton(
     model_executor.layers.utils.apply_penalties.
     """
     num_seqs, vocab_size = logits.shape
-    _, prompt_mask = get_token_bin_counts_and_mask_triton(
-        prompt_tokens_tensor, vocab_size, num_seqs
-    )
+    _, prompt_mask = get_token_bin_counts_and_mask_triton(prompt_tokens_tensor, vocab_size, num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask_triton(
         output_tokens_tensor,
         vocab_size,
