@@ -793,24 +793,17 @@ class AscendModelSlimConfig(QuantizationConfig):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")
         self.enable_fa_quant = fa_quant_type != ""
         self.kvcache_quant_layers = []
-        if self.enable_fa_quant:
-            for key in self.quant_description:
-                if "fa_k.scale" in key:
-                    _id = "".join(re.findall(r"\.(\d+)\.", key))
-                    self.kvcache_quant_layers.append(int(_id))
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
         self.has_layerwise_indexer_quant_config = False
         self.indexer_quant_layer_prefixes = []
         self.indexer_quant_layers = []
-        for key, value in self.quant_description.items():
-            if not isinstance(key, str) or not key.endswith(".indexer.quant_type"):
-                continue
-            self.has_layerwise_indexer_quant_config = True
-            if value != "INT8_DYNAMIC":
-                continue
-            layer_prefix = key[: -len(".indexer.quant_type")].rstrip(".")
-            self.indexer_quant_layer_prefixes.append(layer_prefix)
-            _id = "".join(re.findall(r"\.(\d+)\.", layer_prefix))
-            if _id.isdigit():
-                self.indexer_quant_layers.append(int(_id))
-        self.enable_indexer_quant = bool(indexer_quant_type) or self.has_layerwise_indexer_quant_config
+        if self.enable_fa_quant or self.enable_indexer_quant:
+            for key in self.quant_description:
+                _id = "".join(re.findall(r"\.(\d+)\.", key))
+                if "fa_k.scale" in key:
+                    self.kvcache_quant_layers.append(int(_id))
+                if "indexer.quant_type" in key:
+                    layer_prefix = key[: -len(".indexer.quant_type")].rstrip(".")
+                    self.indexer_quant_layer_prefixes.append(layer_prefix)
+                    if _id.isdigit():
+                        self.indexer_quant_layers.append(int(_id))
