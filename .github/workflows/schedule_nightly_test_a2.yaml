@@ -196,6 +196,34 @@ jobs:
         }}
       upload: false
 
+  single-node-accuracy-tests-pr-only:
+    needs: [parse-trigger]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      needs.parse-trigger.outputs.filter != 'all'
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - name: pr-accuracy-group-1
+            os: linux-aarch64-a2b3-1
+            model_list:
+              - gemma-3-4b-it
+    uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
+    with:
+      vllm: v0.18.0
+      runner: ${{ matrix.test_config.os }}
+      model_list: ${{ toJson(matrix.test_config.model_list) }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
+      is_run: >-
+        ${{
+          needs.parse-trigger.outputs.run == 'true' &&
+          needs.parse-trigger.outputs.filter != 'all' &&
+          contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+        }}
+      upload: false
+
   doc-test:
     name: doc-test
     needs: [parse-trigger]
