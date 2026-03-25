@@ -1,10 +1,8 @@
 import sys
 from typing import Any
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.model_loader.weight_utils import maybe_remap_kv_scale_name
-
-logger = init_logger(__name__)
 
 
 class ImportPatchDecorator:
@@ -41,7 +39,16 @@ def patch_deepseek(module):
     def new_remap(name: str, params_dict: dict):
         name = ori_maybe_remap_kv_scale_name(name, params_dict)
 
-        replace_scale_names = ["fa_q.scale", "fa_k.scale", "fa_v.scale", "fa_q.offset", "fa_k.offset", "fa_v.offset"]
+        replace_scale_names = [
+            "fa_q.scale",
+            "fa_k.scale",
+            "fa_v.scale",
+            "fa_q.offset",
+            "fa_k.offset",
+            "fa_v.offset",
+            "indexer.q_rot",
+            "indexer.k_rot",
+        ]
 
         for scale_name in replace_scale_names:
             if name.endswith(scale_name):

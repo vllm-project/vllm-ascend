@@ -167,15 +167,12 @@
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
 #    Why:
 #       vllm doesn't support all_to_all for GroupCoordinator.
-#       all_reduce in vLLM not is a customop, which will make MatmulAllReduceAddRMSNorm fusion failure.
 #    How：
 #       Add all_to_all implementation for GroupCoordinator.
-#       make all_reduce as a customop.
 #    Related PR (if no, explain why):
 #       No, we should use vlLM all2all manager to support all_to_all for npu.
 #    Future Plan:
 #       Remove this patch when the refactor of all2all manager is done.
-#       Remove this patch when vLLM support all_reduce as customop.
 #
 # ** 2. File: worker/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -259,6 +256,20 @@
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
+# ** 7a. File: worker/patch_gdn_attn.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.attention.backends.gdn_attn.GDNAttentionMetadataBuilder.build`
+#    Why:
+#       Qwen3.5/Qwen3Next GDN prefill on NPU needs prebuilt varlen chunk metadata
+#       to avoid forward-time host round-trips that break async scheduling.
+#    How：
+#       Monkey-patch the upstream builder in-place, keep upstream code untouched,
+#       and attach prebuilt device metadata bundle onto the returned attention
+#       metadata object for Ascend-specific consumers.
+#    Future Plan:
+#       Remove this patch when upstream exposes a backend hook for extending GDN
+#       metadata or when the optimization is accepted upstream directly.
+#
 # ** 8. File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
@@ -301,7 +312,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest processor implementation.
 #
-# ** 10. File: worker/patch_v2_eagle.py**
+# ** 10. File: worker/patch_v2/patch_eagle.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
 #    Why:
@@ -337,7 +348,7 @@
 #    Future Plan:
 #       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
 #
-# ** 13. File: worker/patch_v2_uva.py**
+# ** 13. File: worker/patch_v2/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.states.UvaBuffer`
 #    Why:
@@ -542,3 +553,48 @@
 #    Future Plan:
 #       The maybe_remap_kv_scale_name function of the community is reconstructed to support
 #       multiple backends.
+# ** 24. File: worker/patch_v2/patch_input_batch.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
+#    Why:
+#       vllm use InputBatch to make dummy tensors. in `model_runner.py` and `cudagraph_utils.py`
+#       which make it difficult to inherit from vllm methods.
+#    How：
+#       replace InputBatch with AscendInputBatch.
+#    Future Plan:
+#       remove this patch when vLLM-ascend's make_dummy behavior aligns with vLLM.
+# ** 25. File: worker/patch_v2/patch_block_table.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.block_table.BlockTables`
+#    Why:
+##      vllm-ascend need to initialize slot mapping as torch.int32 dtype,
+#       but vllm default is torch.int64 dtype.
+#    How：
+#       replace BlockTables with AscendBlockTables which initialize slot mapping
+#       as torch.int32 dtype.
+#    Future Plan:
+#       remove this patch when vLLM-ascend's BlockTables can initialize
+#       slot mapping as torch.int64 dtype.
+# ** 25. File: worker/patch_v2/patch_model_state.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.model_states.default.init_model_state`
+#    Why:
+##      vllm's prepare_attn in ModelState is different from vllm,
+#       we need to override init_model_state.
+#    How：
+#       Define AscendModelState and initialize it in init_model_state.
+#    Future Plan:
+#       remove this when vllm-ascend's attention metadata is align with vllm.
+# ** 26. File: worker/patch_v2/patch_triton.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
+#    Why:
+#       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
+#    How：
+#       override triton ops in vLLM with ascend implementation
+#    Related PR (if no, explain why):
+#       Let vLLM support triton ops dispatch.
+#    Future Plan:
+#       Remove this patch when vLLM support the dispatch function.
+#

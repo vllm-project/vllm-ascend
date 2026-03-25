@@ -50,7 +50,7 @@ RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.17.0
+ARG VLLM_TAG=v0.18.0
 RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
@@ -59,11 +59,13 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm
 
 # Install vllm-ascend
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
+# Installing vllm-ascend on x86 can pull upstream triton back in alongside triton-ascend. Remove it immediately after this step.
 RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    if [ "$(uname -i)" = "x86_64" ]; then python3 -m pip uninstall -y triton; fi && \
     python3 -m pip cache purge
 
 # Install clang-15 (for triton-ascend)
