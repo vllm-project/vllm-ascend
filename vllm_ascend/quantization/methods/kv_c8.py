@@ -63,3 +63,27 @@ class AscendFAQuantAttentionMethod:
         repeated_quant_kscale = fa_k_scale.repeat(self.kv_lora_rank)
         layer.quant_kscale = repeated_quant_kscale.view(1, self.kv_lora_rank)
         layer.quant_kscale = 1.0 / torch.nn.Parameter(layer.quant_kscale.to(torch.float), requires_grad=False)
+
+
+@register_scheme("INT8_DYNAMIC", "attention")
+class AscendSFAQuantAttentionMethod:
+    def __init__(self):
+        vllm_config = get_current_vllm_config()
+        config = vllm_config.model_config.hf_config
+        self.index_head_dim = config.index_head_dim
+
+    def create_weights(self, layer: torch.nn.Module) -> None:
+        extra_module_names = ["indexer"]
+        for name in extra_module_names:
+            setattr(layer, name, torch.nn.Module())
+        params_dict = {}
+        params_dict["indexer.q_rot"] = torch.empty((self.index_head_dim, self.index_head_dim), dtype=torch.float32)
+        params_dict["indexer.k_rot"] = torch.empty((self.index_head_dim, self.index_head_dim), dtype=torch.float32)
+        for name, weight in params_dict.items():
+            module_name, weight_name = name.split(".")
+            module = getattr(layer, module_name)
+            weight_param = torch.nn.Parameter(weight, requires_grad=False)
+            module.register_parameter(weight_name, weight_param)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
