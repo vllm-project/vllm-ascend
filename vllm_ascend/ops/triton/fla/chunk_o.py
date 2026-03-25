@@ -13,7 +13,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from .utils import prepare_chunk_offsets, safe_exp
+from vllm_ascend.ops.triton.fla.utils import prepare_chunk_offsets, safe_exp
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
 @triton.heuristics(
@@ -34,17 +35,20 @@ def chunk_fwd_kernel_o(
     chunk_offsets,
     scale,
     T,
-    H: tl.constexpr,
-    Hg: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
+    H,
+    Hg,
+    K,
+    V,
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    NT_PER_PROG: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    # Grid: (V/BV, N*H, NUM_PROG_T) where NUM_PROG_T = ceil(NT_max / NT_PER_PROG)
+    # Each program handles NT_PER_PROG consecutive chunks for one (i_v, head) pair
+    i_v, i_nh, i_tp = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     T_max = T
 
@@ -64,7 +68,11 @@ def chunk_fwd_kernel_o(
     v += (bos * H + i_h) * V
     o += (bos * H + i_h) * V
 
-    for i_t in range(NT):
+    # This program handles chunks [i_tp*NT_PER_PROG, min((i_tp+1)*NT_PER_PROG, NT))
+    t_start = i_tp * NT_PER_PROG
+    t_end = tl.minimum(t_start + NT_PER_PROG, NT)
+
+    for i_t in range(t_start, t_end):
         i_tg = boh + i_t
         h_base = h + (i_tg * H + i_h).to(tl.int64) * K * V
         b_o = tl.zeros([BT, BV], dtype=tl.float32)
@@ -129,14 +137,24 @@ def chunk_fwd_o(
     o = torch.empty_like(v)
     if cu_seqlens is None:
         N, chunk_offsets = B, None
+        NT_max = triton.cdiv(T, BT)
     else:
         N, chunk_offsets = (
             len(cu_seqlens) - 1,
             prepare_chunk_offsets(cu_seqlens, BT),
         )
+        # Compute maximum NT across all sequences for grid dimension
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        NT_max = int(triton.cdiv(int(seqlens.max().item()), BT))
+
+    # Partition NT_max chunks across programs to balance NPU core utilization.
+    # With 40 vector cores and N*H programs per core dimension:
+    # NT_PER_PROG=8 → ceil(161/8)=21 progs per head × 8 heads = 168 blocks
+    NT_PER_PROG = max(1, NT_max // max(1, get_vectorcore_num() // 2))
+    NUM_PROG_T = triton.cdiv(NT_max, NT_PER_PROG)
 
     def grid(meta):
-        return (triton.cdiv(V, meta["BV"]), N * H)
+        return (triton.cdiv(V, meta["BV"]), N * H, NUM_PROG_T)
 
     g = g.transpose(1, 2).contiguous()
     chunk_fwd_kernel_o[grid](
@@ -157,6 +175,7 @@ def chunk_fwd_o(
         BT=BT,
         BK=128,
         BV=128,
+        NT_PER_PROG=NT_PER_PROG,
         num_warps=4,
         num_stages=2,
     )
