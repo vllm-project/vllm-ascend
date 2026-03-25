@@ -157,9 +157,17 @@ def extract_last_width(x, start_loc, width):
     return x[:, indices].permute(1, 0, 2)
 
 @triton.jit(
-    do_not_specialize=["batch", "state_len", "num_cache_lines", "stride_x_seq",
-    "stride_x_token", "stride_conv_state_seq", "stride_conv_state_tok",
-    "stride_state_indices", "stride_o_seq", "stride_o_token"
+    do_not_specialize=[
+        "batch",
+        "state_len",
+        "num_cache_lines",
+        "stride_x_seq",
+        "stride_x_token",
+        "stride_conv_state_seq",
+        "stride_conv_state_tok",
+        "stride_state_indices",
+        "stride_o_seq",
+        "stride_o_token",
     ]
 )
 def _causal_conv1d_update_kernel_npu_tiled(
