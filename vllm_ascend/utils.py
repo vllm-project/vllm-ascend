@@ -849,7 +849,7 @@ def _is_contain_expert(config: Any):
     return False
 
 
-def is_vl_model(vllm_config: VllmConfig):
+def is_vl_model(vllm_config: VllmConfig = None):
     """Checks if the model is a VL model by config.
 
     Uses the same criterion as vllm itself (model_config.py): a model is
@@ -859,6 +859,10 @@ def is_vl_model(vllm_config: VllmConfig):
     self (rare but possible).
     """
     global _IS_VL_MODEL
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
         model_config = vllm_config.model_config
         # Primary: vllm's own VL detection — hf_config is the top-level
