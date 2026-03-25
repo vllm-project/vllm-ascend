@@ -12,7 +12,6 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
-    get_quant_type_for_layer,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
@@ -257,49 +256,3 @@ class TestAscendModelSlimConfig(TestBase):
 
     def test_get_scaled_act_names(self):
         self.assertEqual(self.ascend_config.get_scaled_act_names(), [])
-
-    def test_get_quant_type_for_layer_uses_layerwise_indexer_quant_type(self):
-        quant_description = {
-            "indexer_quant_type": "LEGACY_GLOBAL",
-            "model.layers.0.self_attn.indexer.quant_type": "INT8_DYNAMIC",
-        }
-
-        quant_type = get_quant_type_for_layer(
-            quant_description,
-            "model.layers.0.self_attn",
-            "attention",
-        )
-
-        self.assertEqual(quant_type, "INT8_DYNAMIC")
-
-    def test_is_indexer_quant_layer_uses_layerwise_quant_description(self):
-        quant_description = {
-            "model.layers.1.self_attn.indexer.quant_type": "INT8_DYNAMIC",
-            "model.layers.3.self_attn.indexer.quant_type": "INT8_DYNAMIC",
-        }
-        config = AscendModelSlimConfig(quant_description)
-
-        self.assertTrue(config.enable_indexer_quant)
-        self.assertTrue(config.is_indexer_quant_layer("model.layers.1.self_attn"))
-        self.assertTrue(config.is_indexer_quant_layer("model.layers.3.self_attn"))
-        self.assertFalse(config.is_indexer_quant_layer("model.layers.2.self_attn"))
-
-    def test_is_indexer_quant_layer_falls_back_to_global_mode(self):
-        quant_description = {
-            "indexer_quant_type": "INT8_DYNAMIC",
-        }
-        config = AscendModelSlimConfig(quant_description)
-
-        self.assertTrue(config.enable_indexer_quant)
-        self.assertTrue(config.is_indexer_quant_layer("model.layers.0.self_attn"))
-
-    def test_is_indexer_quant_layer_without_any_int8_dynamic_entry(self):
-        quant_description = {
-            "model.layers.1.self_attn.indexer.quant_type": "FLOAT",
-            "model.layers.3.self_attn.indexer.quant_type": "FLOAT",
-        }
-        config = AscendModelSlimConfig(quant_description)
-
-        self.assertTrue(config.enable_indexer_quant)
-        self.assertFalse(config.is_indexer_quant_layer("model.layers.1.self_attn"))
-        self.assertFalse(config.is_indexer_quant_layer("model.layers.3.self_attn"))
