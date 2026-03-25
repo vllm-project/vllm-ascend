@@ -82,9 +82,6 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 inputs_embeds=None,
                 token_type_ids=None,
                 use_cache=None,
-                output_attentions=None,
-                output_hidden_states=None,
-                return_dict=None,
                 cache_position=None,
             ):
                 # token_type_ids
@@ -103,9 +100,6 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds,
                     use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
                     cache_position=cache_position,
                 )
 
