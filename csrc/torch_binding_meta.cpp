@@ -569,6 +569,25 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_sum_lstm_meta(
+    const at::Tensor& states_4d,
+    const at::Tensor& z4_4d,
+    const at::Tensor& prev_cell,
+    const c10::optional<at::Tensor>& w_cell,
+    const c10::optional<at::Tensor>& b_cell,
+    const c10::optional<at::Tensor>& w_state,
+    const c10::optional<at::Tensor>& b_state,
+    double alpha,
+    double eps_cell,
+    double eps_state,
+    bool use_fast_gelu)
+{
+    // Output shape is the same as prev_cell
+    at::Tensor out_state = at::empty_symint(prev_cell.sym_sizes(), prev_cell.options());
+    at::Tensor out_cell = at::empty_symint(prev_cell.sym_sizes(), prev_cell.options());
+    return std::tuple<at::Tensor, at::Tensor>(out_state, out_cell);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
