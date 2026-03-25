@@ -149,7 +149,12 @@ jobs:
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
     needs: [parse-trigger]
-    if: always() && needs.parse-trigger.outputs.run == 'true'
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' && (
+        needs.parse-trigger.outputs.filter == 'all' ||
+        contains(needs.parse-trigger.outputs.filter, 'accuracy-group')
+      )
     runs-on: linux-aarch64-a2b3-0
     outputs:
       nightly_matrix: ${{ steps.set-matrix.outputs.nightly_matrix }}
@@ -169,7 +174,10 @@ jobs:
 
   single-node-accuracy-tests:
     needs: [parse-trigger, generate-accuracy-matrix]
-    if: always() && needs.parse-trigger.outputs.run == 'true'
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      needs.generate-accuracy-matrix.result != 'skipped'
     strategy:
       fail-fast: false
       matrix:
@@ -195,7 +203,8 @@ jobs:
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
-      needs.parse-trigger.outputs.filter != 'all'
+      needs.parse-trigger.outputs.filter != 'all' &&
+      needs.generate-accuracy-matrix.result != 'skipped'
     strategy:
       fail-fast: false
       matrix:
