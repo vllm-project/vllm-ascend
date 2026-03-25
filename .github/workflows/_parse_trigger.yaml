@@ -1,0 +1,115 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'Parse nightly trigger'
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: false
+        type: string
+        default: linux-aarch64-a2b3-0
+    outputs:
+      run:
+        description: "Whether nightly tests should run"
+        value: ${{ jobs.parse.outputs.run }}
+      filter:
+        description: "Comma-wrapped test name filter (e.g. ',name1,name2,'), or 'all'"
+        value: ${{ jobs.parse.outputs.filter }}
+      ref:
+        description: "The vllm-ascend ref (commit SHA for PRs, branch/tag name otherwise)"
+        value: ${{ jobs.parse.outputs.ref }}
+
+jobs:
+  parse:
+    name: Parse trigger and determine test scope
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      run: ${{ steps.parse.outputs.run }}
+      filter: ${{ steps.parse.outputs.filter }}
+      ref: ${{ steps.parse.outputs.ref }}
+    steps:
+      - name: Parse trigger
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eventName = context.eventName;
+
+            function parseNightlyComment(body) {
+              if (!body) return null;
+              const match = body.trim().match(/^\/nightly(?:\s+(.+))?$/m);
+              if (!match) return null;
+              const args = (match[1] || '').trim();
+              if (!args || args === 'all') return 'all';
+              // Wrap with commas for exact-name matching: ",name1,name2,"
+              return ',' + args.split(/\s+/).join(',') + ',';
+            }
+
+            function getRef() {
+              if (eventName === 'pull_request') {
+                return context.payload.pull_request.head.sha;
+              }
+              return (context.ref || '').replace(/^refs\/(heads|tags)\//, '') || 'main';
+            }
+
+            core.setOutput('ref', getRef());
+
+            // 1. schedule / workflow_dispatch: run all tests with pre-built image
+            if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
+              core.setOutput('run', 'true');
+              core.setOutput('filter', 'all');
+              return;
+            }
+
+            // 2. pull_request (labeled / synchronize)
+            if (eventName === 'pull_request') {
+              const labels = context.payload.pull_request.labels.map(l => l.name);
+              if (!labels.includes('nightly-test')) {
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
+                return;
+              }
+              // Search comments for latest /nightly command
+              const prNumber = context.payload.pull_request.number;
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              });
+              let filter = null;
+              for (let i = comments.length - 1; i >= 0; i--) {
+                const result = parseNightlyComment(comments[i].body);
+                if (result !== null) { filter = result; break; }
+              }
+              // No /nightly comment found: do not run any tests
+              if (filter === null) {
+                core.info('nightly-test label present but no /nightly comment found; skipping.');
+                core.setOutput('run', 'false');
+                core.setOutput('filter', '');
+                return;
+              }
+              core.setOutput('run', 'true');
+              core.setOutput('filter', filter);
+              return;
+            }
+
+            // Fallback
+            core.setOutput('run', 'false');
+            core.setOutput('filter', '');
