@@ -30,6 +30,9 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+# NPU does not support fork, use spawn for multiprocessing
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
 from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
