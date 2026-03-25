@@ -82,6 +82,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 inputs_embeds=None,
                 use_cache=None,
                 cache_position=None,
+                token_type_ids=None,
             ):
                 # token_type_ids
                 self._current_token_type_ids = token_type_ids
