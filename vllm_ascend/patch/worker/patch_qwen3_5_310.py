@@ -24,9 +24,9 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from vllm_ascend._310p.ops.chunk_gate_delta_rule import chunk_gated_delta_rule_pytorch
-from vllm_ascend._310p.ops.fused_gdn_gating import fused_gdn_gating_pytorch
-from vllm_ascend._310p.ops.fused_recurrent_gated_delta_rule import fused_recurrent_gated_delta_rule_pytorch
+from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
+from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
+from vllm_ascend._310p.ops.fla.fused_recurrent_gated_delta_rule import fused_recurrent_gated_delta_rule_pytorch
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.utils import enable_sp
 
@@ -100,8 +100,7 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 conv_state_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes],
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
-                validate_data=False,
+                max_query_len=spec_state_indices_tensor.size(-1)
             )
 
         # 1.2: Process the remaining part
