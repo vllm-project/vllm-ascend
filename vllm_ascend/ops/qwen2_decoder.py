@@ -83,6 +83,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 use_cache=None,
                 cache_position=None,
                 token_type_ids=None,
+                **kwargs: Unpack[TransformersKwargs],
             ):
                 # token_type_ids
                 self._current_token_type_ids = token_type_ids
@@ -112,7 +113,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 token_type_ids,
             ):
                 """
-                NPU优化的4D Mask生成 - 向量化并行实现,替代原始循环实现
+                4D Mask generation optimized for NPU - vector parallel implementation, replacing the original loop implementation
                 """
                 dtype, device = input_tensor.dtype, input_tensor.device
                 min_dtype = torch.finfo(dtype).min
@@ -121,38 +122,38 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 if token_type_ids is None:
                     return self._create_standard_causal_mask(batch_size, sequence_length, dtype, device, attention_mask)
                 # ==========================================
-                # NPU优化：向量化并行Mask生成 (替代循环)
+                # NPU optimization: vectorized parallel mask generation (replacing loops)
                 # ==========================================
-                # 1. 创建image token位置掩码 [batch, seq_len]
+                # 1. create image token position mask [batch, seq_len]
                 is_image = (token_type_ids == 0).unsqueeze(-1).to(dtype=dtype, device=device)  # [batch, seq_len, 1]
                 is_text = (token_type_ids == 1).unsqueeze(-1).to(dtype=dtype, device=device)  # [batch, seq_len, 1]
-                # 2. Image tokens之间的双向注意力 (全连接)
+                
+                # 2. Bidirectional attention (fully connected) between image tokens.
                 # image_attention: [batch, seq_len, seq_len]
                 image_attention = torch.bmm(is_image, is_image.transpose(1, 2))
-                # 3. Text tokens对Image tokens的可见性 (全连接)
+                # 3. Visibility of text tokens to image tokens (full connection)
                 text_to_image = torch.bmm(is_text, is_image.transpose(1, 2))
-                # 4. Text 对 Text 的因果注意力
-                # 先做矩阵乘法得到 [B, L, L] 的 text-text 关系对
+                # 4. Causal attention from text to text.
+                # First, perform matrix multiplication to obtain the text-text relationship pairs of [B, L, L].
                 text_to_text_base = torch.bmm(is_text, is_text.transpose(1, 2))
-                # 创建因果三角阵
+                # create casual triangular Lower
                 causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), device=device, dtype=dtype))
                 text_to_text = text_to_text_base * causal_mask.unsqueeze(0)
-                # 5. 合并所有注意力模式
+                # 5. Merge all attention patterns
                 combined_mask = image_attention + text_to_image + text_to_text
-                combined_mask = (1 - combined_mask) * min_dtype  # 反转：0->min_dtype, 1->0
-                # 6. 处理 Padding Mask (attention_mask)
-                # vLLM 传入的 attention_mask 可能是 [B, L]
+                combined_mask = (1 - combined_mask) * min_dtype  # reverse：0->min_dtype, 1->0
+                # 6. Process Padding Mask (attention_mask)
                 if attention_mask is not None:
-                    # 确保 padding_mask 在同一设备
+                    # Ensure that padding_mask is on the same device
                     p_mask = attention_mask.to(device=device, dtype=dtype)
                     if p_mask.dim() == 2:
-                        # 扩展为 [B, 1, 1, L] 适配 4D Attention
+                        # Extended to [B, 1, 1, L] to adapt to 4D attention.
                         p_mask = (1.0 - p_mask[:, None, None, :]) * min_dtype
                         return combined_mask.unsqueeze(1) + p_mask
                 return combined_mask.unsqueeze(1)
 
             def _create_standard_causal_mask(self, batch_size, seq_len, dtype, device, attention_mask):
-                """标准因果mask (当没有token_type_ids时使用)"""
+                """Standard causal mask (when token_type_ids is None)"""
                 min_dtype = torch.finfo(dtype).min
                 mask = torch.triu(torch.full((seq_len, seq_len), min_dtype, dtype=dtype, device=device), diagonal=1)
                 mask = mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
@@ -287,8 +288,6 @@ class AscendQwen2DecoderLayer(Qwen2DecoderLayer):
 
 
 def optimized_apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
-    # npu_rotary_mul 要求 cos/sin 的形状与 q/k 匹配或可广播
-    # 通常性能提升在 30%-50% 以上
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = torch_npu.npu_rotary_mul(q, cos, sin)
