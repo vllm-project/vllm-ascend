@@ -79,14 +79,12 @@ class AscendInputBatch(InputBatch):
         num_reqs: int,
         num_tokens: int,
         input_buffers: AscendInputBuffers,
-        device: torch.device,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
         input_batch = InputBatch.make_dummy(
             num_reqs,
             num_tokens,
             input_buffers,
-            device,
         )
         # seq_len equals to query_len
         input_buffers.seq_lens_np[:num_reqs] = num_tokens // num_reqs
