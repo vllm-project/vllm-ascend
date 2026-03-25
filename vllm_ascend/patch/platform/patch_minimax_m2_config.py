@@ -150,8 +150,7 @@ def _patch_speculative_minimax_whitelist() -> None:
         from vllm.config.speculative import SpeculativeConfig  # type: ignore
     except Exception:
         logger.warning(
-            "SpeculativeConfig is not found, skip patching eagle3/extract_hidden_states "
-            "checks for MiniMax-M2 on NPU."
+            "SpeculativeConfig is not found, skip patching eagle3/extract_hidden_states checks for MiniMax-M2 on NPU."
         )
         return
 
@@ -163,9 +162,7 @@ def _patch_speculative_minimax_whitelist() -> None:
         )
         return
     if getattr(original_verify_args, "_vllm_ascend_minimax_eagle3_patched", False):
-        logger.warning(
-            "eagle3/extract_hidden_states checks for MiniMax-M2 on NPU have already been patched."
-        )
+        logger.warning("eagle3/extract_hidden_states checks for MiniMax-M2 on NPU have already been patched.")
         return
 
     # Pydantic dataclass validation invokes `model_validators["_verify_args"].func`, not
@@ -176,11 +173,7 @@ def _patch_speculative_minimax_whitelist() -> None:
         model_validators = getattr(decorators, "model_validators", None)
         if isinstance(model_validators, dict):
             mv = model_validators.get("_verify_args")
-    inner_verify = (
-        mv.func
-        if mv is not None and getattr(mv, "func", None) is not None
-        else original_verify_args
-    )
+    inner_verify = mv.func if mv is not None and getattr(mv, "func", None) is not None else original_verify_args
 
     def _patched_verify_args(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         try:
@@ -236,8 +229,7 @@ def _patch_speculative_minimax_whitelist() -> None:
             rebuild_dataclass(SpeculativeConfig, force=True)  # type: ignore[arg-type]
         except Exception as e:
             logger.warning(
-                "rebuild_dataclass(SpeculativeConfig) failed (%s); eagle3 whitelist "
-                "patch may not apply.",
+                "rebuild_dataclass(SpeculativeConfig) failed (%s); eagle3 whitelist patch may not apply.",
                 e,
             )
         # If `VllmConfig` was imported before this patch ran, its pydantic-core schema
@@ -270,7 +262,7 @@ def _patch_eagle3_registry_alias() -> None:
 
     # Prefer patching the underlying dicts when available.
     if hasattr(registry, "_SPECULATIVE_DECODING_MODELS"):
-        models = getattr(registry, "_SPECULATIVE_DECODING_MODELS")
+        models = registry._SPECULATIVE_DECODING_MODELS
         if isinstance(models, dict):
             models.setdefault("Eagle3MiniMaxM2ForCausalLM", ("llama_eagle3", "Eagle3LlamaForCausalLM"))
 
