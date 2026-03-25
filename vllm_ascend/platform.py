@@ -183,17 +183,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
-        cache_config = vllm_config.cache_config
-        if cache_config.user_specified_block_size:
-            # User specified --block-size; keep it.
-            return
-        model_config = vllm_config.model_config
-        if model_config is not None and model_config.is_hybrid:
-            # Hybrid attention+mamba models rely on the model-specific sizing
-            # logic rather than the generic platform default.
-            return
-
-        super().update_block_size_for_backend(vllm_config)
+        # TODO: NPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def set_device(cls, device: torch.device):
