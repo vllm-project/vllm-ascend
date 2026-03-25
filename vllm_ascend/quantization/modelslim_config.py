@@ -429,6 +429,21 @@ class AscendModelSlimConfig(QuantizationConfig):
             self._add_kvcache_quant_metadata()
             logger.info("Applied hf_to_vllm_mapper to quant_description keys")
 
+    def get_cache_scale(self, name: str) -> str | None:
+        """Map checkpoint C8 KV scale/offset names to vLLM parameter names."""
+        if self.quant_description.get("kv_cache_type") != "C8":
+            return None
+        _C8_SCALE_MAPPING = {
+            "k_proj.kv_cache_scale": "attn.k_cache_scale",
+            "k_proj.kv_cache_offset": "attn.k_cache_offset",
+            "v_proj.kv_cache_scale": "attn.v_cache_scale",
+            "v_proj.kv_cache_offset": "attn.v_cache_offset",
+        }
+        for src_suffix, dst_suffix in _C8_SCALE_MAPPING.items():
+            if name.endswith(src_suffix):
+                return name[: -len(src_suffix)] + dst_suffix
+        return None
+
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
         return prefix
@@ -476,6 +491,10 @@ class AscendModelSlimConfig(QuantizationConfig):
         ):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             return AscendKVCacheMethod(scheme)
+        elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
+            from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
+
+            return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
