@@ -17,7 +17,7 @@ from .utils import prepare_chunk_indices
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H", "Hg", "K", "V"])
 def recompute_w_u_fwd_kernel(
     k,
     v,
@@ -29,10 +29,10 @@ def recompute_w_u_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    H: tl.constexpr,
-    Hg: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
+    H,
+    Hg,
+    K,
+    V,
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
