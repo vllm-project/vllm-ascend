@@ -324,8 +324,23 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             model_runner_type=self.model_config.runner_type,
         )
         if hasattr(common_attn_metadata, "kvcomp_metadata"):
+            real_batch_size = attn_metadata.seq_lens.shape[0]
+            seq_lens_for_hamming = attn_metadata.seq_lens[:real_batch_size].to(device=self.device, non_blocking=True) # attn_metadata.seq_lens_device
+            max_seq_len_for_hamming = torch.max(attn_metadata.seq_lens).item() # 这里会有同步
             attn_metadata.kvcomp_metadata = common_attn_metadata.kvcomp_metadata
             attn_metadata.actual_seq_lengths_q_device = recover_request_lengths(query_start_loc)
+            attn_metadata.kvcomp_metadata.seq_lens_for_hamming = seq_lens_for_hamming
+            attn_metadata.kvcomp_metadata.max_seq_len_for_hamming = max_seq_len_for_hamming
+
+            kvcomp_metadata = attn_metadata.kvcomp_metadata
+            kvcomp_config = attn_metadata.kvcomp_metadata.kvcomp_config
+            remainder = attn_metadata.seq_lens % kvcomp_config.chunk_size
+            top_k_for_hamming_cpu = kvcomp_metadata.topk_for_hamming_full_cpu[:real_batch_size]
+            attn_metadata.kvcomp_metadata.hamming_output_seq_lens = torch.where(
+                remainder == 0,\
+                kvcomp_config.chunk_size * top_k_for_hamming_cpu,\
+                kvcomp_config.chunk_size * (top_k_for_hamming_cpu - 1) + remainder
+            )
         return attn_metadata
 
     def build_for_graph_capture(
@@ -779,7 +794,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if (kvcomp_config.vllm_hash_attention_skip_layers[self.layerIndex] and 
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
-            return kvcomp_metadata.hamming_output, kvcomp_metadata.seq_lens_for_hamming
+            return kvcomp_metadata.hamming_output, kvcomp_metadata.hamming_output_seq_lens
         else: # padding, 指定 batch size
             sink = 1
             recent =4
@@ -801,20 +816,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return block_table, actual_seq_lengths_kv
 
             real_batch_size = attn_metadata.seq_lens.shape[0] # 这里是不会padding的。。。
-            seq_lens_for_hamming = attn_metadata.seq_lens[:real_batch_size].to(device=query.device, non_blocking=True) # attn_metadata.seq_lens_device
-            max_seq_len_for_hamming = torch.max(attn_metadata.seq_lens).item()
+            seq_lens_for_hamming = kvcomp_metadata.seq_lens_for_hamming
+            max_seq_len_for_hamming = kvcomp_metadata.max_seq_len_for_hamming
+            
             # max_seq_len_for_hamming = torch.tensor(max_seq_len_for_hamming, dtype=torch.int32)
             chunk_sizes_for_hamming = kvcomp_metadata.chunk_sizes_for_hamming_full[:real_batch_size]# chunk_sizes_full
             block_tables_for_hamming = attn_metadata.block_tables[:real_batch_size]
             top_k_for_hamming = kvcomp_metadata.topk_for_hamming_full[:real_batch_size]
             top_k_for_hamming_cpu = kvcomp_metadata.topk_for_hamming_full_cpu[:real_batch_size]
-
-            remainder = attn_metadata.seq_lens % kvcomp_config.chunk_size
-            new_seq_lens_list = torch.where(
-                remainder == 0,\
-                kvcomp_config.chunk_size * top_k_for_hamming_cpu,\
-                kvcomp_config.chunk_size * (top_k_for_hamming_cpu - 1) + remainder
-            )
 
             hashq = hash_encoder.compute_hash(query[:real_batch_size])
             hashq = hashq.unsqueeze(2).contiguous()    
@@ -835,9 +844,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             new_block_table = new_block_table.squeeze(1).contiguous()
             kvcomp_metadata.hamming_output = new_block_table
-            kvcomp_metadata.seq_lens_for_hamming = new_seq_lens_list
-
-        return new_block_table, new_seq_lens_list
+        return new_block_table, kvcomp_metadata.hamming_output_seq_lens
 
     def forward_fused_infer_attention(
         self,
