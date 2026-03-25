@@ -1976,7 +1976,7 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_batch_across_dp(
                 num_tokens_padded=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode.value,
-                allow_dp_padding=cudagraph_mode != CUDAGraphMode.NONE,
+                allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
             )
 
             # Extract DP padding if there is any
