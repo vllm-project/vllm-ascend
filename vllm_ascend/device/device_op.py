@@ -170,7 +170,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu.npu_scatter_pa_kv_cache(
-            key=key, value=value.contiguous(), key_cache=key_cache, value_cache=value_cache, slot_mapping=slot_mapping
+            key=key.contiguous(), value=value.contiguous(), key_cache=key_cache, value_cache=value_cache, slot_mapping=slot_mapping.contiguous()
         )
 
     @staticmethod
