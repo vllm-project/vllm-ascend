@@ -80,7 +80,6 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 position_ids=None,
                 past_key_values=None,
                 inputs_embeds=None,
-                token_type_ids=None,
                 use_cache=None,
                 cache_position=None,
             ):
