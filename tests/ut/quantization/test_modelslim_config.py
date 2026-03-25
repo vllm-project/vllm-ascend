@@ -16,6 +16,7 @@ from vllm_ascend.quantization.modelslim_config import (
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -124,6 +125,19 @@ class TestAscendModelSlimConfig(TestBase):
             method = self.ascend_config.get_quant_method(
                 attention_layer, "layers.1.attn")
             self.assertIs(method, mock_ascend_kvcache.return_value)
+
+    def test_get_quant_method_for_c8_kv_cache_attention(self):
+        c8_config = AscendModelSlimConfig({"kv_cache_type": "C8"})
+        attention_layer = MagicMock(spec=AttentionLayerBase)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.hf_config.model_type = None
+        with patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_vllm_config), \
+            patch("vllm_ascend.quantization.method_adapters.AscendKVCacheMethod", return_value=MagicMock()) as mock_kvcache:
+            method = c8_config.get_quant_method(attention_layer, "model.layers.0.self_attn.attn")
+            self.assertIs(method, mock_kvcache.return_value)
+            args, _ = mock_kvcache.call_args
+            from vllm_ascend.quantization.methods.kv_c8 import AscendC8KVCacheAttentionMethod
+            self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
 
     def test_get_quant_method_for_fused_moe(self):
         fused_moe_layer = MagicMock(spec=FusedMoE)
