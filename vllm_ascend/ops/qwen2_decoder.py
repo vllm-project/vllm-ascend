@@ -113,7 +113,8 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 token_type_ids,
             ):
                 """
-                4D Mask generation optimized for NPU - vector parallel implementation, replacing the original loop implementation
+                4D Mask generation optimized for NPU 
+                vector parallel implementation, replacing the original loop implementation
                 """
                 dtype, device = input_tensor.dtype, input_tensor.device
                 min_dtype = torch.finfo(dtype).min
@@ -127,7 +128,6 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 # 1. create image token position mask [batch, seq_len]
                 is_image = (token_type_ids == 0).unsqueeze(-1).to(dtype=dtype, device=device)  # [batch, seq_len, 1]
                 is_text = (token_type_ids == 1).unsqueeze(-1).to(dtype=dtype, device=device)  # [batch, seq_len, 1]
-                
                 # 2. Bidirectional attention (fully connected) between image tokens.
                 # image_attention: [batch, seq_len, seq_len]
                 image_attention = torch.bmm(is_image, is_image.transpose(1, 2))
