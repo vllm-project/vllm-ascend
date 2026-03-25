@@ -216,7 +216,7 @@ class NPUWorker(WorkerBase):
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
-        if tags is None or "weights" in tags:
+        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
             for name, param in model.named_parameters():
                 if "w2_weight" in name and param.shape[2] == hidden_size:
                     parts = name.split(".")
