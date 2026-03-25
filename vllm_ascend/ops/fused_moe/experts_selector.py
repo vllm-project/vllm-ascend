@@ -18,6 +18,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import get_weight_prefetch_method
 
 
@@ -216,7 +217,7 @@ def _select_experts_with_fusion_ops(
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
-    topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
+    topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(
         router_logits,
         k=top_k,
         k_group=topk_group,
