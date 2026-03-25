@@ -51,8 +51,9 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.acl_graph import get_graph_params, update_graph_params_workspaces
-from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
+
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
     """
