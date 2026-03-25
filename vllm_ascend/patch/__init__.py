@@ -312,7 +312,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest processor implementation.
 #
-# ** 10. File: worker/patch_v2_eagle.py**
+# ** 10. File: worker/patch_v2/patch_eagle.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
 #    Why:
@@ -348,7 +348,7 @@
 #    Future Plan:
 #       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
 #
-# ** 13. File: worker/patch_v2_uva.py**
+# ** 13. File: worker/patch_v2/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.states.UvaBuffer`
 #    Why:
@@ -553,3 +553,48 @@
 #    Future Plan:
 #       The maybe_remap_kv_scale_name function of the community is reconstructed to support
 #       multiple backends.
+# ** 24. File: worker/patch_v2/patch_input_batch.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
+#    Why:
+#       vllm use InputBatch to make dummy tensors. in `model_runner.py` and `cudagraph_utils.py`
+#       which make it difficult to inherit from vllm methods.
+#    How：
+#       replace InputBatch with AscendInputBatch.
+#    Future Plan:
+#       remove this patch when vLLM-ascend's make_dummy behavior aligns with vLLM.
+# ** 25. File: worker/patch_v2/patch_block_table.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.block_table.BlockTables`
+#    Why:
+##      vllm-ascend need to initialize slot mapping as torch.int32 dtype,
+#       but vllm default is torch.int64 dtype.
+#    How：
+#       replace BlockTables with AscendBlockTables which initialize slot mapping
+#       as torch.int32 dtype.
+#    Future Plan:
+#       remove this patch when vLLM-ascend's BlockTables can initialize
+#       slot mapping as torch.int64 dtype.
+# ** 25. File: worker/patch_v2/patch_model_state.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.model_states.default.init_model_state`
+#    Why:
+##      vllm's prepare_attn in ModelState is different from vllm,
+#       we need to override init_model_state.
+#    How：
+#       Define AscendModelState and initialize it in init_model_state.
+#    Future Plan:
+#       remove this when vllm-ascend's attention metadata is align with vllm.
+# ** 26. File: worker/patch_v2/patch_triton.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
+#    Why:
+#       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
+#    How：
+#       override triton ops in vLLM with ascend implementation
+#    Related PR (if no, explain why):
+#       Let vLLM support triton ops dispatch.
+#    Future Plan:
+#       Remove this patch when vLLM support the dispatch function.
+#
