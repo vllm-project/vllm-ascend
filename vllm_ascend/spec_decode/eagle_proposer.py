@@ -99,6 +99,10 @@ class SpecDecodeBaseProposer(EagleProposer):
             1 if self.pass_hidden_states_to_model else 0
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
+        if self.needs_extra_input_slots:
+            self._raise_if_padded_drafter_batch_disabled()
+            self._raise_if_multimodal()
+            self._raise_if_mrope()
         # If needs_extra_input_slots is now True but was False during super().__init__,
         # the dependent buffers were never allocated — create them now.
         if self.needs_extra_input_slots and self.is_rejected_token_mask is None:
