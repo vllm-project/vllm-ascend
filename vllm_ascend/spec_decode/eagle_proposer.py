@@ -89,12 +89,6 @@ class SpecDecodeBaseProposer(EagleProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
-        # vllm.EagleProposer.__init__ hardcodes pass_hidden_states_to_model=True
-        # when calling vllm.SpecDecodeBaseProposer.__init__, so the derived
-        # attributes (net_num_new_slots_per_request, needs_extra_input_slots) and
-        # the dependent buffers (is_rejected_token_mask, is_masked_token_mask) may
-        # be computed/initialized incorrectly when pass_hidden_states_to_model=False.
-        # We fix this up after super().__init__ completes.
         super().__init__(vllm_config, device, runner)
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
