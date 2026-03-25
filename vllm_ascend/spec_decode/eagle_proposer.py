@@ -89,10 +89,27 @@ class SpecDecodeBaseProposer(EagleProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
+        # vllm.EagleProposer.__init__ hardcodes pass_hidden_states_to_model=True
+        # when calling vllm.SpecDecodeBaseProposer.__init__, so the derived
+        # attributes (net_num_new_slots_per_request, needs_extra_input_slots) and
+        # the dependent buffers (is_rejected_token_mask, is_masked_token_mask) may
+        # be computed/initialized incorrectly when pass_hidden_states_to_model=False.
+        # We fix this up after super().__init__ completes.
         super().__init__(vllm_config, device, runner)
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        # Recompute the two attributes that vllm.SpecDecodeBaseProposer derived
+        # from the hardcoded True value so they reflect the actual argument.
+        self.net_num_new_slots_per_request = self.extra_slots_per_request - (
+            1 if self.pass_hidden_states_to_model else 0
+        )
+        self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
+        # If needs_extra_input_slots is now True but was False during super().__init__,
+        # the dependent buffers were never allocated — create them now.
+        if self.needs_extra_input_slots and self.is_rejected_token_mask is None:
+            self.is_rejected_token_mask = torch.zeros((self.max_num_tokens,), dtype=torch.bool, device=device)
+            self.is_masked_token_mask = torch.zeros((self.max_num_tokens,), dtype=torch.bool, device=device)
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
