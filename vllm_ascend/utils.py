@@ -1091,14 +1091,6 @@ def refresh_block_size(vllm_config):
     if not cache_config:
         return
 
-    if cache_config.user_specified_block_size:
-        # User specified --block-size; keep it.
-        if cache_config.block_size != 128:
-            logger.warning(
-                "The user specified --block-size and the value is not 128, which can lead to performance degradation"
-            )
-        return
-
     if cache_config.block_size is None:
         cache_config.block_size = 128
 

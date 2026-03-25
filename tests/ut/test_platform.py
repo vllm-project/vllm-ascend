@@ -293,7 +293,6 @@ class TestNPUPlatform(TestBase):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.cache_config.block_size = None
         vllm_config.cache_config.enable_prefix_caching = True
-        vllm_config.cache_config.user_specified_block_size = False
         vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
