@@ -113,7 +113,7 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
                 token_type_ids,
             ):
                 """
-                4D Mask generation optimized for NPU 
+                4D Mask generation optimized for NPU
                 vector parallel implementation, replacing the original loop implementation
                 """
                 dtype, device = input_tensor.dtype, input_tensor.device
