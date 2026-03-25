@@ -42,7 +42,6 @@ from vllm_ascend.utils import (
     flashcomm2_enable,
     get_ascend_device_type,
     is_moe_model,
-    is_vl_model,
     refresh_block_size,
     update_aclgraph_sizes,
     update_cudagraph_capture_sizes,
@@ -158,6 +157,16 @@ class NPUPlatform(Platform):
         return None
 
     @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
+        """Apply Ascend-specific defaults. Set sp_min_token_num=1 when enable_sp and not set."""
+        pass_config = vllm_config.compilation_config.pass_config
+        if pass_config.enable_sp and pass_config.sp_min_token_num is None:
+            from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
+
+            pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
+            logger.info(f"set sp_min_token_num to {pass_config.sp_min_token_num}")
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return torch.npu.get_device_name(device_id)
 
@@ -173,6 +182,20 @@ class NPUPlatform(Platform):
         return torch.inference_mode()
 
     @classmethod
+    def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        cache_config = vllm_config.cache_config
+        if cache_config.user_specified_block_size:
+            # User specified --block-size; keep it.
+            return
+        model_config = vllm_config.model_config
+        if model_config is not None and model_config.is_hybrid:
+            # Hybrid attention+mamba models rely on the model-specific sizing
+            # logic rather than the generic platform default.
+            return
+
+        super().update_block_size_for_backend(vllm_config)
+
+    @classmethod
     def set_device(cls, device: torch.device):
         torch.npu.set_device(device)
 
@@ -185,6 +208,7 @@ class NPUPlatform(Platform):
 
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
+
         ascend_config = init_ascend_config(vllm_config)
 
         if vllm_config.kv_transfer_config is not None:
@@ -205,6 +229,7 @@ class NPUPlatform(Platform):
                 if not isinstance(ascend_compilation_config, dict)
                 else ascend_compilation_config
             )
+
         ascend_config.update_compile_ranges_split_points()
 
         if model_config and hasattr(model_config.hf_text_config, "index_topk"):
@@ -350,7 +375,8 @@ class NPUPlatform(Platform):
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
-            parallel_config.all2all_backend = "flashinfer_all2allv"
+            if not vllm_config.compilation_config.pass_config.enable_sp:
+                parallel_config.all2all_backend = "flashinfer_all2allv"
             if is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:
@@ -406,11 +432,6 @@ class NPUPlatform(Platform):
             vllm_config.parallel_config.cp_kv_cache_interleave_size = cache_config.block_size
 
         if enable_sp(vllm_config):
-            assert not is_vl_model(vllm_config), """Flash Comm V1 is not supported for VL models. \
-                Please disable it by setting VLLM_ASCEND_ENABLE_FLASHCOMM1=0. \
-                For optimal performance with VL models, we recommend enabling Sequence Parallelism \
-                via --compilation-config '{"pass_config": {"enable_sp": true}}'."""
-
             assert vllm_config.parallel_config.tensor_parallel_size > 1, (
                 "Flash Comm v1 is only supported when tp_size > 1."
             )
@@ -543,7 +564,7 @@ class NPUPlatform(Platform):
         attn_metadata: dict[str, Any],
         vllm_config: VllmConfig,
         dp_metadata,
-        virtual_engine: int = 0,
+        virtual_engine: int = 0,  # ToDo:: Remove me when upgrade to vllm 0.19.0 from 0.18.0
         num_tokens: int = 0,
         num_tokens_across_dp: torch.Tensor | None = None,
         cudagraph_runtime_mode=None,
@@ -797,3 +818,7 @@ class NPUPlatform(Platform):
                     "ignored on Ascend. Resetting to default (32)."
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True

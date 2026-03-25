@@ -159,23 +159,19 @@ class AscendConfig:
             and get_ascend_device_type() != AscendDeviceType.A5
         )
 
+        self.enable_sp_by_pass = (
+            vllm_config.model_config is not None
+            and not vllm_config.model_config.enforce_eager
+            and vllm_config.compilation_config.pass_config.enable_sp
+        )
+
     @staticmethod
     def _get_compile_ranges(compilation_config):
-        from vllm_ascend.utils import vllm_version_is
-
-        if vllm_version_is("0.17.0"):
-            return compilation_config.compile_ranges_split_points
-        else:
-            return compilation_config.compile_ranges_endpoints
+        return compilation_config.compile_ranges_endpoints or []
 
     @staticmethod
     def _set_compile_ranges(compilation_config, value):
-        from vllm_ascend.utils import vllm_version_is
-
-        if vllm_version_is("0.17.0"):
-            compilation_config.compile_ranges_split_points = value
-        else:
-            compilation_config.compile_ranges_endpoints = value
+        compilation_config.compile_ranges_endpoints = value
 
     def update_compile_ranges_split_points(self):
         vllm_config = self.vllm_config
@@ -205,14 +201,6 @@ class AscendConfig:
                     "{new_compile_ranges_split_points} for matmul and allreduce fusion"
                 )
 
-            from vllm_ascend.utils import is_moe_model
-
-            if vllm_config.compilation_config.pass_config.enable_sp and not is_moe_model(vllm_config):
-                from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_threshold
-
-                sp_threshold = get_sp_threshold(vllm_config)
-                new_compile_ranges_split_points.append(sp_threshold)
-                logger.debug(f"add {sp_threshold} to compile_ranges_split_points for sequence parallelism")
             if len(new_compile_ranges_split_points) > len(self._get_compile_ranges(vllm_config.compilation_config)):
                 new_compile_ranges_split_points = sorted(new_compile_ranges_split_points)
                 self._set_compile_ranges(vllm_config.compilation_config, new_compile_ranges_split_points)

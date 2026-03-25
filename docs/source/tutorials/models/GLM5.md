@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
 - `GLM-5-w4a8`: [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
-- `GLM-5-w8a8`: [Download model weight](https://ai.gitcode.com/Eco-Tech/GLM-5-w8a8/tree/main).
+- `GLM-5-w8a8`: [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantify the model naively.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -1306,6 +1306,21 @@ python load_balance_proxy_server_example.py \
       6721 6722 6723 6724 \
       6721 6722 6723 6724 \
       6721 6722 6723 6724      
+```
+
+## Functional Verification
+
+Once your server is started, you can query the model with input prompts:
+
+```shell
+curl http://<node0_ip>:<port>/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "glm-5",
+        "prompt": "The future of AI is",
+        "max_completion_tokens": 50,
+        "temperature": 0
+    }'
 ```
 
 ## Accuracy Evaluation

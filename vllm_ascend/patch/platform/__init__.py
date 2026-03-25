@@ -20,7 +20,7 @@ import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_fusion_matcher_compat_ops  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
 from vllm_ascend import envs
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p
 
 if not is_310p():
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
@@ -32,5 +32,6 @@ import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
-if envs.VLLM_ASCEND_BALANCE_SCHEDULING and vllm_version_is("0.17.0"):
+
+if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
     import vllm_ascend.patch.platform.patch_balance_schedule  # noqa

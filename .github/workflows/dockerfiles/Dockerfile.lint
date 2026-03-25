@@ -20,14 +20,14 @@ FROM ascendai/python:3.11-ubuntu22.04
 ARG TARGETARCH
 
 RUN apt-get update -y && \
-    apt-get install -y curl git gcc g++ cmake libnuma-dev jq && \
+    apt-get install -y curl git gcc g++ cmake libnuma-dev jq wget xz-utils shellcheck && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
 
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # For lint purpose, actually we need make a main2main matching.
-ARG VLLM_COMMIT=8b6325758cce5f9c36d38f2462edbd368b97a07c
+ARG VLLM_COMMIT=ed359c497a728f08b5b41456c07a688ccd510fbc
 RUN git clone $VLLM_REPO /vllm-workspace/vllm && \
     cd /vllm-workspace/vllm && \
     git checkout $VLLM_COMMIT
