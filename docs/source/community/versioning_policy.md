@@ -23,6 +23,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        | Triton Ascend |
 |-------------|-------------------|-----------------|-------------|---------------------------------|---------------|
+| v0.18.0rc1  | v0.18.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0         |
 | v0.17.0rc1  | v0.17.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0         |
 | v0.16.0rc1  | v0.16.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0         |
 | v0.15.0rc1  | v0.15.0           | >= 3.10, < 3.12 | 8.5.0       | 2.9.0  / 2.9.0                  | 3.2.0         |
@@ -59,7 +60,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
 |-------------|--------------|------------------|-------------|--------------------|
-|     main    | ed359c497a728f08b5b41456c07a688ccd510fbc, v0.18.0 tag | >= 3.10, < 3.12   | 8.5.0 | 2.9.0 / 2.9.0 |
+|     main    | ed359c497a728f08b5b41456c07a688ccd510fbc, v0.18.0 tag | >= 3.10, < 3.12   | 8.5.1 | 2.9.0 / 2.9.0 |
 
 ## Release cadence
 
@@ -67,6 +68,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.03.27 | Release candidates, v0.18.0rc1            |
 | 2026.03.15 | Release candidates, v0.17.0rc1            |
 | 2026.03.10 | Release candidates, v0.16.0rc1            |
 | 2026.02.27 | Release candidates, v0.15.0rc1            |
@@ -126,7 +128,7 @@ Usually, each minor version of vLLM (such as 0.7) corresponds to a vLLM Ascend v
 
 | Branch     | State        | Note                                                     |
 | ---------- | ------------ | -------------------------------------------------------- |
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.16.0 tag |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.18.0 tag |
 | releases/v0.13.0 | Maintained | CI commitment for vLLM 0.13.0 version                |
 | v0.11.0-dev| Maintained   | CI commitment for vLLM 0.11.0 version |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version                     |
