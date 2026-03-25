@@ -150,6 +150,7 @@ public:
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale2,
 
         uint32_t epilogueCoreNum = 40,
+        uint32_t blockK = 1,
         Callback &&callback = Callback{}
     )
     {
