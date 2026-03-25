@@ -22,6 +22,7 @@ name: Nightly Image Build Schedule
 
 on:
   workflow_dispatch:
+    # Next step: Add more inputs here if needed, e.g. vllm version, vllm-ascend version, image tag, etc.
 
 jobs:
   build-a2:
