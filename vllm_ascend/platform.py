@@ -196,9 +196,6 @@ class NPUPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults. Set sp_min_token_num=1 when enable_sp and not set."""
-        default_max_cg_capture_size = cls._get_default_max_cudagraph_capture_size(vllm_config)
-        if default_max_cg_capture_size is not None:
-            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
         pass_config = vllm_config.compilation_config.pass_config
         if pass_config.enable_sp and pass_config.sp_min_token_num is None:
             from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
