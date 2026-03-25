@@ -37,34 +37,47 @@ def token_bin_counts_and_mask_kernel(
     bin_counts_ptr,
     counts_batch_stride,
     counts_vocab_stride,
-    BIG_CORE_NUM: tl.constexpr,
-    BIG_ROW_BLOCK_SIZE: tl.constexpr,
+    SEQ_BLOCK: tl.constexpr,
 ):
-    """Count token occurrences per batch row. Tokens with value >= vocab_size
-    (e.g. padding) are skipped. Uses atomic_add for robust accumulation.
+    """Count token occurrences per batch row.
+
+    2D tiling:
+      - axis=0: core/program group dimension
+      - axis=1: block id dimension
+
+    We linearize (batch_idx, seq_block_id) into a single global block id and
+    distribute blocks across all programs to improve utilization when
+    batch_size is small but seq_len is large (typical prefill).
+
+    Tokens with value >= vocab_size (e.g. padding) are skipped.
     """
-    pid = tl.program_id(axis=0)
-    SMALL_ROW_BLOCK_SIZE = BIG_ROW_BLOCK_SIZE - 1
-    if pid < BIG_CORE_NUM:
-        row_block_size = BIG_ROW_BLOCK_SIZE
-        row_start_idx = pid * BIG_ROW_BLOCK_SIZE
-    else:
-        row_block_size = SMALL_ROW_BLOCK_SIZE
-        row_start_idx = (
-            BIG_CORE_NUM * BIG_ROW_BLOCK_SIZE
-            + (pid - BIG_CORE_NUM) * SMALL_ROW_BLOCK_SIZE
-        )
+    pid0 = tl.program_id(axis=0)
+    pid1 = tl.program_id(axis=1)
+    progs = tl.num_programs(axis=0)
 
-    row_end_idx = tl.minimum(row_start_idx + row_block_size, batch_size)
-    for batch_idx in range(row_start_idx, row_end_idx):
-        batch_tokens_start = tokens_ptr + batch_idx * tokens_batch_stride
-        batch_counts_start = bin_counts_ptr + batch_idx * counts_batch_stride
+    n_seq_blocks = tl.cdiv(seq_len, SEQ_BLOCK)
+    linear_block = pid1 * progs + pid0
+    total_blocks = batch_size * n_seq_blocks
+    if linear_block >= total_blocks:
+        return
 
-        for pos in range(seq_len):
-            token = tl.load(batch_tokens_start + pos * tokens_seq_stride)
-            if token >= 0 and token < vocab_size:
-                count_ptr = batch_counts_start + token * counts_vocab_stride
-                tl.atomic_add(count_ptr, 1)
+    batch_idx = linear_block // n_seq_blocks
+    seq_block_id = linear_block - batch_idx * n_seq_blocks
+    seq_start = seq_block_id * SEQ_BLOCK
+
+    batch_tokens_start = tokens_ptr + batch_idx * tokens_batch_stride
+    batch_counts_start = bin_counts_ptr + batch_idx * counts_batch_stride
+
+    pos_offsets = seq_start + tl.arange(0, SEQ_BLOCK)
+    pos_mask = pos_offsets < seq_len
+    token = tl.load(
+        batch_tokens_start + pos_offsets * tokens_seq_stride,
+        mask=pos_mask,
+        other=vocab_size,  # force invalid
+    )
+    token_in_range = (token >= 0) & (token < vocab_size) & pos_mask
+    count_ptr = batch_counts_start + token * counts_vocab_stride
+    tl.atomic_add(count_ptr, 1, mask=token_in_range)
 
 
 def get_token_bin_counts_and_mask_triton(
@@ -101,15 +114,14 @@ def get_token_bin_counts_and_mask_triton(
     if not bin_counts.is_contiguous():
         bin_counts = bin_counts.contiguous()
 
-    big_row_block_size = triton.cdiv(n_rows, core_num)
-    big_core_num = max(
-        0,
-        min(
-            core_num - (big_row_block_size * core_num - n_rows),
-            core_num,
-        ),
-    )
-    grid = (min(n_rows, core_num),)
+    # 2D grid: (progs, blocks_per_prog_group)
+    # Keep axis-0 bounded by vector core count, and distribute (batch, seq_block)
+    # blocks across all programs to increase utilization when n_rows is small.
+    SEQ_BLOCK = 256
+    n_seq_blocks = triton.cdiv(n_cols, SEQ_BLOCK)
+    total_blocks = n_rows * n_seq_blocks
+    progs = min(core_num, max(1, total_blocks))
+    grid = (progs, triton.cdiv(total_blocks, progs))
 
     token_bin_counts_and_mask_kernel[grid](
         tokens,
@@ -121,7 +133,6 @@ def get_token_bin_counts_and_mask_triton(
         bin_counts,
         bin_counts.stride(0),
         bin_counts.stride(1),
-        BIG_CORE_NUM=big_core_num,
-        BIG_ROW_BLOCK_SIZE=big_row_block_size,
+        SEQ_BLOCK=SEQ_BLOCK,
     )
     return bin_counts, bin_counts > 0

@@ -30,7 +30,7 @@ def _pt_apply_penalties(
     )
 
 
-@pytest.mark.parametrize("num_seqs", [1, 4, 8])
+@pytest.mark.parametrize("num_seqs", [1, 8, 32, 128])
 @pytest.mark.parametrize("vocab_size", [5120, 151936])
 @pytest.mark.parametrize("max_prompt_len", [32, 128])
 @pytest.mark.parametrize("max_output_len", [16, 64])
