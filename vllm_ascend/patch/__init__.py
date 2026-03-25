@@ -598,3 +598,26 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
+# ** 27. File: worker/patch_qwen3_c8.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.load_weights`
+#    Why:
+#       The Qwen3 W8A8C8 model stores per-channel KV cache scales and offsets
+#       (k_cache_scale, k_cache_offset, v_cache_scale, v_cache_offset) under
+#       weight names that AutoWeightsLoader does not recognise and would
+#       silently discard.  Without these scales the INT8 KV cache cannot be
+#       dequantised correctly at inference time.
+#    How:
+#       Wrap load_weights to intercept the C8 scale/offset tensors before they
+#       reach the base loader.  Each intercepted tensor is routed to the
+#       corresponding nn.Parameter via its weight_loader, then excluded from
+#       the remaining weight stream so the base loader never sees it.
+#    Related PR (if no, explain why):
+#       This PR (Qwen3-32B W8A8C8 support).  Upstream vLLM's weight-loading
+#       pipeline does not yet have a generic hook for hardware-plugin-defined
+#       KV cache parameters.
+#    Future Plan:
+#       Remove this patch when vLLM provides a first-class extension point
+#       for loading extra KV cache quantisation parameters in model load_weights,
+#       or when the Qwen3 model's weight names are aligned with the parameter
+#       names expected by the quantisation backend.
