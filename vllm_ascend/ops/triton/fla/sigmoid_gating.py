@@ -39,7 +39,7 @@ else:
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["scale", "N"])
+@triton.jit(do_not_specialize=["scale", "N", "T", "B"])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
@@ -54,8 +54,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     num_accepted_tokens,
     scale,
     N,  # num of sequences
-    T: tl.constexpr,  # num of tokens
-    B: tl.constexpr,
+    T,  # num of tokens
+    B,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,

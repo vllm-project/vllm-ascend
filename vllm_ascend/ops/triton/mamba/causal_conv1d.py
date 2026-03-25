@@ -157,7 +157,10 @@ def extract_last_width(x, start_loc, width):
     return x[:, indices].permute(1, 0, 2)
 
 @triton.jit(
-    do_not_specialize=["batch", "dim", "state_len", "num_cache_lines"]
+    do_not_specialize=["batch", "state_len", "num_cache_lines", "stride_x_seq",
+    "stride_x_token", "stride_conv_state_seq", "stride_conv_state_tok",
+    "stride_state_indices", "stride_o_seq", "stride_o_token"
+    ]
 )
 def _causal_conv1d_update_kernel_npu_tiled(
     # Pointers
@@ -172,22 +175,22 @@ def _causal_conv1d_update_kernel_npu_tiled(
     initial_state_idx,  # (batch,)
     o_ptr,  # same shape as x_ptr
     batch: tl.int32,
-    dim,
+    dim: tl.constexpr,
     seqlen: tl.constexpr,  # max seqlen for varlen, or exact seqlen
     state_len,  # effective state_len computed in wrapper
     num_cache_lines,
     # Strides
     stride_x_seq,
-    stride_x_dim,
+    stride_x_dim: tl.constexpr,
     stride_x_token,
     stride_w_dim: tl.constexpr,
     stride_w_width: tl.constexpr,
     stride_conv_state_seq,
-    stride_conv_state_dim,
+    stride_conv_state_dim: tl.constexpr,
     stride_conv_state_tok,
     stride_state_indices,
     stride_o_seq,
-    stride_o_dim,
+    stride_o_dim: tl.constexpr,
     stride_o_token,
     # others
     pad_slot_id: tl.constexpr,
