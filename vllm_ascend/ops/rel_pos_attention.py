@@ -51,8 +51,6 @@ class AscendRelPosAttention(RelPosAttention):
                 pse_shift=attn_bias,
                 input_layout="BNSD",
                 scale_value=self.scale,
-                pre_tokens=2147483647,
-                next_tokens=2147483647,
                 num_heads=self.num_heads,
             )
         else:
@@ -62,8 +60,6 @@ class AscendRelPosAttention(RelPosAttention):
                 v,
                 input_layout="BNSD",
                 scale_value=self.scale,
-                pre_tokens=2147483647,
-                next_tokens=2147483647,
                 num_heads=self.num_heads,
             )
 
