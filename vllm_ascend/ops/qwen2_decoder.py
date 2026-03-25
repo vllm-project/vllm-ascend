@@ -52,7 +52,6 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
             hidden_act,
             initializer_range,
         )
-
         # config
         config = Qwen2Config(
             hidden_size=hidden_dimension,
@@ -69,14 +68,10 @@ class AscendCustomQwen2Decoder(CustomQwen2Decoder):
             initializer_range=initializer_range,
             _attn_implementation=attn_implementation,
         )
-
-        self.model = self._create_custom_model(AscendQwen2Model, config)
-
+        self.model = self._create_optimized_custom_model(config)
         del self.model.embed_tokens
 
-    def _create_custom_model(self, AscendQwen2Model, config):
-        """Qwen2Model"""
-
+    def _create_optimized_custom_model(self, config):
         class CustomQwen2ModelInner(AscendQwen2Model):
             def forward(
                 self,
