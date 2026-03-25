@@ -59,7 +59,7 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
-    def normalize_mxfp8_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
+    def maybe_normalize_mxfp_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
         return scale
 
     @staticmethod
@@ -233,7 +233,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
-    def normalize_mxfp8_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
+    def maybe_normalize_mxfp_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
         if scale is None or scale.ndim != 2:
             return scale
         if scale.shape[-1] % 2 != 0:
@@ -291,7 +291,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if dynamic_scale is None:
             hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
 
-        return hidden_states, A5DeviceAdaptor.normalize_mxfp8_scale_layout(dynamic_scale)
+        return hidden_states, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(dynamic_scale)
 
     @staticmethod
     def npu_grouped_matmul_swiglu_quant(
@@ -328,7 +328,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
         )
-        return out, A5DeviceAdaptor.normalize_mxfp8_scale_layout(out_scale), None
+        return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
 
     @staticmethod
     def get_quant_gmm2_kwargs(
