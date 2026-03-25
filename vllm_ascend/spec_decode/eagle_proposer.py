@@ -1194,7 +1194,8 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
             exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
             common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
-        common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
+        if common_attn_metadata.num_computed_tokens_cpu is not None:
+            common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions[0])
         else:
