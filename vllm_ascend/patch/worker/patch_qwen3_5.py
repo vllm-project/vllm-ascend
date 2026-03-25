@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
@@ -394,7 +395,7 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if self.layer_idx == 0 and enable_sp():
+        if self.layer_idx == 0 and _EXTRA_CTX.flash_comm_v1_enabled:
             tp_size = get_tensor_model_parallel_world_size()
             n_out = (hidden_states.shape[0] + tp_size - 1) // tp_size
             hidden_dim = hidden_states.shape[-1]
