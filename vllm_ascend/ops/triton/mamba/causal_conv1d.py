@@ -156,6 +156,7 @@ def extract_last_width(x, start_loc, width):
 
     return x[:, indices].permute(1, 0, 2)
 
+
 @triton.jit(
     do_not_specialize=[
         "batch",
