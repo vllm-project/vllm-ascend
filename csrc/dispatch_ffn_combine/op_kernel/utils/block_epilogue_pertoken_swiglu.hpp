@@ -183,7 +183,7 @@ public:
 
         for (uint32_t loopIdx = loopStartIdx; loopIdx < loopStartIdx + tasksForIdx; ++loopIdx) {
 
-            auto gmTileC = gmC[loopIdx * blockN];
+            auto gmTileC = gmC[loopIdx * blockK];
 
             auto &ubC = ubCList[ubListId];
             auto &ubD = ubDList[ubListId];
