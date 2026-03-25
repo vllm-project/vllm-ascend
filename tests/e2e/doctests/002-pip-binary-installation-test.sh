@@ -47,6 +47,7 @@ function install_binary_test() {
     pip install vllm=="${PIP_VLLM_VERSION}"
 
     pip install vllm-ascend=="${PIP_VLLM_ASCEND_VERSION}"
+    pip install torchvision==0.24.0 torchaudio==2.9.0
 
     pip list | grep vllm
 
