@@ -1318,6 +1318,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             sparse_mode = 3
             attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            if self.fa_quant_layer:
+                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
         elif self.fa_quant_layer:
             attn_mask = None
             input_layout = "BSND_NBSD"
@@ -1403,7 +1405,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(softmax_lse),
             )
             if self.fa_quant_layer:
-                attn_params = attn_params + (dequant_scale_q_nope, self.fak_descale_float)  # type: ignore
+                attn_params = attn_params + (
+                    weak_ref_tensors(dequant_scale_q_nope),
+                    weak_ref_tensors(self.fak_descale_float),
+                )  # type: ignore
             else:
                 attn_params = attn_params + (None, None)  # type: ignore
 
