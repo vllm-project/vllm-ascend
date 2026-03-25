@@ -29,11 +29,15 @@ function install_system_packages() {
     fi
 }
 
+function config_pip_mirror() {
+    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+}
 
 function install_binary_test() {
 
     install_system_packages
     create_vllm_venv
+    config_pip_mirror
 
     PIP_VLLM_VERSION=$(get_version pip_vllm_version)
     VLLM_VERSION=$(get_version vllm_version)
