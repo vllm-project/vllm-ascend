@@ -105,7 +105,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             self._raise_if_mrope()
         # If needs_extra_input_slots is now True but was False during super().__init__,
         # the dependent buffers were never allocated — create them now.
-        if self.needs_extra_input_slots and self.is_rejected_token_mask is None:
+        if self.needs_extra_input_slots:
             self.is_rejected_token_mask = torch.zeros((self.max_num_tokens,), dtype=torch.bool, device=device)
             self.is_masked_token_mask = torch.zeros((self.max_num_tokens,), dtype=torch.bool, device=device)
         self.decode_threshold = 1 + self.num_speculative_tokens
