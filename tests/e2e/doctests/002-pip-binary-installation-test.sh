@@ -41,13 +41,15 @@ function install_binary_test() {
     _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
 
     # Setup extra-index-url for x86 & torch_npu dev version
-    pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/
+    pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 
     # The vLLM version already in pypi, we install from pypi.
     pip install vllm=="${PIP_VLLM_VERSION}"
 
     pip install vllm-ascend=="${PIP_VLLM_ASCEND_VERSION}"
-    pip install torchvision==0.24.0 torchaudio==2.9.0
+    if [ "${PIP_VLLM_ASCEND_VERSION}" == "0.17.0rc1" ]; then
+        pip install torchvision==0.24.0 torchaudio==2.9.0
+    fi
 
     pip list | grep vllm
 
