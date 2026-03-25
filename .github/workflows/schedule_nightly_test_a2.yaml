@@ -179,6 +179,7 @@ jobs:
       vllm: v0.18.0
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
+      model_filter: ${{ needs.parse-trigger.outputs.filter }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
       is_run: >-
         ${{
@@ -204,6 +205,7 @@ jobs:
       vllm: v0.18.0
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
+      model_filter: ${{ needs.parse-trigger.outputs.filter }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
       is_run: >-
         ${{

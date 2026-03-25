@@ -46,7 +46,8 @@
       "name": "pr-accuracy-group-1",
       "os": "linux-aarch64-a2b3-1",
       "model_list": [
-        "gemma-3-4b-it"
+        "gemma-3-4b-it",
+        "internlm3-8b-instruct"
       ]
     }
   ]
