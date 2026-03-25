@@ -150,7 +150,7 @@ jobs:
     name: Generate accuracy test matrix
     needs: [parse-trigger]
     if: always() && needs.parse-trigger.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2b3-0
     outputs:
       nightly_matrix: ${{ steps.set-matrix.outputs.nightly_matrix }}
       pr_only_matrix: ${{ steps.set-matrix.outputs.pr_only_matrix }}
