@@ -21,7 +21,7 @@ mtp/speculative-decode:
 eplb:
   - '/(\beplb)/i'
 llm-model:
-  - '/(deepseek[- ]*(r1|v3(\.2)?)\S*|(kimi k2|kimik2|kimi-k2)(?!\.5)|(kimi k2\.5|kimik2\.5|kimi-k2\.5)|glm5|glm-5|glm 5|qwen3-(?:235b|480b)\S*|Qwen3-(?:32B|8B|30B)\S*|qwen3-next\S*|\bglm[- ]?4\.[0-9](?![a-zA-Z0-9-])\S*)/i'
+  - '/(deepseek[- ]*(r1|v3(\.2)?)\S*|(kimi k2|kimik2|kimi-k2)(?!\.5)|(kimi k2\.5|kimik2\.5|kimi-k2\.5)|glm5|glm-5|glm 5|qwen3-(?:235b|480b)\S*|Qwen3-(?:32B|8B|30B)\S*|qwen3-next\S*|\bglm[- ]?4\.[0-9]+(?![^v\s]*v)\S*)/i'
 deepseek:
   - '/(deepseek[- ]*(r1|v3(\.2)?)\S*)/i'
 kimi-k2:
@@ -37,7 +37,7 @@ qwen3-dense:
 qwen3-next:
   - '/(qwen3-next\S*)/i'
 glm-4:
-  - '/(\bglm[- ]?4\.[0-9](?![a-zA-Z0-9-])\S*)/i'
+  - '/(\bglm[- ]?4\.[0-9]+(?![^v\s]*v)\S*)/i'
 multi-modality-generate:
   - '/(seedance\S*|seedream\S*|\bwan\d[\d.]*|hunyuan\S*|fLux\S*|kimi k2\.5|kimi-k2\.5|kimik2\.5|minimax\S*|qwen-image\S*)/i'
 seedance:
