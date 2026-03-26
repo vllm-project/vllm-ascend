@@ -165,6 +165,12 @@ class AscendConfig:
             and vllm_config.compilation_config.pass_config.enable_sp
         )
 
+        # When multistream_overlap_dsa is True, sfa_v1.py overlaps cube, vector, and communication workloads
+        # to increase latency hiding during inference. However, due to the complexity of combining multiple
+        # features, this is currently only supported for the enable_dsa_cp_with_layer_shard scenario.
+        # TODO(rjg-lyh): Once feature stacking is fully stabilized, extend support to all scenarios.
+        self.multistream_overlap_dsa = additional_config.get("multistream_overlap_dsa", False)
+
     @staticmethod
     def _get_compile_ranges(compilation_config):
         return compilation_config.compile_ranges_endpoints or []
