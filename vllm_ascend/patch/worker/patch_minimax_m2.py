@@ -20,11 +20,6 @@
 from collections.abc import Iterable
 
 import torch
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.model_executor.models.minimax_m2 import MiniMaxM2Attention, MiniMaxM2Model, MiniMaxM2MoE
 from vllm.platforms import current_platform
 
@@ -62,29 +57,6 @@ def _patched_moe_forward(
 
 
 MiniMaxM2MoE.forward = _patched_moe_forward
-
-
-# ---------------------------------------------------------------------------
-# MiniMaxM2Attention: num_kv_head_replicas and k_norm weight sharding
-# ---------------------------------------------------------------------------
-_original_attention_init = MiniMaxM2Attention.__init__
-
-
-def _patched_attention_init(self, *args, **kwargs) -> None:
-    _original_attention_init(self, *args, **kwargs)
-    tp_size = get_tensor_model_parallel_world_size()
-    self.num_kv_head_replicas = max(1, tp_size // self.total_num_kv_heads)
-    if self.total_num_kv_heads < tp_size:
-        rms_norm_eps = getattr(getattr(self, "q_norm", None), "variance_epsilon", 1e-6)
-        self.k_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_kv_heads,
-            eps=rms_norm_eps,
-            weight_shard_world_size=self.total_num_kv_heads,
-            weight_shard_rank=get_tensor_model_parallel_rank() // self.num_kv_head_replicas,
-        )
-
-
-MiniMaxM2Attention.__init__ = _patched_attention_init
 
 
 # ---------------------------------------------------------------------------
