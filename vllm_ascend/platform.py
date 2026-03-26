@@ -153,6 +153,43 @@ class NPUPlatform(Platform):
         config_deprecated_logging()
 
     @classmethod
+    def _get_default_max_cudagraph_capture_size(cls, vllm_config: VllmConfig) -> int | None:
+        """Mirror the default-max branch in vLLM's `_set_cudagraph_sizes()`.
+
+        This helper corresponds to the upstream block under
+        "determine the initial max_cudagraph_capture_size" when
+        `compilation_config.max_cudagraph_capture_size is None`.
+
+        Ascend injects this default earlier via `apply_config_platform_defaults()`
+        so the rest of `_set_cudagraph_sizes()` can keep using upstream logic for
+        size-list generation, token-cap clipping, SP filtering, and later
+        post-processing. The only intentional difference from upstream is removing
+        the CUDA-oriented trailing `* 2`: Ascend wants the default capture upper
+        bound to track `max_num_seqs * decode_query_len`, capped at 512.
+
+        Returning `None` means the platform should not inject a default. This
+        covers the cases where the user has already provided either
+        `max_cudagraph_capture_size` or `cudagraph_capture_sizes`.
+        """
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.max_cudagraph_capture_size is not None:
+            return None
+        if compilation_config.cudagraph_capture_sizes is not None:
+            return None
+
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
+        if max_num_seqs is None:
+            return None
+
+        decode_query_len = 1
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        if speculative_config and speculative_config.num_speculative_tokens:
+            decode_query_len += speculative_config.num_speculative_tokens
+
+        return min(max_num_seqs * decode_query_len, 512)
+
+    @classmethod
     def get_device_capability(cls, device_id: int = 0):
         return None
 
@@ -165,6 +202,10 @@ class NPUPlatform(Platform):
 
             pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
             logger.info(f"set sp_min_token_num to {pass_config.sp_min_token_num}")
+
+        default_max_cg_capture_size = cls._get_default_max_cudagraph_capture_size(vllm_config)
+        if default_max_cg_capture_size is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -273,7 +314,10 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        # set cudaprah sizes before extending `compilation_config.splitting_ops`
+        # Recompute cudagraph sizes after Ascend-specific compatibility updates.
+        # The platform default max is injected earlier via
+        # `apply_config_platform_defaults`, so this late pass should only honor
+        # the current max / size inputs after the mode adjustments above.
         vllm_config._set_cudagraph_sizes()
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
