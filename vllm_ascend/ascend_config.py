@@ -186,6 +186,7 @@ class AscendConfig:
         layer_names: set[str] = set()
         suffix = ".indexer.quant_type"
         from vllm.model_executor.models.utils import extract_layer_index
+        
         for key, value in quant_description.items():
             if not isinstance(key, str) or not key.endswith(suffix):
                 continue
@@ -213,6 +214,7 @@ class AscendConfig:
         ):
             return True
         from vllm.model_executor.models.utils import extract_layer_index
+
         layer_ids = {extract_layer_index(normalized_layer_name)}
         return any(layer_id in self._sparse_c8_layer_ids for layer_id in layer_ids)
 
