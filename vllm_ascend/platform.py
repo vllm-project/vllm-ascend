@@ -358,31 +358,6 @@ class NPUPlatform(Platform):
             # not be detected in advance assert.
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
-            if vllm_config.speculative_config:
-                num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
-                uniform_decode_query_len = num_spec_tokens + 1
-                original_sizes = list(compilation_config.cudagraph_capture_sizes) if compilation_config.cudagraph_capture_sizes else []
-                compilation_config.cudagraph_capture_sizes = [
-                    size for size in compilation_config.cudagraph_capture_sizes
-                    if size % uniform_decode_query_len == 0
-                ]
-                if not compilation_config.cudagraph_capture_sizes:
-                    logger.warning(
-                        "FULL_DECODE_ONLY: After filtering for speculative decoding, no valid "
-                        "cudagraph_capture_sizes remain. Original sizes: %s, uniform_decode_query_len: %d. "
-                        "Falling back to PIECEWISE mode.",
-                        original_sizes,
-                        uniform_decode_query_len,
-                    )
-                    compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                else:
-                    logger.info(
-                        "FULL_DECODE_ONLY: Filtered cudagraph_capture_sizes for speculative decoding: %s "
-                        "(removed sizes not divisible by uniform_decode_query_len=%d, original: %s)",
-                        compilation_config.cudagraph_capture_sizes,
-                        uniform_decode_query_len,
-                        original_sizes,
-                    )
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
@@ -407,31 +382,6 @@ class NPUPlatform(Platform):
             """
             logger.warning(warning_message)
             update_aclgraph_sizes(vllm_config)
-            if vllm_config.speculative_config:
-                num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
-                uniform_decode_query_len = num_spec_tokens + 1
-                original_sizes = list(compilation_config.cudagraph_capture_sizes) if compilation_config.cudagraph_capture_sizes else []
-                compilation_config.cudagraph_capture_sizes = [
-                    size for size in compilation_config.cudagraph_capture_sizes
-                    if size % uniform_decode_query_len == 0
-                ]
-                if not compilation_config.cudagraph_capture_sizes:
-                    logger.warning(
-                        "FULL/FULL_DECODE_ONLY: After filtering for speculative decoding, no valid "
-                        "cudagraph_capture_sizes remain. Original sizes: %s, uniform_decode_query_len: %d. "
-                        "Falling back to PIECEWISE mode.",
-                        original_sizes,
-                        uniform_decode_query_len,
-                    )
-                    compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                else:
-                    logger.info(
-                        "FULL/FULL_DECODE_ONLY: Filtered cudagraph_capture_sizes for speculative decoding: %s "
-                        "(removed sizes not divisible by uniform_decode_query_len=%d, original: %s)",
-                        compilation_config.cudagraph_capture_sizes,
-                        uniform_decode_query_len,
-                        original_sizes,
-                    )
         else:
             logger.info(
                 "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode
