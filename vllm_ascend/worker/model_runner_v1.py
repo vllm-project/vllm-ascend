@@ -1284,6 +1284,7 @@ class NPUModelRunner(GPUModelRunner):
                     cudagraph_mode == CUDAGraphMode.FULL
                     or (enable_sp() and not self.model_config.use_mla)
                     and self.pcp_size == 1  # TODO(lxs): fix this
+                    and self.dcp_size == 1
                 ):
                     # Currently, Graph Mode and SP will both pad num_tokens,
                     # Another possible condition is num_tokens_padded != num_tokens_unpadded
