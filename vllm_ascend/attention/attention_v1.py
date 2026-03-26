@@ -17,7 +17,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar
 
 import torch
 import torch_npu
@@ -213,7 +212,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -242,7 +241,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 got {self.decode_threshold}"
             )
 
-        AscendAttentionMetadataBuilder.reorder_batch_threshold = self.decode_threshold
+        self.reorder_batch_threshold = self.decode_threshold
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
