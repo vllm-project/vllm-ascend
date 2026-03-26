@@ -94,7 +94,7 @@ class TestAscendW4A16AWQLinearMethod(TestBase):
         group_size = 128
 
         # Original vLLM AWQ format weights
-        num_groups = out_features // group_size
+        num_groups = hidden_size // group_size
         layer.qweight = torch.nn.Parameter(
             torch.randint(0, 100, (hidden_size, out_features // pack_factor), dtype=torch.int32),
             requires_grad=False
@@ -250,6 +250,8 @@ class TestUnpackQzeroFromInt32(TestBase):
 
         result = unpack_qzero_from_int32(weight, param_dtype, pack_factor=8, is_moe_layer=False)
 
+        # (1, 2) packed → (1, 16) unpacked (2 elements × 8 nibbles each)
+        self.assertEqual(result.shape, (1, 16))
         self.assertEqual(result.dtype, param_dtype)
         self.assertTrue(result.is_contiguous())
 
@@ -260,6 +262,8 @@ class TestUnpackQzeroFromInt32(TestBase):
 
         result = unpack_qzero_from_int32(weight, param_dtype, pack_factor=8, is_moe_layer=True)
 
+        # (1, 1, 2) packed → (1, 1, 16) unpacked (2 elements × 8 nibbles each)
+        self.assertEqual(result.shape, (1, 1, 16))
         self.assertEqual(result.dtype, param_dtype)
         self.assertTrue(result.is_contiguous())
 
@@ -286,6 +290,8 @@ class TestUnpackWeightFromInt32(TestBase):
 
         result = unpack_weight_from_int32(weight, pack_factor=8)
 
+        # Output shape is unchanged — repacking stays within the same int32 layout
+        self.assertEqual(result.shape, weight.shape)
         self.assertEqual(result.dtype, torch.int32)
         self.assertTrue(result.is_contiguous())
 
@@ -295,7 +301,9 @@ class TestUnpackWeightFromInt32(TestBase):
 
         result = unpack_weight_from_int32(weight, pack_factor=8)
 
-        self.assertEqual(result[0, 0].item(), 8)
+        # All-zero input → repack loop produces all-zero weight_tmp → XOR with
+        # 0x88888888 makes every int32 element 0x88888888 = -2004318072 (signed int32).
+        self.assertEqual(result[0, 0].item(), -2004318072)  # 0x88888888 as int32
 
     def test_unpack_weight_from_int32_contiguous(self):
         """Test output is contiguous."""
