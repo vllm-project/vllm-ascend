@@ -36,6 +36,10 @@ on:
       model_list:
         required: true
         type: string
+      model_filter:
+        required: false
+        type: string
+        default: ''
       upload:
         required: false
         type: boolean
@@ -182,6 +186,43 @@ jobs:
             pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
           } >> "$GITHUB_ENV"
 
+      - name: Compute effective model list
+        run: |
+          model_filter='${{ inputs.model_filter }}'
+          all_models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+
+          if [[ "$model_filter" == "all" ]] || [[ -z "$model_filter" ]]; then
+            effective_models="$all_models"
+          else
+            any_model_in_filter=false
+            while IFS= read -r model; do
+              if [[ "$model_filter" == *",${model},"* ]]; then
+                any_model_in_filter=true
+                break
+              fi
+            done <<< "$all_models"
+
+            if [[ "$any_model_in_filter" == "true" ]]; then
+              effective_models=""
+              while IFS= read -r model; do
+                if [[ "$model_filter" == *",${model},"* ]]; then
+                  effective_models+="$model"$'\n'
+                fi
+              done <<< "$all_models"
+              effective_models="${effective_models%$'\n'}"
+            else
+              effective_models="$all_models"
+            fi
+          fi
+
+          echo "Effective models to test:"
+          echo "$effective_models"
+          {
+            echo 'EFFECTIVE_MODELS<<EOF'
+            echo "$effective_models"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+
       - name: Run vllm-project/vllm-ascend accuracy test
         id: report
         env:
@@ -200,7 +241,7 @@ jobs:
           mkdir -p ./benchmarks/accuracy
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Received model_list: ${{ inputs.model_list }}"
-          models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          models="$EFFECTIVE_MODELS"
           any_failure=0
           for model in $models; do
             echo "Running test for model: $model"
@@ -218,7 +259,7 @@ jobs:
       - name: Generate step summary
         if: ${{ always() }}
         run: |
-          models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          models="$EFFECTIVE_MODELS"
           for model in $models; do
             echo "Processing model: $model"
             model_base_name=$(basename "$model")
