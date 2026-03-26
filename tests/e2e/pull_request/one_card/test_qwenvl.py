@@ -142,46 +142,40 @@ QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 @wait_until_npu_memory_free()
 def test_qwen2vl_lora(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA"""
-    config = TestConfig(model_path=QWEN2VL_MODEL_PATH,
-                        lora_path=qwen2vl_lora_files)
+    config = TestConfig(model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_lora_files)
 
     # Test with different LoRA IDs
     with VllmRunner(
-            config.model_path,
-            max_num_seqs=config.max_num_seqs,
-            enable_lora=True,
-            max_loras=config.max_loras,
-            max_lora_rank=config.max_lora_rank,
-            enable_tower_connector_lora=config.enable_tower_connector_lora,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            mm_processor_kwargs=config.mm_processor_kwargs,
-            mm_processor_cache_gb=config.mm_processor_cache_gb,
-            max_model_len=config.max_model_len,
+        config.model_path,
+        max_num_seqs=config.max_num_seqs,
+        enable_lora=True,
+        max_loras=config.max_loras,
+        max_lora_rank=config.max_lora_rank,
+        enable_tower_connector_lora=config.enable_tower_connector_lora,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        mm_processor_kwargs=config.mm_processor_kwargs,
+        mm_processor_cache_gb=config.mm_processor_cache_gb,
+        max_model_len=config.max_model_len,
     ) as vllm_model:
         llm = vllm_model.model
-        run_test(llm,
-                 config,
-                 TEST_IMAGES,
-                 expected_outputs=EXPECTED_OUTPUTS,
-                 lora_id=1)
+        run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=1)
 
 
 @wait_until_npu_memory_free()
 def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA through beam search."""
-    config = TestConfig(model_path=QWEN2VL_MODEL_PATH,
-                        lora_path=qwen2vl_lora_files)
+    config = TestConfig(model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_lora_files)
     with VllmRunner(
-            config.model_path,
-            max_num_seqs=config.max_num_seqs,
-            enable_lora=True,
-            max_loras=config.max_loras,
-            max_lora_rank=config.max_lora_rank,
-            enable_tower_connector_lora=config.enable_tower_connector_lora,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            mm_processor_kwargs=config.mm_processor_kwargs,
-            mm_processor_cache_gb=config.mm_processor_cache_gb,
-            max_model_len=config.max_model_len,
+        config.model_path,
+        max_num_seqs=config.max_num_seqs,
+        enable_lora=True,
+        max_loras=config.max_loras,
+        max_lora_rank=config.max_lora_rank,
+        enable_tower_connector_lora=config.enable_tower_connector_lora,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        mm_processor_kwargs=config.mm_processor_kwargs,
+        mm_processor_cache_gb=config.mm_processor_cache_gb,
+        max_model_len=config.max_model_len,
     ) as vllm_model:
         llm = vllm_model.model
 
@@ -201,29 +195,24 @@ def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
 @wait_until_npu_memory_free()
 def test_qwen25vl_lora(qwen25vl_lora_files):
     """Test Qwen 2.5 VL model with LoRA"""
-    config = TestConfig(model_path=QWEN25VL_MODEL_PATH,
-                        lora_path=qwen25vl_lora_files)
+    config = TestConfig(model_path=QWEN25VL_MODEL_PATH, lora_path=qwen25vl_lora_files)
 
     # Test with different LoRA IDs
     with VllmRunner(
-            config.model_path,
-            max_num_seqs=config.max_num_seqs,
-            enable_lora=True,
-            max_loras=config.max_loras,
-            max_lora_rank=config.max_lora_rank,
-            enable_tower_connector_lora=config.enable_tower_connector_lora,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            mm_processor_kwargs=config.mm_processor_kwargs,
-            mm_processor_cache_gb=config.mm_processor_cache_gb,
-            max_model_len=config.max_model_len,
+        config.model_path,
+        max_num_seqs=config.max_num_seqs,
+        enable_lora=True,
+        max_loras=config.max_loras,
+        max_lora_rank=config.max_lora_rank,
+        enable_tower_connector_lora=config.enable_tower_connector_lora,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        mm_processor_kwargs=config.mm_processor_kwargs,
+        mm_processor_cache_gb=config.mm_processor_cache_gb,
+        max_model_len=config.max_model_len,
     ) as vllm_model:
         llm = vllm_model.model
         # with set_default_torch_num_threads(1):
-        run_test(llm,
-                 config,
-                 TEST_IMAGES,
-                 expected_outputs=EXPECTED_OUTPUTS,
-                 lora_id=1)
+        run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=1)
 
 
 @wait_until_npu_memory_free()
@@ -238,16 +227,16 @@ def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
         enable_tower_connector_lora=True,
     )
     with VllmRunner(
-            config.model_path,
-            max_num_seqs=config.max_num_seqs,
-            enable_lora=True,
-            max_loras=config.max_loras,
-            max_lora_rank=config.max_lora_rank,
-            enable_tower_connector_lora=config.enable_tower_connector_lora,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            mm_processor_kwargs=config.mm_processor_kwargs,
-            mm_processor_cache_gb=config.mm_processor_cache_gb,
-            max_model_len=config.max_model_len,
+        config.model_path,
+        max_num_seqs=config.max_num_seqs,
+        enable_lora=True,
+        max_loras=config.max_loras,
+        max_lora_rank=config.max_lora_rank,
+        enable_tower_connector_lora=config.enable_tower_connector_lora,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        mm_processor_kwargs=config.mm_processor_kwargs,
+        mm_processor_cache_gb=config.mm_processor_cache_gb,
+        max_model_len=config.max_model_len,
     ) as vllm_model:
         llm = vllm_model.model
 
@@ -321,16 +310,16 @@ def test_qwen2vl_multiple_lora_types(
         enable_tower_connector_lora=True,
     )
     with VllmRunner(
-            config.model_path,
-            max_num_seqs=config.max_num_seqs,
-            enable_lora=True,
-            max_loras=config.max_loras,
-            max_lora_rank=config.max_lora_rank,
-            enable_tower_connector_lora=config.enable_tower_connector_lora,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            mm_processor_kwargs=config.mm_processor_kwargs,
-            mm_processor_cache_gb=config.mm_processor_cache_gb,
-            max_model_len=config.max_model_len,
+        config.model_path,
+        max_num_seqs=config.max_num_seqs,
+        enable_lora=True,
+        max_loras=config.max_loras,
+        max_lora_rank=config.max_lora_rank,
+        enable_tower_connector_lora=config.enable_tower_connector_lora,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        mm_processor_kwargs=config.mm_processor_kwargs,
+        mm_processor_cache_gb=config.mm_processor_cache_gb,
+        max_model_len=config.max_model_len,
     ) as vllm_model:
         llm = vllm_model.model
 
