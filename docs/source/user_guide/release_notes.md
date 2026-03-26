@@ -6,38 +6,32 @@ This is the first release candidate of v0.18.0 for vLLM Ascend. Please follow th
 
 ### Highlights
 
-- Balance scheduling is now supported via `VLLM_ASCEND_BALANCE_SCHEDULING` for better data-parallel load balancing. [#7611](https://github.com/vllm-project/vllm-ascend/pull/7611)
-- Flash Comm V1 now supports VL models with MLA, removing a previous limitation for multimodal serving. [#7390](https://github.com/vllm-project/vllm-ascend/pull/7390)
+- Data-parallel load balancing is now supported by setting `VLLM_ASCEND_BALANCE_SCHEDULING=1`. [#7611](https://github.com/vllm-project/vllm-ascend/pull/7611)
 - DeepSeek models are now supported on A5 through new MLA operators. [#7232](https://github.com/vllm-project/vllm-ascend/pull/7232)
+- C8 INT8 KV cache is now supported for GQA attention models. [#7474](https://github.com/vllm-project/vllm-ascend/pull/7474)
+- DeepSeek-V3.1 PD disaggregation and C8 quantization are now supported. [#7222](https://github.com/vllm-project/vllm-ascend/pull/7222)
 
 ### Features
 
+- Flash Comm V1 now supports VL models with MLA, removing a previous limitation for multimodal serving. [#7390](https://github.com/vllm-project/vllm-ascend/pull/7390)
 - Support separate attention backends for target and draft models in speculative decoding, allowing finer backend tuning per model. [#7342](https://github.com/vllm-project/vllm-ascend/pull/7342)
 - VL MoE models now support SP, and `sp_threshold` is removed in favor of `sp_min_token_num` from vLLM. [#7044](https://github.com/vllm-project/vllm-ascend/pull/7044)
 - Qwen VL models now support `w8a8_mxfp8` quantization. [#7417](https://github.com/vllm-project/vllm-ascend/pull/7417)
-- LayerwiseConnector now supports virtual push on decode nodes in PD deployment. [#7361](https://github.com/vllm-project/vllm-ascend/pull/7361)
 
 ### Performance
 
 - Optimized the Qwen3.5 and Qwen3-Next GDN prefill path by prebuilding chunk metadata, reducing host-device synchronization overhead. [#7487](https://github.com/vllm-project/vllm-ascend/pull/7487)
 - Simplified the FIA prefill context merge path for better runtime efficiency. [#7293](https://github.com/vllm-project/vllm-ascend/pull/7293)
 
-### Dependencies
-
-- vLLM is upgraded to v0.18.0 for docker and release flows. [#7523](https://github.com/vllm-project/vllm-ascend/pull/7523) [#7502](https://github.com/vllm-project/vllm-ascend/pull/7502)
-
 ### Documentation
 
-- Added configuration documentation for `enable_sparse_c8`. [#7600](https://github.com/vllm-project/vllm-ascend/pull/7600)
 - Refreshed deployment and model docs for Kimi-K2.5, GLM-4.7, DeepSeek-V3.2, MiniMax-M2.5, and PD disaggregation guides. [#7371](https://github.com/vllm-project/vllm-ascend/pull/7371) [#7403](https://github.com/vllm-project/vllm-ascend/pull/7403) [#7292](https://github.com/vllm-project/vllm-ascend/pull/7292) [#7296](https://github.com/vllm-project/vllm-ascend/pull/7296) [#7300](https://github.com/vllm-project/vllm-ascend/pull/7300)
 
 ### Others
 
-- Lowered the log level in PD disaggregation to reduce noisy deployment logs. [#7589](https://github.com/vllm-project/vllm-ascend/pull/7589)
 - Fixed a PD separation issue where decode nodes could get stuck because shapes were not aligned across DP nodes. [#7534](https://github.com/vllm-project/vllm-ascend/pull/7534)
 - Fixed a regression where hybrid attention plus mamba models on Ascend could start with an incorrect block size after the v0.18.0 upgrade. [#7528](https://github.com/vllm-project/vllm-ascend/pull/7528)
 - Fixed multi-instance serving OOM calculation on single-card deployments. [#7427](https://github.com/vllm-project/vllm-ascend/pull/7427)
-- Fixed the speculative decoding proposer path for v0.18.0. [#7544](https://github.com/vllm-project/vllm-ascend/pull/7544)
 - Fixed DeepSeek v3.1 C8 when overlaying MTP with full decode and full graph modes. [#7571](https://github.com/vllm-project/vllm-ascend/pull/7571)
 
 ## v0.17.0rc1 - 2026.03.15
