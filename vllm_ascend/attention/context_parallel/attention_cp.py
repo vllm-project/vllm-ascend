@@ -49,6 +49,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
 )
 from vllm_ascend.compilation.acl_graph import get_graph_params, update_graph_params_workspaces
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 
@@ -752,12 +753,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
             if has_decode:
                 slot_mapping = attn_metadata.slot_mapping[: num_decode_tokens * self.pcp_size : self.pcp_size]
-                torch_npu._npu_reshape_and_cache(
+                DeviceOperator.reshape_and_cache(
                     key=key[:num_decode_tokens],
                     value=value[:num_decode_tokens],
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    slot_indices=slot_mapping,
+                    slot_mapping=slot_mapping,
                 )
 
             if has_prefill:
@@ -784,12 +785,12 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 slot_mapping = attn_metadata.slot_mapping[
                     self.pcp_size * num_decode_tokens : attn_metadata.num_actual_tokens_pcp_padded
                 ]
-                torch_npu._npu_reshape_and_cache(
+                DeviceOperator.reshape_and_cache(
                     key=prefill_key,
                     value=prefill_value,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    slot_indices=slot_mapping,
+                    slot_mapping=slot_mapping,
                 )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
