@@ -110,4 +110,6 @@ If you encounter any problems while contributing, feel free to submit a PR to im
 :maxdepth: 1
 testing
 multi_node_test
+nightly_ci_test
+e2e_ci_test
 :::
