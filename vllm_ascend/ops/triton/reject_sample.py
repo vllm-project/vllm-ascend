@@ -19,6 +19,8 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num
 
+UNIFIED_BUFFER_SIZE = 85 * 1024  # half of UB
+
 
 def cal_grid_and_block_size(batch_size: int):
     vectorcore_num = get_vectorcore_num()
@@ -324,6 +326,8 @@ def rejection_greedy_sample_with_triton(
     vec_len = output_token_ids.shape[0]
 
     if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and is_greedy is None:
+        grid = get_vectorcore_num()
+        block_size = UNIFIED_BUFFER_SIZE // 12
         rejection_greedy_sample_spec_len_1_triton[(grid,)](
             output_token_ids,
             draft_token_ids,
@@ -333,6 +337,8 @@ def rejection_greedy_sample_with_triton(
             BLOCK_SIZE=block_size,
         )
     else:
+        grid = get_vectorcore_num()
+        block_size = UNIFIED_BUFFER_SIZE // 16
         rejection_greedy_sample_triton[(grid,)](
             output_token_ids,
             cu_num_draft_tokens,
@@ -348,8 +354,8 @@ def rejection_greedy_sample_with_triton(
 
 def expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replace_to, max_num_tokens):
     vec_len = batch_size
-    grid, block_size = cal_grid_and_block_size(batch_size)
-
+    grid = get_vectorcore_num()
+    block_size = max(1, (UNIFIED_BUFFER_SIZE - max_num_tokens * 4) // 20)
     expand_kernel[(grid,)](
         expanded_x,
         x,
