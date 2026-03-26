@@ -186,7 +186,7 @@ class AscendConfig:
         layer_names: set[str] = set()
         suffix = ".indexer.quant_type"
         from vllm.model_executor.models.utils import extract_layer_index
-        
+
         for key, value in quant_description.items():
             if not isinstance(key, str) or not key.endswith(suffix):
                 continue
