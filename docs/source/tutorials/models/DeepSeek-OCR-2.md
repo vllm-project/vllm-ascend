@@ -133,7 +133,7 @@ if __name__ == "__main__":
     main()
 ```
 
-> **Note:** Since DeepSeek-OCR-2 requires dynamic loading of remote code (with trust_remote_code=True), this triggers the underlying initialization of PyTorch in the main process in advance. On the Ascend/ARM architecture, this causes vLLM to encounter conflicts with the OpenMP thread pool when subsequently launching a multi-process engine through fork (resulting in an error message "Invalid thread pool"). 
+> **Note:** Since DeepSeek-OCR-2 requires dynamic loading of remote code (with trust_remote_code=True), this triggers the underlying initialization of PyTorch in the main process in advance. On the Ascend/ARM architecture, this causes vLLM to encounter conflicts with the OpenMP thread pool when subsequently launching a multi-process engine through fork (resulting in an error message "Invalid thread pool").
 To ensure that the model can start stably, before running any inference script or starting the API service, the following environment variables must be set in the terminal to forcibly isolate the multi-process context:
 
 ```bash
@@ -142,7 +142,7 @@ python test_deepseek_ocr_2.py
 
 ### Start API Server
 
-After configuring the environment variables mentioned above, you can start an OpenAI-compatible API server. 
+After configuring the environment variables mentioned above, you can start an OpenAI-compatible API server.
 
 *Note: The vision encoder consumes significant memory. It is highly recommended to limit `max-model-len` and reduce `gpu-memory-utilization` (e.g., `0.7`) to prevent Out-Of-Memory (OOM) errors during the KV Cache initialization on 32GB NPU cards.*
 
@@ -182,13 +182,14 @@ curl http://127.0.0.1:8000/v1/chat/completions \
     "temperature": 0.0
   }'
 ```
+
 *Note: You can also replace the URL with a base64 encoded string (`"url": "data:image/jpeg;base64,<BASE64_STRING>"`) to test local images.*
 
 ## Accuracy Evaluation
 
 ### Using Language Model Evaluation Harness (lm_eval)
 
-Currently, the `lm_eval` framework lacks suitable full-text pure OCR transcription datasets. The `doc_vqa` (Document Visual Question Answering) dataset is used here **solely for smoke-testing the end-to-end execution pipeline** to prevent hardware regression. 
+Currently, the `lm_eval` framework lacks suitable full-text pure OCR transcription datasets. The `doc_vqa` (Document Visual Question Answering) dataset is used here **solely for smoke-testing the end-to-end execution pipeline** to prevent hardware regression.
 
 Since DeepSeek-OCR-2 is a base model without a predefined Chat Template, using a few-shot prompt (`--num_fewshot 3`) is mandatory to regularize its output format for this specific evaluation task.
 
@@ -227,7 +228,8 @@ There are three vllm bench subcommands:
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.
-- 
+-
+
 Take the serve as an example. Run the code as follows.
 
 ```bash

@@ -203,7 +203,6 @@ class QKNormRopeFusionPass(VllmInductorPass):
             logger.debug("QKNorm and Rope fusion enabled, but no Attention layers were discovered.")
             return
         layer = next(iter(attn_layers.values()))
-        rotary_dim = getattr(layer, "rotary_dim", layer.head_size)
         rope_dim = get_rope_dim(vllm_config)
         if rope_dim <= 0:
             logger.debug("QKNorm and Rope fusion disabled: non-positive rope_dim (%d) detected. ", rope_dim)

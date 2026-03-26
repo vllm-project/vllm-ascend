@@ -532,11 +532,11 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `transformers.models.llama.modeling_llama.LlamaFlashAttention2`
 #    Why:
-#       DeepSeek-V2 and DeepSeek-OCR-2 code (`modeling_deepseekv2.py`) imports 
-#       `LlamaFlashAttention2`. However, transformers >= 4.43.0 removed this class, 
+#       DeepSeek-V2 and DeepSeek-OCR-2 code (`modeling_deepseekv2.py`) imports
+#       `LlamaFlashAttention2`. However, transformers >= 4.43.0 removed this class,
 #       causing ImportError during model loading.
 #    How：
-#       Inject a dummy alias (`LlamaFlashAttention2 = LlamaAttention`) to bypass the 
+#       Inject a dummy alias (`LlamaFlashAttention2 = LlamaAttention`) to bypass the
 #       import check. It won't affect Ascend execution since vLLM uses custom attention backend.
 #    Related PR:
 #       Issue #6692 Verify/Support DeepSeek-OCR-2
