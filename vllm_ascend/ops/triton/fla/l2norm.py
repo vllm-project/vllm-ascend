@@ -14,8 +14,8 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-@triton.jit
-def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr, NUM_CHUNKS: tl.constexpr):
+@triton.jit(do_not_specialize=["eps", "M", "NUM_CHUNKS"])
+def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr, NUM_CHUNKS):
     base_row = tl.program_id(0) * (NUM_CHUNKS * MBLOCK)
     rindex = tl.arange(0, N)[None, :]
 

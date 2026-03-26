@@ -379,6 +379,8 @@ def get_quant_type_for_layer(
     # Attention
     if layer_type == "attention" and "fa_quant_type" in quant_description:
         return quant_description["fa_quant_type"]
+    if layer_type == "attention" and "indexer_quant_type" in quant_description:
+        return quant_description["indexer_quant_type"]
     # Linear / MoE
     return get_linear_quant_type(quant_description, prefix, packed_modules_mapping)
 
@@ -522,6 +524,21 @@ class AscendModelSlimConfig(QuantizationConfig):
         else:
             logger.info("No valid reverse mapping found for WeightsMapper.")
 
+    def get_cache_scale(self, name: str) -> str | None:
+        """Map checkpoint C8 KV scale/offset names to vLLM parameter names."""
+        if self.quant_description.get("kv_cache_type") != "C8":
+            return None
+        _C8_SCALE_MAPPING = {
+            "k_proj.kv_cache_scale": "attn.k_cache_scale",
+            "k_proj.kv_cache_offset": "attn.k_cache_offset",
+            "v_proj.kv_cache_scale": "attn.v_cache_scale",
+            "v_proj.kv_cache_offset": "attn.v_cache_offset",
+        }
+        for src_suffix, dst_suffix in _C8_SCALE_MAPPING.items():
+            if name.endswith(src_suffix):
+                return name[: -len(src_suffix)] + dst_suffix
+        return None
+
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         # Store model_type for reference
         self.model_type = model_type
@@ -582,9 +599,15 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             return AscendLinearMethod(scheme)
-        elif isinstance(layer, AttentionLayerBase) and self.is_fa_quant_layer(prefix):
+        elif isinstance(layer, AttentionLayerBase) and (
+            self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)
+        ):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             return AscendKVCacheMethod(scheme)
+        elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
+            from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
+
+            return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
@@ -633,6 +656,13 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.enable_fa_quant:
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.kvcache_quant_layers:
+                return True
+        return False
+
+    def is_indexer_quant_layer(self, prefix):
+        if self.enable_indexer_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
                 return True
         return False
 
@@ -773,8 +803,13 @@ class AscendModelSlimConfig(QuantizationConfig):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")
         self.enable_fa_quant = fa_quant_type != ""
         self.kvcache_quant_layers = []
-        if self.enable_fa_quant:
+        indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
+        self.enable_indexer_quant = indexer_quant_type != ""
+        self.indexer_quant_layers = []
+        if self.enable_fa_quant or self.enable_indexer_quant:
             for key in self.quant_description:
+                _id = "".join(re.findall(r"\.(\d+)\.", key))
                 if "fa_k.scale" in key:
-                    _id = "".join(re.findall(r"\.(\d+)\.", key))
                     self.kvcache_quant_layers.append(int(_id))
+                if "indexer.quant_type" in key:
+                    self.indexer_quant_layers.append(int(_id))
