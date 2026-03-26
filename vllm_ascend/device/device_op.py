@@ -17,7 +17,6 @@
 #
 import torch
 import torch_npu
-from vllm.forward_context import get_forward_context
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT4_E2M1FN_X2_DTYPE,
@@ -28,8 +27,6 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class BaseDeviceAdaptor:
-    small_batch_gmm_batch_num = 16
-
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu._npu_reshape_and_cache(
@@ -49,32 +46,51 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        # In small batch and non-quantization scenarios, npu_moe_init_routing_v2 is more efficient.
-        # It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
-        if quant_mode == -1 and get_forward_context().num_tokens <= DeviceOperator.small_batch_gmm_batch_num:
-            return torch_npu.npu_moe_init_routing_v2(
-                hidden_states,
-                topk_ids,
-                scale=scale,
-                active_num=active_num,
-                expert_num=expert_num,
-                expert_tokens_num_type=2,
-                expert_tokens_num_flag=expert_tokens_num_flag,
-                active_expert_range=active_expert_range,
-                quant_mode=quant_mode,
-            )
-        else:
-            return torch.ops._C_ascend.npu_moe_init_routing_custom(
-                hidden_states,
-                topk_ids,
-                scale=scale,
-                active_num=active_num,
-                expert_num=expert_num,
-                expert_tokens_num_type=expert_tokens_num_type,
-                expert_tokens_num_flag=expert_tokens_num_flag,
-                active_expert_range=active_expert_range,
-                quant_mode=quant_mode,
-            )
+        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+            hidden_states,
+            topk_ids,
+            scale=scale,
+            active_num=active_num,
+            expert_num=expert_num,
+            expert_tokens_num_type=expert_tokens_num_type,
+            expert_tokens_num_flag=expert_tokens_num_flag,
+            active_expert_range=active_expert_range,
+            quant_mode=quant_mode,
+        )
+
+    @staticmethod
+    def maybe_normalize_mxfp_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
+        return scale
+
+    @staticmethod
+    def moe_gating_top_k(
+        x: torch.Tensor,
+        *,
+        k: int,
+        k_group: int,
+        group_count: int,
+        group_select_mode: int,
+        renorm: int,
+        norm_type: int,
+        out_flag: bool,
+        routed_scaling_factor: float = 1.0,
+        eps: float = 1e-20,
+        bias_opt: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
+            x,
+            k=k,
+            k_group=k_group,
+            group_count=group_count,
+            group_select_mode=group_select_mode,
+            renorm=renorm,
+            norm_type=norm_type,
+            out_flag=out_flag,
+            routed_scaling_factor=routed_scaling_factor,
+            eps=eps,
+            bias_opt=bias_opt,
+        )
+        return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod
     def npu_dynamic_quant(
@@ -171,6 +187,18 @@ class BaseDeviceAdaptor:
             output_dtype=fallback_output_dtype,
         )[0]
 
+    @staticmethod
+    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
+        torch_npu.atb.npu_paged_cache_load(
+            cache_kv_c,
+            cache_k_pe,
+            block_table,
+            context_seq_len_npu,
+            seq_starts=seq_starts,
+            key=key,
+            value=value,
+        )
+
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
@@ -205,6 +233,46 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
+    def maybe_normalize_mxfp_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
+        if scale is None or scale.ndim != 2:
+            return scale
+        if scale.shape[-1] % 2 != 0:
+            raise ValueError(f"Invalid MXFP8 scale shape: {tuple(scale.shape)}")
+        return scale.reshape(scale.shape[0], scale.shape[1] // 2, 2)
+
+    @staticmethod
+    def moe_gating_top_k(
+        x: torch.Tensor,
+        *,
+        k: int,
+        k_group: int,
+        group_count: int,
+        group_select_mode: int,
+        renorm: int,
+        norm_type: int,
+        out_flag: bool,
+        routed_scaling_factor: float = 1.0,
+        eps: float = 1e-20,
+        bias_opt: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
+            x,
+            k=k,
+            bias=bias_opt,
+            k_group=k_group,
+            group_count=group_count,
+            group_select_mode=group_select_mode,
+            renorm=0,
+            norm_type=norm_type,
+            routed_scaling_factor=routed_scaling_factor,
+            eps=eps,
+        )
+        if norm_type == 0 and renorm == 1:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        return topk_weights, topk_ids.to(torch.int32), out
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
@@ -221,12 +289,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             )
 
         if dynamic_scale is None:
-            return torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
+            hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
 
-        if dynamic_scale.ndim == 2:
-            dynamic_scale = dynamic_scale.reshape(dynamic_scale.shape[0], dynamic_scale.shape[1] // 2, 2)
-
-        return hidden_states, dynamic_scale
+        return hidden_states, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(dynamic_scale)
 
     @staticmethod
     def npu_grouped_matmul_swiglu_quant(
@@ -263,7 +328,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
         )
-        return out, out_scale, None
+        return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
 
     @staticmethod
     def get_quant_gmm2_kwargs(
@@ -374,6 +439,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             output_dtype=output_dtype,
             **gmm2_kwargs,
         )[0]
+
+    @staticmethod
+    def mla_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+        torch_npu.npu_gather_pa_kv_cache(
+            cache_kv_c,
+            cache_k_pe,
+            block_table,
+            context_seq_len_npu,
+            seq_offset=seq_offset,
+            key=key,
+            value=value,
+        )
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:

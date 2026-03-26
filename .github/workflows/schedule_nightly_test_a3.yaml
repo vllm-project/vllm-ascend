@@ -49,86 +49,30 @@ concurrency:
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
-    runs-on: linux-aarch64-a2b3-0
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.pull_request.labels.*.name, 'nightly-test')
-    outputs:
-      should_run: ${{ steps.parse.outputs.should_run }}
-      test_filter: ${{ steps.parse.outputs.test_filter }}
-      is_pr_event: ${{ steps.parse.outputs.is_pr_event }}
-    steps:
-      - name: Parse trigger
-        id: parse
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const eventName = context.eventName;
+    uses: ./.github/workflows/_parse_trigger.yaml
 
-            function parseNightlyComment(body) {
-              if (!body) return null;
-              const match = body.trim().match(/^\/nightly(?:\s+(.+))?$/m);
-              if (!match) return null;
-              const args = (match[1] || '').trim();
-              if (!args || args === 'all') return 'all';
-              // Wrap with commas for exact-name matching: ",name1,name2,"
-              return ',' + args.split(/\s+/).join(',') + ',';
-            }
-
-            // schedule / workflow_dispatch: run all tests with pre-built image
-            if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
-              core.setOutput('should_run', 'true');
-              core.setOutput('test_filter', 'all');
-              core.setOutput('is_pr_event', 'false');
-              return;
-            }
-
-            // pull_request (labeled / synchronize)
-            if (eventName === 'pull_request') {
-              const labels = context.payload.pull_request.labels.map(l => l.name);
-              if (!labels.includes('nightly-test')) {
-                core.setOutput('should_run', 'false');
-                core.setOutput('test_filter', '');
-                core.setOutput('is_pr_event', 'true');
-                return;
-              }
-              // Search comments for latest /nightly command
-              const prNumber = context.payload.pull_request.number;
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                per_page: 100,
-              });
-              let testFilter = null;
-              for (let i = comments.length - 1; i >= 0; i--) {
-                const result = parseNightlyComment(comments[i].body);
-                if (result !== null) { testFilter = result; break; }
-              }
-              // No /nightly comment found: do not run any tests
-              if (testFilter === null) {
-                core.info('nightly-test label present but no /nightly comment found; skipping.');
-                core.setOutput('should_run', 'false');
-                core.setOutput('test_filter', '');
-                core.setOutput('is_pr_event', 'true');
-                return;
-              }
-              core.setOutput('should_run', 'true');
-              core.setOutput('test_filter', testFilter);
-              core.setOutput('is_pr_event', 'true');
-              return;
-            }
-
-            // Fallback
-            core.setOutput('should_run', 'false');
-            core.setOutput('test_filter', '');
-            core.setOutput('is_pr_event', 'false');
+  build-image:
+    name: Build nightly-a3 image
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: a3
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
   multi-node-tests:
     name: multi-node
-    needs: [parse-trigger]
-    if: always() && needs.parse-trigger.outputs.should_run == 'true'
+    needs: [parse-trigger, build-image]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -140,15 +84,9 @@ jobs:
           - name: multi-node-qwen3-dp
             config_file_path: Qwen3-235B-A22B.yaml
             size: 2
-          # - name: multi-node-dpsk-4node-pd
-          #   config_file_path: DeepSeek-R1-W8A8.yaml
-          #   size: 4
           - name: multi-node-qwenw8a8-2node
             config_file_path: Qwen3-235B-W8A8.yaml
             size: 2
-          # - name: multi-node-deepseek-r1-w8a8-eplb
-          #   config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
-          #   size: 4
           - name: multi-node-qwenw8a8-2node-eplb
             config_file_path: Qwen3-235B-W8A8-EPLB.yaml
             size: 2
@@ -190,19 +128,12 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
-      vllm_ascend_ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref_name }}
-      is_pr_test: >-
+      vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
+      should_run: >-
         ${{
-          needs.parse-trigger.outputs.is_pr_event == 'true' && (
-            needs.parse-trigger.outputs.test_filter == 'all' ||
-            contains(needs.parse-trigger.outputs.test_filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-      is_run: >-
-        ${{
-          needs.parse-trigger.outputs.should_run == 'true' && (
-            needs.parse-trigger.outputs.test_filter == 'all' ||
-            contains(needs.parse-trigger.outputs.test_filter, format(',{0},', matrix.test_config.name))
+          needs.parse-trigger.outputs.run == 'true' && (
+            needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
     secrets:
@@ -210,44 +141,22 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [parse-trigger, multi-node-tests]
-    if: always() && needs.parse-trigger.outputs.should_run == 'true'
+    needs: [parse-trigger, build-image, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
         test_config:
+          # pytest-driven tests
           - name: qwen3-30b-acc
             os: linux-aarch64-a3-4
             tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
-    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-    with:
-      runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
-      tests: ${{ matrix.test_config.tests }}
-      name: ${{ matrix.test_config.name }}
-      is_pr_test: >-
-        ${{
-          needs.parse-trigger.outputs.is_pr_event == 'true' && (
-            needs.parse-trigger.outputs.test_filter == 'all' ||
-            contains(needs.parse-trigger.outputs.test_filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-      is_run: >-
-        ${{
-          needs.parse-trigger.outputs.should_run == 'true' && (
-            needs.parse-trigger.outputs.test_filter == 'all' ||
-            contains(needs.parse-trigger.outputs.test_filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-
-  single-node-yaml-tests:
-    name: single-node
-    if: always() && needs.parse-trigger.outputs.should_run == 'true'
-    needs: [parse-trigger, multi-node-tests]
-    strategy:
-      fail-fast: false
-      matrix:
-        test_config:
+          - name: custom-multi-ops
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/
           # YAML-driven tests
           - name: deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
@@ -258,6 +167,9 @@ jobs:
           - name: deepseek-v3-2-w8a8
             os: linux-aarch64-a3-16
             config_file_path: DeepSeek-V3.2-W8A8.yaml
+          - name: glm-5-w4a8
+            os: linux-aarch64-a3-16
+            config_file_path: GLM-5.yaml
           - name: glm-4.7-w8a8
             os: linux-aarch64-a3-16
             config_file_path: GLM-4.7.yaml
@@ -279,6 +191,9 @@ jobs:
           - name: qwen3-30b-a3b-w8a8
             os: linux-aarch64-a3-4
             config_file_path: Qwen3-30B-A3B-W8A8.yaml
+          - name: qwen3-next-80b-a3b-instruct
+            os: linux-aarch64-a3-4
+            config_file_path: Qwen3-Next-80B-A3B-Instruct.yaml
           - name: qwen3-next-80b-a3b-instruct-w8a8
             os: linux-aarch64-a3-4
             config_file_path: Qwen3-Next-80B-A3B-Instruct-W8A8.yaml
@@ -310,51 +225,13 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
-      is_pr_test: >-
+      should_run: >-
         ${{
-          needs.parse-trigger.outputs.is_pr_event == 'true' && (
-            needs.parse-trigger.outputs.test_filter == 'all' ||
-            contains(needs.parse-trigger.outputs.test_filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-      is_run: >-
-        ${{
-          needs.parse-trigger.outputs.should_run == 'true' && (
-            needs.parse-trigger.outputs.test_filter == 'all' ||
-            contains(needs.parse-trigger.outputs.test_filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-
-  custom-ops-tests:
-    name: test ops
-    needs: [parse-trigger, multi-node-tests]
-    if: always() && needs.parse-trigger.outputs.should_run == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        test_config:
-          - name: custom-multi-ops
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/
-    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-    with:
-      runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
-      tests: ${{ matrix.test_config.tests }}
-      name: ${{ matrix.test_config.name }}
-      is_pr_test: >-
-        ${{
-          needs.parse-trigger.outputs.is_pr_event == 'true' && (
-            needs.parse-trigger.outputs.test_filter == 'all' ||
-            contains(needs.parse-trigger.outputs.test_filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-      is_run: >-
-        ${{
-          needs.parse-trigger.outputs.should_run == 'true' && (
-            needs.parse-trigger.outputs.test_filter == 'all' ||
-            contains(needs.parse-trigger.outputs.test_filter, format(',{0},', matrix.test_config.name))
+          needs.parse-trigger.outputs.run == 'true' && (
+            needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}

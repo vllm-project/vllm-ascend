@@ -40,6 +40,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.layer_shard_linear import (
     is_hidden_layer,
     post_process_after_loading_for_shard_weight_series,
@@ -1075,12 +1076,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
             k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
 
-            torch_npu.atb.npu_paged_cache_load(
+            DeviceOperator.mla_cache_load(
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
                 context_seq_len_npu,
-                seq_starts=prefill_metadata.chunked_context.starts[i],
+                prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
             )
@@ -1317,6 +1318,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             sparse_mode = 3
             attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            if self.fa_quant_layer:
+                dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
         elif self.fa_quant_layer:
             attn_mask = None
             input_layout = "BSND_NBSD"
@@ -1402,7 +1405,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(softmax_lse),
             )
             if self.fa_quant_layer:
-                attn_params = attn_params + (dequant_scale_q_nope, self.fak_descale_float)  # type: ignore
+                attn_params = attn_params + (
+                    weak_ref_tensors(dequant_scale_q_nope),
+                    weak_ref_tensors(self.fak_descale_float),
+                )  # type: ignore
             else:
                 attn_params = attn_params + (None, None)  # type: ignore
 
