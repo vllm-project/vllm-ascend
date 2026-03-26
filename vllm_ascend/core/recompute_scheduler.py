@@ -33,7 +33,6 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import (
-    RequestQueue,
     SchedulingPolicy,
     create_request_queue,
 )
@@ -447,9 +446,9 @@ class RecomputeScheduler(Scheduler):
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(
-                    request.status
-                ) and not self._try_promote_blocked_waiting_request(request):
+                if self._is_blocked_waiting_status(request.status) and not self._try_promote_blocked_waiting_request(
+                    request
+                ):
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
@@ -583,15 +582,8 @@ class RecomputeScheduler(Scheduler):
 
                 # Determine if we need to allocate cross-attention blocks.
                 num_encoder_tokens = 0
-                if (
-                    self.is_encoder_decoder
-                    and request.has_encoder_inputs
-                    and encoder_inputs_to_schedule
-                ):
-                    num_encoder_tokens = sum(
-                        request.get_num_encoder_embeds(i)
-                        for i in encoder_inputs_to_schedule
-                    )
+                if self.is_encoder_decoder and request.has_encoder_inputs and encoder_inputs_to_schedule:
+                    num_encoder_tokens = sum(request.get_num_encoder_embeds(i) for i in encoder_inputs_to_schedule)
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -762,9 +754,7 @@ class RecomputeScheduler(Scheduler):
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         new_block_ids_to_zero = (
-            (self.kv_cache_manager.take_new_block_ids() or None)
-            if self.needs_kv_cache_zeroing
-            else None
+            (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
 
         scheduler_output = RecomputeSchedulerOutput(
