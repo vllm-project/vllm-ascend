@@ -9,7 +9,6 @@ from vllm.reasoning.minimax_m2_reasoning_parser import (
 
 
 class FakeTokenizer:
-
     def get_vocab(self):
         return {
             "<think>": 1,

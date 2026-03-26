@@ -42,18 +42,13 @@ def _extract_class_method_source(
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name == class_name:
             for item in node.body:
-                if (
-                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and item.name == method_name
-                ):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == method_name:
                     method_source = ast.get_source_segment(source, item)
                     if method_source is None:
                         break
                     return textwrap.dedent(method_source)
 
-    raise RuntimeError(
-        f"Unable to extract {class_name}.{method_name} from {module_path}."
-    )
+    raise RuntimeError(f"Unable to extract {class_name}.{method_name} from {module_path}.")
 
 
 def _install_method(method_name: str, method_source: str) -> None:
@@ -73,10 +68,7 @@ def _replace_block(
     count: int = 1,
 ) -> str:
     if source.count(old) < count:
-        raise RuntimeError(
-            "Failed to locate expected block while patching "
-            "OpenAIServingChat usage accounting."
-        )
+        raise RuntimeError("Failed to locate expected block while patching OpenAIServingChat usage accounting.")
     return source.replace(old, new, count)
 
 
@@ -108,12 +100,8 @@ def _rebuild_model_field(model_cls, field_name: str, annotation) -> None:
 
 
 _rebuild_model_field(chat_protocol.ChatCompletionResponse, "usage", UsageInfo)
-_rebuild_model_field(
-    chat_protocol.ChatCompletionStreamResponse, "usage", UsageInfo | None
-)
-_rebuild_model_field(
-    engine_protocol.RequestResponseMetadata, "final_usage_info", UsageInfo | None
-)
+_rebuild_model_field(chat_protocol.ChatCompletionStreamResponse, "usage", UsageInfo | None)
+_rebuild_model_field(engine_protocol.RequestResponseMetadata, "final_usage_info", UsageInfo | None)
 
 
 def _count_minimax_reasoning_tokens(
@@ -133,12 +121,8 @@ def _patched_count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
     return _count_minimax_reasoning_tokens(token_ids, self.end_token_id)
 
 
-minimax_parser.MiniMaxM2ReasoningParser.count_reasoning_tokens = (
-    _patched_count_reasoning_tokens
-)
-minimax_parser.MiniMaxM2AppendThinkReasoningParser.count_reasoning_tokens = (
-    _patched_count_reasoning_tokens
-)
+minimax_parser.MiniMaxM2ReasoningParser.count_reasoning_tokens = _patched_count_reasoning_tokens
+minimax_parser.MiniMaxM2AppendThinkReasoningParser.count_reasoning_tokens = _patched_count_reasoning_tokens
 
 
 def _count_reasoning_tokens_for_usage(
@@ -168,15 +152,11 @@ def _make_usage_info(
             reasoning_tokens=max(0, min(reasoning_tokens, completion_tokens))
         )
     if self.enable_prompt_tokens_details and num_cached_tokens:
-        usage.prompt_tokens_details = chat_serving.PromptTokenUsageInfo(
-            cached_tokens=num_cached_tokens
-        )
+        usage.prompt_tokens_details = chat_serving.PromptTokenUsageInfo(cached_tokens=num_cached_tokens)
     return usage
 
 
-OpenAIServingChat._count_reasoning_tokens_for_usage = staticmethod(
-    _count_reasoning_tokens_for_usage
-)
+OpenAIServingChat._count_reasoning_tokens_for_usage = staticmethod(_count_reasoning_tokens_for_usage)
 OpenAIServingChat._make_usage_info = _make_usage_info
 
 
