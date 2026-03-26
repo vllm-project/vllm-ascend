@@ -127,9 +127,6 @@ If you run this script successfully, you can see the info shown below:
 Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I am Qwen, a large-scale language model independently developed by the Tongyi Lab under Alibaba Group. I am'
 ```
 
-### Note 
-Qwen3Next doesn't support TP16 and TP > 16 now, because num of query heads is 16. Under TP16, GQA degenerates into MHA, causing service failure due to limitations of the FIA operator.
-
 ::::
 :::::
 
