@@ -29,7 +29,6 @@ from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
-import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version

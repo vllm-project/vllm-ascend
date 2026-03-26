@@ -423,14 +423,16 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
 class SequenceColumnParallelOp(CustomColumnParallelOp):
     def __init__(self, layer):
         super().__init__(layer)
-        self.is_vl_first_layer = False
+        self.need_all_gather = False
 
     def update_attrs(self):
         super().update_attrs()
         # For VL models, inputs_embeds at layer 0 comes from the vision encoder
         # as full [N, H] — it has NOT been reduce-scattered. We detect this
         # statically at init time so the branch is a constant to dynamo.
-        self.need_all_gather = not (extract_layer_index(self.layer.prefix) == 0 and is_vl_model(vllm_config) and "attn" in self.prefix)
+        self.need_all_gather = not (
+            extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix
+        )
 
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         """Linear layer with column parallelism.
