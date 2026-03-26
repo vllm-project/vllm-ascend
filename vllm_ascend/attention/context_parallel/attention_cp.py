@@ -15,8 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import ClassVar
-
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -60,11 +58,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
     Extends AscendAttentionMetadataBuilder with PCP/DCP metadata handling.
     """
-
-    # Does this backend/builder reorder the batch?
-    # If not, set this to None. Otherwise set it to the query
-    # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(
         self,
