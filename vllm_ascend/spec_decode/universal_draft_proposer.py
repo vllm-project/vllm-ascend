@@ -10,16 +10,12 @@ which provides ``VocabMapping`` and the ``universal_draft`` config method.
 import torch
 from vllm.config import VllmConfig
 from vllm.forward_context import BatchDescriptor
-from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
-from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
-
-logger = init_logger(__name__)
 
 
 class AscendUniversalDraftProposer(AscendDraftModelProposer):
@@ -37,18 +33,13 @@ class AscendUniversalDraftProposer(AscendDraftModelProposer):
         device: torch.device,
         runner=None,
     ):
-        # Intentionally skip AscendDraftModelProposer.__init__ to avoid
-        # the vocab-size-mismatch check.  We still need the base class
-        # initialisation and the TP-mismatch check.
-        SpecDecodeBaseProposer.__init__(
-            self,
-            vllm_config=vllm_config,
-            device=device,
-            pass_hidden_states_to_model=False,
-            runner=runner,
-        )
-        self._raise_if_draft_tp_mismatch()
+        super().__init__(vllm_config=vllm_config, device=device, runner=runner)
         self.vocab_mapping: VocabMapping | None = None
+
+    def _raise_if_vocab_size_mismatch(self):
+        # Override: heterogeneous vocabularies are expected and handled
+        # by VocabMapping, so we intentionally skip the check.
+        pass
 
     # -- model loading -------------------------------------------------------
 
@@ -61,19 +52,13 @@ class AscendUniversalDraftProposer(AscendDraftModelProposer):
         )
         draft_tokenizer = get_tokenizer(
             self.speculative_config.draft_model_config.tokenizer,
-            trust_remote_code=(
-                self.speculative_config.draft_model_config.trust_remote_code
-            ),
+            trust_remote_code=(self.speculative_config.draft_model_config.trust_remote_code),
         )
         self.vocab_mapping = VocabMapping(
             target_tokenizer=target_tokenizer,
             draft_tokenizer=draft_tokenizer,
-            target_vocab_size=(
-                self.vllm_config.model_config.get_vocab_size()
-            ),
-            draft_vocab_size=(
-                self.speculative_config.draft_model_config.get_vocab_size()
-            ),
+            target_vocab_size=(self.vllm_config.model_config.get_vocab_size()),
+            draft_vocab_size=(self.speculative_config.draft_model_config.get_vocab_size()),
             device=self.device,
         )
 
@@ -95,12 +80,8 @@ class AscendUniversalDraftProposer(AscendDraftModelProposer):
 
         # 1) Map incoming target-vocab IDs → draft-vocab IDs so the draft
         #    model receives tokens it understands.
-        draft_input_ids = self.vocab_mapping.map_target_to_draft_ids(
-            target_token_ids
-        )
-        draft_next_ids = self.vocab_mapping.map_target_to_draft_ids(
-            next_token_ids
-        )
+        draft_input_ids = self.vocab_mapping.map_target_to_draft_ids(target_token_ids)
+        draft_next_ids = self.vocab_mapping.map_target_to_draft_ids(next_token_ids)
 
         # 2) Temporarily wrap compute_logits on the raw draft model so that
         #    logits are constrained to the vocabulary intersection before
