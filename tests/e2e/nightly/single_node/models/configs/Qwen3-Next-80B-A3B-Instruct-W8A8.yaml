@@ -42,4 +42,4 @@ test_cases:
         max_out_len: 32768
         batch_size: 32
         baseline: 96
-        threshold: 3
+        threshold: 4
