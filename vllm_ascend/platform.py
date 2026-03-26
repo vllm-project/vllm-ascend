@@ -318,15 +318,12 @@ class NPUPlatform(Platform):
             speculative_config
             and speculative_config.num_speculative_tokens
             and compilation_config.cudagraph_capture_sizes
-            and compilation_config.cudagraph_mode
-            in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL)
+            and compilation_config.cudagraph_mode in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL)
         ):
             decode_query_len = 1 + speculative_config.num_speculative_tokens
             if decode_query_len > 1:
                 max_size = compilation_config.max_cudagraph_capture_size
-                aligned_sizes = list(range(
-                    decode_query_len, max_size + 1, decode_query_len
-                ))
+                aligned_sizes = list(range(decode_query_len, max_size + 1, decode_query_len))
                 update_cudagraph_capture_sizes(vllm_config, aligned_sizes)
                 logger.info(
                     "Adjusted cudagraph_capture_sizes for speculative decoding "
