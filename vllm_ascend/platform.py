@@ -331,7 +331,6 @@ class NPUPlatform(Platform):
                 logger.info(
                     "Adjusted cudagraph_capture_sizes for speculative decoding, (decode_query_len=%d): from %d to %d",
                     decode_query_len,
-                    len(aligned_sizes),
                     aligned_sizes[0],
                     aligned_sizes[-1],
                 )
