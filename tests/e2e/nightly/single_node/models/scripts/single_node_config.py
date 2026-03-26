@@ -1,6 +1,6 @@
 import logging
 import os
-import re
+import regex as re
 from dataclasses import dataclass, field
 from typing import Any
 
