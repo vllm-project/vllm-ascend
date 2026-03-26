@@ -27,6 +27,8 @@ on:
   pull_request:
     branches:
       - 'main'
+      - '*-dev'
+      - 'releases/v*'
     types: [labeled, synchronize]
 
 permissions:
