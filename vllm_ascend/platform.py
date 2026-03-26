@@ -517,7 +517,7 @@ class NPUPlatform(Platform):
                 "fused mc2 op cannot be used with hierarchy communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
             )
-        
+
         if model_config and "Qwen3Next" in model_config.hf_config.architectures[0]:
             if vllm_config.parallel_config.tensor_parallel_size >= 16:
                 raise ValueError("Qwen3Next model does not support tp >= 16.")
