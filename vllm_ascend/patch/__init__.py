@@ -179,6 +179,33 @@
 #       Remove this patch once the upstream MiniMax usage-accounting fix is in
 #       the runtime vLLM version used by vllm-ascend.
 #
+# ** 10. File: platform/patch_glm_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.tool_parsers.glm4_moe_tool_parser.Glm4MoeModelToolParser`
+#    Why:
+#       GLM-4.7 / GLM-4.5 tool-call streaming on the release runtime still has
+#       two independent finish-path bugs:
+#       1. the parser can leave a terminal `<arg_value>... </tool_call>` chunk
+#          partially undrained, and
+#       2. finish backfill trusts the parser's internal accumulated arguments
+#          instead of the argument bytes actually sent to the client.
+#       Together these can drop a full string value or emit only a suffix like
+#       `"}` in the final SSE chunk even when non-stream output is correct.
+#    How：
+#       Monkey-patch the GLM parser to keep draining a single chunk through
+#       terminal state transitions, and monkey-patch chat streaming to track
+#       per-tool arguments actually emitted to the client before computing the
+#       finish-chunk suffix. The suffix logic still tolerates mixed JSON
+#       whitespace styles from GLM tool parsers.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37845
+#       https://github.com/vllm-project/vllm/pull/33218
+#    Future Plan:
+#       Remove this patch once both the GLM parser drain fix and the serving
+#       finish-backfill fix are present in the runtime vLLM version used by
+#       vllm-ascend.
+#
 # * Worker Patch:
 # ===============
 #
