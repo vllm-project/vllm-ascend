@@ -95,7 +95,7 @@ def main():
 
     llm = LLM(
         model="/path/to/DeepSeek-OCR-2",
-        trust_remote_code=False,
+        trust_remote_code=True,
         max_model_len=4096,
         limit_mm_per_prompt={"image": 1},
     )
