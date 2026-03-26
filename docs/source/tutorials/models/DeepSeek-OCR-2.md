@@ -32,7 +32,7 @@ You can use our official docker image to run DeepSeek-OCR-2 directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-docker).
 
-```python
+```bash
    :substitutions:
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
 # Update the vllm-ascend image according to your environment.
