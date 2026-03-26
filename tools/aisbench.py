@@ -18,7 +18,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -26,6 +25,7 @@ from pathlib import Path
 import filelock
 import huggingface_hub
 import pandas as pd
+import regex as re
 from modelscope import snapshot_download  # type: ignore
 
 BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))

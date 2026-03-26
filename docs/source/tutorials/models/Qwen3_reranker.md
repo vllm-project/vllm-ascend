@@ -111,7 +111,7 @@ model_name = "Qwen/Qwen3-Reranker-8B"
 
 model = LLM(
     model=model_name,
-    task="score",
+    runner="pooling",
     hf_overrides={
         "architectures": ["Qwen3ForSequenceClassification"],
         "classifier_from_token": ["no", "yes"],
@@ -154,7 +154,7 @@ if __name__ == "__main__":
 
     outputs = model.score(query_template.format(prefix=prefix, instruction=instruction, query=query), documents)
 
-    print([output.outputs[0].score for output in outputs])
+    print([output.outputs.score for output in outputs])
 ```
 
 If you run this script successfully, you will see a list of scores printed to the console, similar to this:

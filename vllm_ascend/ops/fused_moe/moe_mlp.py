@@ -18,15 +18,15 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
-from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -95,27 +95,17 @@ def quant_apply_mlp(
     w2_offset: torch.Tensor | None = None,
     fusion: bool = False,
     dynamic_eplb: bool = False,
-    **kwargs,
+    use_mxfp_quant: bool = False,
+    act_quant_type: torch.dtype = torch.float8_e4m3fn,
+    weight_quant_type: torch.dtype | None = None,
+    scale_type: torch.dtype | None = None,
+    per_token_scale_type: torch.dtype | None = None,
+    use_bf16: bool = True,
 ) -> torch.Tensor:
-    # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
-    # quantization modes will be consolidated into a dataclass in a follow-up.
-    use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
-    act_quant_type = torch.float8_e4m3fn
-    weight_quant_type = None
-    scale_type = None
-    per_token_scale_type = None
-    use_bf16 = True
-
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
 
     if use_mxfp_quant:
-        act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
-        weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
-        scale_type = kwargs.get("scale_type")
-        per_token_scale_type = kwargs.get("per_token_scale_type")
-        use_bf16 = kwargs.get("use_bf16", True)
-
         ensure_mxfp8_moe_available("MXFP MoE MLP path")
 
         if w1_scale_bias is not None or w2_scale_bias is not None:
@@ -138,7 +128,9 @@ def quant_apply_mlp(
         quantized_hidden_states = None
     else:
         unquantized_hidden_states = None
-        pertoken_scale = dynamic_scale
+        pertoken_scale = (
+            DeviceOperator.maybe_normalize_mxfp_scale_layout(dynamic_scale) if use_mxfp_quant else dynamic_scale
+        )
         quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
@@ -147,7 +139,7 @@ def quant_apply_mlp(
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(hidden_states)
-    is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
+    is_mc2 = _EXTRA_CTX.moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and w1_offset is None and is_mc2:
         if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
@@ -371,34 +363,32 @@ def unquant_apply_mlp(
     return hidden_states
 
 
-def unified_apply_mlp(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor | list[torch.Tensor],
-    w2: torch.Tensor | list[torch.Tensor],
-    group_list: torch.Tensor,
-    w1_scale: list[torch.Tensor] | None = None,
-    w2_scale: list[torch.Tensor] | None = None,
-    activation: str | None = None,
-    w1_bias: torch.Tensor = None,
-    w2_bias: torch.Tensor = None,
-    dynamic_scale: torch.Tensor = None,
-    group_list_type: int = 1,
-    w1_scale_bias: torch.Tensor = None,
-    w2_scale_bias: torch.Tensor = None,
-    w1_offset: torch.Tensor | None = None,
-    w2_offset: torch.Tensor | None = None,
-    topk_scales: torch.Tensor | None = None,
-    with_quant: bool = False,
-    fusion: bool = False,
-    need_trans: bool = True,
-    dynamic_eplb: bool = False,
-    **kwargs,
-) -> torch.Tensor:
+def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     """
     Unified MoE MLP entry.
-    Quant path is dispatched by DeviceOperator with explicit quant-type flags.
+    Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
     """
-    if not with_quant:
+    hidden_states = mlp_compute_input.hidden_states
+    group_list = mlp_compute_input.group_list
+    group_list_type = mlp_compute_input.group_list_type
+    dynamic_scale = mlp_compute_input.dynamic_scale
+    topk_scales = mlp_compute_input.topk_scales
+    w1 = mlp_compute_input.weights.w1
+    w2 = mlp_compute_input.weights.w2
+    w1_bias = mlp_compute_input.weights.w1_bias
+    w2_bias = mlp_compute_input.weights.w2_bias
+    w1_scale = mlp_compute_input.weights.w1_scale
+    w2_scale = mlp_compute_input.weights.w2_scale
+    w1_scale_bias = mlp_compute_input.weights.w1_scale_bias
+    w2_scale_bias = mlp_compute_input.weights.w2_scale_bias
+    w1_offset = mlp_compute_input.weights.w1_offset
+    w2_offset = mlp_compute_input.weights.w2_offset
+    activation = mlp_compute_input.activation
+    need_trans = mlp_compute_input.need_trans
+    dynamic_eplb = mlp_compute_input.dynamic_eplb
+    fusion = mlp_compute_input.fusion
+
+    if not mlp_compute_input.quant.is_quant:
         return unquant_apply_mlp(
             hidden_states=hidden_states,
             w1=w1,
@@ -413,13 +403,22 @@ def unified_apply_mlp(
         )
 
     assert w1_scale is not None and w2_scale is not None
-    # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
-    # quantization modes will be consolidated into a dataclass in a follow-up.
-    act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
-    weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn)
-    scale_type = kwargs.get("scale_type")
-    per_token_scale_type = kwargs.get("per_token_scale_type")
-    use_mxfp_quant = kwargs.get("use_mxfp_quant", False)
+    act_quant_type = torch.float8_e4m3fn
+    weight_quant_type = torch.float8_e4m3fn
+    scale_type = None
+    per_token_scale_type = None
+    use_bf16 = hidden_states.dtype == torch.bfloat16
+    use_mxfp_quant = mlp_compute_input.quant.is_mxfp
+
+    if use_mxfp_quant:
+        mxfp = mlp_compute_input.quant.mxfp
+        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is MXFP8."
+        act_quant_type = mxfp.act_quant_type or act_quant_type
+        weight_quant_type = mxfp.weight_quant_type or weight_quant_type
+        scale_type = mxfp.scale_dtype
+        per_token_scale_type = mxfp.per_token_scale_dtype
+        use_bf16 = mxfp.use_bf16
+
     return quant_apply_mlp(
         hidden_states=hidden_states,
         w1=w1,
@@ -435,10 +434,10 @@ def unified_apply_mlp(
         w2_offset=w2_offset,
         fusion=fusion,
         dynamic_eplb=dynamic_eplb,
+        use_mxfp_quant=use_mxfp_quant,
         act_quant_type=act_quant_type,
         weight_quant_type=weight_quant_type,
         scale_type=scale_type,
         per_token_scale_type=per_token_scale_type,
-        use_mxfp_quant=use_mxfp_quant,
-        use_bf16=kwargs.get("use_bf16", True),
+        use_bf16=use_bf16,
     )

@@ -1,3 +1,4 @@
+import gc
 import itertools
 import random
 
@@ -347,3 +348,6 @@ def test_moe_init_routing_custom():
             failed_test_cnt += 1
 
     assert (failed_test_cnt == 0)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

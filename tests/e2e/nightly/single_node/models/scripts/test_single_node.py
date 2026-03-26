@@ -3,6 +3,8 @@ from typing import Any
 
 import openai
 import pytest
+import subprocess
+import sys
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
@@ -144,6 +146,15 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
+    # TODO: remove this part after the transformers version upgraded
+    if config.special_dependencies:
+        for k, v in config.special_dependencies.items():
+            command = [
+                sys.executable,
+                "-m", "pip", "install",
+                f"{k}=={v}",
+            ]
+            subprocess.call(command)
     if config.service_mode == "epd":
         with (
             RemoteEPDServer(vllm_serve_args=config.epd_server_cmds, env_dict=config.envs) as _,

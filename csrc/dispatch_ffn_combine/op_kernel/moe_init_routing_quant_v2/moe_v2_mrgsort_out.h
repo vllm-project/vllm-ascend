@@ -168,9 +168,9 @@ __aicore__ inline void MoeV2MrgsortOut::UpdateSortInfo() {
 
 __aicore__ inline void MoeV2MrgsortOut::Extract() {
   AscendC::Extract(this->ubOutput1, this->ubOutput2, this->tempBuffer, Ceil(curLoopSortedNum, ONE_REPEAT_SORT_NUM));
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Muls(this->ubOutput1, this->ubOutput1, (float)-1, Align(curLoopSortedNum, sizeof(float)));
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Cast(this->ubOutputInt1, this->ubOutput1, RoundMode::CAST_ROUND, Align(curLoopSortedNum, sizeof(float)));
 }
 

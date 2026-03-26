@@ -39,9 +39,9 @@ def test_qwen3_vl_sp_tp2(model: str) -> None:
         compilation_config={
             "cudagraph_capture_sizes": [2, 4],
             "cudagraph_mode": "FULL_DECODE_ONLY",
-            "pass_config": {"enable_sp": True},
+            "pass_config": {"enable_sp": True, "sp_min_token_num": 10},
         },
-        additional_config={"sp_threshold": 10, "ascend_compilation_config": {"enable_npugraph_ex": False}},
+        additional_config={"ascend_compilation_config": {"enable_npugraph_ex": False}},
     ) as runner:
         sp_outputs = runner.model.generate(prompts, sampling_params)
 

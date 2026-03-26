@@ -16,9 +16,6 @@
 #
 import numpy as np
 import torch
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
-from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
@@ -53,21 +50,23 @@ class AscendSampler(Sampler):
             self.num_speculative_tokens,
         )
 
+        # Apply bad words masking in place.
+        self.bad_words_state.apply_bad_words(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
+        )
+
         # Apply temperature in place.
-        apply_temperature(logits, idx_mapping, self.sampling_states.temperature.gpu)
+        self.sampling_states.apply_temperature(logits, idx_mapping, idx_mapping_np)
 
-        # Apply min_p in place if any request has a non-zero min_p.
-        do_min_p = self.sampling_states.do_min_p(idx_mapping_np)
-        if do_min_p:
-            apply_min_p(logits, idx_mapping, self.sampling_states.min_p.gpu)
+        # Apply min_p in place.
+        self.sampling_states.apply_min_p(logits, idx_mapping, idx_mapping_np)
 
-        # Apply top_k and/or top_p. This might return a new tensor.
-        do_top_k = self.sampling_states.do_top_k(idx_mapping_np)
-        top_k = self.sampling_states.top_k.gpu[idx_mapping] if do_top_k else None
-        do_top_p = self.sampling_states.do_top_p(idx_mapping_np)
-        top_p = self.sampling_states.top_p.gpu[idx_mapping] if do_top_p else None
-        if do_top_k or do_top_p:
-            logits = apply_top_k_top_p(logits, top_k, top_p)
+        # Apply top_k and/or top_p. This might or might not return a new tensor.
+        logits = self.sampling_states.apply_top_k_top_p(logits, idx_mapping, idx_mapping_np)
 
         # Sample the next token.
         sampled = gumbel_sample(

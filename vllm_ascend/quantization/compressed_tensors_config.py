@@ -21,7 +21,7 @@ from typing import Any, Optional, cast
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy, QuantizationType
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
@@ -36,8 +36,6 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 from .methods import AscendLinearScheme, AscendMoEScheme
-
-logger = init_logger(__name__)
 
 
 # Remove the original compressed_tensors method to replace with our implementation

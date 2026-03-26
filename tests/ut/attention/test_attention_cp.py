@@ -95,7 +95,7 @@ class TestAscendAttentionCPImpl(TestBase):
     @patch('torch_npu.npu_attention_update')
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch(
-        'vllm_ascend.attention.context_parallel.attention_cp.get_forward_context'
+        'vllm_ascend.ascend_forward_context.get_forward_context'
     )
     @patch_distributed_groups(dcp_size=2, pcp_size=2)
     def test_forward_decode_pcp_dcp(self, mock_all2all, mock_dcp, mock_pcp,

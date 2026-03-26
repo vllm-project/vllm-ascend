@@ -1,3 +1,4 @@
+import gc
 import pytest
 import torch
 from einops import rearrange
@@ -98,3 +99,6 @@ def test_fused_qkvzba_split_reshape_cat(
     validate_cmp(z, z_ref, dtype)
     validate_cmp(b, b_ref, dtype)
     validate_cmp(a, a_ref, dtype)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

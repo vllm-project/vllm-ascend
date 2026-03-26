@@ -1,9 +1,9 @@
 # Standard
 import json
 import os
-import re
 from dataclasses import dataclass
 
+import regex as re
 import torch
 
 # Third Party

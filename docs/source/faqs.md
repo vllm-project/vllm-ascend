@@ -2,8 +2,7 @@
 
 ## Version Specific FAQs
 
-- [[v0.16.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6969)
-- [[v0.15.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6838)
+- [[v0.17.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7173)
 - [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
 
 ## General FAQs
@@ -270,3 +269,23 @@ bash tools/install_flash_infer_attention_score_ops_a2.sh
 
 **NOTE**: Don't set `additional_config.pa_shape_list` when using this method; otherwise, it will lead to another attention operator.
 **Important**: Please make sure you're using the **official image** of `vllm-ascend`; otherwise, you **must change** the directory `/vllm-workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or `tools/install_flash_infer_attention_score_ops_a3.sh` to your own, or create one. If you're not the root user, you need `sudo` **privileges** to run this script.
+
+### 23. How to set `SOC_VERSION` when building from source on a CPU-only machine?
+
+When building from source (e.g. `pip install -e .`), the build may try to infer the target chip via `npu-smi`. If `npu-smi` is not available (common in CPU-only build environments), you must set `SOC_VERSION` manually before installation.
+
+You can use the defaults from `Dockerfile*` as a reference. For example:
+
+```bash
+# Atlas A2
+export SOC_VERSION="ascend910b1"
+
+# Atlas A3
+export SOC_VERSION="ascend910_9391"
+
+# Atlas 300I
+export SOC_VERSION="ascend310p1"
+
+# Atlas A5 (Ascend 950 series)
+export SOC_VERSION="<value starting with ascend950>"
+```

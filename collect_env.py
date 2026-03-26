@@ -18,11 +18,11 @@
 import datetime
 import locale
 import os
-import re
 import subprocess
 import sys
 from collections import namedtuple
 
+import regex as re
 from vllm.envs import environment_variables
 
 try:

@@ -1,0 +1,12 @@
+model_name: "vllm-ascend/Qwen3-VL-8B-Instruct-W8A8"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+- name: "mmmu_val"
+  metrics:
+  - name: "acc,none"
+    value: 0.52
+max_model_len: 8192
+batch_size: 32
+gpu_memory_utilization: 0.8
+quantization: ascend

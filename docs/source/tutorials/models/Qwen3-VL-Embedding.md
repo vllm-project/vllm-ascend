@@ -40,7 +40,7 @@ vllm serve Qwen/Qwen3-VL-Embedding-8B --runner pooling
 Once your server is started, you can query the model with input prompts.
 
 ```bash
-curl http://127.0.0.1:8000/v1/embeddings -H "Content-Type: application/json" -d '{
+curl http://localhost:8000/v1/embeddings -H "Content-Type: application/json" -d '{
   "input": [
         "The capital of China is Beijing.",
         "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun."

@@ -16,7 +16,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ## Weight Preparation
 
- Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-Next-80B-A3B-Instruct/tree/main)
+ Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## Deployment
 
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     prompts = [
         "Who are you?",
     ]
-    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_completion_tokens=32)
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_tokens=32)
     llm = LLM(model="Qwen/Qwen3-Next-80B-A3B-Instruct",
               tensor_parallel_size=4,
               enforce_eager=True,

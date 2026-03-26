@@ -18,7 +18,6 @@
 #
 
 import torch
-from triton.runtime import driver  # type: ignore
 from vllm.triton_utils import tl, triton
 
 
@@ -113,7 +112,9 @@ def rms_norm(
 
     output = torch.empty_like(input_2d, dtype=input_.dtype)
     BLOCK_SIZE = 1024
-    max_grid_size = driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"]
+    max_grid_size = triton.runtime.driver.active.utils.get_device_properties(torch.npu.current_device())[
+        "num_vectorcore"
+    ]
 
     grid = (min(n_rows, max_grid_size),)
 

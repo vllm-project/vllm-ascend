@@ -1,5 +1,6 @@
 from typing import Optional
 
+import gc
 import pytest
 import torch
 import torch.nn.functional as F
@@ -156,6 +157,11 @@ def causal_conv1d_fn_pytorch(
     out_ref_tensor = torch.cat(out_ref, dim=0)
     return out_ref_tensor
 
+def to_int64_tuple(t):
+    t = t.to(torch.int64)
+    if t.dim() == 0:
+        return (t.item(),)
+    return tuple(t.tolist())
 
 @pytest.mark.parametrize('has_initial_state', [False, True])
 @pytest.mark.parametrize('itype', [torch.bfloat16])
@@ -226,16 +232,19 @@ def test_ascend_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias,
     x_origin=x.transpose(-1, -2)
     weight_origin=weight.transpose(-1, -2)
     conv_states_origin=conv_states.transpose(-1, -2)
-    out = torch.ops._C_ascend.causal_conv1d_fn(
+    activation_num = 1 if activation else 0
+    out = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     x_origin,
                     weight_origin,
-                    bias,
-                    activation=activation,
                     conv_state=conv_states_origin,
-                    has_initial_state=has_initial_state_tensor,
-                    non_spec_state_indices_tensor=cache_indices,
-                    non_spec_query_start_loc=query_start_loc,
+                    bias_opt=bias,
+                    query_start_loc_opt=to_int64_tuple(query_start_loc),
+                    cache_indices_opt=to_int64_tuple(cache_indices),
+                    initial_state_mode_opt=to_int64_tuple(has_initial_state_tensor),
+                    num_accepted_tokens_opt=[],
+                    activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
+                    run_mode=0
                 ).transpose(-1, -2)
     validate_cmp(out, out_ref, itype)
     validate_cmp(conv_states, conv_states_ref, itype)
@@ -310,6 +319,9 @@ def test_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias,
 
     validate_cmp(out, out_ref, itype)
     validate_cmp(conv_states, conv_states_ref, itype)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 def causal_conv1d_update_ref(x,
@@ -443,3 +455,6 @@ def test_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim,
     assert torch.equal(conv_state[unused_states_bool],
                        conv_state_for_padding_test[unused_states_bool])
     assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

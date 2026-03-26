@@ -121,9 +121,10 @@ class TestAscendMultiHeadLatentAttention(TestBase):
     @patch("vllm_ascend.ops.mla.get_ascend_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
     @patch("vllm_ascend.ops.mla.get_forward_context")
-    def test_forward(self, mock_get_forward_context, mock_tp_size,
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
+    def test_forward(self, mock_get_forward_context_2, mock_get_forward_context, mock_tp_size,
                      mock_ascend_config, mock_get_vllm_config,
-                     mock_mla_forward):
+                     mock_mla_forward,):
         mock_tp_size.return_value = 1
         mock_ascend_config.return_value.enable_shared_expert_dp = False
         mock_vllm_config = MagicMock(spec=VllmConfig)
@@ -159,6 +160,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_forward_context = MagicMock(spec=ForwardContext)
         mock_forward_context.flash_comm_v1_enabled = False
         mock_get_forward_context.return_value = mock_forward_context
+        mock_get_forward_context_2.return_value = mock_forward_context
 
         mock_mla_forward.return_value = (3, self.hidden_size)
 

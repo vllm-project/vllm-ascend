@@ -22,10 +22,9 @@ set -euo pipefail
 trap 'echo "Error on line $LINENO: command \`$BASH_COMMAND\` failed with exit code $?" >&2' ERR
 
 cd /vllm-workspace
-mkdir -p fused_infer_attention_score_a2_$(uname -i)
 # download fused_infer_attention_score related source files
 wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/cann-8.5.1/fused_infer_attention_score_a2_$(uname -i).tar.gz
-tar -zxvf ./fused_infer_attention_score_a2_$(uname -i).tar.gz -C ./fused_infer_attention_score_a2_$(uname -i)
+tar -zxvf ./fused_infer_attention_score_a2_$(uname -i).tar.gz
 
 # replace fused_infer_attention_score operation files
 cd $ASCEND_TOOLKIT_HOME/opp/built-in/op_impl/ai_core/tbe/kernel/ascend910b/ops_transformer

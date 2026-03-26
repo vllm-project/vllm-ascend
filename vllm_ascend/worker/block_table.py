@@ -3,6 +3,7 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 
 class BlockTable:
@@ -239,21 +240,10 @@ class MultiGroupBlockTable:
         device: torch.device,
         block_sizes: list[int],
         num_speculative_tokens: int = 0,
+        max_num_blocks: list[int] | None = None,
         kernel_sizes: list[list[int]] | None = None,
         cp_kv_cache_interleave_size: int = 1,
     ) -> None:
-        # Note(hc): each dcp rank only store
-        # (max_model_len//dcp_world_size) tokens in kvcache,
-        # so the block_size which used for calc max_num_blocks_per_req
-        # must be multiplied by dcp_world_size.
-        try:
-            dcp_world_size = get_dcp_group().world_size
-            pcp_world_size = get_pcp_group().world_size
-        except AssertionError:
-            # DCP might not be initialized in testing
-            dcp_world_size = 1
-            pcp_world_size = 1
-
         if kernel_sizes is None:
             kernel_sizes = [[0]] * len(block_sizes)
         # Ensure kernel_sizes matches block_sizes length
@@ -264,12 +254,25 @@ class MultiGroupBlockTable:
                 f"kernel_sizes length ({len(kernel_sizes)}) must match block_sizes length ({len(block_sizes)})"
             )
 
+        if max_num_blocks is None:
+            # Note(hc): each dcp rank only store
+            # (max_model_len//dcp_world_size) tokens in kvcache,
+            # so the block_size which used for calc max_num_blocks_per_req
+            # must be multiplied by dcp_world_size.
+            total_cp_world_size = get_total_cp_world_size()
+            max_num_blocks = [cdiv(max_model_len, block_size * total_cp_world_size) for block_size in block_sizes]
+
+        if len(max_num_blocks) != len(block_sizes):
+            raise ValueError(
+                f"max_num_blocks length ({len(max_num_blocks)}) must match block_sizes length ({len(block_sizes)})"
+            )
+
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         self.block_tables = [
             BlockTable(
                 block_size,
                 max_num_reqs,
-                max(cdiv(max_model_len, block_size * dcp_world_size * pcp_world_size), 1 + num_speculative_tokens),
+                max_num_blocks_per_req,
                 max_num_batched_tokens,
                 pin_memory,
                 device,
@@ -277,7 +280,7 @@ class MultiGroupBlockTable:
                 cp_kv_cache_interleave_size,
                 num_speculative_tokens,
             )
-            for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
+            for block_size, kernel_size_list, max_num_blocks_per_req in zip(block_sizes, kernel_sizes, max_num_blocks)
         ]
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:

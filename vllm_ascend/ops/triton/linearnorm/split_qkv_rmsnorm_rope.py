@@ -16,8 +16,7 @@
 #
 
 import torch
-import triton  # type: ignore
-import triton.language as tl  # type: ignore
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import extract_slice, get_element, get_vectorcore_num, insert_slice

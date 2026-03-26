@@ -16,24 +16,30 @@
 #
 """Ascend quantization module.
 
-This module provides quantization support for Ascend NPU.
-
-Supported quantization tools:
-- ModelSlim: Use AscendModelSlimConfig
-- LLM-Compressor (compressed_tensors): Use AscendCompressedTensorsConfig
-
-Public API:
-- Config classes: AscendModelSlimConfig, AscendCompressedTensorsConfig
-- For scheme implementations, import from vllm_ascend.quantization.methods
+This module intentionally avoids eager imports so that importing lightweight
+submodules (for example ``quant_type``) does not trigger heavy registration
+paths and circular imports during startup.
 """
 
-# LLM-Compressor (compressed_tensors) quantization config
-from .compressed_tensors_config import AscendCompressedTensorsConfig
+from typing import TYPE_CHECKING, Any
 
-# ModelSlim quantization config
-from .modelslim_config import AscendModelSlimConfig
+if TYPE_CHECKING:
+    from .compressed_tensors_config import AscendCompressedTensorsConfig
+    from .modelslim_config import AscendModelSlimConfig
 
 __all__ = [
     "AscendModelSlimConfig",
     "AscendCompressedTensorsConfig",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "AscendModelSlimConfig":
+        from .modelslim_config import AscendModelSlimConfig
+
+        return AscendModelSlimConfig
+    if name == "AscendCompressedTensorsConfig":
+        from .compressed_tensors_config import AscendCompressedTensorsConfig
+
+        return AscendCompressedTensorsConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -117,6 +117,7 @@ class ServerState:
         self.host = host
         self.port = port
         self.url = f"http://{host}:{port}/v1"
+        # Auto-completion for ipv6
         try:
             ip = ipaddress.ip_address(self.host)
             if isinstance(ip, ipaddress.IPv6Address):
@@ -268,6 +269,16 @@ def parse_args():
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
     )
     args = parser.parse_args()
+    logger.info(
+        f"Decoder hosts will access Proxy host:port/metaserver, ensure that {set(args.decoder_hosts)} "
+        f"can access {args.host}:{args.port}/metaserver"
+    )
+    # Wildcard address is not allowed for layerwise connector
+    if args.host in ["0.0.0.0", "::", "0:0:0:0:0:0:0:0"]:
+        raise ValueError(
+            f"Decoder hosts will access Proxy host:port/metaserver, to avoid configuration errors, "
+            f"the Wildcard Address {args.host} is not allowed for proxy"
+        )
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
         raise ValueError("Number of prefiller hosts must match number of prefiller ports")
     if len(args.decoder_hosts) != len(args.decoder_ports):

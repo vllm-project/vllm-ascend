@@ -1,3 +1,4 @@
+import gc
 import torch
 
 from tests.ut.base import PytestBase
@@ -31,3 +32,6 @@ class TestChunkGatedDeltaRule(PytestBase):
 
         assert core_attn_out_non_spec.shape == (1, 17, 8, 128)
         assert last_recurrent_state.shape == (3, 8, 128, 128)
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()

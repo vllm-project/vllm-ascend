@@ -17,7 +17,7 @@ from .utils import prepare_chunk_indices
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H", "Hg", "K", "V"])
 def recompute_w_u_fwd_kernel(
     k,
     v,
@@ -29,10 +29,10 @@ def recompute_w_u_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    H: tl.constexpr,
-    Hg: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
+    H,
+    Hg,
+    K,
+    V,
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
@@ -102,12 +102,14 @@ def recompute_w_u_fwd(
     g_cumsum: torch.Tensor,
     A: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, v.shape[-1]
     H = v.shape[-2]
     BT = A.shape[-1]
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if cu_seqlens is not None and chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BK = 64

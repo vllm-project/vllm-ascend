@@ -21,10 +21,11 @@ from typing import Any
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
-from vllm.forward_context import get_forward_context
 
 from vllm_ascend._310p.fused_moe.experts_selector import select_experts
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
 
 from .registry import register_scheme
@@ -95,7 +96,9 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         log2phy: torch.Tensor | None = None,
         global_redundant_expert_num: int = 0,
         pertoken_scale: Any | None = None,
-        **kwargs,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -125,18 +128,22 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
         topk_weights = topk_weights.to(self.in_dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
 
         final_hidden_states = moe_comm_method.fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale,
-            w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            expert_map=expert_map,
-            use_int8_w8a8=True,
+            fused_experts_input=build_fused_experts_input(
+                hidden_states=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                quant_type=self.quant_type,
+                dynamic_eplb=False,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            ),
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result

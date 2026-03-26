@@ -80,8 +80,6 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export TASK_QUEUE_ENABLE=1
 # Enable the AIVector core to directly schedule ROCE communication.
 export HCCL_OP_EXPANSION_MODE="AIV"
-# Enable MLP prefetch for better performance.
-export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 # Enable FlashComm_v1 optimization when tensor parallel is enabled.
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
@@ -94,7 +92,7 @@ vllm serve /data/Qwen3-32B \
   --max-num-batched-tokens 40960 \
   --speculative-config '{"method": "suffix", "num_speculative_tokens": 3}' \
   --gpu-memory-utilization 0.9 \
-  --additional-config '{"pa_shape_list":[48,64,72,80]}' \
+  --additional-config '{"pa_shape_list":[48,64,72,80], "weight_prefetch_config":{"enable":true}}' \
   --port 8011
 ```
 

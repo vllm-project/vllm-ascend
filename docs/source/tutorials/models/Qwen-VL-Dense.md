@@ -142,7 +142,7 @@ llm = LLM(
 )
 
 sampling_params = SamplingParams(
-    max_completion_tokens=512
+    max_tokens=512
 )
 
 image_messages = [

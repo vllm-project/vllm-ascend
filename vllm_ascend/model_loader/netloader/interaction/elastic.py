@@ -15,11 +15,11 @@
 #
 
 import json
-import re
 import socket
 import threading
 from contextlib import suppress
 
+import regex as re
 import torch
 from vllm.logger import logger
 

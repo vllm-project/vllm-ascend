@@ -21,7 +21,7 @@ from typing import Any
 
 import torch
 from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -40,8 +40,6 @@ from vllm_ascend.quantization.modelslim_config import (
     packed_modules_model_mapping,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
-
-logger = init_logger(__name__)
 
 
 def create_scheme_for_layer(
