@@ -90,117 +90,28 @@ jobs:
       contains_310: false
       type: full
 
-  parse-comment:
+  parse-trigger:
     name: Parse /e2e comment
-    runs-on: linux-aarch64-a2b3-0
     if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ready') }}
-    outputs:
-      allowed: ${{ steps.resolve.outputs.allowed }}
-      pr_sha: ${{ steps.resolve.outputs.pr_sha }}
-      singlecard_tests: ${{ steps.parse.outputs.singlecard_tests }}
-      multicard_2_tests: ${{ steps.parse.outputs.multicard_2_tests }}
-      multicard_4_tests: ${{ steps.parse.outputs.multicard_4_tests }}
-      p310_tests: ${{ steps.parse.outputs.p310_tests }}
-    steps:
-      - name: Resolve actor, SHA and /e2e comment body
-        id: resolve
-        uses: actions/github-script@v7
-        with:
-          script: |
-            let actor, prSha, prNumber, prAuthor, commentBody;
-
-            // pull_request event with 'ready' label: search comments for the latest /e2e command.
-            prNumber = context.payload.pull_request.number;
-            prAuthor = context.payload.pull_request.user.login;
-            prSha = context.payload.pull_request.head.sha;
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              per_page: 100,
-            });
-            for (let i = comments.length - 1; i >= 0; i--) {
-              if (comments[i].body && comments[i].body.trim().match(/^\/e2e/m)) {
-                commentBody = comments[i].body;
-                actor = comments[i].user.login;
-                break;
-              }
-            }
-            if (!actor) {
-              core.setOutput('allowed', 'false');
-              core.info('No /e2e comment found; skipping.');
-              return;
-            }
-
-            // Allow PR author or any collaborator with write/admin access
-            const isPRAuthor = actor === prAuthor;
-            let hasWriteAccess = false;
-            try {
-              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                username: actor,
-              });
-              hasWriteAccess = ['admin', 'write'].includes(data.permission);
-            } catch (e) {
-              hasWriteAccess = false;
-            }
-            const allowed = isPRAuthor || hasWriteAccess;
-            if (!allowed) {
-              core.warning(`User ${actor} is not authorized to trigger E2E tests`);
-            }
-            core.setOutput('allowed', allowed.toString());
-            core.setOutput('pr_sha', prSha);
-            core.setOutput('comment_body', commentBody);
-
-      - name: Parse /e2e command and categorize tests by runner
-        id: parse
-        if: steps.resolve.outputs.allowed == 'true'
-        env:
-          COMMENT_BODY: ${{ steps.resolve.outputs.comment_body }}
-        run: |
-          # Strip /e2e prefix and normalize whitespace (handles space/newline separated lists)
-          TESTS=$(echo "$COMMENT_BODY" | sed 's|^/e2e[[:space:]]*||' | tr '\n' ' ' | xargs)
-          echo "All specified tests: $TESTS"
-
-          SINGLECARD_TESTS=""
-          MULTICARD_2_TESTS=""
-          MULTICARD_4_TESTS=""
-          P310_TESTS=""
-
-          for TEST in $TESTS; do
-            if echo "$TEST" | grep -q "multicard/2-cards"; then
-              MULTICARD_2_TESTS="$MULTICARD_2_TESTS $TEST"
-            elif echo "$TEST" | grep -q "multicard/4-cards"; then
-              MULTICARD_4_TESTS="$MULTICARD_4_TESTS $TEST"
-            elif echo "$TEST" | grep -q "310p"; then
-              P310_TESTS="$P310_TESTS $TEST"
-            else
-              SINGLECARD_TESTS="$SINGLECARD_TESTS $TEST"
-            fi
-          done
-
-          echo "singlecard_tests=$(echo "$SINGLECARD_TESTS" | xargs || true)" >> $GITHUB_OUTPUT
-          echo "multicard_2_tests=$(echo "$MULTICARD_2_TESTS" | xargs || true)" >> $GITHUB_OUTPUT
-          echo "multicard_4_tests=$(echo "$MULTICARD_4_TESTS" | xargs || true)" >> $GITHUB_OUTPUT
-          echo "p310_tests=$(echo "$P310_TESTS" | xargs || true)" >> $GITHUB_OUTPUT
-
+    uses: ./.github/workflows/_parse_trigger.yaml
+    with:
+      parse_e2e_comment: true
 
   e2e-comment-test:
     name: e2e-comment (${{ matrix.vllm_version }})
     strategy:
       fail-fast: false
       matrix:
-        vllm_version: [8a680463fab3bc9e6760417cd5c0a6aa58283065, v0.17.0]
-    needs: [parse-comment]
-    if: ${{ needs.parse-comment.outputs.allowed == 'true' }}
+        vllm_version: [35141a7eeda941a60ad5a4956670c60fd5a77029, v0.18.0]
+    needs: [parse-trigger]
+    if: ${{ needs.parse-trigger.outputs.allowed == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
       type: comment
-      ref: ${{ needs.parse-comment.outputs.pr_sha }}
-      singlecard_tests: ${{ needs.parse-comment.outputs.singlecard_tests }}
-      multicard_2_tests: ${{ needs.parse-comment.outputs.multicard_2_tests }}
-      multicard_4_tests: ${{ needs.parse-comment.outputs.multicard_4_tests }}
-      p310_tests: ${{ needs.parse-comment.outputs.p310_tests }}
+      ref: ${{ needs.parse-trigger.outputs.pr_sha }}
+      singlecard_tests: ${{ needs.parse-trigger.outputs.singlecard_tests }}
+      multicard_2_tests: ${{ needs.parse-trigger.outputs.multicard_2_tests }}
+      multicard_4_tests: ${{ needs.parse-trigger.outputs.multicard_4_tests }}
+      p310_tests: ${{ needs.parse-trigger.outputs.p310_tests }}
