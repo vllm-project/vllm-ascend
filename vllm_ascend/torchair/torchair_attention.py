@@ -16,11 +16,10 @@
 #
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Type
+from typing import Any, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
                                               AttentionType)
@@ -175,8 +174,9 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: Optional[nn.Module] = None,
-    ):
+        model: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> Any:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
 

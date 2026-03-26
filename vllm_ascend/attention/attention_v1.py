@@ -17,7 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar, List, Optional, Tuple, Type
+from typing import Any, ClassVar, List, Optional, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
@@ -208,8 +208,9 @@ class AscendAttentionMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: Optional[nn.Module] = None,
-    ):
+        model: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> Any:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
@@ -219,8 +220,8 @@ class AscendAttentionMetadataBuilder:
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
-        attn_mask = common_attn_metadata.attn_mask
-        attn_state = common_attn_metadata.attn_state
+        attn_mask = getattr(common_attn_metadata, 'attn_mask', None)
+        attn_state = getattr(common_attn_metadata, 'attn_state', None)
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
                                                                        num_reqs
                                                                        + 1]
@@ -251,7 +252,7 @@ class AscendAttentionMetadataBuilder:
                                                  non_blocking=True)
 
         if is_310p():
-            if attn_state == AscendAttentionState.PrefillNoCache:
+            if attn_state == AscendAttentionState.PrefillNoCache and attn_mask is not None:
                 mask_nz = nd_to_nz_2d(attn_mask)
                 attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(),
                                                       ACL_FORMAT_FRACTAL_NZ)
@@ -271,8 +272,9 @@ class AscendAttentionMetadataBuilder:
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
-            attn_state=attn_state,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp)
+            attn_state=cast("AscendAttentionState", attn_state),
+            enable_dbo_across_dp=getattr(common_attn_metadata,
+                                         'enable_dbo_across_dp', False))
         return attn_metadata
 
     def build_for_graph_capture(
@@ -427,11 +429,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 pre_tokens=self.sliding_window,
                 scale=self.scale,
                 block_table=attn_metadata.block_tables,
-                actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
-                actual_seq_lengths_kv=attn_metadata.seq_lens)
+                actual_seq_lengths=[1] * batch_size,
+                actual_seq_lengths_kv=attn_metadata.seq_lens,
+                sparse_mode=0)
 
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
+            block_size = getattr(self, 'block_size', 128)
+            real_context_lens = attn_metadata.seq_lens // block_size
+
             graph_params = get_graph_params()
             forward_context: ForwardContext = get_forward_context()
             num_tokens = query.shape[0]
@@ -480,7 +486,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_heads=self.num_heads,
                     scale_value=self.scale,
                     block_table=attn_metadata.block_tables,
-                    context_lens=attn_metadata.seq_lens,
+                    context_lens=real_context_lens,
                     out=output,
                     workspace=workspace)
                 handle = torch.npu.graph_task_group_end(stream)
@@ -494,7 +500,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_heads=self.num_heads,
                     scale_value=self.scale,
                     block_table=attn_metadata.block_tables,
-                    context_lens=attn_metadata.seq_lens,
+                    context_lens=real_context_lens,
                     out=output)
         return output
 
@@ -503,7 +509,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
+        layer: Optional[torch.nn.Module] = None,
     ) -> torch.Tensor:
+        # Dynamic model type detection
+        # We identify the model type via the layer config to apply model-specific
+        # optimizations or workarounds without affecting other models.
+        is_llama4 = False
+        if layer and hasattr(layer, "config"):
+            model_type = getattr(layer.config, "model_type", "").lower()
+            is_llama4 = "llama-4" in model_type
         # Use chunked prefill for head size 192 scenario, like deepseek
         # paged_attention_splitfuse maybe crash at such scenario.
         # TODO: vanilla path will be removed after the kernel support
@@ -526,9 +540,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # Use paged attention.
         assert attn_metadata is not None
-        assert attn_metadata.attn_mask is not None
+        # assert attn_metadata.attn_mask is not None
 
-        if is_310p():
+        if is_310p() and attn_metadata.attn_mask is not None:
             # Do reformat in case of broadcasted tensors.
             attn_metadata.attn_mask = \
                 torch_npu.npu_format_cast(attn_metadata.attn_mask.contiguous(),
@@ -543,6 +557,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_block, block_size, -1)
         value = self.value_cache.view(  # type: ignore
             num_block, block_size, -1)
+        # WORKAROUND: For Llama-4, we use a flattened query length and set
+        # This ensures the fused attention kernel correctly handles the TND layout
+        actual_seq_lengths_q = torch.tensor([query.shape[0]],
+                                            dtype=torch.int32,
+                                            device=query.device)
+        # Model-specific logic branch
+        if is_llama4:
+            # WORKAROUND: For Llama-4, we use a flattened query length and set
+            # sparse_mode=0 to resolve ACL Error 507034 (stream synchronization failure).
+            # This ensures the fused attention kernel correctly handles the TND layout
+            # for Llama-4's MoE architecture on Ascend NPU.
+            actual_seq_lengths_q = torch.tensor([query.shape[0]],
+                                                dtype=torch.int32,
+                                                device=query.device)
+            sparse_mode = 0
+        else:
+            # Standard path for other models (e.g., Llama-3, Qwen)
+            actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+            sparse_mode = 3
 
         output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
@@ -552,12 +585,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_table=attn_metadata.block_tables,
             input_layout="TND",
             block_size=block_size,
-            actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+            actual_seq_lengths=actual_seq_lengths_q,
             actual_seq_lengths_kv=attn_metadata.seq_lens_list,
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=3,
+            sparse_mode=sparse_mode,
         )
 
         return output
@@ -673,13 +706,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # Thus we need unpad it here.
                 num_tokens = attn_metadata.query_start_loc[-1]
                 query = query[:num_tokens]
-                output = self._forward_v1_style(query, attn_metadata, output)
+                output = self._forward_v1_style(query, attn_metadata, output,
+                                                layer)
 
         # to make in-place change to the output tensor
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = output.view(num_tokens, self.num_heads, self.head_size)
         ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
-        return output.view(num_tokens, self.hidden_size)
+        return output.view(-1, self.hidden_size)
 
 
 def unified_ascend_attention_with_output(

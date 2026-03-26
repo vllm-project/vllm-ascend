@@ -261,8 +261,7 @@ def _native_select_experts(
             hidden_states=hidden_states,
             gating_output=router_logits,
             topk=top_k,
-            renormalize=renormalize,
-            global_num_experts=global_num_experts)
+            renormalize=renormalize)
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
         return topk_weights, topk_ids

@@ -4,6 +4,7 @@
 :caption: Deployment
 :maxdepth: 1
 single_npu
+models/llama4_scout
 single_npu_multimodal
 single_npu_audio
 single_npu_qwen3_embedding
