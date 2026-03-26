@@ -329,8 +329,7 @@ class NPUPlatform(Platform):
                 compilation_config.max_cudagraph_capture_size = aligned_sizes[-1]
                 compilation_config.post_init_cudagraph_sizes()
                 logger.info(
-                    "Adjusted cudagraph_capture_sizes for speculative decoding "
-                    "(decode_query_len=%d): from %d to %d",
+                    "Adjusted cudagraph_capture_sizes for speculative decoding, (decode_query_len=%d): from %d to %d",
                     decode_query_len,
                     len(aligned_sizes),
                     aligned_sizes[0],
