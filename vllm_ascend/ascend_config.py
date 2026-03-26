@@ -17,7 +17,6 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -186,6 +185,7 @@ class AscendConfig:
         layer_ids: set[int] = set()
         layer_names: set[str] = set()
         suffix = ".indexer.quant_type"
+        from vllm.model_executor.models.utils import extract_layer_index
         for key, value in quant_description.items():
             if not isinstance(key, str) or not key.endswith(suffix):
                 continue
@@ -195,7 +195,7 @@ class AscendConfig:
             if not layer_name:
                 continue
             layer_names.add(layer_name)
-            layer_ids.update(extract_layer_index(layer_name))
+            layer_ids.update({extract_layer_index(layer_name)})
         return layer_ids, layer_names
 
     def is_sparse_c8_layer(self, layer_name: str | None) -> bool:
@@ -212,8 +212,8 @@ class AscendConfig:
             for candidate in self._sparse_c8_layer_names
         ):
             return True
-
-        layer_ids = extract_layer_index(normalized_layer_name)
+        from vllm.model_executor.models.utils import extract_layer_index
+        layer_ids = {extract_layer_index(normalized_layer_name)}
         return any(layer_id in self._sparse_c8_layer_ids for layer_id in layer_ids)
 
     @staticmethod
