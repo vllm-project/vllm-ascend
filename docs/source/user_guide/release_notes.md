@@ -6,10 +6,8 @@ This is the first release candidate of v0.18.0 for vLLM Ascend. Please follow th
 
 ### Highlights
 
-- Data-parallel load balancing is now supported by setting `VLLM_ASCEND_BALANCE_SCHEDULING=1`. [#7611](https://github.com/vllm-project/vllm-ascend/pull/7611)
+- C8(INT8 KV cache) is now supported for GQA attention models, and also supported on DeepSeek-V3.1 with PD disaggregation scenario. [#7474](https://github.com/vllm-project/vllm-ascend/pull/7474), [#7222](https://github.com/vllm-project/vllm-ascend/pull/7222)
 - DeepSeek models are now supported on A5 through new MLA operators. [#7232](https://github.com/vllm-project/vllm-ascend/pull/7232)
-- C8 INT8 KV cache is now supported for GQA attention models. [#7474](https://github.com/vllm-project/vllm-ascend/pull/7474)
-- DeepSeek-V3.1 PD disaggregation and C8 quantization are now supported. [#7222](https://github.com/vllm-project/vllm-ascend/pull/7222)
 
 ### Features
 
