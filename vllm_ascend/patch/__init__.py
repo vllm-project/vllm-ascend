@@ -159,6 +159,26 @@
 #    Future Plan:
 #       Remove this patch after the upcoming KV cache spec refactor.
 #
+# ** 9. File: platform/patch_minimax_usage_accounting.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.entrypoints.openai.engine.protocol.UsageInfo`
+#      `vllm.reasoning.minimax_m2_reasoning_parser`
+#    Why:
+#       MiniMax M2 reasoning outputs use `</think>` as the only boundary token,
+#       but the runtime usage accounting path either omits reasoning token
+#       details entirely or counts them incorrectly.
+#    How：
+#       Monkey-patch the MiniMax reasoning token counters, extend `UsageInfo`
+#       with `completion_tokens_details.reasoning_tokens`, and update chat
+#       streaming/non-streaming usage generation to propagate the corrected
+#       counts.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37955
+#    Future Plan:
+#       Remove this patch once the upstream MiniMax usage-accounting fix is in
+#       the runtime vLLM version used by vllm-ascend.
+#
 # * Worker Patch:
 # ===============
 #
