@@ -128,7 +128,7 @@ Prompt: 'Who are you?', Generated text: ' What do you know about me?\n\nHello! I
 ```
 
 ### Note 
-Qwen3Next doesn't support tp16 now, because num of query heads is 16. Under TP16, GQA degenerates into MHA, causing service failure due to limitations of the FIA operator.
+Qwen3Next doesn't support TP16 and TP > 16 now, because num of query heads is 16. Under TP16, GQA degenerates into MHA, causing service failure due to limitations of the FIA operator.
 
 ::::
 :::::
