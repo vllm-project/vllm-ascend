@@ -39,13 +39,13 @@ qwen3-next:
 glm-4:
   - '/(glm\s*4\.(?![^v\s]*v)\S*)/i'
 multi-modality-generate:
-  - '/(seedance\S*|seedream\S*|wan\S*|hunyuan\S*|fLux\S*|kimi k2\.5|kimi-k2\.5|kimik2\.5|minimax\S*|qwen-image\S*)/i'
+  - '/(seedance\S*|seedream\S*|wan\d[\d.]*|hunyuan\S*|fLux\S*|kimi k2\.5|kimi-k2\.5|kimik2\.5|minimax\S*|qwen-image\S*)/i'
 seedance:
   - '/(seedance\S*)/i'
 seedream:
   - '/(seedream\S*)/i'
 wan:
-  - '/(wan\S*)/i'
+  - '/(wan\d[\d.]*)/i'
 hunyuan:
   - '/(hunyuan\S*)/i'
 fLux:

@@ -23,13 +23,13 @@ import atexit
 import functools
 import math
 import os
-import re
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
@@ -764,8 +764,8 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
-def enable_sp_by_pass(vllm_config: VllmConfig):
-    return not vllm_config.model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
+def enable_sp_by_pass():
+    return get_ascend_config().enable_sp_by_pass
 
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
@@ -791,7 +791,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp()
+    return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
 
 
 def prefill_context_parallel_enable() -> bool:
@@ -849,7 +849,7 @@ def _is_contain_expert(config: Any):
     return False
 
 
-def is_vl_model(vllm_config: VllmConfig):
+def is_vl_model(vllm_config: VllmConfig = None):
     """Checks if the model is a VL model by config.
 
     Uses the same criterion as vllm itself (model_config.py): a model is
@@ -859,6 +859,10 @@ def is_vl_model(vllm_config: VllmConfig):
     self (rare but possible).
     """
     global _IS_VL_MODEL
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
         model_config = vllm_config.model_config
         # Primary: vllm's own VL detection — hf_config is the top-level
@@ -1097,12 +1101,12 @@ def refresh_block_size(vllm_config):
     if not scheduler_config or not model_config:
         return
 
-    # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if (
-        "qwen3_next" not in model_config.hf_text_config.model_type
-        and "qwen3_5" not in model_config.hf_text_config.model_type
-        and cache_config.block_size != 128
-    ):
+    if model_config.is_hybrid:
+        # Hybrid attention+mamba models rely on the model-specific sizing
+        # logic rather than the generic platform default.
+        return
+
+    if cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128
