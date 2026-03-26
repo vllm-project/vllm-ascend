@@ -298,6 +298,9 @@ class NPUPlatform(Platform):
         # - Prefill stage: uses PIECEWISE mode
         # - Decode stage: uses FULL mode
         # This is controlled dynamically in model_runner based on is_all_decode flag
+        # Note: We do NOT filter cudagraph_capture_sizes here for speculative decoding
+        # because PIECEWISE (prefill) doesn't require uniform_decode alignment.
+        # Only FULL decode mode requires the alignment.
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             logger.info(
                 "FULL_AND_PIECEWISE enabled on NPU. "
@@ -313,33 +316,7 @@ class NPUPlatform(Platform):
             )
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
-            pre_filter_sizes = list(compilation_config.cudagraph_capture_sizes) if compilation_config.cudagraph_capture_sizes else []
             update_aclgraph_sizes(vllm_config)
-            if vllm_config.speculative_config:
-                num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens
-                uniform_decode_query_len = num_spec_tokens + 1
-                original_sizes = pre_filter_sizes
-                compilation_config.cudagraph_capture_sizes = [
-                    size for size in compilation_config.cudagraph_capture_sizes
-                    if size % uniform_decode_query_len == 0
-                ]
-                if not compilation_config.cudagraph_capture_sizes:
-                    logger.warning(
-                        "After filtering for speculative decoding, no valid cudagraph_capture_sizes remain. "
-                        "Original sizes: %s, uniform_decode_query_len: %d. "
-                        "Falling back to PIECEWISE mode.",
-                        original_sizes,
-                        uniform_decode_query_len,
-                    )
-                    compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                else:
-                    logger.info(
-                        "Filtered cudagraph_capture_sizes for speculative decoding: %s (removed sizes not "
-                        "divisible by uniform_decode_query_len=%d, original: %s)",
-                        compilation_config.cudagraph_capture_sizes,
-                        uniform_decode_query_len,
-                        original_sizes,
-                    )
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
             return
 
