@@ -324,15 +324,18 @@ class NPUPlatform(Platform):
             if decode_query_len > 1:
                 max_size = compilation_config.max_cudagraph_capture_size
                 aligned_sizes = list(range(decode_query_len, max_size + 1, decode_query_len))
-                update_cudagraph_capture_sizes(vllm_config, aligned_sizes)
-                if aligned_sizes:
-                    logger.info(
-                        "Adjusted cudagraph_capture_sizes for speculative decoding "
-                        "(decode_query_len=%d): %d sizes from %d to %d",
-                        decode_query_len,
-                        len(aligned_sizes),
-                        aligned_sizes[0],
-                        aligned_sizes[-1],
+             if aligned_sizes:
+                compilation_config.cudagraph_capture_sizes = aligned_sizes
+                compilation_config.max_cudagraph_capture_size = aligned_sizes[-1]
+                compilation_config.post_init_cudagraph_sizes()
+                logger.info(
+                    "Adjusted cudagraph_capture_sizes for speculative decoding "
+                    "(decode_query_len=%d): %d sizes from %d to %d",
+                    decode_query_len,
+                    len(aligned_sizes),
+                    aligned_sizes[0],
+                    aligned_sizes[-1],
+                )
                     )
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
