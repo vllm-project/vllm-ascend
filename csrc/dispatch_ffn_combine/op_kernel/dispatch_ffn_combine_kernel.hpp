@@ -460,7 +460,7 @@ private:
             if (params.listLen == 1) {
                 gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
             }
-            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
+            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.k();
             startCoreIdx = (startCoreIdx  + coreLoops) % coreNum;
         }
 
@@ -860,7 +860,7 @@ private:
             uint32_t rowStartThisCore = 0;
             MatrixCoord offsetC{0U, 0};
             MatrixCoord shapeC{dequantSum1, params.problemShape.n()};
-            LayoutC layoutC{dequantSum1, params.problemShape.n()};
+            LayoutC layoutC{dequantSum1, params.problemShape.k()};
             int64_t gmOffsetC = layoutC.GetOffset(offsetC);
             int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
             blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], params.epilogueCoreNum, params.problemShape.k());
@@ -878,7 +878,7 @@ private:
                 MatrixCoord offsetC{rowStartThisCore, 0};
                 uint32_t dequantLen = dequantSum2;
                 MatrixCoord shapeC{dequantLen, params.problemShape.n()};
-                LayoutC layoutC{dequantLen, params.problemShape.n()};
+                LayoutC layoutC{dequantLen, params.problemShape.k()};
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
                 blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], coreNum, params.problemShape.k());
@@ -1020,10 +1020,8 @@ private:
 
             workspaceOffset += AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
             ptrcumsumMM = params.ptrWorkspace + workspaceOffset;
-
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
 
-            // workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
             ptrPerTokenScale = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * sizeof(ElementPerTokenScale);
@@ -1045,7 +1043,7 @@ private:
             workspaceOffset += params.maxOutputSize * params.problemShape.k() * sizeof(ElementA);
             // ptrPermutedToken = params.ptrWorkspace + workspaceOffset;
 
-            workspaceOffset += params.maxOutputSize * k2 * sizeof(ElementA);
+            // workspaceOffset += params.maxOutputSize * k2 * sizeof(ElementA);
             ptrSumBeforeRank = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.EP * sizeof(int32_t) * FLAGSTRIDE;
