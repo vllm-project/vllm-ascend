@@ -23,8 +23,8 @@ from tests.ut.base import TestBase
 from vllm_ascend.quantization.awq_config import AWQConfig
 from vllm_ascend.quantization.methods.w4a16_awq import (AscendW4A16AWQFusedMoEMethod,
                                                          AscendW4A16AWQLinearMethod,
-                                                         unpack_qzero_from_int32,
-                                                         unpack_weight_from_int32)
+                                                         _unpack_qzero_from_int32,
+                                                         _unpack_weight_from_int32)
 
 
 class TestAWQConfig(TestBase):
@@ -248,7 +248,7 @@ class TestUnpackQzeroFromInt32(TestBase):
         weight = torch.tensor([[305419896, -1420531520]], dtype=torch.int32)
         param_dtype = torch.bfloat16
 
-        result = unpack_qzero_from_int32(weight, param_dtype, pack_factor=8, is_moe_layer=False)
+        result = _unpack_qzero_from_int32(weight, param_dtype, pack_factor=8, is_moe_layer=False)
 
         # (1, 2) packed → (1, 16) unpacked (2 elements × 8 nibbles each)
         self.assertEqual(result.shape, (1, 16))
@@ -260,7 +260,7 @@ class TestUnpackQzeroFromInt32(TestBase):
         weight = torch.tensor([[[305419896, -1420531520]]], dtype=torch.int32)
         param_dtype = torch.bfloat16
 
-        result = unpack_qzero_from_int32(weight, param_dtype, pack_factor=8, is_moe_layer=True)
+        result = _unpack_qzero_from_int32(weight, param_dtype, pack_factor=8, is_moe_layer=True)
 
         # (1, 1, 2) packed → (1, 1, 16) unpacked (2 elements × 8 nibbles each)
         self.assertEqual(result.shape, (1, 1, 16))
@@ -272,7 +272,7 @@ class TestUnpackQzeroFromInt32(TestBase):
         weight = torch.tensor([[0, 1, 7, 8, 9, 10, 15, 0]], dtype=torch.int32)
         param_dtype = torch.bfloat16
 
-        result = unpack_qzero_from_int32(weight, param_dtype, pack_factor=8, is_moe_layer=False)
+        result = _unpack_qzero_from_int32(weight, param_dtype, pack_factor=8, is_moe_layer=False)
 
         # Each int32 element unpacks to 8 nibbles; element k's lowest nibble lands at index k*8.
         self.assertEqual(result[0, 0].item(), 8)    # element 0: 0 -> -(0-8) = 8
@@ -288,7 +288,7 @@ class TestUnpackWeightFromInt32(TestBase):
         """Test unpacking weights with XOR transformation."""
         weight = torch.tensor([[305419896, -1420531520]], dtype=torch.int32)
 
-        result = unpack_weight_from_int32(weight, pack_factor=8)
+        result = _unpack_weight_from_int32(weight, pack_factor=8)
 
         # Output shape is unchanged — repacking stays within the same int32 layout
         self.assertEqual(result.shape, weight.shape)
@@ -299,7 +299,7 @@ class TestUnpackWeightFromInt32(TestBase):
         """Test XOR 0x88888888 transformation is applied."""
         weight = torch.tensor([[0, 0, 0, 0, 0, 0, 0, 0]], dtype=torch.int32)
 
-        result = unpack_weight_from_int32(weight, pack_factor=8)
+        result = _unpack_weight_from_int32(weight, pack_factor=8)
 
         # All-zero input → repack loop produces all-zero weight_tmp → XOR with
         # 0x88888888 makes every int32 element 0x88888888 = -2004318072 (signed int32).
@@ -309,7 +309,7 @@ class TestUnpackWeightFromInt32(TestBase):
         """Test output is contiguous."""
         weight = torch.randint(0, 100, (16, 8), dtype=torch.int32)
 
-        result = unpack_weight_from_int32(weight, pack_factor=8)
+        result = _unpack_weight_from_int32(weight, pack_factor=8)
 
         self.assertTrue(result.is_contiguous())
 

@@ -23,6 +23,7 @@ import torch_npu
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
 REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
 
-def unpack_qzero_from_int32(
+def _unpack_qzero_from_int32(
     weight: torch.Tensor,
     param_dtype: torch.dtype,
     pack_factor: int = 8,
@@ -69,7 +70,7 @@ def unpack_qzero_from_int32(
     return weight.to(param_dtype).contiguous()
 
 
-def unpack_weight_from_int32(
+def _unpack_weight_from_int32(
     weight: torch.Tensor,
     pack_factor: int = 8,
 ) -> torch.Tensor:
@@ -99,7 +100,7 @@ class AscendW4A16AWQLinearMethod(AWQLinearMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
         layer.qzeros = torch.nn.Parameter(
-            unpack_qzero_from_int32(
+            _unpack_qzero_from_int32(
                 weight=layer.qzeros.data,
                 param_dtype=layer.scales.data.dtype,
                 pack_factor=self.pack_factor,
@@ -107,7 +108,7 @@ class AscendW4A16AWQLinearMethod(AWQLinearMethod):
             requires_grad=False,
         )
         layer.qweight = torch.nn.Parameter(
-            unpack_weight_from_int32(weight=layer.qweight.data, pack_factor=self.pack_factor), requires_grad=False
+            _unpack_weight_from_int32(weight=layer.qweight.data, pack_factor=self.pack_factor), requires_grad=False
         )
 
     def apply(
@@ -143,6 +144,7 @@ class AscendW4A16AWQFusedMoEMethod(AscendMoEScheme):
         self.quant_config = quant_config
         self.pack_factor = self.quant_config.pack_factor
         self.group_size = self.quant_config.group_size
+        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
 
     def get_weight(
         self,
@@ -220,50 +222,45 @@ class AscendW4A16AWQFusedMoEMethod(AscendMoEScheme):
         return param_dict
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.register_parameter(
-            "w13_qzeros",
-            torch.nn.Parameter(
-                unpack_qzero_from_int32(
-                    weight=layer.w13_qzeros.data,
-                    param_dtype=layer.w13_scales.data.dtype,
-                    pack_factor=self.pack_factor,
-                    is_moe_layer=True,
-                ),
-                requires_grad=False,
+        w13_qzeros = torch.nn.Parameter(
+            _unpack_qzero_from_int32(
+                weight=layer.w13_qzeros.data,
+                param_dtype=layer.w13_scales.data.dtype,
+                pack_factor=self.pack_factor,
+                is_moe_layer=True,
             ),
+            requires_grad=False,
         )
-        layer.register_parameter(
-            "w13_qweight",
+        layer.register_parameter("w13_qzeros", w13_qzeros)
+        w13_qweight = (
             torch.nn.Parameter(
-                unpack_weight_from_int32(
+                _unpack_weight_from_int32(
                     weight=layer.w13_qweight.data,
                     pack_factor=self.pack_factor,
                 ),
                 requires_grad=False,
             ),
         )
-        layer.register_parameter(
-            "w2_qzeros",
-            torch.nn.Parameter(
-                unpack_qzero_from_int32(
-                    weight=layer.w2_qzeros.data,
-                    param_dtype=layer.w2_scales.data.dtype,
-                    pack_factor=self.pack_factor,
-                    is_moe_layer=True,
-                ),
-                requires_grad=False,
+        layer.register_parameter("w13_qweight", w13_qweight)
+
+        w2_qzeros = torch.nn.Parameter(
+            _unpack_qzero_from_int32(
+                weight=layer.w2_qzeros.data,
+                param_dtype=layer.w2_scales.data.dtype,
+                pack_factor=self.pack_factor,
+                is_moe_layer=True,
             ),
+            requires_grad=False,
         )
-        layer.register_parameter(
-            "w2_qweight",
-            torch.nn.Parameter(
-                unpack_weight_from_int32(
-                    weight=layer.w2_qweight.data,
-                    pack_factor=self.pack_factor,
-                ),
-                requires_grad=False,
+        layer.register_parameter("w2_qzeros", w2_qzeros)
+        w2_qweight = torch.nn.Parameter(
+            _unpack_weight_from_int32(
+                weight=layer.w2_qweight.data,
+                pack_factor=self.pack_factor,
             ),
+            requires_grad=False,
         )
+        layer.register_parameter("w2_qweight", w2_qweight)
 
     def apply(
         self,
@@ -318,7 +315,7 @@ class AscendW4A16AWQFusedMoEMethod(AscendMoEScheme):
                 w1=layer.w13_qweight,
                 w2=layer.w2_qweight,
                 quant_type=self.quant_type,
-                dynamic_eplb=False,
+                dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
                 global_redundant_expert_num=global_redundant_expert_num,
                 mc2_mask=mc2_mask,

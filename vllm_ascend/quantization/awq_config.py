@@ -15,29 +15,22 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from typing import Any
+from typing import Any, Union
 
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 
+from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import AWQ_QUANTIZATION_METHOD
 
 from .method_adapters import AscendFusedMoEMethod
 from .methods import get_scheme_class
 from .methods.w4a16_awq import AscendW4A16AWQLinearMethod
-
-
-def _remove_quantization_method():
-    """Remove vLLM's native AWQ registration so Ascend's implementation takes over."""
-    if AWQ_QUANTIZATION_METHOD in QUANTIZATION_METHODS:
-        QUANTIZATION_METHODS.remove(AWQ_QUANTIZATION_METHOD)
-
-
-_remove_quantization_method()
 
 
 @register_quantization_config(AWQ_QUANTIZATION_METHOD)
@@ -97,7 +90,9 @@ class AWQConfig(QuantizationConfig):
         modules_to_not_convert = cls.get_from_keys_or(config, ["modules_to_not_convert"], None)
         return cls(weight_bits, group_size, zero_point, modules_to_not_convert, config)
 
-    def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> QuantizeMethodBase | None:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Union["LinearMethodBase", "QuantizeMethodBase"] | None:
         if isinstance(layer, LinearBase):
             if is_layer_skipped(
                 prefix,
@@ -105,10 +100,7 @@ class AWQConfig(QuantizationConfig):
                 self.packed_modules_mapping,
                 skip_with_substr=True,
             ):
-                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-
                 return AscendUnquantizedLinearMethod()
-
             return AscendW4A16AWQLinearMethod(self)
 
         elif isinstance(layer, FusedMoE):
@@ -117,10 +109,7 @@ class AWQConfig(QuantizationConfig):
                 self.modules_to_not_convert,
                 skip_with_substr=True,
             ):
-                from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
-
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
-
             scheme_cls = get_scheme_class("W4A16_AWQ", "moe")
             if scheme_cls is None:
                 raise NotImplementedError(f"W4A16_AWQ moe scheme not found for layer {prefix}")
