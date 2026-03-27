@@ -296,14 +296,18 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_
 VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
 ```
 
-For running nightly single-node test cases locally, refer to the following example.
+::::
+
+:::::
+
+For running nightly single-node model test cases locally, refer to the following example.
 
 ```bash
 export CONFIG_YAML_PATH=Qwen3-32B.yaml
 VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
 ```
 
-For running nightly multi-node test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).
+For running nightly multi-node model test cases locally, refer to the `Running Locally` section in [Multi Node Test](./multi_node_test.md).
 
 #### E2E test examples
 
