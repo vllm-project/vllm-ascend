@@ -99,7 +99,7 @@ After a thorough review of the issue content:
 - Verify and apply the appropriate **issue type** label (`bug`, `feature request`, `RFC`, `question`, `documentation`, `installation`, `performance`, `new model`, etc.).
 - Handle terminal states:
   - For duplicates, apply the `duplicated` label, provide an explanation and a link to the existing issue or PR. If there are no further questions, close the issue.
-  - For invalid reports, provide an explanation and apply the `resolved` label, then wait for a response from the issue creator. If there are no further questions, close the issue.
+  - For invalid reports, provide an explanation, apply the `resolved` label, and close the issue. The issue creator can comment or request to reopen if they have further questions.
 - Optionally apply a **priority** label (`high`, `medium`, or `low`).
 - If community contributions are welcome, apply `help wanted`. For well-scoped beginner-friendly tasks, also apply `good first issue`.
 - Assign the issue owner and replace `triage review` with `triaged` to indicate that triage is complete.
