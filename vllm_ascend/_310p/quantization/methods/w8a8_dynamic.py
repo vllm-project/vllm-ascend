@@ -27,8 +27,7 @@ from vllm_ascend._310p.fused_moe.experts_selector import select_experts
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
-
-from vllm_ascend.quantization.methods.base import AscendMoEScheme, AscendLinearScheme, QuantType
+from vllm_ascend.quantization.methods.base import AscendLinearScheme, AscendMoEScheme, QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
