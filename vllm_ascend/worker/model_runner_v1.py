@@ -2562,6 +2562,8 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Starting to load model %s...", self.model_config.model)
 
         if self.ascend_config.mix_placement:
+            # TODO: Enabling the mix placement in deepseek_v2.py
+            # remove this part after the mix placement merged into vllm
             def mock_true():
                 return True
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_true

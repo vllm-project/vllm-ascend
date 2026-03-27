@@ -31,7 +31,6 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-        self.mix_placement = additional_config.get("mix_placement", False)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
         self.xlite_graph_config = XliteGraphConfig(xlite_graph_config, vllm_config)
@@ -168,6 +167,14 @@ class AscendConfig:
 
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+
+        self.mix_placement = additional_config.get("mix_placement", False)
+        self._check_mix_placement()
+
+    def _check_mix_placement(self):
+        if self.mix_placement:
+            if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
+                raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
 
     @staticmethod
     def _get_compile_ranges(compilation_config):

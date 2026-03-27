@@ -189,7 +189,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
-        n_shared_experts = layer.n_shared_experts
+        n_shared_experts = getattr(layer, "n_shared_experts", 0)
+        mix_placement = getattr(layer, "mix_placement", False)
         if n_shared_experts is None:
             n_shared_experts = 0
         valid_global_expert_num = global_num_experts - global_redundant_expert_num - n_shared_experts
@@ -216,7 +217,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 scoring_func=scoring_func,
                 routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias,
-                mix_placement=layer.mix_placement,
+                mix_placement=mix_placement,
                 num_logical_experts=router_logits.shape[1],
                 num_shared_experts=n_shared_experts,
                 global_num_experts=global_num_experts,
@@ -274,8 +275,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 log2phy=log2phy,
                 pertoken_scale=pertoken_scale,
                 activation=activation,
-                w1_scale=[layer.fused_w1_scale] if fused_scale_flag else w1_scale,
-                w2_scale=[layer.fused_w2_scale] if fused_scale_flag else w2_scale,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
