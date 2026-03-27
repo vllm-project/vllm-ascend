@@ -17,42 +17,23 @@ These labels track where an issue stands in the workflow.
 | `stale` | No activity for an extended period; parties have been notified and the issue will be auto-closed if there is no response |
 | `duplicated` | A duplicate of an existing open issue or merged PR |
 
-### 1.2 Issue Type Labels
+### 1.2 Type Labels
 
 These labels describe the nature of the issue.
 
 | Label | Description |
 | --- | --- |
-| `bug` | Something is not working correctly or behaves unexpectedly |
-| `enhancement` | Incremental improvement to an existing feature |
 | `feature request` | Request for new functionality |
 | `RFC` | Request for Comments — significant architectural or design change requiring community discussion |
-| `question` | A usage or design question; no code change may be required |
+| `new model` | Request to add support for a new model on Ascend NPU |
+| `usage` | A usage question; no code change may be required |
+| `question` | A general question; no code change may be required |
 | `documentation` | Improvements or corrections to documentation |
 | `installation` | Issues related to setup and deployment |
 | `performance` | Performance regression, bottleneck, or optimization request |
-| `new model` | Request to add support for a new model on Ascend NPU |
+| `bug` | Something is not working correctly or behaves unexpectedly |
 
-### 1.3 Module Labels
-
-These labels identify the subsystem or area of the codebase responsible for the issue.
-
-| Label | Description |
-| --- | --- |
-| `module:core` | Core vLLM Ascend platform and model runner logic |
-| `module:ops` | NPU custom operators and kernel implementations |
-| `module:quantization` | Quantization support (W8A8, W4A16, etc.) |
-| `module:multimodal` | Multimodal model support |
-| `module:dp` | Data parallelism |
-| `module:ep` | Expert parallelism (MoE routing and dispatch) |
-| `module:graph` | ACL graph / graph compilation support |
-| `module:lora` | LoRA adapter support |
-| `module:rl` | Reinforcement learning (RLHF, GRPO, etc.) |
-| `module:tests` | Test infrastructure, CI, and test coverage |
-| `module:tools` | Developer tooling, scripts, and utilities |
-| `module:mindie-turbo` | MindIE Turbo integration |
-
-### 1.4 Priority Labels (Optional)
+### 1.3 Priority Labels (Optional)
 
 | Label | Description |
 | --- | --- |
@@ -60,7 +41,7 @@ These labels identify the subsystem or area of the codebase responsible for the 
 | `medium` | Normal priority; handled in the regular development flow |
 | `low` | Low priority; edge case or minor issue that can be deferred |
 
-### 1.5 Community Labels (Optional)
+### 1.4 Contribution Labels (Optional)
 
 | Label | Description |
 | --- | --- |
@@ -70,39 +51,31 @@ These labels identify the subsystem or area of the codebase responsible for the 
 ## 2. Workflow
 
 ```mermaid
-flowchart TD
+flowchart LR
     A([Issue Filed]) --> B
 
     subgraph P1["Phase 1 — First Response"]
-        B[Apply: triage review]
-        B --> B2{Module known?}
-        B2 -- Yes --> B3[Apply module:xxx]
-        B2 -- No --> B4[Defer to Phase 2]
-        B3 --> B5[Assign Owner]
-        B4 --> B5
+        direction LR
+        B[On-Call Maintainer] --> B1[Add label: triage review & module label]
     end
 
-    B5 --> C
+    B1 --> C
 
     subgraph P2["Phase 2 — Triage & Analysis"]
-        C[Replace triage review → triaged]
-        C --> C2{Issue status?}
-        C2 -- Duplicate --> C3["Apply duplicated\nLink existing issue/PR → Close"]
-        C2 -- Invalid --> C4["Apply resolved\nExplain → Close"]
-        C2 -- Valid --> C6["Apply issue type label\n(bug / feature request / RFC / …)"]
-        C6 --> C7["Optional - Apply priority label\n(critical / high / medium / low)"]
-        C7 --> C8{Optional - Community\ncontribution?}
-        C8 -- Yes --> C9["Apply help wanted\nor good first issue"]
-        C8 -- No --> C10[Track & Implement]
-        C9 --> C10
+        direction LR
+        C[Module Maintainer]
+        C -- Valid --> C2[Verify issue type label]
+        C -- Duplicate --> C3[Add: duplicated → Close]
+        C -- Invalid --> C4[Add: resolved → Close]
+        C2 --> C5[opt: Add priority label/help wanted/good first issue]
+        C5 --> C6[Assign issue owner & replace: triage review → triaged]
     end
 
-    C10 --> D
+    C6 --> D
 
     subgraph P3["Phase 3 — Closure"]
-        D{Resolution\nstatus?}
-        D -- Resolved --> D2["Apply resolved → Close\nReference merged PR"]
-        D -- Resolved & Long inactive --> D3["Apply stale → Auto-close if no response"]
+        direction LR
+        D[Track & Implement] -- Resolved --> D2[Apply: resolved → Close] -- Long inactive --> D3[Apply: stale → Auto-close]
     end
 
     style P1 fill:#dbeafe,stroke:#3b82f6
@@ -112,28 +85,27 @@ flowchart TD
 
 ### Phase 1 — First Response
 
-When an issue is first seen by a maintainer or contributor:
+When an issue is first picked up by the on-call maintainer:
 
-- Apply `triage review` to signal that the issue has been picked up and is under initial review.
-- Apply the relevant `module:xxx` label if the responsible subsystem is already clear. If it cannot be determined at this stage, the module label should be added during Phase 2 after deeper analysis.
-- Assign an owner who will track the issue through to resolution.
+- Apply `triage review` to signal that the issue has entered the initial review queue.
+- Add the relevant module label so the issue can be routed to the appropriate module maintainer for detailed triage.
 
 ### Phase 2 — Triage and Analysis
 
 After a thorough review of the issue content:
 
-- Replace `triage review` with `triaged` to indicate that assessment is complete.
-- Apply an **issue type** label (`bug`, `feature request`, `RFC`, `question`, `documentation`, `installation`, `performance`, `new model`, etc.).
-- Apply a **priority** label (`critical`, `high`, `medium`, or `low`).
+- Verify and apply the appropriate **issue type** label (`bug`, `feature request`, `RFC`, `question`, `documentation`, `installation`, `performance`, `new model`, etc.).
 - Handle terminal states:
-  - For duplicates, apply `duplicated`, link to the existing issue or PR, then close.
-  - For invalid reports, apply `invalid`, provide a brief explanation, then close.
-  - For issues that will not be addressed, apply `wontfix`, explain the reasoning, then close.
+  - For duplicates, apply the `duplicated` label, provide an explanation and a link to the existing issue or PR. If there are no further questions, close the issue.
+  - For invalid reports, provide an explanation and apply the `resolved` label, then wait for a response from the issue creator. If there are no further questions, close the issue.
+- Optionally apply a **priority** label (`high`, `medium`, or `low`).
 - If community contributions are welcome, apply `help wanted`. For well-scoped beginner-friendly tasks, also apply `good first issue`.
+- Assign the issue owner and replace `triage review` with `triaged` to indicate that triage is complete.
 
 ### Phase 3 — Closure
 
-Once the issue has been resolved:
+After triage, the issue moves into tracking and implementation:
 
-- Apply `resolved` and close the issue, or close it directly with a comment describing how the problem was addressed (e.g., a reference to the merged PR).
-- For issues that have been inactive for an extended period with no response, apply `stale` as a final notice before auto-closure.
+- Keep the issue in progress until it is resolved through a merged PR or another confirmed resolution path.
+- Once the issue is resolved, apply `resolved` and close it, ideally with a reference to the merged PR or a short explanation of the resolution.
+- If the issue remains inactive for an extended period, apply `stale` as the final state before auto-closure.
