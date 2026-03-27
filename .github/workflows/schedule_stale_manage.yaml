@@ -39,7 +39,6 @@ jobs:
           days-before-pr-close: -1
       - uses: actions/stale@v10
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
           # Process issues with the 'awaiting-feedback' label
           any-of-labels: 'awaiting-feedback'
 
