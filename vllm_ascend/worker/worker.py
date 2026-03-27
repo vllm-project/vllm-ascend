@@ -31,7 +31,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
@@ -42,6 +42,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -95,12 +96,7 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch()
-        # Import _inductor for graph mode execution with triton
-        # This lazy import avoids torch_npu re-initialization in patch
-        from vllm.triton_utils import HAS_TRITON
 
-        if HAS_TRITON:
-            import torch_npu._inductor  # noqa: F401
         # Register ops when worker init.
         from vllm_ascend import ops
 
@@ -139,6 +135,7 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+        self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -219,7 +216,7 @@ class NPUWorker(WorkerBase):
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
-        if tags is None or "weights" in tags:
+        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
             for name, param in model.named_parameters():
                 if "w2_weight" in name and param.shape[2] == hidden_size:
                     parts = name.split(".")
@@ -252,6 +249,15 @@ class NPUWorker(WorkerBase):
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         torch.npu.set_device(device)
+
+        # Import _inductor for graph mode execution with triton
+        # This lazy import avoids torch_npu re-initialization in patch
+        # Note that this should be imported after torch.npu.set_device
+        # to avoid repeated set_device in extra processes
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            import torch_npu._inductor  # noqa: F401
 
         gc.collect()
         torch.npu.empty_cache()
@@ -335,13 +341,6 @@ class NPUWorker(WorkerBase):
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
             self.model_runner.profile_run()
-            free_memory, total_memory = torch.npu.mem_get_info()
-            torch_memory = torch.npu.memory_reserved()
-            non_torch_memory_before_empty_cache = total_memory - free_memory - torch_memory
-
-        self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = profile_result.torch_peak_increase
-        non_torch_memory_cleared_by_empty_cache = non_torch_memory_before_empty_cache - self.non_torch_memory
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
@@ -353,16 +352,12 @@ class NPUWorker(WorkerBase):
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container."
         )
-        self.available_kv_cache_memory_bytes = (
-            self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
-        )
-
+        self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %.2f GiB",
-            GiB(self.available_kv_cache_memory_bytes),
-            scope="local",
+            "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
+
         return int(self.available_kv_cache_memory_bytes)
 
     def execute_model(
@@ -373,6 +368,11 @@ class NPUWorker(WorkerBase):
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
 
+        if self._pp_send_work:
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -382,8 +382,14 @@ class NPUWorker(WorkerBase):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict(all_gather_group=all_gather_group)
+            tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
+                all_gather_group=all_gather_group
+            )
+            assert tensor_dict is not None
+            intermediate_tensors = AsyncIntermediateTensors(
+                tensor_dict,
+                comm_handles=comm_handles,
+                comm_postprocess=comm_postprocess,
             )
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
@@ -399,7 +405,10 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        get_pp_group().send_tensor_dict(output.tensors, all_gather_group=all_gather_group)
+        self._pp_send_work = get_pp_group().isend_tensor_dict(
+            output.tensors,
+            all_gather_group=all_gather_group,
+        )
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
@@ -504,6 +513,7 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
@@ -575,7 +585,6 @@ class NPUWorker(WorkerBase):
             self.parallel_config.decode_context_parallel_size,
         )
         init_ascend_model_parallel(self.parallel_config)
-        ensure_kv_transfer_initialized(self.vllm_config)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def _create_profiler(self, trace_name: str):

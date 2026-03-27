@@ -19,6 +19,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
 from ..utils import weak_ref_tensors
 
 
@@ -72,6 +74,7 @@ class ACLGraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
@@ -89,7 +92,11 @@ class ACLGraphWrapper:
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
-        raise AttributeError(f"Attribute {key} not exists in the runnable of aclgraph wrapper: {self.runnable}")
+        if self.is_debugging_mode:
+            raise AttributeError(
+                f"Attribute {key} not exists in the runnable of aclgraph wrapper: {self._runnable_str}"
+            )
+        raise AttributeError(f"Attribute {key} not found. Set VLLM_LOGGING_LEVEL=DEBUG for more details.")
 
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
@@ -195,7 +202,7 @@ class ACLGraphWrapper:
             if self.vllm_config.speculative_config
             else False
         )
-        if self.runtime_mode != CUDAGraphMode.FULL or not forward_context.is_draft_model or not use_eagle:
+        if self.runtime_mode != CUDAGraphMode.FULL or not _EXTRA_CTX.is_draft_model or not use_eagle:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output

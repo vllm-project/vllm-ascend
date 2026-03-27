@@ -16,76 +16,125 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from contextlib import contextmanager
 from typing import Any
 
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionMetadataBuilder
+from vllm.config.compilation import CUDAGraphMode
+from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-from vllm.v1.worker.gpu.cudagraph_utils import prepare_inputs_to_capture as prepare_inputs_to_capture_gpu
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 
 
-class AclGraphManager(CudaGraphManager):
-    """ACL Graph Manager for Ascend NPUs."""
+class ModelAclGraphManager(ModelCudaGraphManager):
+    """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
     def __init__(
         self,
         vllm_config: VllmConfig,
-        use_mrope: bool,
         device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        model_runner: Any,
     ):
-        with torch_cuda_wrapper():
-            super().__init__(vllm_config, use_mrope, device)
+        super().__init__(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+        )
+        # set model runner attribute, so we can access attributes model runner
+        # when call `run_fullgraph` method in CudaGraphManager,
+        # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
+        self.model_runner = model_runner
+        # capture_sizes sorts in ascending order.
+        self.capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
+        # vllm-ascend need to update graph params of attention backend.
+        # so we need to set graph params before capture full graph.
+        if super().needs_capture():
+            set_graph_params(self.capture_sizes)
 
-    def capture_graph(
+    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Override run_fullgraph to update full graph params in run_fullgraph."""
+        num_tokens = desc.num_tokens
+        logger.info_once(f"run_fullgraph with num_tokens={num_tokens}")
+        ret = super().run_fullgraph(desc)
+
+        positions = self.model_runner.input_buffers.positions[:num_tokens]
+        # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
+        # calculate num_tokens_across_dp.
+        num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens, device=self.device)
+        with set_forward_context(
+            self.model_runner.input_batch.attn_metadata,
+            self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=desc.cg_mode,
+            num_tokens_across_dp=num_tokens_across_dp,
+            batch_descriptor=None,  # Full graph model don't need batch_descriptor
+            slot_mapping=self.model_runner.input_batch.slot_mappings,
+        ):
+            forward_context = get_forward_context()
+            update_full_graph_params(
+                # FIXME(Ronald1995): support hybrid attn backend
+                list(self.model_runner.attn_backends.values())[0],
+                self.model_runner.update_stream,
+                forward_context,
+                num_tokens,
+                self.vllm_config,
+                self.model_runner.speculative_config,
+                positions.shape[0],
+            )
+        return ret
+
+    def capture(
         self,
-        num_tokens: int,
         model: nn.Module,
+        model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        has_lora: bool = False,
+        use_aux_hidden_state_outputs: bool = False,
+        progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        with torch_cuda_wrapper(), prepare_capture_inputs_wrapper():
-            super().capture_graph(
-                num_tokens,
-                model,
-                input_buffers,
-                block_tables,
-                attn_metadata_builders,
-                kv_cache_config,
-            )
+        """Capture CUDA graphs for model forward pass."""
+        model = ModelWithContext(model)
+        return super().capture(
+            model,
+            model_state,
+            input_buffers,
+            block_tables,
+            attn_groups,
+            kv_cache_config,
+            has_lora,
+            use_aux_hidden_state_outputs,
+            progress_bar_desc,
+        )
 
 
-@contextmanager
-def prepare_capture_inputs_wrapper():
-    """Context manager to override input preparation for NPU graph capture."""
-    # TODO(Ronald1995): make prepare_inputs_to_capture as static method
-    # in CudaGraphManager.
-    global prepare_inputs_to_capture_gpu
-    try:
-        ori_func = prepare_inputs_to_capture_gpu
-        prepare_inputs_to_capture_gpu = prepare_inputs_to_capture
-        yield
-    finally:
-        prepare_inputs_to_capture_gpu = ori_func
+class ModelWithContext(nn.Module):
+    """Define a wrapper model to inject forward context.
+    so we can inherit vllm's CudaGraphManager._capture_full_graph.
+    """
 
+    def __init__(self, original_model):
+        super().__init__()
+        self.original_model = original_model
 
-def prepare_inputs_to_capture(
-    num_reqs: int,
-    num_tokens: int,
-    input_buffers: InputBuffers,
-    block_tables: BlockTables,
-    attn_metadata_builders: list[AttentionMetadataBuilder],
-    max_model_len: int,
-    kv_cache_config: KVCacheConfig,
-) -> dict[str, Any]:
-    # TODO(Ronald1995): Implement NPU specific input preparation.
-    return {}
+    def forward(self, *args, **kwargs):
+        # In warmup phase, capturing=False by default.
+        # when capturing, we need to set capturing=True in forward context.
+        if torch.npu.is_current_stream_capturing():
+            _EXTRA_CTX.capturing = True
+
+        return self.original_model(*args, **kwargs)

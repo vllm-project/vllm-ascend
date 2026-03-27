@@ -1,7 +1,7 @@
 import json
-import logging
 import os
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tests.ut.base import TestBase
@@ -15,7 +15,7 @@ from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_MET
 
 class TestDetectQuantizationMethod(TestBase):
 
-    def test_returns_none_for_non_directory(self):
+    def test_returns_none_for_non_existent_path(self):
         result = detect_quantization_method("/non/existent/path")
         self.assertIsNone(result)
 
@@ -81,12 +81,10 @@ class TestDetectQuantizationMethod(TestBase):
         """When both ModelSlim config and compressed-tensors config exist,
         ModelSlim should take priority."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create ModelSlim config
             modelslim_path = os.path.join(tmpdir, MODELSLIM_CONFIG_FILENAME)
             with open(modelslim_path, "w") as f:
                 json.dump({"layer.weight": "INT8"}, f)
 
-            # Create compressed-tensors config
             config_path = os.path.join(tmpdir, "config.json")
             with open(config_path, "w") as f:
                 json.dump({
@@ -101,10 +99,12 @@ class TestDetectQuantizationMethod(TestBase):
 
 class TestMaybeAutoDetectQuantization(TestBase):
 
-    def _make_vllm_config(self, model_path="/fake/model", quantization=None):
+    def _make_vllm_config(self, model_path="/fake/model",
+                           quantization=None, revision=None):
         vllm_config = MagicMock()
         vllm_config.model_config.model = model_path
         vllm_config.model_config.quantization = quantization
+        vllm_config.model_config.revision = revision
         return vllm_config
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
@@ -112,7 +112,6 @@ class TestMaybeAutoDetectQuantization(TestBase):
     def test_no_detection_does_nothing(self, mock_detect):
         vllm_config = self._make_vllm_config()
         maybe_auto_detect_quantization(vllm_config)
-        # quantization should remain unchanged
         self.assertIsNone(vllm_config.model_config.quantization)
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
@@ -135,16 +134,16 @@ class TestMaybeAutoDetectQuantization(TestBase):
         vllm_config = self._make_vllm_config(
             model_path="/fake/quant_model", quantization=None)
 
-        with self.assertLogs("vllm_ascend.quantization.utils",
-                             level=logging.INFO) as cm:
+        with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
             maybe_auto_detect_quantization(vllm_config)
 
         self.assertEqual(vllm_config.model_config.quantization,
                          ASCEND_QUANTIZATION_METHOD)
-        log_output = "\n".join(cm.output)
-        self.assertIn("Auto-detected quantization method", log_output)
-        self.assertIn(ASCEND_QUANTIZATION_METHOD, log_output)
-        self.assertIn("/fake/quant_model", log_output)
+        mock_logger.info.assert_called_once()
+        call_args = mock_logger.info.call_args[0]
+        self.assertIn("Auto-detected quantization method", call_args[0])
+        self.assertIn(ASCEND_QUANTIZATION_METHOD, call_args)
+        self.assertIn("/fake/quant_model", call_args)
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
            return_value=ASCEND_QUANTIZATION_METHOD)
@@ -155,28 +154,37 @@ class TestMaybeAutoDetectQuantization(TestBase):
             model_path="/fake/quant_model",
             quantization=COMPRESSED_TENSORS_METHOD)
 
-        with self.assertLogs("vllm_ascend.quantization.utils",
-                             level=logging.WARNING) as cm:
+        with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
             maybe_auto_detect_quantization(vllm_config)
 
-        # User's choice is respected
         self.assertEqual(vllm_config.model_config.quantization,
                          COMPRESSED_TENSORS_METHOD)
-        log_output = "\n".join(cm.output)
-        self.assertIn("Auto-detected quantization method", log_output)
-        self.assertIn(ASCEND_QUANTIZATION_METHOD, log_output)
-        self.assertIn(COMPRESSED_TENSORS_METHOD, log_output)
+        mock_logger.warning.assert_called_once()
+        call_args = mock_logger.warning.call_args[0]
+        self.assertIn("Auto-detected quantization method", call_args[0])
+        self.assertIn(ASCEND_QUANTIZATION_METHOD, call_args)
+        self.assertIn(COMPRESSED_TENSORS_METHOD, call_args)
 
     @patch("vllm_ascend.quantization.utils.detect_quantization_method",
            return_value=None)
     def test_no_detection_emits_no_log(self, mock_detect):
         """When no quantization is detected, no log should be emitted."""
         vllm_config = self._make_vllm_config(quantization=None)
-        logger_name = "vllm_ascend.quantization.utils"
 
-        with self.assertRaises(AssertionError):
-            # assertLogs raises AssertionError when no logs are emitted
-            with self.assertLogs(logger_name, level=logging.DEBUG):
-                maybe_auto_detect_quantization(vllm_config)
+        with patch("vllm_ascend.quantization.utils.logger") as mock_logger:
+            maybe_auto_detect_quantization(vllm_config)
 
+        mock_logger.info.assert_not_called()
+        mock_logger.warning.assert_not_called()
         self.assertIsNone(vllm_config.model_config.quantization)
+
+    @patch("vllm.config.VllmConfig._get_quantization_config",
+           return_value=MagicMock())
+    @patch("vllm_ascend.quantization.utils.detect_quantization_method",
+           return_value=ASCEND_QUANTIZATION_METHOD)
+    def test_passes_revision_to_detect(self, mock_detect, mock_get_quant):
+        """Verify that model revision is forwarded to detect_quantization_method."""
+        vllm_config = self._make_vllm_config(
+            model_path="org/model-name", revision="v1.0", quantization=None)
+        maybe_auto_detect_quantization(vllm_config)
+        mock_detect.assert_called_once_with("org/model-name", revision="v1.0")

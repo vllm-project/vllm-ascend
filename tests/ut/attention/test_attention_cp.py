@@ -95,7 +95,7 @@ class TestAscendAttentionCPImpl(TestBase):
     @patch('torch_npu.npu_attention_update')
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch(
-        'vllm_ascend.attention.context_parallel.attention_cp.get_forward_context'
+        'vllm_ascend.ascend_forward_context.get_forward_context'
     )
     @patch_distributed_groups(dcp_size=2, pcp_size=2)
     def test_forward_decode_pcp_dcp(self, mock_all2all, mock_dcp, mock_pcp,
@@ -169,8 +169,6 @@ class TestAscendAttentionCPImpl(TestBase):
         attn_metadata.prefill.chunked_context = MagicMock()
         local_context_lens_allranks = torch.tensor([[[256, 256], [256, 256]]])
         attn_metadata.prefill.chunked_context.local_context_lens_allranks = local_context_lens_allranks
-        attn_metadata.prefill.chunked_context.batch_chunk_seq_mask = torch.randint(
-            0, 2, (1024, ), dtype=torch.bool)
         attn_metadata.prefill.chunked_context.local_total_toks = local_context_lens_allranks[:,
                                                                                              0,
                                                                                              0].sum(

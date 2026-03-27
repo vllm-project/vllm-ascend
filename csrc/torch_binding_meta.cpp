@@ -457,6 +457,118 @@ void transpose_kv_cache_by_block_meta(
 {
     return;
 }
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+npu_copy_and_expand_eagle_inputs_meta(
+    const at::Tensor &target_token_ids,
+    const at::Tensor &target_positions,
+    const at::Tensor &next_token_ids,
+    const at::Tensor &query_start_loc,
+    const at::Tensor &query_end_loc,
+    int64_t padding_token_id,
+    int64_t parallel_drafting_token_id,
+    int64_t num_padding_slots_per_request,
+    bool shift_input_ids,
+    int64_t total_draft_tokens)
+{
+    int64_t total_input_tokens = target_token_ids.size(0);
+    int64_t num_reqs = query_start_loc.size(0) - 1;
+
+    at::Tensor out_input_ids = at::empty({total_draft_tokens}, target_token_ids.options());
+    at::Tensor out_positions = at::empty({total_draft_tokens}, target_token_ids.options());
+    at::Tensor out_is_rejected_token_mask = at::empty({total_draft_tokens}, target_token_ids.options().dtype(at::kChar));
+    at::Tensor out_is_masked_token_mask = at::empty({total_draft_tokens}, target_token_ids.options().dtype(at::kChar));
+    at::Tensor out_new_token_indices = at::empty({num_reqs * num_padding_slots_per_request}, target_token_ids.options());
+    at::Tensor out_hidden_state_mapping = at::empty({total_input_tokens}, target_token_ids.options());
+
+    return {out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
+            out_new_token_indices, out_hidden_state_mapping};
+}
+
+at::Tensor npu_causal_conv1d_custom_meta(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    const c10::optional<at::Tensor>& bias_opt,
+    at::IntArrayRef query_start_loc_opt,
+    at::IntArrayRef cache_indices_opt,
+    at::IntArrayRef initial_state_mode_opt,
+    at::IntArrayRef num_accepted_tokens_opt,
+    int64_t  activation_mode,
+    int64_t  pad_slot_id,
+    int64_t  run_mode)
+{
+
+    at::Tensor output = at::empty_symint(x.sym_sizes(), x.options());
+    return output;
+}
+  
+std::vector<at::Tensor> moe_grouped_matmul_meta(
+    at::Tensor x,
+    at::Tensor weight,
+    const at::Tensor& group_list,
+    int64_t split_item,
+    int64_t group_type,
+    int64_t group_list_type
+)
+{
+    bool transpose_weight = false;
+    bool weight_nz = true;
+
+    at::TensorList x_list = at::TensorList(x);
+    at::TensorList weight_list = at::TensorList(weight);
+    std::vector<at::Tensor> y;
+    c10::TensorOptions options = x[0].options().dtype(x[0].scalar_type());
+    auto m = x[0].sizes()[0];
+    auto n = weight[0].sizes()[1];
+    if (!transpose_weight) {
+        n = weight[0].sizes()[2];
+    }
+    at::Tensor y_0 = at::zeros(at::IntArrayRef{m, n}, options);
+    y.emplace_back(y_0);
+    at::TensorList result = at::TensorList(y);
+
+    return y;
+}
+
+at::Tensor npu_lightning_indexer_quant_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
+    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_key,
+    const c10::optional<at::Tensor> &block_table, int64_t query_quant_mode, int64_t key_quant_mode,
+    c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode)
+{
+    std::string query_layout_str = std::string(layout_query);
+    std::string key_layout_str = std::string(layout_key);
+    
+    const int SIZE = 8;
+    const int DIM_0 = 0;
+    const int DIM_1 = 1;
+    const int DIM_2 = 2;
+    const int DIM_3 = 3;
+
+    at::SmallVector<int64_t, SIZE> output_size;
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+            "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    for (size_t i = 0; i < key.sizes().size(); i++) {
+        TORCH_CHECK(key.size(i) > 0, "All values within key's shape should be greater "
+            "than 0, but shape[", i, "] is ", key.size(i));
+    }
+    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
+    int64_t keyHeadNum = (key_layout_str == "TND")? key.size(DIM_1) : key.size(DIM_2);
+    if (query_layout_str == "BSND") {
+        output_size = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, sparse_count};
+    } else {
+        output_size = {query.size(DIM_0), keyHeadNum, sparse_count};
+    }
+    at::Tensor lightning_indexer_quant_output = at::empty(output_size, query.options().dtype(at::kInt));
+
+    return lightning_indexer_quant_output;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -498,5 +610,13 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
+    // CopyAndExpandEagleInputs
+    ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
+    // causal_conv1d_fn
+    ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
+    // moe_grouped_matmul
+    ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
+    // Lightning indexer quant
+    ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
 }
 }

@@ -36,6 +36,10 @@ on:
       model_list:
         required: true
         type: string
+      model_filter:
+        required: false
+        type: string
+        default: ''
       upload:
         required: false
         type: boolean
@@ -67,6 +71,11 @@ jobs:
       env:
         VLLM_USE_MODELSCOPE: True
         GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -79,6 +88,7 @@ jobs:
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
@@ -91,6 +101,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -102,14 +113,15 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
 
       - name: Install tensorflow (for Molmo-7B-D-0924)
         if: ${{ inputs.runner == 'linux-aarch64-a2b3-1' && contains(inputs.model_list, 'Molmo-7B-D-0924') }}
@@ -174,6 +186,43 @@ jobs:
             pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
           } >> "$GITHUB_ENV"
 
+      - name: Compute effective model list
+        run: |
+          model_filter='${{ inputs.model_filter }}'
+          all_models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+
+          if [[ "$model_filter" == "all" ]] || [[ -z "$model_filter" ]]; then
+            effective_models="$all_models"
+          else
+            any_model_in_filter=false
+            while IFS= read -r model; do
+              if [[ "$model_filter" == *",${model},"* ]]; then
+                any_model_in_filter=true
+                break
+              fi
+            done <<< "$all_models"
+
+            if [[ "$any_model_in_filter" == "true" ]]; then
+              effective_models=""
+              while IFS= read -r model; do
+                if [[ "$model_filter" == *",${model},"* ]]; then
+                  effective_models+="$model"$'\n'
+                fi
+              done <<< "$all_models"
+              effective_models="${effective_models%$'\n'}"
+            else
+              effective_models="$all_models"
+            fi
+          fi
+
+          echo "Effective models to test:"
+          echo "$effective_models"
+          {
+            echo 'EFFECTIVE_MODELS<<EOF'
+            echo "$effective_models"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+
       - name: Run vllm-project/vllm-ascend accuracy test
         id: report
         env:
@@ -192,7 +241,7 @@ jobs:
           mkdir -p ./benchmarks/accuracy
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Received model_list: ${{ inputs.model_list }}"
-          models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          models="$EFFECTIVE_MODELS"
           any_failure=0
           for model in $models; do
             echo "Running test for model: $model"
@@ -210,7 +259,7 @@ jobs:
       - name: Generate step summary
         if: ${{ always() }}
         run: |
-          models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          models="$EFFECTIVE_MODELS"
           for model in $models; do
             echo "Processing model: $model"
             model_base_name=$(basename "$model")
