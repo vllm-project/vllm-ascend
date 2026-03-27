@@ -257,8 +257,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         return self._align_to_graph_bucket_tokens(attn_output, attn_metadata)
 
     def _align_to_graph_bucket_tokens(self, attn_output: torch.Tensor | None, attn_metadata: M) -> torch.Tensor | None:
-        if attn_output is None:
-            return None
+        if attn_output is None or self.pcp_size == 1:
+            return attn_output
         # In graph/piecewise mode, output buffer uses graph bucket token size
         # (forward_context.num_tokens), while PCP path may compute only valid
         # tokens. Align to the larger one to avoid later write-back mismatch.
