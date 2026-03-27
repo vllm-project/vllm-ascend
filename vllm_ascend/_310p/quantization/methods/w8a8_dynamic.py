@@ -19,6 +19,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
+import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 
