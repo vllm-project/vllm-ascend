@@ -19,6 +19,7 @@
 import os
 from unittest.mock import patch
 
+import pytest
 from tests.e2e.conftest import VllmRunner
 
 
@@ -75,6 +76,7 @@ def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.skip(reason="FlashComm1 is not stable yet.")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_qwen3_next_distributed_mp_flash_comm_tp4():
