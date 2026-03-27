@@ -174,7 +174,11 @@ class AscendW8A8DynamicLinearMethod310(AscendLinearScheme):
     ) -> dict[str, Any]:
         return {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
 
-    def get_perchannel_param(self, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+    def get_perchannel_param(
+        self,
+        output_size: int,
+        params_dtype: torch.dtype,
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         params["weight_scale"] = torch.empty(output_size, 1, dtype=torch.float32)
         params["weight_offset"] = torch.empty(output_size, 1, dtype=torch.float32)
