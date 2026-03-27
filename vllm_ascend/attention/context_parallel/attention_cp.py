@@ -138,13 +138,14 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         assert num_computed_tokens_of_pcp_dcp is not None
         chunked_context_metadata = None
         attn_mask_seqlens = common_long_seq_metadata.attn_mask_seqlens
+        attn_chunk_seqlens = common_long_seq_metadata.attn_chunk_seqlens
         if num_prefills > 0:
             query_lens = query_lens[num_decodes:]
             context_lens_cpu = num_computed_tokens_cpu[num_decodes:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
             if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                 if self.pcp_size > 1 and common_long_seq_metadata.pcp_use_hybrid_attn:
-                    query_lens = attn_mask_seqlens[0] * 2
+                    query_lens = attn_chunk_seqlens * 2
                 local_context_lens_allranks = (
                     torch.tensor(num_computed_tokens_of_pcp_dcp)[self.num_decodes_flatten :]
                     .to(self.device)

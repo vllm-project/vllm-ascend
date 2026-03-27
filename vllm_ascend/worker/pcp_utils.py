@@ -905,6 +905,7 @@ class PCPManager:
                     tensor_npu = self._list_to_tensor(value, self.device)
                     self.kv_idx_names[key] = tensor_npu
 
+                attn_chunk_seqlens = torch.tensor(chunk_seqlens, dtype=torch.int32)
                 attn_mask_seqlens = torch.cumsum(torch.tensor(chunk_seqlens, dtype=torch.int32), dim=0).tolist()
                 head_attn_nomask_seqlens = torch.cumsum(
                     torch.tensor(kv_with_q_head_nomask_seqlens, dtype=torch.int32), dim=0
@@ -947,6 +948,7 @@ class PCPManager:
                 long_seq_metadata.attn_mask_seqlens = self.extra_long_seq_kwargs["attn_mask_seqlens"]
                 long_seq_metadata.head_attn_nomask_seqlens = self.extra_long_seq_kwargs["head_attn_nomask_seqlens"]
                 long_seq_metadata.tail_attn_nomask_seqlens = self.extra_long_seq_kwargs["tail_attn_nomask_seqlens"]
+                long_seq_metadata.attn_chunk_seqlens = attn_chunk_seqlens
 
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor

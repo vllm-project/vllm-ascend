@@ -490,16 +490,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         head_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.head_attn_nomask_seqlens
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
 
-        # FIA with TND layout only supports bfloat16, convert if needed
-        original_dtype = q_nope.dtype
-        need_dtype_convert = original_dtype != torch.bfloat16
-        if need_dtype_convert:
-            q_nope = q_nope.to(torch.bfloat16)
-            q_pe = q_pe.to(torch.bfloat16)
-            k_nope = k_nope.to(torch.bfloat16)
-            k_pe = k_pe.to(torch.bfloat16)
-            value = value.to(torch.bfloat16)
-
         output_head, lse_head = self._attention_with_mask_and_nomask(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
             q_pe=torch.index_select(q_pe, 0, q_head_idx),
@@ -540,10 +530,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         output = output.reshape([num_tokens, self.num_heads * self.v_head_dim])
 
-        # Convert back to original dtype if needed
-        if need_dtype_convert:
-            output = output.to(original_dtype)
-
         return output
 
     def _attention_with_mask_and_nomask(
@@ -555,8 +541,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         value: torch.Tensor,
         kv_mask_idx: torch.Tensor,
         kv_nomask_idx: torch.Tensor,
-        attn_mask_seqlens: torch.Tensor,
-        attn_nomask_seqlens: torch.Tensor,
+        attn_mask_seqlens: list[int],
+        attn_nomask_seqlens: list[int],
         mask: torch.Tensor,
         attn_metadata,
     ):
