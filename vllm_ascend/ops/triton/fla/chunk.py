@@ -40,13 +40,13 @@ def chunk_gated_delta_rule_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     prebuilt_meta=None,
 ):
-    forward_context = get_forward_context()
-    num_decodes = 0
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is not None and isinstance(attn_metadata, dict):
-        attn_metadata = next(iter(attn_metadata.values()), None)
-    if attn_metadata is not None:
-        num_decodes = attn_metadata.num_decodes
+    # forward_context = get_forward_context()
+    # num_decodes = 0
+    # attn_metadata = forward_context.attn_metadata
+    # if attn_metadata is not None and isinstance(attn_metadata, dict):
+    #     attn_metadata = next(iter(attn_metadata.values()), None)
+    # if attn_metadata is not None:
+    #     num_decodes = attn_metadata.num_decodes
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
     chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64
@@ -97,48 +97,48 @@ def chunk_gated_delta_rule_fwd(
         chunk_offsets=chunk_offsets_chunk64,
     )
 
-    if get_pcp_group().world_size > 1:
-        h_update = chunk_gated_delta_rule_fwd_hupdate(
-            k=k,
-            w=w,
-            u=u,
-            g=g,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices_chunk64,
-            chunk_offsets=chunk_offsets_chunk64,
-            update_chunk_offsets=update_chunk_offsets_chunk64,
-            num_decodes=num_decodes,
-        )
-        all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
-        final_chunk_indices = final_chunk_indices_chunk64
-        if final_chunk_indices is None:
-            final_chunk_indices = prepare_final_chunk_indices(cu_seqlens, chunk_size)
-        final_h_update = h_update[:, final_chunk_indices, :, :, :]
-        all_final_h_update = get_pcp_group().all_gather(final_h_update, 0)
+    # if get_pcp_group().world_size > 1:
+    #     h_update = chunk_gated_delta_rule_fwd_hupdate(
+    #         k=k,
+    #         w=w,
+    #         u=u,
+    #         g=g,
+    #         cu_seqlens=cu_seqlens,
+    #         chunk_indices=chunk_indices_chunk64,
+    #         chunk_offsets=chunk_offsets_chunk64,
+    #         update_chunk_offsets=update_chunk_offsets_chunk64,
+    #         num_decodes=num_decodes,
+    #     )
+    #     all_final_state = get_pcp_group().all_gather(final_state.unsqueeze(0), 0)
+    #     final_chunk_indices = final_chunk_indices_chunk64
+    #     if final_chunk_indices is None:
+    #         final_chunk_indices = prepare_final_chunk_indices(cu_seqlens, chunk_size)
+    #     final_h_update = h_update[:, final_chunk_indices, :, :, :]
+    #     all_final_h_update = get_pcp_group().all_gather(final_h_update, 0)
 
-        updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
-        updated_state[0, ...] = all_final_state[0]
-        for i in range(1, get_pcp_group().world_size):
-            updated_final_state = all_final_state[i] + torch.matmul(
-                all_final_h_update[i, ...], updated_state[i - 1, ...]
-            )
-            updated_state[i, ...] = updated_final_state
+    #     updated_state = final_state.new_empty(get_pcp_group().world_size, *final_state.shape)
+    #     updated_state[0, ...] = all_final_state[0]
+    #     for i in range(1, get_pcp_group().world_size):
+    #         updated_final_state = all_final_state[i] + torch.matmul(
+    #             all_final_h_update[i, ...], updated_state[i - 1, ...]
+    #         )
+    #         updated_state[i, ...] = updated_final_state
 
-        final_state = updated_state[-1, ...]
+    #     final_state = updated_state[-1, ...]
 
-        if get_pcp_group().rank_in_group == 0:
-            updated_h_state = torch.zeros_like(final_state)
-        else:
-            updated_h_state = updated_state[get_pcp_group().rank_in_group - 1, ...]
+    #     if get_pcp_group().rank_in_group == 0:
+    #         updated_h_state = torch.zeros_like(final_state)
+    #     else:
+    #         updated_h_state = updated_state[get_pcp_group().rank_in_group - 1, ...]
 
-        h = chunk_fwd_o_update(
-            q=q,
-            v=v_new,
-            h=h,
-            h_update=h_update,
-            updated_h_state=updated_h_state,
-            cu_seqlens=cu_seqlens,
-        )
+    #     h = chunk_fwd_o_update(
+    #         q=q,
+    #         v=v_new,
+    #         h=h,
+    #         h_update=h_update,
+    #         updated_h_state=updated_h_state,
+    #         cu_seqlens=cu_seqlens,
+    #     )
 
     o = chunk_fwd_o(
         q=q,
@@ -149,11 +149,11 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-
-    if SUPPRESS_LEVEL < 3:
-        return g, o, A, final_state, None, None, None
-    elif SUPPRESS_LEVEL >= 3:
-        return g, o, A, final_state, w, h, v_new
+    return g, o, A, final_state, w, h, v_new
+    # if SUPPRESS_LEVEL < 3:
+    #     return g, o, A, final_state, None, None, None
+    # elif SUPPRESS_LEVEL >= 3:
+    #     return g, o, A, final_state, w, h, v_new
 
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
