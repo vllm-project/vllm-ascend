@@ -59,7 +59,6 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
-    register_ascend_pluggable_layers,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -105,7 +104,6 @@ class NPUWorker(WorkerBase):
         if get_ascend_device_type() != AscendDeviceType.A5:
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
-        register_ascend_pluggable_layers(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         check_ascend_device_type()
