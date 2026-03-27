@@ -618,6 +618,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
+    from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
+    from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
@@ -656,6 +658,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
         "Conv3dLayer": AscendConv3dLayer,
+        "RelPosAttention": AscendRelPosAttention,
+        "CustomQwen2Decoder": AscendCustomQwen2Decoder,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
@@ -696,30 +700,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
-
-
-def register_ascend_pluggable_layers(vllm_config: VllmConfig | None = None):
-    global _ASCEND_LAYER_IS_REIGISTERED
-    if _ASCEND_LAYER_IS_REIGISTERED:
-        return
-
-    from vllm.model_executor.custom_op import PluggableLayer
-
-    from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
-    from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
-
-    global REGISTERED_ASCEND_LAYERS
-    REGISTERED_ASCEND_LAYERS = {
-        "RelPosAttention": AscendRelPosAttention,
-        "CustomQwen2Decoder": AscendCustomQwen2Decoder,
-        # Add Ascend PluggableLayer here.
-    }
-
-    for name, layer_cls in REGISTERED_ASCEND_LAYERS.items():
-        PluggableLayer.register_oot(_decorated_layer_cls=layer_cls, name=name)
-
-    # NOTE: Keep this at last to ensure all pluggable layers are registered.
-    _ASCEND_LAYER_IS_REIGISTERED = True
 
 
 class AscendDeviceType(Enum):
