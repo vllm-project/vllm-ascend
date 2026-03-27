@@ -68,6 +68,11 @@ Use this skill when:
 │  ├── Verify PyPI & Docker availability                                      │
 │  └── Broadcast release                                                      │
 │                                                                             │
+│  Phase 9: WeChat Article (微信公众号推文)                                     │
+│  ├── Collect release statistics (commits, contributors)                     │
+│  ├── Generate WeChat article from template                                  │
+│  └── Review and publish to WeChat official account                          │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -177,18 +182,34 @@ python scripts/update_checklist_section.py \
 Scan for PRs that should be included in the release:
 
 ```bash
-# List open PRs with release-related labels
+# 1. [Priority] List open PRs/issues in the release milestone
+gh pr list --repo vllm-project/vllm-ascend \
+  --state open \
+  --search "milestone:${VERSION}" \
+  --json number,title,url,labels
+
+gh issue list --repo vllm-project/vllm-ascend \
+  --state open \
+  --search "milestone:${VERSION}" \
+  --json number,title,url,labels
+
+# 2. List open PRs with release-related labels
 gh pr list --repo vllm-project/vllm-ascend \
   --state open \
   --label "release-blocker" \
   --json number,title,url
 
-# List PRs merged since last release
+# 3. List PRs merged since last release
 gh pr list --repo vllm-project/vllm-ascend \
   --state merged \
   --search "merged:>${LAST_RELEASE_DATE}" \
   --json number,title,mergedAt
 ```
+
+**Priority Order:**
+1. PRs/Issues in the release milestone - these are explicitly targeted for this release
+2. PRs with `release-blocker` label - critical items that must be merged
+3. Recently merged PRs - for tracking what's already included
 
 ### 3.2 Update Checklist
 
@@ -444,6 +465,112 @@ python scripts/generate_announcement.py \
 gh issue close ${CHECKLIST_ISSUE} \
   --repo vllm-project/vllm-ascend \
   --comment "Release ${VERSION} completed successfully!"
+```
+
+## Phase 9: WeChat Article (微信公众号推文)
+
+After release notes are finalized and the release is completed, generate a WeChat article for community broadcast.
+
+### 9.1 Article Structure Template
+
+The WeChat article follows a structured format with emojis for visual appeal:
+
+| Section | Emoji | Description | Recommended Items |
+|---------|-------|-------------|-------------------|
+| **Opening Paragraph** | 🎉 | Version announcement + positioning + core highlights summary | 1 paragraph |
+| **Statistics** | 🥳 | Number of commits, new contributors | 1 line |
+| **Core Highlights** | 💥 | Top 2-3 most important features/optimizations | 2-3 items |
+| **New Features** | 🆕 | New functionality, models, operators | 3-5 items |
+| **Performance** | 🚀 | Performance improvements (include metrics when available) | 2-4 items |
+| **Refactoring** | 🔨 | Code refactoring, dependency upgrades | 1-3 items |
+| **Bug Fixes** | 🐞 | Important bug fixes | 3-5 items |
+| **Quality/Testing** | 🛡️ | Test coverage, CI/CD improvements | 0-2 items |
+| **Documentation** | 📄 | Documentation updates (can combine into 1 item) | 1 item |
+| **Links** | ➡️ | Source code, quick start, installation guide | 3 links |
+
+### 9.2 Article Template
+
+```markdown
+vLLM Ascend ${VERSION}版本发布🎉 此版本是针对vLLM v${VLLM_VERSION}系列版本首个RC版本，[1-2句核心亮点描述]。
+
+🥳 本版本共计${COMMITS_COUNT}个commits，新增${NEW_CONTRIBUTORS_COUNT}位新开发者！
+💥 [核心亮点1]
+💥 [核心亮点2]
+🆕 [新特性1]
+🆕 [新特性2]
+🆕 [新特性3]
+🚀 [性能优化1，最好包含具体数据如"提升X%"]
+🚀 [性能优化2]
+🔨 [重构/依赖升级1]
+🔨 [重构/依赖升级2]
+🐞 修复 [重要bug1]
+🐞 修复 [重要bug2]
+🐞 修复 [重要bug3]
+🛡️ [质量/测试改进]
+📄 [文档更新汇总]
+
+➡️ 源码地址：https://github.com/vllm-project/vllm-ascend/releases/tag/${VERSION}
+➡️ 快速体验：https://vllm-ascend.readthedocs.io/en/latest/quick_start.html
+➡️ 安装指南：https://vllm-ascend.readthedocs.io/en/latest/installation.html
+```
+
+### 9.3 Writing Guidelines
+
+1. **Opening Paragraph**:
+   - Start with version number and 🎉
+   - Describe version positioning (RC/stable, which vLLM version)
+   - Highlight 1-2 core themes of this release
+
+2. **Content Selection**:
+   - Prioritize user-facing features over internal refactoring
+   - Include specific performance numbers when available
+   - Group related items (e.g., multiple bug fixes for one feature)
+   - Highlight breaking changes or dependency upgrades
+
+3. **Language Style**:
+   - Use concise, active voice
+   - Avoid overly technical jargon
+   - Keep each item to one line when possible
+   - Use "完成支持/适配" for new features, "优化/提升" for performance
+
+4. **Statistics Collection**:
+   ```bash
+   # Count commits since last release
+   git rev-list --count ${LAST_VERSION}..${VERSION}
+
+   # Count new contributors
+   git log ${LAST_VERSION}..${VERSION} --format='%aN' | sort -u > all_contributors.txt
+   git log ..${LAST_VERSION} --format='%aN' | sort -u > prev_contributors.txt
+   comm -23 all_contributors.txt prev_contributors.txt | wc -l
+   ```
+
+### 9.4 Example: v0.16.0rc1
+
+```
+vLLM Ascend 0.16.0rc1版本发布🎉 此版本是针对vLLM v0.16.0系列版本首个RC版本，重点完成了Qwen3-Omni量化适配优化和GLM5-W8A8量化支持，同时新增多个AscendC自定义算子并持续优化MoE模型性能。
+
+🥳 欢迎社区开发者持续贡献！
+💥 Qwen3-Omni量化适配及优化完成，推理性能显著提升
+💥 GLM5-W8A8量化支持，通过参数化MLA维度实现
+🆕 实验性支持 FabricMem Mode，提供ADXL/HIXL互联支持
+🆕 310P新增 w8a8sc 量化方法支持
+🆕 Mooncake Layerwise Connector 新增 kv_pool 支持
+🆕 Eagle3 新增 QuaRot 量化支持（无embedding）
+🚀 Qwen3-VL 卷积计算优化，TTFT提升0.95%，吞吐提升0.59%
+🚀 MTP执行优化，重排状态更新操作提升性能
+🚀 全局CPU分片及IRQ绑定优化，改善资源管理
+🔨 EPLB profiling增强，支持专家热度对比和调整时间显示
+🔨 CANN升级至8.5.1，请手动升级或使用官方镜像
+🐞 修复 Eagle + Context Parallel 组合使用问题
+🐞 修复 LoRA 精度问题（由上游vLLM变更引入）
+🐞 修复多个 Qwen-Omni 量化相关问题
+🐞 修复 triton rope_siso 实现bug
+🛡️ 完善310P max-model-len参数说明及部署文档
+📄 新增CPU绑定开发指南、Metrics使用文档及GLM4.x多节点部署教程
+
+➡️ 源码地址：https://github.com/vllm-project/vllm-ascend/releases/tag/v0.16.0rc1
+➡️ 快速体验：https://vllm-ascend.readthedocs.io/en/latest/quick_start.html
+➡️ 安装指南：https://vllm-ascend.readthedocs.io/en/latest/installation.html
 ```
 
 ## Script Reference
