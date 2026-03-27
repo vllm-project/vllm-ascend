@@ -105,6 +105,12 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fix Git Safe Directory
+        run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Install vllm-project/vllm-ascend
         run: |
@@ -116,7 +122,7 @@ jobs:
       - name: Run unit test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+          TORCH_DEVICE_BACKEND_AUTOLOAD: 0 
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/arm64-linux/devlib
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
