@@ -17,6 +17,8 @@ from transformers.models.qwen2.modeling_qwen2 import (
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
+
+import vllm
 from vllm.model_executor.models.deepencoder2 import CustomQwen2Decoder
 
 
