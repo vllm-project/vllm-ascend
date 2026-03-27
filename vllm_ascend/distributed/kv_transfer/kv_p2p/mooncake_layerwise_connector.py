@@ -1027,6 +1027,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.pd_head_ratio = get_ascend_config().pd_head_ratio
         self.num_head_replica = get_ascend_config().num_head_replica
         self.resharding_stream = None
+        self.total_memory = torch_npu.npu.get_device_properties(torch_npu.device()).total_memory
         if self.pd_head_ratio > 1 or self.enable_kv_quant:
             self.resharding_stream = torch.npu.Stream()
 
@@ -1059,15 +1060,15 @@ class MooncakeLayerwiseConnectorWorker:
         if self.pd_head_ratio > 1:
             # regesit kv buffer for tp inequal
             self.k_buffer = torch.zeros(
-                first_kv_cache.numel() + alignment, dtype=first_kv_cache.dtype, device=first_kv_cache.device
+                first_kv_cache.numel() * first_kv_cache.element_size() + alignment, dtype=torch.int8, device=first_kv_cache.device
             )
-            self.k_buffer = align_memory(self.k_buffer, alignment)[: first_kv_cache.numel()].view(
+            self.k_buffer = align_memory(self.k_buffer, alignment).to(first_kv_cache.dtype)[: first_kv_cache.numel()].view(
                 -1, first_kv_cache.shape[-1]
             )
             self.v_buffer = torch.zeros(
-                first_kv_cache.numel() + alignment, dtype=first_kv_cache.dtype, device=first_kv_cache.device
+                first_kv_cache.numel() * first_kv_cache.element_size() + alignment, dtype=torch.int8, device=first_kv_cache.device
             )
-            self.v_buffer = align_memory(self.v_buffer, alignment)[: first_kv_cache.numel()].view(
+            self.v_buffer = align_memory(self.v_buffer, alignment).to(first_kv_cache.dtype)[: first_kv_cache.numel()].view(
                 -1, first_kv_cache.shape[-1]
             )
             buffer_list.append(self.k_buffer)
@@ -1092,9 +1093,9 @@ class MooncakeLayerwiseConnectorWorker:
 
         for tensor in buffer_list:
             assert tensor.data_ptr() % alignment == 0, "The address of the registered kv cache should be aligned to 2M"
-            ret_value = self.engine.register_memory(tensor.data_ptr(), tensor.numel())
+            ret_value = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
             logger.info(
-                f"Register memory for prefill when pd head ratio > 1 {tensor.data_ptr()} {tensor.numel()} {ret_value=}"
+                f"Register memory buffer for prefill when pd head ratio > 1, buffer size: {tensor.numel() * tensor.element_size()}"
             )
             if ret_value != 0:
                 raise RuntimeError("Mooncake memory registration failed. ")
@@ -1541,6 +1542,11 @@ class MooncakeLayerwiseConnectorWorker:
                 and send_task.group_num_blocks[layer_group_idx] > 0
             ):
                 assert self.resharding_stream is not None
+                allocated_memory = torch_npu.npu.memory_allocated()
+                free_memory = self.total_memory - allocated_memory
+                if free_memory < 1024 * 1024 * 1024:
+                    logger.warning(f'Synchronize for kv_transfer AlltoAll. Rest memory: {free_memory}')
+                    torch.npu.synchronize()
                 with npu_stream_switch(self.resharding_stream):
                     reshape_cache_event.wait()
                     dtype = self.k_buffer.dtype  # type: ignore
