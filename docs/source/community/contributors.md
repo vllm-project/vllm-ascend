@@ -34,7 +34,7 @@ Updated on 2026-03-09:
 | 342 | [@Mind-s](https://github.com/Mind-s) | 2026/03/06 | [0f812dc](https://github.com/vllm-project/vllm-ascend/commit/0f812dcc58514d4e01b683282fd5a22cbbc86036) |
 | 341 | [@guleo](https://github.com/guleo) | 2026/03/06 | [18b52af](https://github.com/vllm-project/vllm-ascend/commit/18b52afe2bb2e3ac80e988a2788ac1e3bbdb898a) |
 | 340 | [@songjianquan](https://github.com/songjianquan) | 2026/03/05 | [43c8da3](https://github.com/vllm-project/vllm-ascend/commit/43c8da3574c96b9aaeaf4ef360c9b4aaf6a3e305) |
-| 339 | [@liuchen2026fly](https://github.com/liuchen2026fly) | 2026/03/05 | [640ecd1](https://github.com/vllm-project/vllm-ascend/commit/640ecd1b772b1c3dcdc57336b762cc02d011eba8) |
+| 339 | [@liuchenbing2026](https://github.com/liuchenbing2026) | 2026/03/05 | [640ecd1](https://github.com/vllm-project/vllm-ascend/commit/640ecd1b772b1c3dcdc57336b762cc02d011eba8) |
 | 338 | [@Zhujiyang2](https://github.com/Zhujiyang2) | 2026/03/04 | [c3c2656](https://github.com/vllm-project/vllm-ascend/commit/c3c265648f6fb3bf9ea2f6c0e43a4a2e67973d40) |
 | 337 | [@NJX-njx](https://github.com/NJX-njx) | 2026/03/04 | [c7fd7a2](https://github.com/vllm-project/vllm-ascend/commit/c7fd7a25f7f874dc34149f4c235c952dc7c3e227) |
 | 336 | [@tanhaoan333](https://github.com/tanhaoan333) | 2026/03/03 | [15f6564](https://github.com/vllm-project/vllm-ascend/commit/15f65649762992b17e10bda2d7f942618a10dfbd) |
@@ -224,7 +224,7 @@ Updated on 2026-03-09:
 | 152 | [@jesse996](https://github.com/jesse996) | 2025/09/19 | [833cd1b](https://github.com/vllm-project/vllm-ascend/commit/833cd1b698f3d467bb0a6a60cbf20ebc5535f5c9) |
 | 151 | [@offline893](https://github.com/offline893) | 2025/09/17 | [76844ee](https://github.com/vllm-project/vllm-ascend/commit/76844eec78a23f482a4e0dfe9684898a6ef35fb2) |
 | 150 | [@1Fire4](https://github.com/1Fire4) | 2025/09/17 | [1f6465c](https://github.com/vllm-project/vllm-ascend/commit/1f6465c399d6e699f88e28419c106573bd6c44f0) |
-| 149 | [@invalid-email-address](https://github.com/invalid-email-address) | 2025/09/14 | [c9da5de](https://github.com/vllm-project/vllm-ascend/commit/c9da5dea5c271187c0119848ede9c0518a0c41b2) |
+| 149 | [@zzzzwwjj](https://github.com/zzzzwwjj) | 2025/09/14 | [c9da5de](https://github.com/vllm-project/vllm-ascend/commit/c9da5dea5c271187c0119848ede9c0518a0c41b2) |
 | 148 | [@nwpu-zxr](https://github.com/nwpu-zxr) | 2025/09/13 | [0a27705](https://github.com/vllm-project/vllm-ascend/commit/0a27705917e64993a8a76198ac6e30980578fe60) |
 | 147 | [@zhaozx-cn](https://github.com/zhaozx-cn) | 2025/09/11 | [b9a0a75](https://github.com/vllm-project/vllm-ascend/commit/b9a0a75c783571caf22129612fb3338272d1782c) |
 | 146 | [@wyu0-0](https://github.com/wyu0-0) | 2025/09/11 | [eab3635](https://github.com/vllm-project/vllm-ascend/commit/eab3635850ba351af81d76a7b4b3db46ffb7f697) |

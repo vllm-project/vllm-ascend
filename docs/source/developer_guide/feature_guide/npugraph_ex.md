@@ -4,7 +4,7 @@
 
 This is an optimization based on Fx graphs, which can be considered an acceleration solution for the aclgraph mode.
 
-You can get its code [here](https://gitcode.com/Ascend/torchair)
+You can get its code [code](https://gitcode.com/Ascend/torchair)
 
 ## Default Fx Graph Optimization
 
@@ -19,7 +19,7 @@ npugraph_ex now provides three default operator fusion passes, and more will be 
 
 Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
-You can get the default fusion pass list [here](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00017.html)
+You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00017.html)
 
 ## Custom fusion pass
 
