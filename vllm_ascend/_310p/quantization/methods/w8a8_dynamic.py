@@ -26,7 +26,8 @@ from vllm_ascend._310p.fused_moe.experts_selector import select_experts
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
-from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
+from vllm_ascend.quantization.methods.base import AscendMoEScheme, AscendLinearScheme, QuantType
+from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
 
@@ -154,3 +155,61 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
+
+
+@register_scheme("W8A8_DYNAMIC", "linear")
+class AscendW8A8DynamicLinearMethod310(AscendLinearScheme):
+    """310P-only W8A8 dynamic linear scheme.
+
+    Notes:
+      - This scheme is discovered via 310P local registry.
+    """
+
+    def get_weight(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype = torch.float16,
+    ) -> dict[str, Any]:
+        return {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
+
+    def get_perchannel_param(self, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        params["weight_scale"] = torch.empty(output_size, 1, dtype=torch.float32)
+        params["weight_offset"] = torch.empty(output_size, 1, dtype=torch.float32)
+        return params
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
+    ) -> torch.Tensor:
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+        need_unsqz = False
+        if pertoken_scale.dim() == 2:
+            need_unsqz = True
+            quantized_x = quantized_x.squeeze(dim=1)
+            pertoken_scale = pertoken_scale.squeeze(dim=1)
+
+        # NOTE(310P):
+        # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
+        output = torch_npu.npu_quant_matmul(
+            quantized_x,
+            layer.weight,
+            layer.weight_scale,
+            pertoken_scale=pertoken_scale,
+            bias=bias,
+            output_dtype=x.dtype,
+        )
+        if need_unsqz:
+            output = output.unsqueeze(dim=1)
+        return output
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        # cast quantized weight tensors in NZ format for higher inference speed
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
+        layer.weight_scale.data = layer.weight_scale.data.flatten()
+        layer.weight_offset.data = layer.weight_offset.data.flatten()
