@@ -165,6 +165,9 @@ class AscendConfig:
             and vllm_config.compilation_config.pass_config.enable_sp
         )
 
+        # Enable dispatch/combine op inter-node communication by ROCE
+        self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
+
     @staticmethod
     def _get_compile_ranges(compilation_config):
         return compilation_config.compile_ranges_endpoints or []

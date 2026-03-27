@@ -17,7 +17,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar
 
 import torch
 import torch_npu
@@ -170,6 +169,7 @@ class AscendMetadata:
     # should simplified these parameters once attention schema in vLLM-Ascend
     # is unified.
     seq_lens: torch.Tensor = None
+    seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
 
@@ -214,7 +214,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -243,7 +243,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 got {self.decode_threshold}"
             )
 
-        AscendAttentionMetadataBuilder.reorder_batch_threshold = self.decode_threshold
+        self.reorder_batch_threshold = self.decode_threshold
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
@@ -309,6 +309,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),

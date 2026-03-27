@@ -15,8 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import ClassVar
-
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -61,11 +59,6 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
     Extends AscendAttentionMetadataBuilder with PCP/DCP metadata handling.
     """
-
-    # Does this backend/builder reorder the batch?
-    # If not, set this to None. Otherwise set it to the query
-    # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(
         self,
@@ -240,6 +233,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
