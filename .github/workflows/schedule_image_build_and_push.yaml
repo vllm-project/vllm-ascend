@@ -35,6 +35,7 @@ on:
           - v0.15.0rc1
           - v0.14.0rc1
           - v0.13.0rc3
+          - tfh_docker_image_1
 
 jobs:
   image_build:
