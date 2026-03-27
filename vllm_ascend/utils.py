@@ -653,8 +653,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
-        "Conv2dLayer": AscendConv2dLayer,
         "Conv3dLayer": AscendConv3dLayer,
+        "RelPosAttention": AscendRelPosAttention,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
