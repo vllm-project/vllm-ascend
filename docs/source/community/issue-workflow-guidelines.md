@@ -77,7 +77,7 @@ flowchart LR
 
     subgraph P3["Phase 3 — Closure"]
         direction LR
-        D[Track & Implement] -- Resolved --> D2[Apply: resolved → Close] -- Long inactive --> D3[Apply: stale → Auto-close]
+        D[Track & Implement] -- Resolved --> D2[Apply: resolved → Close]
     end
 
     style P1 fill:#dbeafe,stroke:#3b82f6
