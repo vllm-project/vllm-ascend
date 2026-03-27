@@ -174,6 +174,7 @@ class AscendMLAMetadata:
     slot_mapping: torch.Tensor
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
+    seq_lens_cpu: torch.Tensor
     block_tables: torch.Tensor
 
     # New for MLA (compared to FlashAttention)
@@ -457,6 +458,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             query_start_loc=query_start_loc,
             block_tables=self.block_table,
             seq_lens=self.seq_lens,
+            seq_lens_cpu=self.seq_lens,
         )
 
     def build_chunked_metadata(
