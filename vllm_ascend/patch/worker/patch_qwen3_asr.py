@@ -22,8 +22,8 @@ from typing import Any
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.config import CacheConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     Attention,
@@ -34,9 +34,8 @@ from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLine
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3 import Qwen3Attention
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.attention.backend import AttentionType
-
-from vllm.model_executor.models.utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -57,7 +56,7 @@ class AscendQwen3Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
-        #super().__init__()
+        # super().__init__()
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -103,11 +102,7 @@ class AscendQwen3Attention(nn.Module):
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        attn_cls = (
-            EncoderOnlyAttention
-            if attn_type == AttentionType.ENCODER_ONLY
-            else Attention
-        )
+        attn_cls = EncoderOnlyAttention if attn_type == AttentionType.ENCODER_ONLY else Attention
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -128,9 +123,9 @@ class AscendQwen3Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
         self.rms_norm_eps = rms_norm_eps
-        self.rope_dim=self.rotary_emb.rotary_dim
-        self.is_interleaved=self.rotary_emb.mrope_interleaved
-        self.mrope_section=self.rotary_emb.mrope_section
+        self.rope_dim = self.rotary_emb.rotary_dim
+        self.is_interleaved = self.rotary_emb.mrope_interleaved
+        self.mrope_section = self.rotary_emb.mrope_section
         half_rope_dim = self.rope_dim // 2
         cos_sin_nblk_idx = torch.arange(0, half_rope_dim)
         cos_sin_mask = torch.ones((1, half_rope_dim), dtype=torch.bfloat16)
@@ -142,8 +137,12 @@ class AscendQwen3Attention(nn.Module):
             t_nmask = ~(h_nmask | w_nmask)
         else:
             t_nmask = cos_sin_nblk_idx < self.mrope_section[0]
-            h_nmask = (self.mrope_section[0] - 1 < cos_sin_nblk_idx) & (cos_sin_nblk_idx < mrope_section[0]+mrope_section[1])
-            w_nmask = (self.mrope_section[0]+self.mrope_section[1] - 1 < cos_sin_nblk_idx) & (cos_sin_nblk_idx < half_rope_dim)
+            h_nmask = (self.mrope_section[0] - 1 < cos_sin_nblk_idx) & (
+                cos_sin_nblk_idx < mrope_section[0]+mrope_section[1]
+            )
+            w_nmask = (self.mrope_section[0]+self.mrope_section[1] - 1 < cos_sin_nblk_idx) & (
+                cos_sin_nblk_idx < half_rope_dim
+            )
         h_nmask = torch.where(h_nmask, cos_sin_mask, 0.0)
         w_nmask = torch.where(w_nmask, cos_sin_mask, 0.0)
         t_nmask = torch.where(t_nmask, cos_sin_mask, 0.0)
@@ -161,17 +160,17 @@ class AscendQwen3Attention(nn.Module):
         if cos_sin.dtype != qkv.dtype:
             cos_sin = cos_sin.to(qkv.dtype)
         q, k, v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
-                qkv=qkv,
-                q_weight=self.q_norm.weight,
-                k_weight=self.k_norm.weight,
-                cos_sin=cos_sin.contiguous(),
-                num_q_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_dim,
-                eps=self.rms_norm_eps,
-                mrope_section=self.mrope_section,
-                rope_dim=self.rope_dim,
-                thw_mask = self.thw_mask.to(qkv.device)
+            qkv=qkv,
+            q_weight=self.q_norm.weight,
+            k_weight=self.k_norm.weight,
+            cos_sin=cos_sin.contiguous(),
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            eps=self.rms_norm_eps,
+            mrope_section=self.mrope_section,
+            rope_dim=self.rope_dim,
+            thw_mask = self.thw_mask.to(qkv.device)
         )
 
         attn_output = self.attn(q, k, v)
