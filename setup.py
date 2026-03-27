@@ -74,12 +74,20 @@ def get_chip_type() -> str:
     try:
         npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
         npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
-        chip_info_lines = (
-            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
-            .decode()
-            .strip()
-            .split("\n")
-        )
+        try:
+            chip_info_lines = (
+                subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
+                .decode()
+                .strip()
+                .split("\n")
+            )
+        except subprocess.CalledProcessError as e:
+            chip_info_lines = (
+                subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id)])
+                .decode()
+                .strip()
+                .split("\n")
+            )
         chip_name = get_value_from_lines(chip_info_lines, "Chip Name")
         chip_type = get_value_from_lines(chip_info_lines, "Chip Type")
         npu_name = get_value_from_lines(chip_info_lines, "NPU Name")
