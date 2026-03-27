@@ -1,9 +1,9 @@
 import hashlib
 import os
-import re
 from dataclasses import dataclass
 from typing import Any
 
+import regex as re
 import torch
 from vllm.config import ParallelConfig
 from vllm.logger import logger
