@@ -23,7 +23,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
 - `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm do not support GLM4.6 mtp in October, so we do not provide mtp version. And last month, it supported, you can use the following quantization scheme to add mtp weights to Quantized weights.
-- `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp-floatmtp/summary).
+- `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
 - `Method of Quantify`: [quantization scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209). You can use these methods to quantify the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -32,45 +32,102 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `GLM-4.x` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
+
+Start the docker image on your each node.
 
 ```{code-block} bash
    :substitutions:
-# Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
-# Update the vllm-ascend image according to your environment.
-# Note you should download the weight to /root/.cache in advance.
-# Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-export NAME=vllm-ascend
 
-# Run the container using the defined variables
-# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance.
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
+    --name vllm-ascend \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
 ```
 
+::::
+::::{tab-item} A2 series
+:sync: A2
+
+Start the docker image on your each node.
+
+```{code-block} bash
+   :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+```
+
+::::
+:::::
+
+In addition, if you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+
+If you want to deploy multi-node environment, you need to set up environment on each node.
+
 ## Deployment
+
+**Notice:**
+
+We have optimized the FIA operator in CANN 8.5.1. Manual replacement of the files related to the FIA operator is required. Please execute the FIA operator replacement script:
+[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
+The optimization of the FIA operator will be enabled by default in CANN 9.x releases, and manual replacement will no longer be required. Please stay tuned for updates to this document.
 
 ### Single-node Deployment
 
@@ -668,6 +725,27 @@ python load_balance_proxy_server_example.py \
       9300 9301 9302 9303 \
 ```
 
+## Functional Verification
+
+Once your server is started, you can query the model with input prompts:
+
+```shell
+curl -H "Accept: application/json" \
+    -H "Content-type: application/json" \
+    -X POST \
+    -d '{
+        "model": "glm", 
+        "messages": [{ 
+            "role": "user", 
+            "content": "The future of AI is" 
+        }], 
+        "stream": false, 
+        "ignore_eos": false, 
+        "temperature": 0, 
+        "max_tokens": 200 
+    }' http://<node0_ip>:<port>/v1/chat/completions
+```
+
 ## Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
@@ -728,3 +806,28 @@ vllm bench serve \
 ```
 
 After about several minutes, you can get the performance evaluation result.
+
+## Best Practices
+
+In this chapter, we recommend best practices for three scenarios:
+
+- Long-context: For long sequences with low concurrency (≤ 4): set `dp1 tp16`; For long sequences with high concurrency (> 4): set `dp2 tp8`
+- Low-latency: For short sequences with low latency: we recommend setting `dp2 tp8`
+- High-throughput: For short sequences with high throughput: we also recommend setting `dp2 tp8`
+
+**Notice:**
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
+
+## FAQ
+
+- **Q: Why is the TPOT performance poor in Long-context test?**
+
+  A: Please ensure that the FIA operator replacement script has been executed successfully to complete the replacement of FIA operators. Here is the script: [A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)
+
+- **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
+
+  A: Clean up old processes and restart: `pkill -f VLLM*`.
+
+- **Q: How to handle OOM or unstable startup?**
+
+  A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce concurrency and load-testing pressure (e.g., `max-concurrency` / `num-prompts`).

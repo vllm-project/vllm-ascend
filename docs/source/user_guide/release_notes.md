@@ -17,7 +17,7 @@ This is the first release candidate of v0.17.0 for vLLM Ascend. Please follow th
 - FlashLB algorithm for EPLB: supports per-step heat collection and multi-stage load balancing for better expert parallelism efficiency. [#6477](https://github.com/vllm-project/vllm-ascend/pull/6477)
 - LoRA with tensor parallel and `--fully-sharded-loras` is now fixed and working. [#6650](https://github.com/vllm-project/vllm-ascend/pull/6650)
 - LMCacheAscendConnector is added as a new KV cache pooling solution for Ascend. [#6882](https://github.com/vllm-project/vllm-ascend/pull/6882)
-- W8A8C8 quantization is now supported for DeepSeek-V3.2 and GLM5 in PD-mix scenario. [#7029](https://github.com/vllm-project/vllm-ascend/pull/7029)
+- W8A8C8 quantization is now supported for DeepSeek-V3.2 in PD-mix scenario. [#7029](https://github.com/vllm-project/vllm-ascend/pull/7029)
 - [Experimental] Minimax-m2.5 model is now supported on Ascend NPU. [#7105](https://github.com/vllm-project/vllm-ascend/pull/7105)
 - [Experimental] Mooncake Layerwise Connector now supports hybrid attention manager with multiple KV cache groups. [#7022](https://github.com/vllm-project/vllm-ascend/pull/7022)
 - [Experimental] Prefix cache is now supported in hybrid model. [#7103](https://github.com/vllm-project/vllm-ascend/pull/7103)
@@ -51,7 +51,8 @@ This is the first release candidate of v0.17.0 for vLLM Ascend. Please follow th
 
 - GLM5 requires transformers==5.2.0, and this will resolved by [vllm-project/vllm#30566](https://github.com/vllm-project/vllm/pull/30566), will not included in v0.17.0.
 - There is a precision issue with Qwen3-Next due to the changed tp weight split method. Will fix it in next release.
-- The minimum number of tokens of prefix cache hit in hybrid model is 2k now
+- The minimum number of tokens of prefix cache hit in hybrid model is large now. The exact number is related to tp size, e.g., with tp 2, the block_size is adjusted to 2048, which means that any prefix shorter than 2048 will never be cached.
+- GLM5 has an issue in the 2-node PD mixed deployment scenario where inference may hang when concurrency exceeds 8 (fixed in PR [#7235](https://github.com/vllm-project/vllm-ascend/pull/7235) [#7290](https://github.com/vllm-project/vllm-ascend/pull/7290)).
 
 ## v0.16.0rc1 - 2026.03.09
 

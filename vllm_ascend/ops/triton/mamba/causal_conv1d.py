@@ -11,10 +11,9 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-import triton
-import triton.language as tl
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 
 
@@ -157,7 +156,20 @@ def extract_last_width(x, start_loc, width):
     return x[:, indices].permute(1, 0, 2)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "batch",
+        "state_len",
+        "num_cache_lines",
+        "stride_x_seq",
+        "stride_x_token",
+        "stride_conv_state_seq",
+        "stride_conv_state_tok",
+        "stride_state_indices",
+        "stride_o_seq",
+        "stride_o_token",
+    ]
+)
 def _causal_conv1d_update_kernel_npu_tiled(
     # Pointers
     x_ptr,  # (batch, dim, seqlen) OR (num_tokens, dim) for varlen
@@ -173,21 +185,21 @@ def _causal_conv1d_update_kernel_npu_tiled(
     batch: tl.int32,
     dim: tl.constexpr,
     seqlen: tl.constexpr,  # max seqlen for varlen, or exact seqlen
-    state_len: tl.constexpr,  # effective state_len computed in wrapper
-    num_cache_lines: tl.constexpr,
+    state_len,  # effective state_len computed in wrapper
+    num_cache_lines,
     # Strides
-    stride_x_seq: tl.constexpr,
+    stride_x_seq,
     stride_x_dim: tl.constexpr,
-    stride_x_token: tl.constexpr,
+    stride_x_token,
     stride_w_dim: tl.constexpr,
     stride_w_width: tl.constexpr,
-    stride_conv_state_seq: tl.constexpr,
+    stride_conv_state_seq,
     stride_conv_state_dim: tl.constexpr,
-    stride_conv_state_tok: tl.constexpr,
-    stride_state_indices: tl.constexpr,
-    stride_o_seq: tl.constexpr,
+    stride_conv_state_tok,
+    stride_state_indices,
+    stride_o_seq,
     stride_o_dim: tl.constexpr,
-    stride_o_token: tl.constexpr,
+    stride_o_token,
     # others
     pad_slot_id: tl.constexpr,
     # Meta

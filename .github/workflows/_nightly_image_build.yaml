@@ -1,0 +1,74 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'Nightly image build'
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+        description: "Build target: 'a2' or 'a3'"
+    secrets:
+      HW_USERNAME:
+        required: false
+      HW_TOKEN:
+        required: false
+      GITEE_TOKEN:
+        required: false
+
+jobs:
+  build:
+    name: Build nightly-${{ inputs.target }} image
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: releases/v0.18.0
+
+      - name: Login to Huawei Cloud SWR
+        id: login-swr
+        if: ${{ env.HW_USERNAME != '' && env.HW_TOKEN != '' }}
+        env:
+          HW_USERNAME: ${{ secrets.HW_USERNAME }}
+          HW_TOKEN: ${{ secrets.HW_TOKEN }}
+        run: |
+          echo "$HW_TOKEN" | docker login -u "$HW_USERNAME" --password-stdin swr.cn-southwest-2.myhuaweicloud.com
+
+      - name: Build nightly-${{ inputs.target }} image
+        env:
+          GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          IMAGE="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ inputs.target }}"
+          docker build \
+            --network host \
+            --platform linux/arm64 \
+            -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }} \
+            --build-arg CANN_VERSION="8.5.1" \
+            --build-arg UBUNTU_VERSION="22.04" \
+            --build-arg PYTHON_VERSION="3.11" \
+            --build-arg GITEE_USERNAME="${GITEE_USERNAME}" \
+            --build-arg GITEE_TOKEN="${GITEE_TOKEN}" \
+            -t "$IMAGE" .
+
+      - name: Push image to SWR
+        if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
+        run: |
+          docker push swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ inputs.target }}

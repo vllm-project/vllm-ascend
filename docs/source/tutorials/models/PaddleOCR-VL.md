@@ -74,7 +74,7 @@ Run the following script to start the vLLM server on single 910B4:
 #!/bin/sh
 export VLLM_USE_MODELSCOPE=true
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
-export TASK_QUEUE_ENABLE=2
+export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
