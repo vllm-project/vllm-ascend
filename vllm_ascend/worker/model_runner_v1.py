@@ -76,7 +76,6 @@ from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -119,6 +118,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
