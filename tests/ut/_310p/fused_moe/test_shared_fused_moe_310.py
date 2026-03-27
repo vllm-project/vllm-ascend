@@ -50,6 +50,9 @@ class _DummySharedExperts(torch.nn.Module):
 
 def _build_layer(shared_experts: torch.nn.Module | None) -> AscendSharedFusedMoE310:
     layer = AscendSharedFusedMoE310.__new__(AscendSharedFusedMoE310)
+    # The test bypasses full layer init with __new__, so we must initialize
+    # nn.Module internals before assigning child modules.
+    torch.nn.Module.__init__(layer)
     layer._shared_experts = shared_experts
     return layer
 
