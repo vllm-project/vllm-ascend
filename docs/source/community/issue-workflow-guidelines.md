@@ -66,7 +66,9 @@ flowchart LR
         C[Module Maintainer]
         C -- Valid --> C2[Verify issue type label]
         C -- Duplicate --> C3[Add: duplicated → Close]
-        C -- Invalid --> C4[Add: resolved → Close]
+        C -- Invalid --> C4[Explain + add: resolved]
+        C4 --> C4a[Wait for issue creator response]
+        C4a --> C4b[No further questions → Close]
         C2 --> C5[opt: Add priority label/help wanted/good first issue]
         C5 --> C6[Assign issue owner & replace: triage review → triaged]
     end
