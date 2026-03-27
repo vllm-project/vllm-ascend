@@ -520,7 +520,7 @@ class NPUPlatform(Platform):
 
         if model_config is not None:
             if model_config.hf_config is None:
-                pass
+                return
             elif "Qwen" in model_config.hf_config.architectures[0]:
                 if model_config.get_num_attention_heads(vllm_config.parallel_config) == model_config.get_num_kv_heads(
                     vllm_config.parallel_config
