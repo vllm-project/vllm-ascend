@@ -264,7 +264,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A5}:
-        if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 1:
+        if int(os.getenv("ENABLE_MOE_COMM_TYPE_ALLTOALL", "0")) == 1:
+            moe_comm_type = MoECommType.ALLTOALL
+        elif num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 1:
             moe_comm_type = MoECommType.MC2
         else:
             moe_comm_type = MoECommType.ALLTOALL
