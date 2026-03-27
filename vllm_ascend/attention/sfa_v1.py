@@ -130,6 +130,7 @@ class AscendSFAMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
+    seq_lens_cpu: torch.Tensor
     cum_query_lens: torch.Tensor
     block_table: torch.Tensor
     sin: torch.Tensor
@@ -233,6 +234,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
         cos, sin = get_cos_and_sin_mla(input_positions, True)
 
@@ -320,6 +322,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
             seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(self.model_config),
