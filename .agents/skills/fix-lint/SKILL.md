@@ -11,19 +11,25 @@ description: "自动进行 vllm-ascend 仓库的 lint 更改并提交"
 
 ### 1. 激活 conda base 环境（如有需要）
 
-### 2. 注释 actionlint 相关内容
+### 2. 先提交当前状态
+
+```bash
+git commit -sm "Before fix lint"
+```
+
+### 3. 注释 actionlint 相关内容
 
 编辑 `.pre-commit-config.yaml` 文件，将 actionlint 相关的配置注释掉。
 
-### 3. 执行 format.sh
+### 4. 执行 format.sh
 
 ```bash
 /opt/homebrew/Caskroom/miniconda/base/bin/pre-commit run --all-files
 ```
 
-### 4. 恢复 actionlint 配置（取消注释）
+### 5. 恢复 actionlint 配置（取消注释）
 
-### 5. 检查是否有实际的 lint 更改
+### 6. 检查是否有实际的 lint 更改
 
 ```bash
 git diff --name-only
@@ -34,13 +40,13 @@ git diff --name-only
 - 报告 "没有需要提交的 lint 更改"
 - 结束执行
 
-### 6. 如果有更改，提交
+### 7. 如果有更改，提交
 
 ```bash
 git add -A
 git commit -sm "Fix lint"
 ```
 
-### 7. 报告结果
+### 8. 报告结果
 
 向用户报告 lint 执行的结果。
