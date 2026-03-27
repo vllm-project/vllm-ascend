@@ -194,12 +194,12 @@ Supported images as following.
 
 | image name | Hardware | OS |
 |-|-|-|
-| vllm-ascend:<image-tag> | Atlas A2 | Ubuntu |
-| vllm-ascend:<image-tag>-openeuler | Atlas A2 | openEuler |
-| vllm-ascend:<image-tag>-a3 | Atlas A3 | Ubuntu |
-| vllm-ascend:<image-tag>-a3-openeuler | Atlas A3 | openEuler |
-| vllm-ascend:<image-tag>-310p | Atlas 300I | Ubuntu |
-| vllm-ascend:<image-tag>-310p-openeuler | Atlas 300I | openEuler |
+| `vllm-ascend:<image-tag>` | Atlas A2 | Ubuntu |
+| `vllm-ascend:<image-tag>`-openeuler | Atlas A2 | openEuler |
+| `vllm-ascend:<image-tag>`-a3 | Atlas A3 | Ubuntu |
+| `vllm-ascend:<image-tag>`-a3-openeuler | Atlas A3 | openEuler |
+| `vllm-ascend:<image-tag>`-310p | Atlas 300I | Ubuntu |
+| `vllm-ascend:<image-tag>`-310p-openeuler | Atlas 300I | openEuler |
 
 :::{dropdown} Click here to see "Build from Dockerfile"
 or build IMAGE from **source code**:
