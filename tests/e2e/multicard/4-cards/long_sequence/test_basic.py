@@ -240,7 +240,7 @@ def test_dcp_basic():
         runner.model.generate(prompts, sampling_params)
 
 @wait_until_npu_memory_free()
-def test_dcp_basic():
+def test_dcp_sp_basic():
     prompts = [
         "The capital of France is", "Hello, my name is Tom, I am",
         "The president of United States is", "AI future is"
