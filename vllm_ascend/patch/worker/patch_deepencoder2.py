@@ -3,6 +3,7 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 import torch_npu
+import vllm
 from transformers import Qwen2Config
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
@@ -17,8 +18,6 @@ from transformers.models.qwen2.modeling_qwen2 import (
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
-
-import vllm
 from vllm.model_executor.models.deepencoder2 import CustomQwen2Decoder
 
 
@@ -356,5 +355,6 @@ class AscendQwen2RMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return torch_npu.npu_rms_norm(hidden_states, self.weight, epsilon=self.variance_epsilon)[0]
+
 
 vllm.model_executor.models.deepencoder2.CustomQwen2Decoder = AscendCustomQwen2Decoder
