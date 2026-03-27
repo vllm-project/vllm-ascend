@@ -204,7 +204,7 @@ async def _patched_chat_completion_stream_generator(
     # self-contained instead of depending on fragile source rewrites.
     num_choices = 1 if request.n is None else request.n
     previous_num_tokens = [0] * num_choices
-    raw_output_token_ids = [[] for _ in range(num_choices)]
+    raw_output_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
     finish_reason_sent = [False] * num_choices
     num_prompt_tokens = 0
     num_cached_tokens = None

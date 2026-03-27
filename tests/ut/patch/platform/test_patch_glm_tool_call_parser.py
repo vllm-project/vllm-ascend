@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
+)
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -8,6 +12,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
 )
 from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
+from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 
 class FakeTokenizer:
@@ -233,10 +238,7 @@ def test_glm_streaming_final_chunk_emits_inline_string_value():
             last_tool_delta = result
 
     assert last_tool_delta is not None
-    assert (
-        last_tool_delta.tool_calls[0].function.arguments
-        == '{"filepath":"pong.py"}'
-    )
+    assert last_tool_delta.tool_calls[0].function.arguments == '{"filepath":"pong.py"}'
     assert parser.streamed_args_for_tool == ['{"filepath":"pong.py"}']
     assert parser.prev_tool_call_arr == [
         {
@@ -244,3 +246,69 @@ def test_glm_streaming_final_chunk_emits_inline_string_value():
             "arguments": {"filepath": "pong.py"},
         }
     ]
+
+
+def test_glm47_streaming_delta_serializes_tool_call_fields():
+    parser = Glm47MoeModelToolParser(FakeTokenizer())
+    _reset_streaming_state(parser)
+
+    request = ChatCompletionRequest(
+        model="GLM-5",
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "builtin_get_problems",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filepath": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ],
+    )
+
+    chunks = [
+        "<tool_call>",
+        "builtin_get_problems\n",
+        "<arg_key>filepath</arg_key>",
+        "<arg_value>pong.py</arg_value></tool_call>",
+    ]
+
+    serialized_deltas = []
+    for chunk in chunks:
+        result = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text="",
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        if result is None:
+            continue
+
+        choice = ChatCompletionResponseStreamChoice(
+            index=0,
+            delta=result,
+            logprobs=None,
+            finish_reason=None,
+        )
+        response = ChatCompletionStreamResponse(
+            id="chatcmpl-test",
+            created=0,
+            model="GLM-5",
+            choices=[choice],
+        )
+        serialized_deltas.append(response.model_dump(exclude_unset=True)["choices"][0]["delta"])
+
+    assert len(serialized_deltas) == 2
+    assert serialized_deltas[0]["tool_calls"][0]["type"] == "function"
+    assert serialized_deltas[0]["tool_calls"][0]["function"]["name"] == "builtin_get_problems"
+    assert serialized_deltas[-1] != {}
+    assert serialized_deltas[-1]["tool_calls"][0]["index"] == 0
+    assert serialized_deltas[-1]["tool_calls"][0]["function"]["arguments"] == '{"filepath":"pong.py"}'
