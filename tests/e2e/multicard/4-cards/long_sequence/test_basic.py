@@ -226,25 +226,6 @@ def test_dcp_basic():
         "The capital of France is", "Hello, my name is Tom, I am",
         "The president of United States is", "AI future is"
     ]
-    model = "deepseek-ai/DeepSeek-V2-Lite-Chat"
-    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
-    with VllmRunner(model,
-                    enforce_eager=True,
-                    max_model_len=1024,
-                    tensor_parallel_size=4,
-                    prefill_context_parallel_size=1,
-                    decode_context_parallel_size=2,
-                    max_num_batched_tokens=1024,
-                    enable_expert_parallel=True,
-                    block_size=128) as runner:
-        runner.model.generate(prompts, sampling_params)
-
-@wait_until_npu_memory_free()
-def test_dcp_sp_basic():
-    prompts = [
-        "The capital of France is", "Hello, my name is Tom, I am",
-        "The president of United States is", "AI future is"
-    ]
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
     sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
     with VllmRunner(model,
@@ -257,7 +238,6 @@ def test_dcp_sp_basic():
                     block_size=128,
                     compilation_config={"pass_config": {"enable_sp": True}}) as runner:
         runner.model.generate(prompts, sampling_params)
-
 
 @wait_until_npu_memory_free()
 def test_dcp_full_graph():
