@@ -518,7 +518,7 @@ class NPUPlatform(Platform):
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
             )
 
-        if model_config is not None:
+        if model_config is not None and "Qwen" in model_config.hf_config.architectures[0]:
             if model_config.get_num_attention_heads(vllm_config.parallel_config) == model_config.get_num_kv_heads(
                 vllm_config.parallel_config
             ) and model_config.get_head_size() not in [64, 128, 192]:
