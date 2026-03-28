@@ -66,6 +66,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
     export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/`uname -i`-openEuler-linux && \
     python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     if [ "$(uname -i)" = "x86_64" ]; then python3 -m pip uninstall -y triton; fi && \
+    pip install triton-ascend==3.2.0.dev20260322 -i -i https://test.pypi.org/simple/ && \
     python3 -m pip cache purge
 
 # Install clang (for triton-ascend)

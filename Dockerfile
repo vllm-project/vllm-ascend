@@ -66,6 +66,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     if [ "$(uname -i)" = "x86_64" ]; then python3 -m pip uninstall -y triton; fi && \
+    pip install triton-ascend==3.2.0.dev20260322 -i -i https://test.pypi.org/simple/ && \
     python3 -m pip cache purge
 
 # Install clang-15 (for triton-ascend)
