@@ -84,7 +84,13 @@ class AscendSFABackend(AttentionBackend):
         return AscendSFAMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int) -> tuple[int, ...]:
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod

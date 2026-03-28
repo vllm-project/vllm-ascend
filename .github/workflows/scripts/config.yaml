@@ -61,7 +61,6 @@ e2e-singlecard:
   estimated_time: 600
 - name: tests/e2e/singlecard/model_runner_v2/test_basic.py
   estimated_time: 80
-  is_skipped: true
 e2e-singlecard-light:
 - name: tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
   estimated_time: 229
