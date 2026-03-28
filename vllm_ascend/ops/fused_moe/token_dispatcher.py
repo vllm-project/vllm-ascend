@@ -124,6 +124,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             raise RuntimeError(
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
+        self.global_num_experts = getattr(kwargs, "global_num_experts", 0)
 
     def get_dispatch_mc2_kwargs(
         self,
@@ -132,11 +133,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
-        expert_map = token_dispatch_input.routing.expert_map
-        global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         comm_quant_mode = token_dispatch_input.quant.comm_quant_mode
 
-        assert expert_map is not None, "expert_map is required for MC2 token dispatch."
         # NOTE: quant_mode differs by quant feature:
         # - Legacy int communication quantization uses quant_mode=2.
         # - A5 MXFP8 communication uses quant_mode=4.
@@ -146,13 +144,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             quant_mode = 4 if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp else 2
         else:
             quant_mode = 0
-        self.moe_expert_num = len(expert_map) + global_redundant_expert_num
         kwargs_mc2 = {
             "x": hidden_states,
             "expert_ids": topk_ids,
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
-            "moe_expert_num": self.moe_expert_num,
+            "moe_expert_num": self.global_num_experts,
             "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
@@ -222,7 +219,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             combine_metadata=MoEMC2CombineMetadata(
                 topk_ids=token_dispatch_input.topk_ids,
                 topk_weights=token_dispatch_input.topk_weights,
-                expert_map=token_dispatch_input.routing.expert_map,
                 ep_recv_counts=ep_recv_counts,
                 tp_recv_counts=tp_recv_counts,
                 assist_info_for_combine=assist_info_for_combine,
@@ -232,7 +228,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         )
 
     def get_combine_mc_kwargs(self, hidden_states: torch.Tensor, combine_metadata: MoEMC2CombineMetadata):
-        expert_map = combine_metadata.expert_map
         topk_ids = combine_metadata.topk_ids
         topk_weights = combine_metadata.topk_weights
         ep_recv_counts = combine_metadata.ep_recv_counts
@@ -240,15 +235,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         assist_info_for_combine = combine_metadata.assist_info_for_combine
         expand_scales = combine_metadata.expand_scales
 
-        assert expert_map is not None
-
         kwargs_mc2 = {
             "expand_x": hidden_states,
             "expert_ids": topk_ids,
             "expert_scales": topk_weights.to(torch.float32),
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
-            "moe_expert_num": self.moe_expert_num,
+            "moe_expert_num": self.global_num_experts,
             "global_bs": self.global_bs,
         }
 
@@ -308,9 +301,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self.with_quant = False
         self.ep_rank_id = get_ep_group().rank_in_group
         self.ep_world_size = get_ep_group().world_size
- 
-        total_length = self.ep_world_size * num_experts_local
-        self.expert_map = torch.full((total_length,), -1, dtype=torch.int32)
+
+        global_num_experts = getattr(kwargs, "global_num_experts", 0)
+        self.expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
         start_idx = self.ep_rank_id * num_experts_local
         end_idx = (self.ep_rank_id + 1) * num_experts_local
         self.expert_map[start_idx:end_idx] = torch.arange(num_experts_local, dtype=torch.int32)

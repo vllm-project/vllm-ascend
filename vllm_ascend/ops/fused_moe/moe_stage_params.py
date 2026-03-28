@@ -34,8 +34,6 @@ class MoERoutingParams:
     quant path can reuse those scales instead of requantizing activations.
     """
 
-    expert_map: torch.Tensor | None
-    global_redundant_expert_num: int
     mc2_mask: torch.Tensor | None
     apply_router_weight_on_input: bool
     log2phy: torch.Tensor | None = None
