@@ -289,3 +289,14 @@ export SOC_VERSION="ascend310p1"
 # Atlas A5 (Ascend 950 series)
 export SOC_VERSION="<value starting with ascend950>"
 ```
+
+### 24. Compilation error occasionally encounters with triton-ascend
+
+As shown in [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782), triton-ascend occasionally encounters compilation errors, which is a known issue in triton-ascend 3.2.0. To avoid this issue, please use the offical docker images or install the specific triton-ascend version as following:
+
+```bash
+PYTHON_TAG=$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')") && \
+ARCH=$(python3 -c "import platform; machine = platform.machine().lower(); arch_map = {'x86_64': 'x86_64', 'amd64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}; print(arch_map.get(machine, machine))") && \
+TRITON_ASCEND_WHEEL="triton_ascend-3.2.0.dev20260322-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl" && \
+python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${TRITON_ASCEND_WHEEL}"
+```
