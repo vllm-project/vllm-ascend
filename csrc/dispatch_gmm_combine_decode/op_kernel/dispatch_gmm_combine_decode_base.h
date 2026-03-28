@@ -10,7 +10,7 @@
 #ifndef DISPATCH_GMM_COMBINE_DECODE_BASE_H
 #define DISPATCH_GMM_COMBINE_DECODE_BASE_H
 
-#include "../common/moe_distribute_base.h"
+#include "moe_distribute_base.h"
 
 #define TemplateMC2TypeClass typename ExpandXType, typename W1ScaleType, typename W2ScaleType, typename WType, typename ExpandIdxType, bool IsNeedReduceScatter, uint32_t EXEC_FLAG
 #define TemplateMC2TypeFunc ExpandXType, W1ScaleType, W2ScaleType, WType, ExpandIdxType, IsNeedReduceScatter, EXEC_FLAG
