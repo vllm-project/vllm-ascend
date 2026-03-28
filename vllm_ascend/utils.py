@@ -1276,5 +1276,5 @@ def parse_layer_idx(prefix: str) -> int | None:
 
 def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
-    
+
     return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
