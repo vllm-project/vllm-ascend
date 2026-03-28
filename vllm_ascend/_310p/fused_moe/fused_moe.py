@@ -132,13 +132,10 @@ class AscendFusedMoE310(FusedMoE):
         # init moe
         self.global_expert_map = None
         self.local_expert_map = None
+        # Only MOE TP is supported on 310P
         if self.moe_config.ep_size > 1:
-            self.global_expert_map, self.local_expert_map = self.init_experts_map(self.moe_config)
-        self.local_num_experts = (
-            torch.sum(self.local_expert_map != -1).item()
-            if self.local_expert_map is not None
-            else self.global_num_experts
-        )
+            raise RuntimeError("Expert Parallel is not supported on 310P. Please remove --enable-expert-parallel.")
+        self.local_num_experts = self.global_num_experts
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
@@ -172,39 +169,6 @@ class AscendFusedMoE310(FusedMoE):
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
         )
-
-    def init_experts_map(self, moe_config):
-        """
-        Initialize expert mapping for MoE (Mixture of Experts) model.
-
-        This function creates mappings between global expert indices and local expert indices
-        for each rank in the expert parallel group. It divides the total experts among
-        different ranks and creates both global and local expert maps that are used
-        during MoE computation to determine which experts are handled by which rank.
-
-        Args:
-            moe_config: Configuration object containing MoE parameters including
-                       number of experts, expert parallel size, and expert parallel rank.
-
-        Returns:
-            tuple: A tuple containing:
-                   - global_expert_map: Stack of expert maps for all ranks
-                   - local_expert_map: Expert map for the current rank (transferred to NPU)
-        """
-        n_experts = moe_config.num_experts
-        ep_size = moe_config.ep_size
-        all_experts = torch.arange(n_experts, dtype=torch.int32)
-        experts_groups = all_experts.chunk(ep_size)
-        global_expert_map = []
-        local_expert_map = None
-        for rankid in range(ep_size):
-            expert_map = torch.full((n_experts,), -1, dtype=torch.int32)
-            local_experts = experts_groups[rankid]
-            expert_map[local_experts] = torch.arange(local_experts.shape[0], dtype=torch.int32)
-            global_expert_map.append(expert_map)
-            if rankid == moe_config.ep_rank:
-                local_expert_map = expert_map.npu()
-        return torch.stack(global_expert_map), local_expert_map
 
     def get_quant_type(self) -> QuantType:
         quant_method = self.quant_method
