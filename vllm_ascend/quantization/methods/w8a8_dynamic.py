@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -127,14 +128,15 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
 
-        try:
-            device_group = get_mc2_group().device_group
-            # TODO: Try local_rank = ep_group.rank_in_group
-            local_rank = torch.distributed.get_rank(group=device_group)
-            backend = device_group._get_backend(torch.device("npu"))
-            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-        except AttributeError:
-            self.moe_all_to_all_group_name = ""
+        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
+            try:
+                device_group = get_mc2_group().device_group
+                # TODO: Try local_rank = ep_group.rank_in_group
+                local_rank = get_mc2_group().rank_in_group
+                backend = device_group._get_backend(torch.device("npu"))
+                self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+            except AttributeError:
+                self.moe_all_to_all_group_name = ""
 
     def get_weight(
         self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype

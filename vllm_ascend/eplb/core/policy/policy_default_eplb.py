@@ -1,7 +1,7 @@
 # Copyright Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this policy.
 from collections import defaultdict
-from typing import cast
+from typing import cast, ClassVar
 
 import numpy as np
 
@@ -25,6 +25,12 @@ class DynamicTable:
 
 
 class DefaultEplb(EplbPolicy):
+    _new_ep_size: ClassVar[int | None] = None
+
+    @classmethod
+    def set_new_ep_size(cls, new_ep_size:int):
+        cls._new_ep_size = new_ep_size
+
     @staticmethod
     def add_redundant(current_expert_table, expert_workload, num_original_expert):
         layer_num, npu_num, experts_per_npu = expert_workload.shape
@@ -50,10 +56,13 @@ class DefaultEplb(EplbPolicy):
         for i in range(num_redundancy_expert):
             sorted_indices = np.argsort([t[1] for t in origin_weights], kind="stable")[::-1]
             weights = [origin_weights[idx] for idx in sorted_indices]
-            tmp_raw_weight = weights[0][1] * (len(route_expert_redundancy[weights[0][0]]) + 1)
-            route_expert_redundancy[weights[0][0]].append(route_expert_num + i)
-            avg_weight = tmp_raw_weight / (len(route_expert_redundancy[weights[0][0]]) + 1)
-            weights[0] = (weights[0][0], avg_weight)
+            index = 0
+            while (len(route_expert_redundancy[weights[index][0]])) == card_num - 1:
+                index += 1
+            tmp_raw_weight = weights[index][1] * (len(route_expert_redundancy[weights[index][0]]) + 1)
+            route_expert_redundancy[weights[index][0]].append(route_expert_num + i)
+            avg_weight = tmp_raw_weight / (len(route_expert_redundancy[weights[index][0]]) + 1)
+            weights[index] = (weights[index][0], avg_weight)
             origin_weights = weights
 
         # Step 2: Calculate the number of items per box
@@ -80,6 +89,7 @@ class DefaultEplb(EplbPolicy):
                 box_weights[index] += cur_weight
                 box_counts[index] += 1
                 index += 1
+                index = index % card_num
 
         sorted_indices = np.argsort([t[1] for t in origin_weights], kind="stable")[::-1]
         origin_weights = [origin_weights[idx] for idx in sorted_indices]
@@ -95,6 +105,17 @@ class DefaultEplb(EplbPolicy):
                     if min_box_index == -1 or box_weights[i] < box_weights[min_box_index]:
                         min_box_index = i
 
+            if min_box_index == -1:
+                # Try to place in the last box first
+                if box_counts[-1] < items_per_box or (box_counts[-1] == items_per_box and remaining_items > 0):
+                    min_box_index = -1
+                else:
+                    # Find any box with capacity
+                    for i in range(card_num):
+                        if box_counts[i] < items_per_box or (box_counts[i] == items_per_box and remaining_items > 0):
+                            min_box_index = i
+                            break
+
             # Place the item (id) into the selected box
             boxes[min_box_index].append(item_id)
             boxes_weights[min_box_index].append(weight)
@@ -105,7 +126,58 @@ class DefaultEplb(EplbPolicy):
             if box_counts[min_box_index] == (items_per_box + 1) and remaining_items > 0:
                 remaining_items -= 1
 
-        # Step 5: Output each box's contents and total weight
+            # Step 5: Eliminate duplicate experts within the same NPU through redundancy
+            #         reallocation. Replace duplicates with redundant copies from other
+            #         experts based on minimal weight difference.
+            for i in range(card_num):
+                arr = np.asarray(boxes[i])
+                unique, inv, cnt = np.unique(arr, return_inverse=True, return_counts=True)
+                mask = cnt > 1
+                dup_vals = unique[mask]
+                dup_cnts = cnt[mask]
+                for item_id, counts in zip(dup_vals, dup_cnts):
+                    for _ in range(counts - 1):
+                        cur_position = boxes[i].index(item_id)
+                        cur_weight = boxes_weights[i][cur_position]
+                        sorted_indices = np.argsort(
+                            [
+                                abs(
+                                    t[1]
+                                    * (len(route_expert_redundancy[t[0]]) + 1)
+                                    / (len(route_expert_redundancy[t[0]]) + 2)
+                                    - cur_weight
+                                )
+                                for t in origin_weights
+                            ],
+                            kind="stable",
+                        )
+                        weights = [origin_weights[idx] for idx in sorted_indices]
+                        index = 0
+                        while index < len(weights):
+                            if (
+                                len(route_expert_redundancy[weights[index][0]]) < card_num - 1
+                                and weights[index][0] != item_id
+                                and weights[index][0] not in boxes[i]
+                            ):
+                                break
+                            index += 1
+                        boxes[i][cur_position] = weights[index][0]
+                        tmp_raw_weight = weights[index][1] * (len(route_expert_redundancy[weights[index][0]]) + 1)
+                        route_expert_redundancy[weights[index][0]].append(0)
+                        avg_weight = tmp_raw_weight / (len(route_expert_redundancy[weights[index][0]]) + 1)
+                        boxes_weights[i][cur_position] = avg_weight
+                        weights[index] = (weights[index][0], avg_weight)
+                        tmp_raw_weight = cur_weight * (len(route_expert_redundancy[item_id]) + 1)
+                        avg_weight = tmp_raw_weight / len(route_expert_redundancy[item_id])
+                        route_expert_redundancy[item_id].pop()
+                        for index, (expert_id, expert_weight) in enumerate(weights):
+                            if item_id == expert_id:
+                                weights[index] = (expert_id, avg_weight)
+                        origin_weights = weights
+
+        box_weights = [sum(boxes_weights[i]) for i in range(card_num)]
+
+        # Step 6: Output each box's contents and total weight
         result = []
         for i in range(card_num):
             result.append(
@@ -289,8 +361,12 @@ class DefaultEplb(EplbPolicy):
         assert info.placement_table is not None
         row = cast(np.ndarray, info.placement_table[0])
         expert_ids, counts = np.unique(row, return_counts=True)
-        num_redundancy_expert = self.get_redundant_num(num_npus, counts)
         num_original_expert = len(expert_ids)
+        if DefaultEplb._new_ep_size:
+            num_npus = DefaultEplb._new_ep_size
+            num_redundancy_expert = experts_per_npu * self._new_ep_size - num_original_expert
+        else:
+            num_redundancy_expert = self.get_redundant_num(num_npus, counts)
         layer_workloads = self.add_redundant(info.placement_table, info.workload_table, num_original_expert)
         max_heat_per_layer_before = self.calculate_max_heat_per_layer(info.workload_table, layer_num)
         npu_heat_all_origin = sum(max_heat_per_layer_before)
@@ -308,11 +384,14 @@ class DefaultEplb(EplbPolicy):
         if num_npus <= 0:
             raise ValueError("the number of NPUs must be greater than 0")
 
-        if num_npus < num_redundancy_expert:
+        if experts_per_npu > expert_num:
             raise ValueError(
-                "the number of NPUs "
-                f"{num_npus} must be greater than or equal to the number of redundant experts "
-                f"{num_redundancy_expert}"
+                f"the number of experts per NPU {experts_per_npu} can't be greater than expert_num {expert_num}"
+            )
+        if num_npus * experts_per_npu < num_original_expert:
+            raise ValueError(
+                f"num_npus {num_npus} * experts_per_npu {experts_per_npu} "
+                f"can't be less than num_original_expert {num_original_expert}"
             )
 
         # Number of experts deployed on each card includes one redundant expert
@@ -321,7 +400,7 @@ class DefaultEplb(EplbPolicy):
         max_heat_per_layer_after = np.zeros([layer_num])
         for layer in range(layer_num):
             # Get the expert IDs and their corresponding workloads for the current layer;
-            # workloads need to be normalized, and one redundant expert is added per card
+            # redundant experts will be created and distributed during the packing process
             weights = np.zeros((expert_num,), dtype="object")
             for expert_id, workload_weight in enumerate(layer_workloads[layer]):
                 weights[expert_id] = (expert_id, workload_weight)
@@ -346,5 +425,7 @@ class DefaultEplb(EplbPolicy):
         change = 0
         if npu_heat_all_after < 0.95 * npu_heat_all_origin:
             change = 1
+
+        DefaultEplb._new_ep_size = None
 
         return change, per_layer_priority, np.array(new_global_deployment).tolist()
