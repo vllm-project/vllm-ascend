@@ -368,6 +368,14 @@ class NPUModelRunner(GPUModelRunner):
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
             self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
 
+        # Create a CPU numpy buffer for positions computation when
+        # self.positions is a plain tensor (non-CpuGpuBuffer case).
+        self._positions_cpu_buf = torch.zeros(
+            max_buffer_num_tokens, dtype=torch.int64,
+            pin_memory=self.pin_memory,
+        )
+        self._positions_np_buf = self._positions_cpu_buf.numpy()
+
         self._set_up_drafter()
 
         # kv role
@@ -678,16 +686,18 @@ class NPUModelRunner(GPUModelRunner):
         self.with_prefill = with_prefill
 
         # Get positions.
+        # Use query_pos.np as output buffer for _get_cumsum_and_arange to avoid
+        # corrupting self.arange_np (which is used as both read source and would
+        # be overwritten if used as arange_out, causing aliasing bugs).
+        cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
+        arange = self.query_pos.np[:total_num_scheduled_tokens]
+
         # Handle both CpuGpuBuffer (.np property) and plain Tensor compatibility
         if hasattr(self.positions, 'np'):
             positions_np = self.positions.np[:total_num_scheduled_tokens]
         else:
-            # Plain tensor - move to CPU and convert to numpy
-            positions_np = self.positions.cpu().numpy()[:total_num_scheduled_tokens]
-
-        # New vLLM signature requires arange_out parameter
-        cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.arange_np)
-        arange = self.arange_np[:total_num_scheduled_tokens]
+            # Plain tensor - need a CPU numpy buffer for computation
+            positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices], arange, out=positions_np)
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
@@ -722,13 +732,12 @@ class NPUModelRunner(GPUModelRunner):
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-            cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.arange_np)
+            cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
             # Handle both CpuGpuBuffer (.np property) and plain Tensor compatibility
             if hasattr(self.positions, 'np'):
                 positions_np = self.positions.np[:total_num_scheduled_tokens]
             else:
-                # Plain tensor - move to CPU and convert to numpy
-                positions_np = self.positions.cpu().numpy()[:total_num_scheduled_tokens]
+                positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
                 position_pcp[:total_num_scheduled_tokens],
@@ -851,6 +860,9 @@ class NPUModelRunner(GPUModelRunner):
             # Plain tensor - already on device
             self.query_start_loc[num_reqs + 1 :].fill_(-1)
 
+        # Build prev_positions mapping for async scheduling input_ids handling.
+        self._compute_prev_positions(num_reqs)
+
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         # Calculate M-RoPE positions.
@@ -884,7 +896,14 @@ class NPUModelRunner(GPUModelRunner):
                 )
         else:
             # Common case (1D positions)
-            self._safe_copy_to_gpu(self.positions, total_num_scheduled_tokens)
+            if hasattr(self.positions, 'copy_to_gpu'):
+                self.positions.copy_to_gpu(total_num_scheduled_tokens)
+            else:
+                # Plain tensor: copy from CPU numpy buffer to GPU
+                self.positions[:total_num_scheduled_tokens].copy_(
+                    self._positions_cpu_buf[:total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
