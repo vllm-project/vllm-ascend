@@ -92,6 +92,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.utils import kv_cache_spec_uses_sparse_c8
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -2673,11 +2674,6 @@ class NPUModelRunner(GPUModelRunner):
                     layer_kv_cache_spec[layer_name] = group_spec
         return layer_kv_cache_spec
 
-
-    @staticmethod
-    def _kv_cache_spec_uses_sparse_c8(kv_cache_spec: KVCacheSpec) -> bool:
-        return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
-
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, MLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
@@ -2756,7 +2752,7 @@ class NPUModelRunner(GPUModelRunner):
                     if self.use_sparse:
                         # for deepseek v3.2, we split the kv cache according to the corresponding ratio
                         kv_cache_spec = layer_kv_cache_spec[layer_name]
-                        current_sparse_c8 = self._kv_cache_spec_uses_sparse_c8(kv_cache_spec)
+                        current_sparse_c8 = kv_cache_spec_uses_sparse_c8(kv_cache_spec)
                         sparse_kv_cache_ratio = kv_cache_spec.sparse_kv_cache_ratio
                         k_tensor_split_factor = sparse_kv_cache_ratio[0]
                         v_tensor_split_factor = sparse_kv_cache_ratio[1]
@@ -2868,7 +2864,7 @@ class NPUModelRunner(GPUModelRunner):
                 # encounter OOM issue
                 if isinstance(current_kv_cache_spec, AttentionSpec):
                     if self.use_sparse:
-                        current_sparse_c8 = self._kv_cache_spec_uses_sparse_c8(current_kv_cache_spec)
+                        current_sparse_c8 = kv_cache_spec_uses_sparse_c8(current_kv_cache_spec)
                         if current_sparse_c8:
                             raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor, raw_dsa_k_scale_tensor = kv_cache_raw_tensors[  # type: ignore
                                 layer_name]
