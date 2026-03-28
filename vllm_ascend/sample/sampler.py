@@ -1,5 +1,6 @@
 import torch
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
@@ -44,7 +45,10 @@ class AscendSampler(Sampler):
         sampling_metadata: SamplingMetadata,
         output_token_ids: list[list[int]],
     ) -> torch.Tensor:
-        """Override to use Triton-Ascend apply_all_penalties on NPU."""
+        """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
+        if not HAS_TRITON:
+            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
+
         if sampling_metadata.no_penalties:
             return logits
         assert sampling_metadata.prompt_token_ids is not None
