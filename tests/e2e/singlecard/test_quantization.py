@@ -38,6 +38,7 @@ def test_qwen3_w8a8_quant():
             gpu_memory_utilization=0.7,
             cudagraph_capture_sizes=[1, 2, 4, 8],
             quantization="ascend",
+            enforce_eager=True,
     ) as vllm_model:
         vllm_quant_w8a8_outputs = vllm_model.generate_greedy(
             example_prompts, max_tokens)
