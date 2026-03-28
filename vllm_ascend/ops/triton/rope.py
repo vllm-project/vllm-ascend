@@ -358,7 +358,10 @@ def rope_forward_triton_siso(
             USE_COS_SIN=True,
         )
     elif cos is not None and sin is not None:
-        assert cos.shape[0] == num_tokens and sin.shape[0] == num_tokens
+        assert cos.shape[0] == num_tokens and sin.shape[0] == num_tokens, (
+            f"RoPE cos/sin length must match qk tokens: qk={qk.shape}, "
+            f"num_tokens={num_tokens}, cos={cos.shape}, sin={sin.shape}"
+        )
         cos = cos.view(num_tokens, -1)
         sin = sin.view(num_tokens, -1)
         if rope_dim == -1:

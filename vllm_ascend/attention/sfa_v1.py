@@ -1069,6 +1069,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 num_input_tokens=num_input_tokens,
             )
             k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            hidden_states_for_kv = hidden_states
+            q_c_for_kv = q_c
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
@@ -1084,15 +1086,27 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
+                _ctx = attn_metadata.dsa_cp_context
+                _num_cp_tokens = _ctx.local_end_with_pad - _ctx.local_start
+                _cp_local_offset = _ctx.local_start % hidden_states.shape[0]
+                hidden_states_for_kv = hidden_states[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
+                kv_no_split_for_kv = kv_no_split[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
+                q_c_for_kv = q_c[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
+            else:
+                hidden_states_for_kv = hidden_states
+                kv_no_split_for_kv = kv_no_split
+                q_c_for_kv = q_c
+
+            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states_for_kv, cos=cos, sin=sin)
 
             wait_for_kv_layer_from_connector(layer_name)
 
             if self.enable_dsa_cp:
                 assert slot_mapping_cp is not None
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split_for_kv, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
             else:
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split_for_kv, cos, sin, kv_cache, slot_mapping, attn_metadata)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -1138,7 +1152,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         async_op=async_op,
                     )
 
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c_for_kv)
             q_pe = self.rope_single(q_pe, cos, sin)
 
             if self.enable_dsa_cp:
@@ -1192,8 +1206,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_metadata.reshape_cache_event.record()
 
         topk_indices = self.indexer_select_post_process(
-            x=hidden_states,
-            q_c=q_c,
+            x=hidden_states_for_kv,
+            q_c=q_c_for_kv,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
             cos=cos,
@@ -1229,7 +1243,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return result
             attn_output = result
 
-        output[...] = self.o_proj(attn_output)[0]
+        if self.enable_dsa_cp and attn_metadata is not None and attn_metadata.dsa_cp_context is not None:
+            _ctx = attn_metadata.dsa_cp_context
+            _num_cp_tokens = _ctx.local_end_with_pad - _ctx.local_start
+            _cp_local_offset = _ctx.local_start % output.shape[0]
+            output[_cp_local_offset : _cp_local_offset + _num_cp_tokens] = self.o_proj(attn_output)[0]
+        else:
+            output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
