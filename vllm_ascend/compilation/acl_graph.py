@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
@@ -82,6 +82,21 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+    _graph_pool: ClassVar[tuple[int, int]] = None
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        cls._graph_pool = current_platform.graph_pool_handle()
+        for instance in list(cls._all_instances):
+            instance.clear_graphs()
+
+    @classmethod
+    def get_graph_pool(cls):
+        if cls._graph_pool is None:
+            cls._graph_pool = current_platform.graph_pool_handle()
+        return cls._graph_pool
+
     def __init__(
         self,
         runnable: Callable,
@@ -104,7 +119,7 @@ class ACLGraphWrapper:
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
-        self.graph_pool = current_platform.get_global_graph_pool()
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()

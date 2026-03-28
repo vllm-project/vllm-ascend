@@ -1,6 +1,13 @@
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
+from vllm.distributed import get_cached_tcp_store_client
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    _init_stateless_group,
+    get_tp_group,
+    get_world_group,
+    init_model_parallel_group,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 
@@ -24,12 +31,25 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
+    enable_elastic_ep = parallel_config.enable_elastic_ep
     world_size = torch.distributed.get_world_size()
-    backend = torch.distributed.get_backend(get_world_group().device_group)
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size
+    if enable_elastic_ep:
+        coord_store = get_cached_tcp_store_client(
+            parallel_config.data_parallel_master_ip,
+            parallel_config._coord_store_port,
+        )
+        # Use stateless world group for global information
+        world_size = get_world_group().world_size
+        tp_pp_pcp_size = global_tp_size * global_pp_size * global_pcp_size
+        local_all_ranks = torch.arange(tp_pp_pcp_size).reshape(global_pp_size, global_pcp_size, global_tp_size)
+        backend = "hccl"
+    else:
+        world_size = torch.distributed.get_world_size()
+        backend = torch.distributed.get_backend(get_world_group().device_group)
 
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
@@ -52,11 +72,17 @@ def init_ascend_model_parallel(
         num_head_replica = get_ascend_config().num_head_replica
         remote_tp_size = global_tp_size // pd_tp_ratio
         if num_head_replica <= 1:
-            group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
+            if enable_elastic_ep:
+                group_ranks = local_all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
+            else:
+                group_ranks = all_ranks.view(-1, prefill_tensor_model_parallel_size).unbind(0)
         else:
-            group_ranks = all_ranks.clone().view(
-                global_dp_size * global_pp_size * global_pcp_size, -1, num_head_replica
-            )  # [DP_size, num_head, num_head_replica]
+            if enable_elastic_ep:
+                group_ranks = local_all_ranks.clone().view(global_pp_size * global_pcp_size, -1, num_head_replica)
+            else:
+                group_ranks = all_ranks.clone().view(
+                    global_dp_size * global_pp_size * global_pcp_size, -1, num_head_replica
+                )  # [DP_size, num_head, num_head_replica]
             group_ranks = group_ranks.permute(0, 2, 1)
             group_ranks = group_ranks.reshape(-1, group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
             alltoall_group_size = group_ranks.size(-1) // remote_tp_size
@@ -84,13 +110,46 @@ def init_ascend_model_parallel(
     group_ranks = [x.tolist() for x in group_ranks]
 
     global _MC2
-    _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+    if enable_elastic_ep:
+        _MC2 = _init_stateless_group(
+            group_ranks,
+            "mc2",
+            parallel_config.data_parallel_master_ip,
+            backend,
+            coord_store=coord_store,
+        )
+    else:
+        _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB
-        _DYNAMIC_EPLB = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
-        )
+        if enable_elastic_ep:
+            _DYNAMIC_EPLB = _init_stateless_group(
+                group_ranks,
+                "dynamic_eplb",
+                parallel_config.data_parallel_master_ip,
+                backend,
+                coord_store=coord_store,
+            )
+        else:
+            _DYNAMIC_EPLB = init_model_parallel_group(
+                group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
+            )
+
+    if get_ascend_config().multistream_overlap_gate:
+        global _FC3_QUANT_X
+        if enable_elastic_ep:
+            _FC3_QUANT_X = _init_stateless_group(
+                group_ranks,
+                "fc3_quant_x",
+                parallel_config.data_parallel_master_ip,
+                backend,
+                coord_store=coord_store,
+            )
+        else:
+            _FC3_QUANT_X = init_model_parallel_group(
+                group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
+            )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
@@ -132,6 +191,102 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 0:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
+
+    # TODO: Extract and unify the logic across different communication group.
+    flashcomm2_otp_group_ranks = []
+    if flashcomm2_enable():
+        flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
+        num_fc2_oproj_tensor_parallel_groups: int = global_tp_size // flashcomm2_otp_size
+        global _FLASHCOMM2_OTP
+        global _FLASHCOMM2_ODP
+
+        _FLASHCOMM2_OTP = None
+        _FLASHCOMM2_ODP = get_tp_group()
+
+        if flashcomm2_otp_size > 1:
+            dp_size = 1 if enable_elastic_ep else global_dp_size
+            odp_group_ranks: list[list[int]] = [[] for _ in range(flashcomm2_otp_size * dp_size * global_pp_size)]
+            for dp_group_index in range(dp_size):
+                for pp_group_index in range(global_pp_size):
+                    dp_pp_serial_index = dp_group_index * global_pp_size + pp_group_index
+                    tp_base_rank = dp_pp_serial_index * global_tp_size
+                    odp_base_index = dp_pp_serial_index * flashcomm2_otp_size
+
+                    for i in range(num_fc2_oproj_tensor_parallel_groups):
+                        ranks = []
+                        for j in range(flashcomm2_otp_size):
+                            tp_local_rank = i + j * num_fc2_oproj_tensor_parallel_groups
+                            assert tp_local_rank < global_tp_size
+                            global_rank = tp_base_rank + tp_local_rank
+                            ranks.append(global_rank)
+
+                            odp_group_index = odp_base_index + j
+                            odp_group_ranks[odp_group_index].append(global_rank)
+                        flashcomm2_otp_group_ranks.append(ranks)
+
+            _FLASHCOMM2_OTP = init_model_parallel_group(
+                flashcomm2_otp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_otp"
+            )
+            _FLASHCOMM2_ODP = init_model_parallel_group(
+                odp_group_ranks, get_world_group().local_rank, backend, group_name="flashcomm2_odp"
+            )
+
+    def create_shard_weight_group(module_tp_group_ranks: None) -> GroupCoordinator:
+        # Argument module_tp_group_ranks: The module specific tensor parallel group.
+        # There are three situations.
+        # 1. If it is None, then the TP_size of the specific module is 1 and is replicated linear layer.
+        # 2. If it is not None, and the module tp_group is same as the global tp_group.
+        # 3. If it is not None, and the module tp_group is different from the global tp_group.(eg. flashcomm2_otp)
+        group_ranks = []
+        pp_group_ranks = all_ranks.transpose(2, 4).reshape(-1, global_pp_size)
+        if module_tp_group_ranks is None:
+            # If it is None, then the TP_size of this shard weight is 1.
+            shard_weight_group_ranks = pp_group_ranks.transpose(0, 1).unbind(0)
+            group_ranks = [x.tolist() for x in shard_weight_group_ranks]
+        else:
+            # combine standard tp group and non-standard tp group to build  shard_weight comm_group
+            module_tp_tanspose_ranks = module_tp_group_ranks.transpose(0, 1)
+            G = world_size // (global_pp_size * module_tp_group_ranks.size(1))
+            shard_weight_group_ranks = torch.stack([t.view(global_pp_size, G) for t in module_tp_tanspose_ranks], dim=1)
+            group_ranks = shard_weight_group_ranks.view(-1, G).tolist()
+        return init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="shard_weight")
+
+    # Create shard weight group if enabled
+    if get_ascend_config().layer_sharding is not None:
+        global _SHARD_WEIGHT
+        if flashcomm2_enable():
+            if len(flashcomm2_otp_group_ranks) == 0:
+                FC2_group_ranks = None
+            else:
+                FC2_group_ranks = torch.tensor(flashcomm2_otp_group_ranks).squeeze(0)
+            _SHARD_WEIGHT = create_shard_weight_group(FC2_group_ranks)
+        elif enable_dsa_cp_with_layer_shard():
+            # For dsa_cp, all shard layers are replicated.
+            _SHARD_WEIGHT = create_shard_weight_group(None)
+        else:
+            # For standard tp, use global tp group_ranks
+            tp_group_ranks = all_ranks.view(-1, global_tp_size)
+            _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
+
+
+def _replace_ascend_active_groups(
+    *,
+    mc2: GroupCoordinator | None,
+    dynamic_eplb: GroupCoordinator | None,
+    fc3_quant_x: GroupCoordinator | None,
+) -> None:
+    """Destroy the current DP/EP/WORLD/EPLB groups and replace them.
+
+    Destruction is collective — all ranks in the old groups must call this
+    function together.  Pass all-``None`` to tear down without replacement.
+    """
+    global _MC2, _DYNAMIC_EPLB, _FC3_QUANT_X
+    for group in (_MC2, _DYNAMIC_EPLB, _FC3_QUANT_X):
+        if group is not None:
+            group.destroy()
+    _MC2 = mc2
+    _DYNAMIC_EPLB = dynamic_eplb
+    _FC3_QUANT_X = fc3_quant_x
 
 
 def model_parallel_initialized():
