@@ -11,7 +11,6 @@ class AscendQwen3Attention(Qwen3Attention):
             cos_sin = cos_sin.to(qkv.device)
         if cos_sin.dtype != qkv.dtype:
             cos_sin = cos_sin.to(qkv.dtype)
-        
         q, k, v, _ = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
             q_weight=self.q_norm.weight,
@@ -25,7 +24,6 @@ class AscendQwen3Attention(Qwen3Attention):
             is_interleaved=self.rotary_emb.mrope_interleaved,
             rope_dim=self.rotary_emb.rotary_dim,
         )
-
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -39,7 +37,6 @@ class AscendQwen3MoeAttention(Qwen3MoeAttention):
             cos_sin = cos_sin.to(qkv.device)
         if cos_sin.dtype != qkv.dtype:
             cos_sin = cos_sin.to(qkv.dtype)
-        
         q, k, v, _ = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
             q_weight=self.q_norm.weight,
@@ -53,7 +50,6 @@ class AscendQwen3MoeAttention(Qwen3MoeAttention):
             is_interleaved=self.rotary_emb.mrope_interleaved,
             rope_dim=self.rotary_emb.rotary_dim,
         )
-
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
