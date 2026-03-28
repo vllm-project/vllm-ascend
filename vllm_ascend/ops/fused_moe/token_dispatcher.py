@@ -304,6 +304,16 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self.num_experts_local = (
             num_experts_local.item() if torch.is_tensor(num_experts_local) else int(num_experts_local)
         )
+        self.original_shape = None
+        self.with_quant = False
+        self.ep_rank_id = get_ep_group().rank_in_group
+        self.ep_world_size = get_ep_group().world_size
+ 
+        total_length = self.ep_world_size * num_experts_local
+        self.expert_map = torch.full((total_length,), -1, dtype=torch.int32)
+        start_idx = self.ep_rank_id * num_experts_local
+        end_idx = (self.ep_rank_id + 1) * num_experts_local
+        self.expert_map[start_idx:end_idx] = torch.arange(num_experts_local, dtype=torch.int32)
 
     def token_dispatch(
         self,
@@ -313,9 +323,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
-        expert_map = token_dispatch_input.routing.expert_map
         pertoken_scale = token_dispatch_input.routing.pertoken_scale
-        global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
 
         num_tokens = hidden_states.shape[:-1].numel()
@@ -325,11 +333,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             _, topk = topk_weights.shape
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
-        if expert_map is not None:
-            global_num_experts = len(expert_map) + global_redundant_expert_num
-            mask = expert_map[topk_ids] != -1
+        if self.ep_world_size > 1:
+            global_num_experts = len(self.expert_map)
+            mask = self.expert_map[topk_ids] != -1
             topk_weights = topk_weights * mask
-            first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
+            first_expert_idx = self.ep_rank_id * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
         else:
             first_expert_idx = 0
