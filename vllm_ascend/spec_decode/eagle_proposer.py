@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer as VllmSpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
@@ -89,10 +90,18 @@ class SpecDecodeBaseProposer(EagleProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
-        super().__init__(vllm_config, device, runner)
+        # Bypass EagleProposer.__init__ which hardcodes pass_hidden_states_to_model=True.
+        # Call vllm.SpecDecodeBaseProposer.__init__ directly so the parameter is set
+        # correctly from the start, avoiding downstream recompute hacks.
+        VllmSpecDecodeBaseProposer.__init__(
+            self,
+            vllm_config,
+            device,
+            pass_hidden_states_to_model=pass_hidden_states_to_model,
+            runner=runner,
+        )
 
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
-        self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
