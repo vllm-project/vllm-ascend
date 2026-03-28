@@ -413,6 +413,9 @@ class KVCacheRecvingThread(threading.Thread):
         """
         return self.task_tracker.get_and_clear_finished_requests()
 
+    def add_not_transfer_request(self, request_id: str):
+        self.task_tracker.add_not_transfer_request(request_id)
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self.ready_event.set()
@@ -847,6 +850,11 @@ class MooncakeConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def clear_reqs_need_recv(self):
+        self.connector_scheduler._reqs_need_recv.clear()
+        self.connector_scheduler._reqs_need_send = {}
+        self.connector_scheduler._reqs_in_batch = set()
+
     def request_finished(
         self,
         request: "Request",
@@ -932,8 +940,10 @@ class MooncakeConnectorScheduler:
             * self.pcp_size
             * vllm_config.parallel_config.pipeline_parallel_size
         )
+        self.dp_per_domain = vllm_config.parallel_config.dp_per_domain
 
         # Handshake base port
+        self.port_base = vllm_config.kv_transfer_config.kv_port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
             + vllm_config.parallel_config.data_parallel_rank
@@ -997,7 +1007,12 @@ class MooncakeConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
-                    local_block_ids = blocks.get_unhashed_block_ids() if num_external_tokens > 0 else []
+                    local_block_ids = []
+                    if isinstance(blocks, list):
+                        for block in blocks:
+                            local_block_ids.append(block.get_unhashed_block_ids() if num_external_tokens > 0 else [])
+                    else:
+                        local_block_ids = blocks.get_unhashed_block_ids() if num_external_tokens > 0 else []
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (request, local_block_ids, num_external_tokens)
                 else:
@@ -1028,11 +1043,8 @@ class MooncakeConnectorScheduler:
             )
 
         # Clear the list once workers start the transfers
-        self._reqs_need_recv.clear()
         meta.requests_to_send = self._reqs_need_send
-        self._reqs_need_send = {}
         meta.reqs_in_batch = self._reqs_in_batch
-        self._reqs_in_batch = set()
 
         return meta
 
@@ -1073,7 +1085,7 @@ class MooncakeConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
-            remote_port=self.side_channel_port,
+            remote_port=self.port_base if self.dp_per_domain > 1 else self.side_channel_port,
             remote_pcp_size=self.pcp_size,
             remote_dcp_size=self.dcp_size,
             remote_ptp_size=self.tp_size,
@@ -1134,6 +1146,7 @@ class MooncakeConnectorWorker:
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
         # Handshake base port
+        self.port_base = vllm_config.kv_transfer_config.kv_port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
             + vllm_config.parallel_config.data_parallel_rank
@@ -1323,23 +1336,27 @@ class MooncakeConnectorWorker:
         Use this function to calculate remote port and remote block number of each remote P node that we need to pull.
         """
         prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
-        if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
+        prefill_dycp_enable = True if meta.remote_dycp_ranks else False
+        decode_dycp_enable = True if meta.local_dycp_ranks else False
+        if decode_dycp_enable and self.dp_rank not in meta.local_dycp_ranks:
+            self.remote_port_send_num[meta.remote_engine_id] = None
+            self.kv_recv_thread.add_not_transfer_request(req_id)
+            return [], [], []
+        remote_dycp_ranks = meta.remote_dycp_ranks if prefill_dycp_enable else list(range(meta.remote_pcp_size))
+        local_dycp_ranks = meta.local_dycp_ranks if decode_dycp_enable else [0]
+        assert len(local_dycp_ranks) == 1 or len(local_dycp_ranks) == self.dp_size
+        remote_pcp_size = len(remote_dycp_ranks)
+        local_pcp_size = len(local_dycp_ranks)
+        local_pcp_rank = self.dp_rank
+        remote_cp_size = remote_pcp_size * meta.remote_dcp_size
+        local_cp_size = local_pcp_size * self.dcp_size  # decode pcp is not supported now
+        local_block_ids = meta.local_block_ids[self.dp_rank] if decode_dycp_enable else meta.local_block_ids
+
+        if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1 and not prefill_dycp_enable:
             chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
             remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
             local_block_ids_list, remote_block_ids_list = [meta.local_block_ids], [meta.remote_block_ids]
             return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
-
-        if meta.remote_dycp_ranks == []:
-            meta.remote_dycp_ranks = list(range(meta.remote_pcp_size))
-        if meta.local_dycp_ranks == []:
-            meta.local_dycp_ranks = [0]
-        assert len(meta.remote_dycp_ranks) == 1 or len(meta.remote_dycp_ranks) == meta.remote_pcp_size
-        assert len(meta.local_dycp_ranks) == 1 or len(meta.local_dycp_ranks) == self.dp_size
-        remote_pcp_size = len(meta.remote_dycp_ranks)
-        local_pcp_size = len(meta.local_dycp_ranks)
-        local_pcp_rank = self.dp_rank
-        remote_cp_size = remote_pcp_size * meta.remote_dcp_size
-        local_cp_size = local_pcp_size * self.dcp_size  # decode pcp is not supported now
 
         def context_parallel_parameters_check():
             assert remote_cp_size % (local_cp_size) == 0 or local_cp_size % remote_cp_size == 0
@@ -1398,10 +1415,11 @@ class MooncakeConnectorWorker:
         def get_local_remote_block_port_mappings():
             context_parallel_parameters_check()
             p_node_cp_group_meta = get_cp_group_meta(
-                prefill_tp_size, remote_pcp_size, meta.remote_dcp_size, meta.remote_port, meta.remote_dycp_ranks
+                prefill_tp_size, remote_pcp_size, meta.remote_dcp_size, meta.remote_port, remote_dycp_ranks
             )
+            port_base = self.port_base if decode_dycp_enable else self.side_channel_port
             d_node_cp_group_meta = get_cp_group_meta(
-                self.tp_size, local_pcp_size, self.dcp_size, self.side_channel_port, meta.local_dycp_ranks
+                self.tp_size, local_pcp_size, self.dcp_size, port_base, local_dycp_ranks
             )
             local_remote_block_port_mappings: dict[int, list[list[int]]] = {}
             for d_node_head_key in d_node_cp_group_meta:
@@ -1444,7 +1462,7 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
-            for port in range(prefill_tp_size * meta.remote_pcp_size):
+            for port in range(prefill_tp_size * remote_pcp_size):
                 remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port), None)
                 if remote_host_info is None:
                     remote_host = meta.remote_host
@@ -1475,27 +1493,14 @@ class MooncakeConnectorWorker:
 
         num_external_blocks = math.ceil(meta.num_external_tokens / self.block_size)
 
-        assert math.ceil(num_external_blocks / local_cp_size) == len(meta.local_block_ids), (
-            f"num_external_blocks({num_external_blocks}), cp_size({local_cp_size}), "
-            f"local_block_ids_len ({len(meta.local_block_ids)})"
-        )
+        if not decode_dycp_enable:
+            assert math.ceil(num_external_blocks / local_cp_size) == len(local_block_ids), (
+                f"num_external_blocks({num_external_blocks}), cp_size({local_cp_size}), "
+                f"local_block_ids_len ({len(local_block_ids)})"
+            )
         assert meta.num_prompt_blocks >= num_external_blocks, (
             f"meta.num_prompt_blocks({meta.num_prompt_blocks}), num_external_blocks({num_external_blocks})"
         )
-
-        remote_block_nums_all = [meta.num_prompt_blocks // remote_cp_size] * remote_cp_size
-        num_remain_blocks = meta.num_prompt_blocks % remote_cp_size
-        for i in range(num_remain_blocks):
-            remote_block_nums_all[i] += 1
-        last_block_location = (num_remain_blocks + remote_cp_size - 1) % remote_cp_size
-
-        # prefix cache 需要验证下拉取的方式对不对
-        # Considering prefix cache, the remote_block_nums_all should be revised
-        num_prefix_cached_blocks = meta.num_prompt_blocks - num_external_blocks
-        remote_block_nums_all = [num - num_prefix_cached_blocks // remote_cp_size for num in remote_block_nums_all]
-        num_remain_blocks = num_prefix_cached_blocks % remote_cp_size
-        for i in range(num_remain_blocks):
-            remote_block_nums_all[i] -= 1
 
         if local_cp_size > remote_cp_size:
             remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = [], [], []
@@ -1504,7 +1509,7 @@ class MooncakeConnectorWorker:
                 for mapping in local_remote_block_port_mapping:
                     mapping_list.append(mapping[idx])
                 remote_handshake_port_list.append(mapping_list)
-            
+
             local_cp_rank = self.dcp_rank + local_pcp_rank * self.dcp_size
             remote_rank_list = [[] for _ in range(remote_cp_size)]
             local_rank_list = [[] for _ in range(local_cp_size)]
@@ -1519,14 +1524,29 @@ class MooncakeConnectorWorker:
             local_blocks = []
             remote_blocks = []
             for local_block, local_blk_id in enumerate(local_rank_list[local_cp_rank]):
-                for remote_blk_list in remote_rank_list:
+                for remote_rank_idx, remote_blk_list in enumerate(remote_rank_list):
                     if local_blk_id in remote_blk_list:
-                        local_blocks.append(meta.local_block_ids[local_block])
-                        remote_blocks.append(meta.remote_block_ids[remote_blk_list.index(local_blk_id)])
+                        local_blocks.append(local_block_ids[local_block])
+                        remote_block_ids = meta.remote_block_ids[remote_rank_idx] if prefill_dycp_enable else meta.remote_block_ids
+                        remote_blocks.append(remote_block_ids[remote_blk_list.index(local_blk_id)])
                         break
             local_block_ids_list.append(local_blocks)
             remote_block_ids_list.append(remote_blocks)
         else:
+            remote_block_nums_all = [meta.num_prompt_blocks // remote_cp_size] * remote_cp_size
+            num_remain_blocks = meta.num_prompt_blocks % remote_cp_size
+            for i in range(num_remain_blocks):
+                remote_block_nums_all[i] += 1
+            last_block_location = (num_remain_blocks + remote_cp_size - 1) % remote_cp_size
+
+            # prefix cache 需要验证下拉取的方式对不对
+            # Considering prefix cache, the remote_block_nums_all should be revised
+            num_prefix_cached_blocks = meta.num_prompt_blocks - num_external_blocks
+            remote_block_nums_all = [num - num_prefix_cached_blocks // remote_cp_size for num in remote_block_nums_all]
+            num_remain_blocks = num_prefix_cached_blocks % remote_cp_size
+            for i in range(num_remain_blocks):
+                remote_block_nums_all[i] -= 1
+
             # make sure the last block (which may be unfull) of P nodes is put to the last block of D node
             remote_block_nums: list[int] = []
             final_block_idx: int | None = None
@@ -1543,6 +1563,9 @@ class MooncakeConnectorWorker:
             if final_block_idx is not None:
                 final_block_num = remote_block_nums.pop(final_block_idx)
                 remote_block_nums.append(final_block_num)
+                if prefill_dycp_enable:
+                    remote_block_ids = meta.remote_block_ids.pop(final_block_idx)
+                    meta.remote_block_ids.append(remote_block_ids)
                 for mapping in local_remote_block_port_mapping:
                     final_block_port = mapping.pop(final_block_idx)
                     mapping.append(final_block_port)
@@ -1561,9 +1584,11 @@ class MooncakeConnectorWorker:
             local_block_offset = 0
             for remote_kv_id in range(len(remote_handshake_port_list)):
                 num_blocks_to_pull = remote_block_nums[remote_kv_id]
-                remote_block_ids_list.append(meta.remote_block_ids[:num_blocks_to_pull])
+                remote_block_ids = meta.remote_block_ids[remote_kv_id] if prefill_dycp_enable else meta.remote_block_ids
+                assert num_blocks_to_pull <= len(remote_block_ids)
+                remote_block_ids_list.append(remote_block_ids[:num_blocks_to_pull])   # [[1,2],[4,5]]
                 local_block_ids_list.append(
-                    meta.local_block_ids[local_block_offset : local_block_offset + num_blocks_to_pull]
+                    local_block_ids[local_block_offset : local_block_offset + num_blocks_to_pull]
                 )
                 local_block_offset += num_blocks_to_pull
 
@@ -1582,15 +1607,16 @@ class MooncakeConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ",
                 req_id,
                 meta.remote_engine_id,
-                len(meta.local_block_ids),
-                len(meta.remote_block_ids),
+                len(meta.local_block_ids[0]) if meta.local_dycp_ranks else len(meta.local_block_ids),
+                len(meta.remote_block_ids[0]) if meta.remote_dycp_ranks else len(meta.remote_block_ids),
             )
 
             prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
             remote_req_id = meta.remote_request_id
 
-            if meta.remote_pcp_size * meta.remote_dcp_size > 1:
+            if len(meta.remote_dycp_ranks) > 0 or meta.remote_pcp_size * meta.remote_dcp_size > 1:
+                rank_id = torch.distributed.get_rank()
                 remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
                     req_id, meta
                 )
@@ -1651,15 +1677,14 @@ class MooncakeConnectorWorker:
             if self.kv_recv_thread is not None:
                 self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
 
-        # TODO(wangxiaochao): 此处的self.pcp_size * self.dcp_size == 1 需要考虑下D节点开dycp
-        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
+        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1 and not meta.remote_dycp_ranks:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 if self.tp_rank in self._prefill_get_remote_rank(req_id):
                     self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
 
-        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size > 1:
+        if self.kv_send_thread is not None and (self.pcp_size * self.dcp_size > 1 or meta.remote_dycp_ranks):
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 
