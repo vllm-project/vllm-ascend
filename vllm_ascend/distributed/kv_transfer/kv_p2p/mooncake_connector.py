@@ -1045,6 +1045,10 @@ class MooncakeConnectorScheduler:
         # Clear the list once workers start the transfers
         meta.requests_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
+        if self.dp_per_domain == 1:
+            self._reqs_need_recv.clear()
+            self._reqs_need_send = {}
+            self._reqs_in_batch = set()
 
         return meta
 
@@ -1144,6 +1148,8 @@ class MooncakeConnectorWorker:
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
+
+        self.dp_per_domain = self.vllm_config.parallel_config.dp_per_domain
 
         # Handshake base port
         self.port_base = vllm_config.kv_transfer_config.kv_port
@@ -1677,14 +1683,14 @@ class MooncakeConnectorWorker:
             if self.kv_recv_thread is not None:
                 self.kv_recv_thread.task_tracker.add_req_to_process(req_id)
 
-        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1 and not meta.remote_dycp_ranks:
+        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1 and self.dp_per_domain == 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 if self.tp_rank in self._prefill_get_remote_rank(req_id):
                     self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
 
-        if self.kv_send_thread is not None and (self.pcp_size * self.dcp_size > 1 or meta.remote_dycp_ranks):
+        if self.kv_send_thread is not None and (self.pcp_size * self.dcp_size > 1 or self.dp_per_domain > 1):
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 
