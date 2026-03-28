@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_npu
 from pytest_mock import MockerFixture
 
@@ -197,12 +198,32 @@ def mock_dist_env(mocker: MockerFixture):
 
 @pytest.fixture
 def mock_moe_env(mocker: MockerFixture):
+    def mock_ascend_moe_gating_top_k(
+        router_logits,
+        k,
+        k_group=None,
+        group_count=None,
+        group_select_mode=None,
+        renorm=None,
+        norm_type=None,
+        out_flag=None,
+        routed_scaling_factor=None,
+        eps=None,
+        bias_opt=None,
+    ):
+        num_tokens, num_experts = router_logits.shape
+        topk_weights = torch.randn(num_tokens, k, dtype=router_logits.dtype)
+        topk_ids = torch.randint(0, num_experts, (num_tokens, k), dtype=torch.int32)
+        return topk_weights, topk_ids, None
 
     with patch('torch_npu.npu_moe_gating_top_k', return_value=(
             torch.randn(8, 2),
             torch.randint(0, 8, (8, 2)),
             None
         )), \
+        patch("torch.ops._C_ascend.moe_gating_top_k",
+              side_effect=mock_ascend_moe_gating_top_k,
+              create=True), \
         patch('torch_npu.npu_moe_init_routing', return_value=(
                 torch.randn(8, 2),
                 torch.randint(0, 8, (8, 2)),
@@ -310,6 +331,310 @@ class TestExpertsSelector:
 
         assert topk_weights.shape == (8, 2)
         assert topk_ids.shape == (8, 2)
+
+    @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+    @pytest.mark.parametrize("renormalize", [True, False])
+    def test_select_experts_with_different_scoring_func(
+            self, mock_dist_env, mock_moe_env, scoring_func, renormalize):
+        num_tokens = 16
+        num_experts = 8
+        hidden_size = 32
+
+        hidden_states = torch.randn(num_tokens, hidden_size)
+        router_logits = torch.randn(num_tokens, num_experts)
+
+        def simple_custom_routing(hidden_states, gating_output, topk,
+                                  renormalize, global_num_experts):
+            if scoring_func == "softmax":
+                weights = gating_output.softmax(dim=-1)
+            else:
+                weights = gating_output.sigmoid()
+            topk_weights, topk_ids = weights.topk(topk, dim=-1)
+            if renormalize:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                               keepdim=True)
+            return topk_weights, topk_ids.to(torch.int32)
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=renormalize,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=simple_custom_routing,
+            scoring_func=scoring_func,
+            e_score_correction_bias=None,
+            global_num_experts=num_experts)
+
+        assert topk_weights.shape == (num_tokens, 2)
+        assert topk_ids.shape == (num_tokens, 2)
+        assert topk_weights.dtype == hidden_states.dtype
+        assert topk_ids.dtype == torch.int32
+
+        if renormalize:
+            weight_sum = topk_weights.sum(dim=-1)
+            torch.testing.assert_close(weight_sum,
+                                       torch.ones_like(weight_sum),
+                                       rtol=1e-4,
+                                       atol=1e-4)
+
+    def test_select_experts_with_grouped_topk(self, mock_dist_env, mock_moe_env):
+        num_tokens = 16
+        num_experts = 8
+        hidden_size = 32
+        num_expert_group = 4
+        topk_group = 2
+
+        hidden_states = torch.randn(num_tokens, hidden_size)
+        router_logits = torch.randn(num_tokens, num_experts)
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=True,
+            renormalize=True,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=None,
+            scoring_func="softmax",
+            e_score_correction_bias=None,
+            global_num_experts=num_experts)
+
+        assert topk_weights.shape == (num_tokens, 2)
+        assert topk_ids.shape == (num_tokens, 2)
+
+    def test_select_experts_with_e_score_correction_bias(self, mock_dist_env,
+                                                         mock_moe_env):
+        num_tokens = 16
+        num_experts = 8
+        hidden_size = 32
+
+        hidden_states = torch.randn(num_tokens, hidden_size)
+        router_logits = torch.randn(num_tokens, num_experts)
+        e_score_correction_bias = torch.randn(num_experts)
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=None,
+            scoring_func="softmax",
+            e_score_correction_bias=e_score_correction_bias,
+            global_num_experts=num_experts)
+
+        assert topk_weights.shape == (num_tokens, 2)
+        assert topk_ids.shape == (num_tokens, 2)
+
+    def test_select_experts_with_custom_routing_function(self, mock_dist_env,
+                                                         mock_moe_env):
+        num_tokens = 16
+        num_experts = 8
+        hidden_size = 32
+
+        hidden_states = torch.randn(num_tokens, hidden_size)
+        router_logits = torch.randn(num_tokens, num_experts)
+
+        def custom_routing(hidden_states, gating_output, topk, renormalize,
+                           global_num_experts):
+            weights = gating_output.softmax(dim=-1)
+            topk_weights, topk_ids = weights.topk(topk, dim=-1)
+            if renormalize:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                               keepdim=True)
+            return topk_weights, topk_ids.to(torch.int32)
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=custom_routing,
+            scoring_func="softmax",
+            e_score_correction_bias=None,
+            global_num_experts=num_experts)
+
+        assert topk_weights.shape == (num_tokens, 2)
+        assert topk_ids.shape == (num_tokens, 2)
+
+    def test_select_experts_weight_sum_range(self, mock_dist_env, mock_moe_env):
+        num_tokens = 16
+        num_experts = 8
+        hidden_size = 32
+
+        hidden_states = torch.randn(num_tokens, hidden_size)
+        router_logits = torch.randn(num_tokens, num_experts)
+
+        def simple_routing(hidden_states, gating_output, topk, renormalize,
+                           global_num_experts):
+            weights = gating_output.softmax(dim=-1)
+            topk_weights, topk_ids = weights.topk(topk, dim=-1)
+            if renormalize:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                               keepdim=True)
+            return topk_weights, topk_ids.to(torch.int32)
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=simple_routing,
+            scoring_func="softmax",
+            e_score_correction_bias=None,
+            global_num_experts=num_experts)
+
+        assert (topk_weights >= 0).all()
+        assert (topk_weights <= 1).all()
+
+        weight_sum = topk_weights.sum(dim=-1)
+        torch.testing.assert_close(weight_sum,
+                                   torch.ones_like(weight_sum),
+                                   rtol=1e-4,
+                                   atol=1e-4)
+
+    def test_select_experts_expert_id_range(self, mock_dist_env, mock_moe_env):
+        num_tokens = 16
+        num_experts = 8
+        hidden_size = 32
+
+        hidden_states = torch.randn(num_tokens, hidden_size)
+        router_logits = torch.randn(num_tokens, num_experts)
+
+        def simple_routing(hidden_states, gating_output, topk, renormalize,
+                           global_num_experts):
+            weights = gating_output.softmax(dim=-1)
+            topk_weights, topk_ids = weights.topk(topk, dim=-1)
+            if renormalize:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                               keepdim=True)
+            return topk_weights, topk_ids.to(torch.int32)
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=simple_routing,
+            scoring_func="softmax",
+            e_score_correction_bias=None,
+            global_num_experts=num_experts)
+
+        assert (topk_ids >= 0).all()
+        assert (topk_ids < num_experts).all()
+
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method")
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k",
+           return_value=False)
+    def test_select_experts_native_softmax_matches_expected(
+            self, _, mock_get_weight_prefetch_method):
+        hidden_states = torch.tensor([[1.0, 0.0, -1.0, 2.0],
+                                      [0.5, 1.5, -0.5, 1.0]],
+                                     dtype=torch.float32)
+        router_logits = torch.tensor([[3.0, 1.0, 0.0, 2.0],
+                                      [0.0, 4.0, 1.0, 2.0]],
+                                     dtype=torch.float32)
+
+        prefetch_method = MagicMock()
+        mock_get_weight_prefetch_method.return_value = prefetch_method
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=None,
+            scoring_func="softmax",
+            e_score_correction_bias=None,
+            global_num_experts=4)
+
+        expected_probs = router_logits.softmax(dim=-1)
+        expected_weights, expected_ids = expected_probs.topk(2, dim=-1)
+        expected_weights = expected_weights / expected_weights.sum(
+            dim=-1, keepdim=True)
+
+        prefetch_method.maybe_prefetch_moe_weight_preprocess.assert_called_once_with(
+            hidden_states, "gate_up")
+        torch.testing.assert_close(topk_weights,
+                                   expected_weights.to(hidden_states.dtype))
+        assert torch.equal(topk_ids, expected_ids.to(torch.int32))
+
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method")
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k",
+           return_value=False)
+    def test_select_experts_grouped_topk_bias_uses_original_weights(
+            self, _, mock_get_weight_prefetch_method):
+        hidden_states = torch.tensor([[1.0, 0.0, -1.0, 2.0]],
+                                     dtype=torch.float32)
+        router_logits = torch.tensor([[4.0, 3.0, 1.0, 0.0]],
+                                     dtype=torch.float32)
+        e_score_correction_bias = torch.tensor([-10.0, -10.0, 5.0, 5.0],
+                                               dtype=torch.float32)
+
+        mock_get_weight_prefetch_method.return_value = MagicMock()
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=True,
+            renormalize=False,
+            topk_group=1,
+            num_expert_group=2,
+            custom_routing_function=None,
+            scoring_func="softmax",
+            e_score_correction_bias=e_score_correction_bias,
+            global_num_experts=4)
+
+        original_weights = router_logits.softmax(dim=-1)
+        sorted_ids, order = torch.sort(topk_ids, dim=-1)
+        sorted_weights = topk_weights.gather(1, order)
+
+        expected_ids = torch.tensor([[2, 3]], dtype=torch.int32)
+        expected_weights = original_weights[:, 2:4].to(hidden_states.dtype)
+
+        assert torch.equal(sorted_ids, expected_ids)
+        torch.testing.assert_close(sorted_weights, expected_weights)
+
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method",
+           return_value=MagicMock())
+    @patch("vllm_ascend.ops.fused_moe.experts_selector.check_npu_moe_gating_top_k",
+           return_value=False)
+    def test_select_experts_invalid_scoring_func_raises(self, _, __):
+        hidden_states = torch.randn(2, 4)
+        router_logits = torch.randn(2, 4)
+
+        with pytest.raises(ValueError, match="Unsupported scoring function"):
+            select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=2,
+                use_grouped_topk=False,
+                renormalize=True,
+                topk_group=None,
+                num_expert_group=None,
+                custom_routing_function=None,
+                scoring_func="unsupported",
+                e_score_correction_bias=None,
+                global_num_experts=4)
 
 
 class TestCumsumGroupList(TestBase):
@@ -624,3 +949,229 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertTrue(mock_forward_context.with_quant)
         self.assertEqual(result.shape, hidden_states_shape)
         self.assertEqual(result.dtype, torch.bfloat16)
+
+    @patch('torch_npu.npu_swiglu')
+    @patch('torch_npu.npu_grouped_matmul')
+    def test_unified_apply_mlp_without_quantization_matches_expected_values(
+            self, mock_npu_grouped_matmul, mock_npu_swiglu):
+        def fake_grouped_matmul(*, x, weight, bias=None, **kwargs):
+            weight_tensor = weight[0]
+            if weight_tensor.dim() == 3 and weight_tensor.shape[0] == 1:
+                weight_tensor = weight_tensor[0]
+
+            result = x[0] @ weight_tensor
+            if bias is not None:
+                bias_tensor = bias[0]
+                if bias_tensor.dim() == 2 and bias_tensor.shape[0] == 1:
+                    bias_tensor = bias_tensor[0]
+                result = result + bias_tensor.to(result.dtype)
+            return [result]
+
+        def fake_swiglu(x):
+            left, right = x.chunk(2, dim=-1)
+            return F.silu(left) * right
+
+        mock_npu_grouped_matmul.side_effect = fake_grouped_matmul
+        mock_npu_swiglu.side_effect = fake_swiglu
+
+        hidden_states = torch.tensor([[1.0, 2.0], [0.5, -1.0]],
+                                     dtype=torch.float32)
+        w1 = torch.tensor([[[1.0, 0.0, 1.0, -1.0],
+                            [0.0, 1.0, 2.0, 1.0]]],
+                          dtype=torch.float32)
+        w2 = torch.tensor([[[1.0, 2.0], [-1.0, 1.0]]], dtype=torch.float32)
+        topk_scales = torch.tensor([[1.0], [0.5]], dtype=torch.float32)
+        group_list = torch.tensor([2], dtype=torch.int64)
+
+        result = unified_apply_mlp(
+            mlp_compute_input=build_mlp_compute_input_fixture(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                group_list=group_list,
+                with_quant=False,
+                topk_scales=topk_scales,
+                need_trans=False,
+            ))
+
+        gate_up = hidden_states @ w1[0]
+        activated = F.silu(gate_up[:, :2]) * gate_up[:, 2:]
+        activated = activated * topk_scales
+        expected = activated @ w2[0]
+
+        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
+        mock_npu_swiglu.assert_called_once()
+        torch.testing.assert_close(result, expected)
+
+
+class TestZeroExpertsCompute(TestBase):
+    def test_zero_experts_compute_identity_type(self):
+        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+
+        num_experts = 8
+        num_tokens = 4
+        top_k = 2
+        hidden_size = 16
+
+        expert_indices = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7]], dtype=torch.int32)
+        expert_scales = torch.ones(num_tokens, top_k, dtype=torch.float32)
+        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
+
+        result_indices, result_scales, result_hidden = zero_experts_compute(
+            expert_indices=expert_indices,
+            expert_scales=expert_scales,
+            num_experts=num_experts,
+            zero_expert_type="identity",
+            hidden_states=hidden_states,
+        )
+
+        assert result_indices.shape == expert_indices.shape
+        assert result_scales.shape == expert_scales.shape
+        assert result_hidden.shape == hidden_states.shape
+
+    def test_zero_experts_compute_with_zero_experts(self):
+        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+
+        num_experts = 4
+        num_tokens = 3
+        top_k = 2
+        hidden_size = 8
+
+        expert_indices = torch.tensor([[0, 1], [1, 2], [2, 3]], dtype=torch.int32)
+        expert_scales = torch.tensor([[0.5, 0.5], [0.3, 0.7], [0.4, 0.6]], dtype=torch.float32)
+        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
+
+        result_indices, result_scales, result_hidden = zero_experts_compute(
+            expert_indices=expert_indices,
+            expert_scales=expert_scales,
+            num_experts=num_experts,
+            zero_expert_type="identity",
+            hidden_states=hidden_states,
+        )
+
+        assert result_indices.shape == expert_indices.shape
+        assert result_scales.shape == expert_scales.shape
+        assert result_hidden.shape == hidden_states.shape
+
+    def test_zero_experts_compute_normal_experts_masked(self):
+        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+
+        num_experts = 4
+        num_tokens = 2
+        top_k = 2
+        hidden_size = 8
+
+        expert_indices = torch.tensor([[0, 5], [6, 7]], dtype=torch.int32)
+        expert_scales = torch.ones(num_tokens, top_k, dtype=torch.float32)
+        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
+
+        result_indices, result_scales, _ = zero_experts_compute(
+            expert_indices=expert_indices,
+            expert_scales=expert_scales,
+            num_experts=num_experts,
+            zero_expert_type="identity",
+            hidden_states=hidden_states,
+        )
+
+        normal_expert_mask = expert_indices >= num_experts
+        for i in range(num_tokens):
+            for j in range(top_k):
+                if normal_expert_mask[i, j]:
+                    assert result_scales[i, j] == 0.0
+                    assert result_indices[i, j] == 0
+
+    def test_zero_experts_compute_output_sum(self):
+        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+
+        num_experts = 2
+        num_tokens = 2
+        top_k = 2
+        hidden_size = 4
+
+        expert_indices = torch.tensor([[0, 1], [0, 1]], dtype=torch.int32)
+        expert_scales = torch.tensor([[0.5, 0.5], [0.3, 0.7]], dtype=torch.float32)
+        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
+
+        _, _, result_hidden = zero_experts_compute(
+            expert_indices=expert_indices,
+            expert_scales=expert_scales,
+            num_experts=num_experts,
+            zero_expert_type="identity",
+            hidden_states=hidden_states,
+        )
+
+        assert result_hidden.shape == (num_tokens, hidden_size)
+
+    def test_zero_experts_compute_all_zero_experts(self):
+        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+
+        num_experts = 4
+        num_tokens = 2
+        top_k = 2
+        hidden_size = 8
+
+        expert_indices = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+        expert_scales = torch.ones(num_tokens, top_k, dtype=torch.float32)
+        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
+
+        result_indices, result_scales, result_hidden = zero_experts_compute(
+            expert_indices=expert_indices,
+            expert_scales=expert_scales,
+            num_experts=num_experts,
+            zero_expert_type="identity",
+            hidden_states=hidden_states,
+        )
+
+        assert torch.equal(result_indices, expert_indices)
+        assert torch.equal(result_scales, expert_scales)
+        assert result_hidden.shape == hidden_states.shape
+
+    def test_zero_experts_compute_mixed_experts(self):
+        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+
+        num_experts = 3
+        num_tokens = 2
+        top_k = 3
+        hidden_size = 8
+
+        expert_indices = torch.tensor([[0, 1, 4], [2, 5, 6]], dtype=torch.int32)
+        expert_scales = torch.tensor([[0.3, 0.3, 0.4], [0.2, 0.5, 0.3]], dtype=torch.float32)
+        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.float32)
+
+        result_indices, result_scales, _ = zero_experts_compute(
+            expert_indices=expert_indices,
+            expert_scales=expert_scales,
+            num_experts=num_experts,
+            zero_expert_type="identity",
+            hidden_states=hidden_states,
+        )
+
+        assert result_indices.shape == expert_indices.shape
+        assert result_scales.shape == expert_scales.shape
+
+    def test_zero_experts_compute_identity_values_match_expected(self):
+        from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
+
+        expert_indices = torch.tensor([[0, 2], [3, 1]], dtype=torch.int32)
+        expert_scales = torch.tensor([[0.25, 0.75], [0.60, 0.40]],
+                                     dtype=torch.float32)
+        hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]],
+                                     dtype=torch.float32)
+
+        result_indices, result_scales, result_hidden = zero_experts_compute(
+            expert_indices=expert_indices,
+            expert_scales=expert_scales,
+            num_experts=2,
+            zero_expert_type="identity",
+            hidden_states=hidden_states,
+        )
+
+        expected_indices = torch.tensor([[0, 0], [0, 1]], dtype=torch.int32)
+        expected_scales = torch.tensor([[0.25, 0.0], [0.0, 0.40]],
+                                       dtype=torch.float32)
+        expected_hidden = torch.tensor([[0.75, 1.50], [1.80, 2.40]],
+                                       dtype=torch.float32)
+
+        assert torch.equal(result_indices, expected_indices)
+        torch.testing.assert_close(result_scales, expected_scales)
+        torch.testing.assert_close(result_hidden, expected_hidden)
