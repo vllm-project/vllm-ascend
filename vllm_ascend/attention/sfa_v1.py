@@ -1034,6 +1034,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+
         if attn_metadata is None:
             # Profiling run.
             if self.enable_dsa_cp_with_layer_shard and not _EXTRA_CTX.in_profile_run:
@@ -1041,6 +1042,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
+
+        if self.enable_dsa_cp:
+            need_gather_q_kv = False
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), need_gather_q_kv)
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
