@@ -100,6 +100,7 @@ def test_qwen3_dense_graph_mode(
     model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -113,5 +114,6 @@ def test_qwen3_dense_graph_mode(
         model,
         max_model_len=1024,
         enforce_eager=enforce_eager,
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
