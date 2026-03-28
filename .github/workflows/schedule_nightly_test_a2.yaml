@@ -87,9 +87,13 @@ jobs:
   build-image:
     name: Build nightly-a2 image
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix: 
+        vllm_ascend_branch: [main, releases/v0.18.0]
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -105,6 +109,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        vllm_ascend_branch: [releases-v0.18.0]
         test_config:
           # pytest-driven tests
           - name: test_custom_op
@@ -126,7 +131,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: ${{ needs.setup-vars.outputs.image }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ matrix.vllm_ascend_branch }}-a2'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
@@ -149,6 +154,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
+        vllm_ascend_branch: [releases-v0.18.0]
         test_config:
           - name: multi-node-deepseek-dp
             config_file_path: DeepSeek-R1-W8A8-A2.yaml
@@ -160,8 +166,7 @@ jobs:
     with:
       soc_version: a2
       runner: linux-amd64-cpu-8-hk
-      image: ${{ needs.setup-vars.outputs.image }}
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ matrix.vllm_ascend_branch }}-a2'
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}

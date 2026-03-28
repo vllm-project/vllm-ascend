@@ -20,6 +20,7 @@ on:
   pull_request: 
     branches:
       - 'main'
+      - 'releases/*'
     types: [ labeled, synchronize ]
   workflow_dispatch:
     inputs:
@@ -43,7 +44,9 @@ permissions:
 jobs:
   image_build:
     name: Image Build and Push
-    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build')  }}
+    if: >-
+      ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build'))
+          && github.event_name != 'schedule' }}
     strategy:
       matrix:
         build_meta:
@@ -72,5 +75,49 @@ jobs:
       quay_username: ${{ vars.QUAY_USERNAME }}
       should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
       workflow_dispatch_tag: ${{ inputs.tag }}
+    secrets:
+      QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+
+  schedule_image_build:
+    name: Image Build and Push
+    if: ${{ github.event_name == 'schedule' }}
+    strategy:
+      matrix:
+        branch_meta:
+          - branch_ref: main
+            schedule_tag_pattern: main
+            artifact_prefix: digests
+          - branch_ref: releases/v0.18.0
+            schedule_tag_pattern: releases-v0.18.0
+            artifact_prefix: digests-releases-v0.18.0
+        build_meta:
+          - name: A2 Ubuntu
+            dockerfile: Dockerfile
+            suffix: ''
+          - name: A2 openeuler
+            dockerfile: Dockerfile.openEuler
+            suffix: 'openeuler'
+          - name: A3 Ubuntu
+            dockerfile: Dockerfile.a3
+            suffix: 'a3'
+          - name: A3 openEuler
+            dockerfile: Dockerfile.a3.openEuler
+            suffix: 'a3-openeuler'
+          - name: 310P Ubuntu
+            dockerfile: Dockerfile.310p
+            suffix: '310p'
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: '310p-openeuler'
+    uses: ./.github/workflows/_schedule_image_build.yaml
+    with:
+      dockerfile: ${{ matrix.build_meta.dockerfile }}
+      suffix: ${{ matrix.build_meta.suffix }}
+      quay_username: ${{ vars.QUAY_USERNAME }}
+      should_push: ${{ github.repository_owner == 'vllm-project' && (github.event_name != 'pull_request') }}
+      workflow_dispatch_tag: ${{ inputs.tag }}
+      branch_ref: ${{ matrix.branch_meta.branch_ref }}
+      schedule_tag_pattern: ${{ matrix.branch_meta.schedule_tag_pattern }}
+      artifact_prefix: ${{ matrix.branch_meta.artifact_prefix }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
