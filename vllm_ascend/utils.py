@@ -35,7 +35,6 @@ import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
