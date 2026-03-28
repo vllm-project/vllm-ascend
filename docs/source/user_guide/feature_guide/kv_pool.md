@@ -112,6 +112,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "device_name": "",
     "master_server_address": "xx.xx.xx.xx:50088",
     "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
+    "default_kv_lease_ttl": 11000
 }
 ```
 
@@ -120,6 +121,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 **device_name**: ""
 **master_server_address**: Configured with the IP and port of the master service.  
 **global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.**
+**default_kv_lease_ttl** Default lease TTL for KV objects. The default unit is milliseconds. Needs to be larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 
 #### 2.Start mooncake_master
 
@@ -156,6 +158,10 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
+
+#Minimum retransmission timeout of the RDMA，equals 4.096 μs * 2 ^ timeout.
+#Needs to satisfy the equation: transfer time > RMDA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
+export HCCL_RDMA_TIMEOUT=16
 
 # Unit: ms. The timeout for one-sided communication connection establishment is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039). Users can adjust this value based on their specific setup.
 # The recommended formula is: ASCEND_CONNECT_TIMEOUT = connection_time_per_card (typically within 500ms) × total_number_of_Decode_cards.
@@ -229,6 +235,7 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_RDMA_TIMEOUT=16
 export ASCEND_CONNECT_TIMEOUT=10000
 export ASCEND_TRANSFER_TIMEOUT=10000
 
@@ -343,6 +350,7 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_RDMA_TIMEOUT=16
 export ASCEND_CONNECT_TIMEOUT=10000
 export ASCEND_TRANSFER_TIMEOUT=10000
 
