@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
@@ -60,6 +61,16 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+    graph_pool: ClassVar[tuple[int, int]] = current_platform.get_global_graph_pool()
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        """Clear all graphs from all ACLGraphWrapper instances."""
+        for instance in list(cls.all_instances):
+            instance.clear_graphs()
+        cls.graph_pool = (cls.graph_pool[0], cls.graph_pool[1] + 1)
+
     def __init__(
         self,
         runnable: Callable,
@@ -82,7 +93,6 @@ class ACLGraphWrapper:
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
-        self.graph_pool = current_platform.get_global_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -106,6 +116,13 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
+
+    def clear_graphs(self) -> None:
+        for batch_descriptor in self.concrete_aclgraph_entries:
+            entry = self.concrete_aclgraph_entries[batch_descriptor]
+            entry.aclgraph.reset()
+            del entry.aclgraph, entry.batch_descriptor, entry.output, entry.input_addresses, entry
+        self.concrete_aclgraph_entries.clear()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -154,7 +171,7 @@ class ACLGraphWrapper:
 
                 # mind-exploding: carefully manage the reference and memory.
                 forward_context.capturing = True
-                with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                with torch.npu.graph(aclgraph, pool=ACLGraphWrapper.graph_pool):
                     # `output` is managed by pytorch's aclgraph pool
                     output = self.runnable(*args, **kwargs)
                     if self.aclgraph_options.weak_ref_output:

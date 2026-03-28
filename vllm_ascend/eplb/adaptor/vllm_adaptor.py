@@ -48,6 +48,8 @@ class VllmEplbAdaptor:
 
         num_buffer_tensor = self.num_local_experts
         self.buffer_tensor_list: list[list[Any]] = [[] for _ in range(num_buffer_tensor)]
+        if self.model.quant_config is None and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            self.temp_tensor_list: list[list[Any]] = [[] for _ in range(num_buffer_tensor)]
         self.init_buffer_tensor(num_buffer_tensor)
 
         self.log2phy_map_per_layer = dict()
@@ -63,6 +65,9 @@ class VllmEplbAdaptor:
                 expert_tensor = self.param_dict[complete_name][0]
                 buffer_tensor = torch.empty_like(expert_tensor)
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
+                if self.model.quant_config is None and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+                    temp_tensor = torch.empty_like(expert_tensor)
+                    self.temp_tensor_list[buffer_id].append(temp_tensor)
 
     def init_expert_param_per_layer(self):
         self.param_dict = dict()

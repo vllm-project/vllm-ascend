@@ -18,6 +18,7 @@
 import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
+from vllm.distributed.utils import StatelessProcessGroup
 
 
 class NPUCommunicator(DeviceCommunicatorBase):
@@ -27,11 +28,29 @@ class NPUCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: dist.ProcessGroup | None = None,
         unique_name: str = "",
+        global_ranks: list[int] | None = None,
+        global_world_size: int | None = None,
+        tcp_store_group: StatelessProcessGroup | None = None,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
+        super().__init__(
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            global_ranks,
+            global_world_size,
+        )
         # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
         # init device according to rank
         self.device = torch.npu.current_device()
+
+        from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
+
+        self.pyhccl_comm: PyHcclCommunicator | None = None
+        if self.world_size > 1:
+            self.pyhccl_comm = PyHcclCommunicator(
+                group=self.cpu_group if tcp_store_group is None else tcp_store_group, device=self.device
+            )
 
         # For compatibility (mainly for reusing graph capturing code in vllm),
         # init custom all-reduce implementation interface as in CUDACommunicator.
@@ -66,3 +85,15 @@ class NPUCommunicator(DeviceCommunicatorBase):
         dist.all_to_all(output_list, input_list, group=self.device_group)
         output_tensor = torch.cat(output_list, dim=gather_dim).contiguous()
         return output_tensor
+
+    def destroy(self):
+        if self.pyhccl_comm is not None:
+            self.pyhccl_comm.destroy()
+            self.pyhccl_comm = None
+
+    def batch_isend_irecv(self, p2p_ops: list):
+        pyhccl_comm = self.pyhccl_comm
+        if pyhccl_comm is not None and not pyhccl_comm.disabled:
+            pyhccl_comm.batch_isend_irecv(p2p_ops)
+        else:
+            raise ValueError("No PyHccl communicator found")

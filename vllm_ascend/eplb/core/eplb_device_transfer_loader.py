@@ -52,13 +52,18 @@ class D2DExpertWeightLoader:
 
         self.layer_id = layer_id
         self.comm_op_list = []
+        has_temp = set()
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
-            for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
-                self.comm_op_list.append(
-                    dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group)
-                )
+            op_info = {"peer_rank": dst_rank, "tensors": [], "expert_id": global_expert_id_to_send, "op": "send"}
+            for index, src_tensor in enumerate(self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]):
+                if hasattr(self.eplb_adaptor, "temp_tensor_list"):
+                    if local_expert_id not in has_temp:
+                        self.eplb_adaptor.temp_tensor_list[layer_id][index].copy_(src_tensor)
+                op_info["tensors"].append(self.eplb_adaptor.temp_tensor_list[layer_id][index])
+            has_temp.add(local_expert_id)
+            self.comm_op_list.append(op_info)
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
             recv_rank, global_expert_id_to_recv = recv_info
@@ -81,8 +86,17 @@ class D2DExpertWeightLoader:
 
         # set asynchronous stream for d2d expert weight transfer
         if self.comm_op_list:
-            ret_list = dist.batch_isend_irecv(self.comm_op_list)
-            reqs.extend(ret_list)
+            for op_info in self.comm_op_list:
+                peer_rank = op_info["peer_rank"]
+                tensors = op_info["tensors"]
+                expert_id = op_info["expert_id"]
+                op = op_info["op"]
+                for i, tensor in enumerate(tensors):
+                    if op == "send":
+                        worker = self.comm_group.device_group.send([tensor], peer_rank, tag=(expert_id + 1) * (i + 1))
+                    else:
+                        worker = self.comm_group.device_group.recv([tensor], peer_rank, tag=(expert_id + 1) * (i + 1))
+                    reqs.append(worker)
 
         self.state = ExpertWeightUpdateState.TRANSFERRING
 

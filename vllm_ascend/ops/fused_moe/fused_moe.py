@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
@@ -363,7 +364,8 @@ class AscendFusedMoE(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
 
-        setup_moe_comm_method(self.moe_config)
+        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
+            setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 
         self.runner = AscendMoERunner(
