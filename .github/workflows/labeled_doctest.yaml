@@ -26,7 +26,7 @@ on:
       - 'releases/v*'
     paths:
       # If we are changing the doctest we should do a PR test
-      - '.github/workflows/labled_doctest.yaml'
+      - '.github/workflows/labeled_doctest.yaml'
       - 'tests/e2e/doctests/**'
       - 'tests/e2e/common.sh'
       - 'tests/e2e/run_doctests.sh'
