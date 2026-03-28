@@ -111,7 +111,8 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "protocol": "ascend",
     "device_name": "",
     "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
+    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824),
+    "default_kv_lease_ttl": 11000   # Suggestions：default_kv_lease_ttl > ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT*7
 }
 ```
 
@@ -156,6 +157,8 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
+#export HCCL_RDMA_TIMEOUT=16
+#export ASCEND_BUFFER_POOL=4:8 #option: By default, this parameter does not need to be set. You are advised to set this parameter for the customized 64 KB paging OS.
 
 # Unit: ms. The timeout for one-sided communication connection establishment is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039). Users can adjust this value based on their specific setup.
 # The recommended formula is: ASCEND_CONNECT_TIMEOUT = connection_time_per_card (typically within 500ms) × total_number_of_Decode_cards.
