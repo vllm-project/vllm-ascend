@@ -86,8 +86,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     w2=torch.randn(2, 16, 8),
                     quant_type=quant_type,
                     dynamic_eplb=True,
-                    expert_map=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
-                    global_redundant_expert_num=2,
                     mc2_mask=torch.tensor([True, False, True, False]),
                     apply_router_weight_on_input=True,
                     log2phy=torch.tensor([3, 2, 1, 0], dtype=torch.int32),
