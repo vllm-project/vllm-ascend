@@ -75,6 +75,8 @@ def token_bin_counts_and_mask_kernel(
         mask=pos_mask,
         other=vocab_size,  # force invalid
     )
+    # Only count valid token ids in [0, vocab_size). Padding must use id >= vocab_size
+    # (see vLLM apply_penalties contract); those positions are masked out here.
     token_in_range = (token >= 0) & (token < vocab_size) & pos_mask
     count_ptr = batch_counts_start + token * counts_vocab_stride
     tl.atomic_add(count_ptr, 1, mask=token_in_range)
@@ -89,7 +91,7 @@ def get_token_bin_counts_and_mask_triton(
 
     Args:
         tokens: [num_seqs, seq_len] tensor of token IDs. Padding value
-            should be >= vocab_size and will be ignored.
+            should be vocab_size and will be ignored.
         vocab_size: Vocabulary size.
         num_seqs: If provided, asserts tokens.shape[0] == num_seqs.
 
@@ -97,17 +99,21 @@ def get_token_bin_counts_and_mask_triton(
         bin_counts: [num_seqs, vocab_size] int32 counts.
         mask: [num_seqs, vocab_size] bool, True where count > 0.
     """
-    core_num = get_vectorcore_num()
     n_rows, n_cols = tokens.shape
     if num_seqs is not None and num_seqs > 0:
         assert n_rows == num_seqs, f"tokens rows must match num_seqs: tokens.shape[0]={n_rows}, num_seqs={num_seqs}"
     n_rows = num_seqs if num_seqs is not None else n_rows
 
+    # seq_len == 0 is valid for empty decode history; return directly.
+    if n_cols == 0:
+        bin_counts = torch.zeros((n_rows, vocab_size), dtype=torch.int32, device=tokens.device)
+        return bin_counts, bin_counts > 0
+
+    core_num = get_vectorcore_num()
+
     bin_counts = torch.zeros((n_rows, vocab_size), dtype=torch.int32, device=tokens.device)
     if not tokens.is_contiguous():
         tokens = tokens.contiguous()
-    if not bin_counts.is_contiguous():
-        bin_counts = bin_counts.contiguous()
 
     # 2D grid: (progs, blocks_per_prog_group)
     # Keep axis-0 bounded by vector core count, and distribute (batch, seq_block)
@@ -115,7 +121,7 @@ def get_token_bin_counts_and_mask_triton(
     SEQ_BLOCK = 256
     n_seq_blocks = triton.cdiv(n_cols, SEQ_BLOCK)
     total_blocks = n_rows * n_seq_blocks
-    progs = min(core_num, max(1, total_blocks))
+    progs = min(core_num, total_blocks)
     grid = (progs, triton.cdiv(total_blocks, progs))
 
     token_bin_counts_and_mask_kernel[grid](
