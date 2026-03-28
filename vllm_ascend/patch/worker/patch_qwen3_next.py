@@ -131,8 +131,8 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
 
         if not enable_sp():
             mixed_qkv = mixed_qkv[:num_actual_tokens]
-            b = b[:num_actual_tokens]
-            a = a[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
@@ -184,7 +184,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         elif attn_metadata.num_decodes > 0:
             conv_weights_T = conv_weights.transpose(0, 1)
             mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_update(
-                mixed_qkv_non_spec,
+                mixed_qkv_non_spec[: attn_metadata.num_actual_tokens],
                 conv_weights_T,
                 conv_state_T,
                 non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
