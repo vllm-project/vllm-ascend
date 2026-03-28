@@ -107,6 +107,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # EARS (Entropy-Adaptive Rejection Sampling) tolerance for speculative decoding.
+    # When > 0, dynamically relaxes rejection threshold based on target model uncertainty.
+    # Higher values accept more draft tokens but may reduce quality.
+    # Only effective for random sampling (not greedy). Range: [0.0, 1.0]. Default: 0.0 (disabled).
+    "VLLM_EARS_TOLERANCE": lambda: float(os.getenv("VLLM_EARS_TOLERANCE", "0.0")),
 }
 
 # end-env-vars-definition

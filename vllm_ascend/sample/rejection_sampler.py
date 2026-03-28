@@ -10,6 +10,7 @@ from vllm.v1.sample.rejection_sampler import (
     generate_uniform_probs,
 )
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
@@ -179,6 +180,16 @@ def rejection_sample(
         sampling_metadata.generators,
         device,
     )
+
+    # EARS: Entropy-Adaptive Rejection Sampling
+    # Dynamically relax rejection threshold based on target model uncertainty.
+    # When the model is uncertain (low max prob), tolerance is higher → easier acceptance.
+    ears_tolerance = envs_ascend.VLLM_EARS_TOLERANCE
+    if ears_tolerance > 0:
+        max_target_probs = target_probs.max(dim=-1).values  # [num_tokens]
+        uncertainties = 1.0 - max_target_probs
+        tolerance = ears_tolerance * uncertainties
+        uniform_probs = (uniform_probs - tolerance).clamp(min=0.01)
 
     # Sample recovered tokens for each position.
     # [num_tokens]
