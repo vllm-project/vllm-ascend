@@ -1,7 +1,17 @@
+import threading
+from contextlib import contextmanager
+from unittest.mock import patch
+
 import torch
 import torch.distributed as dist
+from torch.distributed import ProcessGroup, Store
+from torch.distributed.distributed_c10d import BackendConfig, _world
 from vllm.distributed import get_dcp_group
 from vllm.distributed.parallel_state import GroupCoordinator, get_dp_group
+from vllm.distributed.stateless_coordinator import (
+    stateless_destroy_torch_distributed_process_group,
+    stateless_init_torch_distributed_process_group,
+)
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -57,6 +67,66 @@ def all_gather_async(
         output_size = (input_size[0] * group.world_size,) + input_size[1:]
         output = torch.empty(output_size, dtype=input.dtype, device=input.device)
     return output, dist.all_gather_into_tensor(output, input, group=group.device_group, async_op=async_op)
+
+
+def stateless_init_pg_with_world_registration(**kwargs) -> ProcessGroup | tuple[ProcessGroup, Store]:
+    # Initializes a ProcessGroup and registers it into PyTorch's global `_world` state.
+    # This is required for operations like `dist.P2POp` that need global metadata.
+    if kwargs.get("return_store", False):
+        pg, store = stateless_init_torch_distributed_process_group(**kwargs)
+    else:
+        pg = stateless_init_torch_distributed_process_group(**kwargs)
+
+    if kwargs["backend"] == "hccl":
+        backend = "hccl"
+        prefix_store = pg.get_group_store()
+        group_name = pg.group_name
+        backend_config = BackendConfig(backend)
+
+        # Register process group to PyTorch's global _world state
+        # Required for: dist.P2POp, dist.batch_isend_irecv, and other ops that query _world.pg_map
+        _world.pg_group_ranks[pg] = {i: i for i in range(pg.size())}
+        _world.pg_map[pg] = (backend, prefix_store)
+        _world.pg_names[pg] = group_name
+        _world.pg_backend_config[pg] = str(backend_config)
+
+        if "WORLD" in group_name:
+            _world.default_pg = pg
+
+    if kwargs.get("return_store", False):
+        return pg, store
+    else:
+        return pg
+
+
+def stateless_destroy_pg_with_world_cleanup(pg: ProcessGroup) -> None:
+    # Destroys the ProcessGroup and cleans up its entries from the global `_world` state.
+    stateless_destroy_torch_distributed_process_group(pg)
+
+    # Remove related attributes from _world
+    _world.pg_map.pop(pg, None)
+    _world.pg_names.pop(pg, None)
+    _world.pg_group_ranks.pop(pg, None)
+    _world.pg_backend_config.pop(pg, None)
+
+
+_PATCH_LOCK = threading.Lock()
+
+
+@contextmanager
+def use_stateless_pg_with_world_registration():
+    with (
+        _PATCH_LOCK,
+        patch(
+            "vllm.distributed.stateless_coordinator.stateless_init_torch_distributed_process_group",
+            new=stateless_init_pg_with_world_registration,
+        ),
+        patch(
+            "vllm.distributed.stateless_coordinator.stateless_destroy_torch_distributed_process_group",
+            new=stateless_destroy_pg_with_world_cleanup,
+        ),
+    ):
+        yield
 
 
 def split_tensor_along_first_dim(
