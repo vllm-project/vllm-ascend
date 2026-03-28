@@ -92,7 +92,6 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
-from vllm_ascend.utils import kv_cache_spec_uses_sparse_c8
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -125,6 +124,7 @@ from vllm_ascend.utils import (
     global_stream,
     is_drafter_moe_model,
     is_moe_model,
+    kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     set_weight_prefetch_method,
 )
