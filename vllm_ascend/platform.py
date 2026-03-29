@@ -319,7 +319,7 @@ class NPUPlatform(Platform):
             and not vllm_config.model_config.enforce_eager
             and enable_sp(vllm_config)
         ):
-            original_sizes = compilatio_config.cudagraph_capture_sizes
+            original_sizes = compilation_config.cudagraph_capture_sizes
             sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
             assert sp_aclgraph_sizes, (
                 f"cudagraph_capture_sizes {original_sizes} does not contain"
