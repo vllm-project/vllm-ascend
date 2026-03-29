@@ -168,6 +168,8 @@ class SpecDecodeBaseProposer(EagleProposer):
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
+        self.token_arange_np = np.arange(self.max_num_tokens + 1)
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
