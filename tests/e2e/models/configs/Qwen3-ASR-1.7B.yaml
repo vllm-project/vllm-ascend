@@ -1,0 +1,28 @@
+model_name: "Qwen3-ASR-1.7B"
+served_model_name: "qwen3-asr"
+hardware: "Atlas A2 Series"
+trust_remote_code: true
+tasks:
+- name: "librispeech_asr"
+  dataset_config: "clean"
+  dataset_split: "test"
+  metrics:
+  - name: "wer"
+    value: 0.1283
+  - name: "cer"
+    value: 0.2479
+- name: "librispeech_asr"
+  dataset_config: "other"
+  dataset_split: "test"
+  metrics:
+  - name: "wer"
+    value: 0.1639
+  - name: "cer"
+    value: 0.3212
+num_samples: 100
+apply_chat_template: false
+max_model_len: 448
+temperature: 0.0
+max_completion_tokens: 64
+input_format: "base64_wav"
+api_base: "http://localhost:8000/v1"
