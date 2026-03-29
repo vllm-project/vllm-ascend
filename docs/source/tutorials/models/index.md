@@ -9,6 +9,7 @@ Qwen2.5-Omni.md
 Qwen2.5-7B.md
 Qwen3-Dense.md
 Qwen-VL-Dense.md
+Qwen3-ASR-1.7B.md
 Qwen3-30B-A3B.md
 Qwen3-235B-A22B.md
 Qwen3-VL-30B-A3B-Instruct.md
