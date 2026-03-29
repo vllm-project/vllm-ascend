@@ -72,8 +72,8 @@ vllm serve Qwen/Qwen3-ASR-1.7B --served-model-name qwen3-asr --tensor-parallel-s
 Once your server is started, you can query the model with input prompts:
 
 ```shell
-curl http://localhost:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
+curl http://localhost:8000/v1/chat/completions
+    -H "Content-Type: application/json"
     -d '{
     "messages": [
     {"role": "user", "content": [
