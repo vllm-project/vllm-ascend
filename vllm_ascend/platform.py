@@ -234,6 +234,13 @@ class NPUPlatform(Platform):
         torch.npu.set_device(device)
 
     @classmethod
+    def _fix_custom_capture_sizes(cls, vllm_config: VllmConfig, graph_sizes: list[int]) -> list[int]:
+        if (graph_sizes[-1] < vllm_config.compilation_config.max_cudagraph_capture_size):
+            graph_sizes.append(graph_sizes[-1] + 1)
+            vllm_config.compilation_config.max_cudagraph_capture_size = graph_sizes[-1]
+        return graph_sizes
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
@@ -326,6 +333,10 @@ class NPUPlatform(Platform):
                 f"values that are multiples of tp_size "
                 f"{vllm_config.parallel_config.tensor_parallel_size}"
             )
+            # If user set the max_num_seqs miss fit the multiple of tp_size,
+            # we need to round up the last size to the multiple of tp_size,
+            # so we can avoid initialization error of vllm server.
+            sp_aclgraph_sizes = _fix_custom_capture_sizes(vllm_config, sp_aclgraph_sizes)
             if len(sp_aclgraph_sizes) != len(original_sizes):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
