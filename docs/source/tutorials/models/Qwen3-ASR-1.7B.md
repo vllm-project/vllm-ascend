@@ -61,11 +61,6 @@ In addition, if you don't want to use the docker image as above, you can also bu
 ## Deployment
 
 
-```bash
-export VLLM_USE_MODELSCOPE=true
-
-vllm serve Qwen/Qwen3-ASR-1.7B --served-model-name qwen3-asr --tensor-parallel-size 1 --max-model-len 448 --gpu-memory-utilization 0.8 --port 8000
-```
 
 ## Functional Verification
 
@@ -77,8 +72,8 @@ curl http://localhost:8000/v1/chat/completions
     -d '{
     "messages": [
     {"role": "user", "content": [
-        {"type": "audio_url", 
-        "audio_url": 
+        {"type": "audio_url",
+        "audio_url":
         {"url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-ASR-Repo/asr_en.wav"}}
     ]}
     ]
