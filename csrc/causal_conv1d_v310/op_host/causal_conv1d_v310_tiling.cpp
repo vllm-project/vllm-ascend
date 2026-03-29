@@ -465,11 +465,11 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
         }
     }
 
-    const std::set<ge::DataType> supportedXDtype = {ge::DT_BF16, ge::DT_FLOAT16};
+    const std::set<ge::DataType> supportedXDtype = {ge::DT_FLOAT16};
     auto xDesc = context->GetInputDesc(X_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context, xDesc);
     const ge::DataType xDtype = xDesc->GetDataType();
-    OP_CHECK_IF(supportedXDtype.count(xDtype) == 0, OP_LOGE(context, "x dtype only supports bf16/fp16"),
+    OP_CHECK_IF(supportedXDtype.count(xDtype) == 0, OP_LOGE(context, "x dtype only supports fp16"),
                 return ge::GRAPH_FAILED);
 
     auto wDesc = context->GetInputDesc(WEIGHT_INDEX);
