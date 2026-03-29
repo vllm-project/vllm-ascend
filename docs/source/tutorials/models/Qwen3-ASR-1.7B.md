@@ -18,7 +18,6 @@ This document will show the main verification steps of the model, including supp
 | **Deployment** | vLLM-based online serving |
 | **Typical Use Cases** | Speech transcription, ASR service verification, benchmarking |
 
-
 ## Environment Preparation
 
 ### Model Weight
