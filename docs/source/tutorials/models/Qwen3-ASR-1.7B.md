@@ -63,7 +63,6 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 ```shell
 #!/bin/sh
-# Enable ModelScope download (optional, for domestic users)
 export VLLM_USE_MODELSCOPE=true
 
 # Start vLLM online service
