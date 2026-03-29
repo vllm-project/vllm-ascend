@@ -24,7 +24,12 @@ It is recommended to download the model weights to a local directory (e.g., `./Q
 
 ### Installation
 
-You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly.
+You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly. For optimal performance, it is recommended to use:
+
+- PyTorch version: 2.10.0+cpu
+- torch_npu version: 2.10.0rc2
+
+These versions support multi-NPU deployment, allowing the model to utilize all available NPU devices (e.g., 4 NPUs) for improved performance.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
