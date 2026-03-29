@@ -62,11 +62,16 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 
 
+export VLLM_USE_MODELSCOPE=true
+
+vllm serve Qwen/Qwen3-ASR-1.7B --served-model-name qwen3-asr --tensor-parallel-size 1 --max-model-len 448 --gpu-memory-utilization 0.8 --port 8000
+
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
-```shell
+
 curl http://localhost:8000/v1/chat/completions
     -H "Content-Type: application/json"
     -d '{
@@ -78,7 +83,7 @@ curl http://localhost:8000/v1/chat/completions
     ]}
     ]
 }'
-```
+
 
 ## Accuracy Evaluation
 
