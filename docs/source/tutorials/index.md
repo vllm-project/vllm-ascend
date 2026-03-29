@@ -4,7 +4,6 @@
 :caption: Deployment
 :maxdepth: 1
 single_npu
-models/llama4_scout
 single_npu_multimodal
 single_npu_audio
 single_npu_qwen3_embedding
@@ -23,4 +22,5 @@ multi_node_qwen3vl
 multi_node_pd_disaggregation_llmdatadist
 multi_node_pd_disaggregation_mooncake
 multi_node_ray
+models/Llama-4-Scout-17B-16E-Instruct
 :::
