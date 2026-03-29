@@ -61,16 +61,10 @@ In addition, if you don't want to use the docker image as above, you can also bu
 ## Deployment
 
 
-```{code-block} shell
-#!/bin/sh
+```bash
 export VLLM_USE_MODELSCOPE=true
 
-vllm serve Qwen3-ASR-1.7B \
-    --served-model-name qwen3-asr \
-    --tensor-parallel-size 1 \
-    --max-model-len 448 \
-    --gpu-memory-utilization 0.8 \
-    --port 8000
+vllm serve Qwen/Qwen3-ASR-1.7B --served-model-name qwen3-asr --tensor-parallel-size 1 --max-model-len 448 --gpu-memory-utilization 0.8 --port 8000
 ```
 
 ## Functional Verification
