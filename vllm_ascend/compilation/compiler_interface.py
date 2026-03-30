@@ -142,7 +142,7 @@ def npugraph_ex_compile(
         ]
         config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
-    py_code_holder = [None]
+    py_code_holder: list[str | None] = [None]
     original_get_code = _CompiledFxGraph.get_code
 
     def hijacked_get_code(self, extend_config=None):
