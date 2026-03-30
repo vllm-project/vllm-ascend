@@ -125,7 +125,6 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 **device_name**: ""
 **master_server_address**: Configured with the IP and port of the master service.  
 **global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.**
-**default_kv_lease_ttl** Default lease TTL for KV objects. The default unit is milliseconds. Set this via `--default_kv_lease_ttl` when starting `mooncake_master`, and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 
 #### 2.Start mooncake_master
 
@@ -136,6 +135,7 @@ mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_rati
 ```
 
 `eviction_high_watermark_ratio` determines the watermark where Mooncake Store will perform eviction，and `eviction_ratio` determines the portion of stored objects that would be evicted.
+`default_kv_lease_ttl` controls the default lease TTL for KV objects (milliseconds); configure it via `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 
 ### PD Disaggregation Scenario
 
