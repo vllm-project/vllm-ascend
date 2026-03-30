@@ -326,7 +326,6 @@ class NPUPlatform(Platform):
                 f"values that are multiples of tp_size "
                 f"{vllm_config.parallel_config.tensor_parallel_size}"
             )
-            
             if len(sp_aclgraph_sizes) != len(original_sizes):
                 # If user set the max_num_seqs miss fit the multiple of tp_size,
                 # we need to match the max_cudagraph_capture_size with the valid max size,
