@@ -254,10 +254,10 @@ class NPUWorker(WorkerBase):
         # This lazy import avoids torch_npu re-initialization in patch
         # Note that this should be imported after torch.npu.set_device
         # to avoid repeated set_device in extra processes
-        # from vllm.triton_utils import HAS_TRITON
-        # @vklyzhenko: TODO: comment to avoid error when draft_model is enabled
-        # if HAS_TRITON:
-        # import torch_npu._inductor  # noqa: F401
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+        import torch_npu._inductor  # noqa: F401
 
         gc.collect()
         torch.npu.empty_cache()
