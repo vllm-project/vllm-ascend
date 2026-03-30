@@ -10,12 +10,13 @@ Two performance collection solutions are provided below: Ascend PyTorch Profiler
 
 | Feature | Ascend PyTorch Profiler | MS Service Profiler |
 |:-----|:------------------------|:------------------|
-| Installation Method | Built-in, no additional installation required | Requires pip installation of msserviceprofiler |
+| Installation Method | Built-in, no additional installation required | Requires building msserviceprofiler from source |
 | Collection Granularity | PyTorch operator level | Service framework function level |
 | Control Method | API request control | Configuration file control |
 | Applicable Scenarios | Model operator performance analysis | Service framework workflow analysis |
 | Data Format | ascend_pt format | Chrome Tracing + CSV |
 | Main Advantage | Operator-level performance analysis | Service framework workflow visualization |
+| Supported Collection Capabilities | PyTorch operator level | PyTorch operator level and Service framework function level |
 
 ## Quick Selection Guide
 
@@ -117,12 +118,14 @@ After analysis, the `*ascend_pt` directory will contain many files, with the mai
 
 ## MS Service Profiler  
 
-### 0. Installation
+### 0. Build from Source and Upgrade
 
-Install the `msserviceprofiler` package using pip:
+The `msserviceprofiler` tool is pre-installed with the CANN Toolkit package. Use the following commands to install or upgrade from source.
 
 ```bash
-pip install msserviceprofiler==1.2.2
+git clone https://gitcode.com/Ascend/msserviceprofiler.git
+cd msserviceprofiler
+bash scripts/build_and_upgrade.sh
 ```
 
 ### 1. Preparation
@@ -166,28 +169,25 @@ curl http://localhost:8000/v1/completions \
 }' | python3 -m json.tool
 ```
 
-### 4. Analyze Data
+### 4. Parse Data
 
 ```bash
 # xxxx-xxxx is the directory automatically created based on vLLM startup time
 cd /root/.ms_server_profiler/xxxx-xxxx
 
-# Analyze data
-msserviceprofiler analyze --input-path=./ --output-path output
+# parse data
+msserviceprofiler parse --input-path=./ --output-path output
 ```
 
 ### 5. View Results
 
-After analysis, the `output` directory will contain:
+After parsing, the `output` directory will contain:
 
-- `chrome_tracing.json`: Chrome tracing format data, which can be opened in [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html).
+- `chrome_tracing.json`: Chrome tracing format data, which can be opened in [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html?framework=mindspore).
 - `profiler.db`: Performance data in database format.
 - `request.csv`: Request-related data.
-- `request_summary.csv`: Overall request metrics.
 - `kvcache.csv`: KV Cache-related data.
 - `batch.csv`: Batch scheduling-related data.
-- `batch_summary.csv`: Overall batch scheduling metrics.
-- `service_summary.csv`: Overall service-level metrics.
 
 ---
 
@@ -206,27 +206,24 @@ The configuration is in JSON format. Main parameters:
 | Parameter | Description | Required |
 |:------:|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:-----:|
 | enable | Switch for profiling: <br />0: disable<br />1: enable<br />Default: 0 | Yes |
-| prof_dir | Directory to store collected performance data. <br />Default: $HOME/.ms_service_profiler | No |
+| prof_dir | Directory to store collected performance data. <br />Default: `${HOME}/.ms_server_profiler` | No |
 | profiler_level | Data collection level. Default is "INFO" (normal level). | No |
-| host_system_usage_freq | Sampling frequency of host CPU and memory metrics. Disabled by default. Range: integer 1–50, unit: Hz (times per second). Set to -1 to disable. <br />Note: Enabling this may consume significant memory. | No |
-| npu_memory_usage_freq | Sampling frequency of NPU memory utilization. Disabled by default. Range: integer 1–50, unit: Hz (times per second). Set to -1 to disable. <br />Note: Enabling this may consume significant memory. | No |
-| acl_task_time | Switch to collect operator dispatch latency and execution latency: <br />0: disable (default; 0 or invalid values mean disabled).<br />1: enable; calls `aclprofCreateConfig` with `ACL_PROF_TASK_TIME_L0`.<br />2: enable MSPTI-based data dumping; uses MSPTI for profiling and requires: `export LD_PRELOAD=$ASCEND_TOOLKIT_HOME/lib64/libmspti.so` | No |
-| acl_prof_task_time_level | Level and duration for profiling: <br />L0: collect operator dispatch and execution latency only; lower overhead (no operator basic info).<br />L1: collect AscendCL interface performance (host–device and inter-device sync/async memory copy latencies), plus operator dispatch, execution, and basic info for comprehensive analysis.<br />time: profiling duration, integer 1–999, in seconds.<br />If unset, defaults to L0 until program exit; invalid values fall back to defaults.<br />Level and duration can be combined, e.g., `"acl_prof_task_time_level": "L1,10"`. | No |
-| api_filter | Filter to select API performance data to dump. For example, specifying "matmul" dumps all API data whose `name` contains "matmul". String, case-sensitive; use ";" to separate multiple targets. Empty means dump all. <br />Effective only when `acl_task_time` is 2. | No |
-| kernel_filter | Filter to select kernel performance data to dump. For example, specifying "matmul" dumps all kernel data whose `name` contains "matmul". String, case-sensitive; use ";" to separate multiple targets. Empty means dump all. <br />Effective only when `acl_task_time` is 2. | No |
-| timelimit | Profiling duration for the service. The process stops automatically after this time. Range: integer 0–7200, unit: seconds. Default 0 means unlimited. | No |
-| domain | Limit profiling to the specified domains to reduce data volume. String, separated by semicolons, case-sensitive, e.g., "Request; KVCache".<br />Empty means all available domains.<br />Available domains: Request, KVCache, ModelExecute, BatchSchedule, Communication.<br />Note: If the selected domains are incomplete, analysis output may show warnings due to missing data. See [Reference Table 1](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/devaids/Profiling/mindieprofiling_0009.html#ZH-CN_TOPIC_0000002370256365__table1985410131831). | No |
+| acl_task_time | Switch to collect operator dispatch latency and execution latency. Values: <br />0: off. Default; 0 or any invalid value means off.<br />1: on. When enabled, calls `aclprofCreateConfig` with `ACL_PROF_TASK_TIME_L0`.<br />2: on. MSPTI-based dump. When enabled, set before starting the service: `export LD_PRELOAD={INSTALL_DIR}/lib64/libmspti.so`, where `{INSTALL_DIR}` is the CANN installation root (e.g. `/usr/local/Ascend/cann` for a typical root install).<br />3: on. Torch Profiler–based dump. | No |
+| acl_prof_task_time_level | Profiling level and duration. Values: <br />L0: collect operator dispatch and execution latency only; lower overhead (no operator basic info).<br />L1: collect AscendCL interface performance (host–device and inter-device sync/async memory copy latencies), plus operator dispatch, execution, and basic info for comprehensive analysis.<br />`{time}`: optional duration segment; integer 1–999, unit seconds.<br />If unset, defaults to L0 until program exit; invalid values fall back to defaults.<br />Level and duration can be combined, e.g., `"acl_prof_task_time_level": "L1;10"`.<br />**Note:** When Torch Profiler is used (`acl_task_time` set to `3`), `{time}` duration is not supported. | No |
+| timelimit | Profiling duration for the service. The process stops automatically after this time. Range: integer 0–7200, unit: seconds. Default 0 means unlimited. Recommend at least 120 s; shorter runs may lack data for parsed outputs and trigger warnings. | No |
+| domain | Limit profiling to the specified domains to reduce data volume. String, separated by semicolons, case-sensitive, e.g., "Request; KVCache".<br />Empty means all available domains.<br />Available domains: Request, KVCache, ModelExecute, BatchSchedule, Communication.<br />Note: If the selected domains are incomplete, analysis output may show warnings due to missing data. See [Reference Table 1](https://www.hiascend.com/document/detail/zh/canncommercial/850/devaids/Profiling/mindieprofiling_0010.html). | No |
+| torch_prof_stack | Collect operator call stacks (framework and CPU operators). Values: `false` (default, off), `true` (on). Requires `acl_task_time` set to `3`. **Note:** Enabling this configuration introduces additional performance overhead. | No |
+| torch_prof_step_num | Torch Profiler step limit. Integer ≥ 0. Default `0` means collect all steps.<br />Requires `acl_task_time` set to `3`. | No |
+| profiler_step_num | Step limit for operator and service framework profiling. Integer ≥ 0.<br />`0` or invalid values stop the entire service profiling process.<br />The number of steps actually recorded depends on `modelRunnerExec` events. | No |
 
 ##### Example Configuration
 
 ```json
 {
-  "enable": 1,
-  "prof_dir": "vllm_prof",
-  "profiler_level": "INFO",
-  "acl_task_time": 0,
-  "acl_prof_task_time_level": "",
-  "timelimit": 0
+    "enable": 1,
+    "prof_dir": "./vllm_prof",
+    "acl_task_time": 0,
+    "acl_prof_task_time_level": ""
 }
 ```
 
@@ -240,9 +237,13 @@ The symbols configuration file defines which functions/methods to profile and su
 
 ##### File Name and Loading
 
-- Default load path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`(According to the installed version of vllm )
+- Default load path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`( According to the installed version of vllm )
 
-If you need to customize the profiling points, it is highly recommended to copy a profiling configuration file to your working directory using the `PROFILING_SYMBOLS_PATH` environment variable.
+If you need to customize the profiling points, it is highly recommended to copy a symbol configuration file to your working directory and point to it with the `PROFILING_SYMBOLS_PATH` environment variable.
+
+##### Configuration file updates
+
+After you change profiling symbols, restart the vLLM service so the updated configuration file is loaded.
 
 ##### Field Descriptions
 
@@ -252,17 +253,17 @@ If you need to customize the profiling points, it is highly recommended to copy 
 | handler | Handler type | `"timer"` (default) or `"pkg.mod:func"` (custom) |
 | domain | Domain tag | `"KVCache"`, `"ModelExecute"` |
 | name | Event name | `"EngineCoreExecute"` |
-| min_version | Upper version constraint | `"0.9.1"` |
-| max_version | Lower version constraint | `"0.11.0"` |
+| min_version | Minimum supported vLLM version | `"0.9.1"` |
+| max_version | Maximum supported vLLM version | `"0.11.0"` |
 | attributes | Custom attribute collection | Only supported for `"timer"` handler. See the section below |
 
-##### Examples
+##### Configuration Examples
 
 - Example 1: Custom handler
 
 ```yaml
 - symbol: vllm.v1.core.kv_cache_manager:KVCacheManager.free
-  handler: vllm_profiler.config.custom_handler_example:kvcache_manager_free_example_handler
+  handler: ms_service_profiler.patcher.config.custom_handler_example.kvcache_manager_free_example_handler
   domain: Example
   name: example_custom
 ```
