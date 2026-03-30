@@ -112,7 +112,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "device_name": "",
     "master_server_address": "xx.xx.xx.xx:50088",
     "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
-    "default_kv_lease_ttl": 11000
+    "default_kv_lease_ttl": 11000,
 }
 ```
 
@@ -160,7 +160,7 @@ export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #export HCCL_INTRA_ROCE_ENABLE=1
 
 #Minimum retransmission timeout of the RDMA，equals 4.096 μs * 2 ^ timeout.
-#Needs to satisfy the equation: transfer time > RMDA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
+#Needs to satisfy the equation: transfer time > RDMA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
 export HCCL_RDMA_TIMEOUT=16
 
 # Unit: ms. The timeout for one-sided communication connection establishment is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039). Users can adjust this value based on their specific setup.
