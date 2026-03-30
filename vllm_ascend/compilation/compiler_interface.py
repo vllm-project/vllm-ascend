@@ -85,12 +85,9 @@ def _patch_acl_graph_run_eagerly() -> None:
             pass
 
     for AclGraph in classes_to_patch:
-        original_call = AclGraph.__call__
 
-        def patched_call(self, *args, _orig=original_call, **kwargs):
-            if self._fx_forward is not None:
-                return self.fx_run_eagerly(*args, **kwargs)
-            return _orig(self, *args, **kwargs)
+        def patched_call(self, *args, **kwargs):
+            return self.fx_run_eagerly(*args, **kwargs)
 
         AclGraph.__call__ = patched_call
 
@@ -113,20 +110,9 @@ def npugraph_ex_compile(
     cache_dir: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
     import torchair
-    from torchair.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
+    from torchair.npu_fx_compiler import _CompiledFxGraph
 
     cache_path = os.path.join(cache_dir, key) if (cache_dir and key) else None
-    if cache_path and os.path.exists(cache_path):
-        try:
-            with open(cache_path) as f:
-                py_code = f.read()
-            artifacts = _CompiledFxArtifacts()
-            artifacts.py_code = py_code
-            compiled = _CompiledFxGraph.load_artifacts(artifacts)
-            logger.info("Loaded compiled graph from cache: %s", cache_path)
-            return compiled, (key, cache_path)
-        except Exception as e:
-            logger.warning("Failed to load compiled graph from cache: %s, error: %s", cache_path, e)
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
