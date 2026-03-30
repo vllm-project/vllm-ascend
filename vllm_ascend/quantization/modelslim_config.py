@@ -679,9 +679,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
 
-    def get_scaled_act_names(self) -> list[str]:
-        return []
-
     def _add_kvcache_quant_metadata(self):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")
         self.enable_fa_quant = fa_quant_type != ""
