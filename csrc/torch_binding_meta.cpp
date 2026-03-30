@@ -569,6 +569,39 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+at::Tensor npu_lightning_attention_decode_meta(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    const at::Tensor &kv_caches_ref,
+    const at::Tensor &slope_rate,
+    const at::Tensor &slot_ids)
+{
+    auto output_size_0 = {query.size(0), query.size(1) * query.size(3)};
+    auto output_dtype_0 = query.scalar_type();
+    at::Tensor attention_out = at::empty(output_size_0, query.options().dtype(output_dtype_0));
+    return attention_out;
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_lightning_attention_prefill_meta(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    const at::Tensor &slope_rate,
+    int64_t block_size,
+    const c10::optional<at::Tensor> &kv_history,
+    at::OptionalIntArrayRef actual_seq_len)
+{
+    auto default_seq_len = std::vector<int64_t>(query.size(0), query.size(2));
+    auto actual_seq_len_value = actual_seq_len.value_or(default_seq_len);
+    auto output_size_0 = {query.size(0), query.size(1), query.size(2), query.size(3)};
+    auto output_size_1 = {query.size(0), query.size(1), query.size(3), query.size(3)};
+    auto output_dtype_0 = query.scalar_type();
+    at::Tensor attention_out = at::empty(output_size_0, query.options().dtype(output_dtype_0));
+    at::Tensor kv_caches_out = at::empty(output_size_1, query.options().dtype(output_dtype_0));
+    return std::tuple<at::Tensor, at::Tensor>(attention_out, kv_caches_out);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -618,5 +651,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // lightning_attention_decode
+    ops.impl("npu_lightning_attention_decode", &vllm_ascend::meta::npu_lightning_attention_decode_meta);
+    // lightning_attention_prefill
+    ops.impl("npu_lightning_attention_prefill", &vllm_ascend::meta::npu_lightning_attention_prefill_meta);
 }
 }
