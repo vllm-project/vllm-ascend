@@ -36,6 +36,10 @@ on:
           - v0.14.0rc1
           - v0.13.0rc3
 
+permissions:
+  packages: write
+  contents: read
+
 jobs:
   image_build:
     name: Image Build and Push
