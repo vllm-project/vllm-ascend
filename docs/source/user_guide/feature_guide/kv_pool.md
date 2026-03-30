@@ -99,6 +99,11 @@ export PYTHONHASHSEED=0
 | 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission cheme on 800 I/T A2 series|
 
+### FAQ for HIXL (ascend_direct) backend
+
+For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
+<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>
+
 ### Run Mooncake Master
 
 #### 1.Configure mooncake.json
