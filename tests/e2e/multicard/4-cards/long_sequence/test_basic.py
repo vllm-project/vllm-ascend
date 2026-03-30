@@ -236,7 +236,8 @@ def test_dcp_basic():
                     decode_context_parallel_size=2,
                     max_num_batched_tokens=1024,
                     enable_expert_parallel=True,
-                    block_size=128) as runner:
+                    block_size=128,
+                    compilation_config={"pass_config": {"enable_sp": True}}) as runner:
         runner.model.generate(prompts, sampling_params)
 
 
