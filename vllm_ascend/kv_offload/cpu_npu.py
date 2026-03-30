@@ -93,6 +93,18 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
                     ),
                 )
             )
+    
+        # Pre-compute base pointers and block sizes for batch copies.
+        self._src_base_ptrs = np.array(
+            [t.data_ptr() for t in self.src_tensors], dtype=np.int64
+        )
+        self._dst_base_ptrs = np.array(
+            [t.data_ptr() for t in self.dst_tensors], dtype=np.int64
+        )
+        self._block_size_in_bytes_arr = np.array(
+            self.tensor_block_size_in_bytes, dtype=np.int64
+        )
+
 
     def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
         logger.info("start transfer_async...")
@@ -123,25 +135,38 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
         assert src_sub_block_count == dst_blocks.size * dst_block_size_factor - dst_sub_blocks_to_skip
 
-        src_to_dst = np.empty((src_sub_block_count, 2), dtype=np.int64)
-        expand_block_ids(src_blocks, src_block_size_factor, src_to_dst[:, 0])
-        expand_block_ids(
-            dst_blocks,
-            dst_block_size_factor,
-            src_to_dst[:, 1],
-            skip_count=dst_sub_blocks_to_skip,
-        )
-        src_to_dst_tensor = torch.from_numpy(src_to_dst)
+        # src_to_dst = np.empty((src_sub_block_count, 2), dtype=np.int64)
+        src_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
+        dst_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
+        expand_block_ids(src_blocks, src_block_size_factor, src_block_ids)
+        expand_block_ids(dst_blocks, self.dst_block_size_factor, dst_block_ids)
+
+        # Build flat pointer arrays for all tensors × all block pairs.
+        num_pairs = dst_sub_block_count
+        num_tensors = len(self.src_tensors)
+        total = num_pairs * num_tensors
+
+        all_src = np.empty(total, dtype=np.int64)
+        all_dst = np.empty(total, dtype=np.int64)
+        all_sizes = np.empty(total, dtype=np.int64)
+
+        for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
+            start = t_idx * num_pairs
+            end = start + num_pairs
+            all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
+            all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
+            all_sizes[start:end] = bsz
+
+        batch_src = torch.from_numpy(all_src)
+        batch_dst = torch.from_numpy(all_dst)
+        batch_sizes = torch.from_numpy(all_sizes)
 
         event = self.events_pool.pop() if self.events_pool else torch.npu.Event()
         with torch.npu.stream(stream):
-            for src_tensor, dst_tensor in zip(src_tensors, dst_tensors):
-                src_key_cache, src_value_cache = src_tensor[0], src_tensor[1]
-                dst_key_cache, dst_value_cache = dst_tensor[0], dst_tensor[1]
 
-                torch.ops._C_ascend.swap_blocks(src_key_cache, dst_key_cache, src_to_dst_tensor)
-                torch.ops._C_ascend.swap_blocks(src_value_cache, dst_value_cache, src_to_dst_tensor)
-
+            torch.ops._C_ascend.swap_blocks_batch(src_key_cache, dst_key_cache, src_to_dst_tensor)
+            torch.ops._C_ascend.swap_blocks_batch(src_value_cache, dst_value_cache, src_to_dst_tensor)
+            
             event.record(stream)
 
         self.transfer_events[job_id] = event

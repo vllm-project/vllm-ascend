@@ -105,6 +105,124 @@ void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
     return;
 }
 
+inline bool is_device_pointer(const void* ptr) {
+    aclrtMemAttr mem_type = ACL_DDR_MEM; 
+    aclError ret = aclrtPointerGetAttr(
+        &mem_type, ACL_POINTER_ATTR_MEMORY_TYPE, const_cast<void*>(ptr));
+    if (ret != ACL_SUCCESS) {
+        return false;
+    }
+    return (mem_type == ACL_HBM_MEM);
+}
+
+inline aclrtMemcpyKind determine_memcpy_kind(const void* src, const void* dst) {
+    bool src_on_device = is_device_pointer(src);
+    bool dst_on_device = is_device_pointer(dst);
+
+    if (src_on_device && dst_on_device) {
+        return ACL_MEMCPY_DEVICE_TO_DEVICE;
+    } else if (src_on_device && !dst_on_device) {
+        return ACL_MEMCPY_DEVICE_TO_HOST;
+    } else if (!src_on_device && dst_on_device) {
+        return ACL_MEMCPY_HOST_TO_DEVICE;
+    }
+    TORCH_CHECK(false, "swap_blocks_batch: invalid device combination, "
+                "both src and dst appear to be on Host");
+    return ACL_MEMCPY_HOST_TO_DEVICE;  // unreachable, suppress warning
+}
+
+void swap_blocks_batch(const torch::Tensor& src_ptrs,
+                       const torch::Tensor& dst_ptrs,
+                       const torch::Tensor& sizes) {
+
+    const int64_t n = src_ptrs.size(0);
+    TORCH_CHECK(dst_ptrs.size(0) == n, "dst_ptrs length must match src_ptrs");
+    TORCH_CHECK(sizes.size(0) == n, "sizes length must match src_ptrs");
+
+    if (n == 0) return;
+
+    const int64_t* src_data = src_ptrs.data_ptr<int64_t>();
+    const int64_t* dst_data = dst_ptrs.data_ptr<int64_t>();
+    const int64_t* size_data = sizes.data_ptr<int64_t>();
+
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    aclrtMemcpyKind memcpy_kind = determine_memcpy_kind(
+        reinterpret_cast<const void*>(src_data[0]),
+        reinterpret_cast<const void*>(dst_data[0]));
+
+    // =========================================================================
+    // 路径 1: aclrtMemcpyBatchAsync (CANN 8.5+, 试验特性)
+    //
+    // 约束：仅支持 H2D / D2H，不支持 D2D。
+    // 通过宏 CANN_MEMCPY_BATCH_ASYNC 控制是否启用。
+    // =========================================================================
+#if defined(CANN_MEMCPY_BATCH_ASYNC)
+    if (memcpy_kind != ACL_MEMCPY_DEVICE_TO_DEVICE) {
+        static_assert(sizeof(void*) == sizeof(int64_t),
+                      "void* and int64_t must be the same size");
+        static_assert(sizeof(size_t) == sizeof(int64_t),
+                      "size_t and int64_t must be the same size");
+
+        void** dst_arr = reinterpret_cast<void**>(
+            const_cast<int64_t*>(dst_data));
+        void** src_arr = reinterpret_cast<void**>(
+            const_cast<int64_t*>(src_data));
+        size_t* size_arr = reinterpret_cast<size_t*>(
+            const_cast<int64_t*>(size_data));
+        size_t* dest_maxs = size_arr;
+
+        aclrtMemcpyBatchAttr attr = {};
+        attr.memcpyKind = memcpy_kind;
+        size_t attrs_index = 0;  
+        size_t fail_index = 0;
+
+        aclError result = aclrtMemcpyBatchAsync(
+            dst_arr,                          
+            dest_maxs,                        
+            src_arr,                          
+            size_arr,                         
+            static_cast<size_t>(n),           
+            &attr,                            
+            &attrs_index,                     
+            1,                                
+            &fail_index,                      
+            stream);                         
+
+        TORCH_CHECK(result == ACL_SUCCESS,
+                    "aclrtMemcpyBatchAsync failed at index ", fail_index,
+                    " with error code ", result);
+        return;
+    }
+#endif  
+
+    // =========================================================================
+    // 路径 2: 逐条 aclrtMemcpyAsync（兼容所有 CANN 版本和所有拷贝方向）
+    //
+    // 与 GPU 版本 CUDA < 12.8 的回退路径等价。
+    // =========================================================================
+    for (int64_t i = 0; i < n; i++) {
+        void* dst = reinterpret_cast<void*>(dst_data[i]);
+        const void* src = reinterpret_cast<const void*>(src_data[i]);
+        size_t copy_size = static_cast<size_t>(size_data[i]);
+
+        aclError ret = aclrtMemcpyAsync(
+            dst,                
+            copy_size,          
+            src,                
+            copy_size,          
+            memcpy_kind,        
+            stream);            
+
+        TORCH_CHECK(ret == ACL_SUCCESS,
+                    "aclrtMemcpyAsync failed at index ", i,
+                    " with error code ", ret,
+                    ", src=", src_data[i],
+                    ", dst=", dst_data[i],
+                    ", size=", size_data[i]);
+    }
+}
+
 AscendType get_dtype_from_torch(at::ScalarType scalarType)
 {
     if (scalarType == at::ScalarType::Float) {
@@ -759,6 +877,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
+
+    ops.def("swap_blocks_batch(Tensor! x, Tensor! y, Tensor z) -> ()");    
+    ops.impl("swap_blocks_batch", torch::kPrivateUse1, &vllm_ascend::swap_blocks_batch);
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
