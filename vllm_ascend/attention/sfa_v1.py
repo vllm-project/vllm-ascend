@@ -1244,6 +1244,16 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return result
             attn_output = result
 
+        if self.enable_dsa_cp_with_layer_shard:
+            send = (
+                attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
+                .permute(1, 0, 2)
+                .reshape(-1, self.num_heads * self.v_head_dim)
+            )
+
+            attn_output = torch.empty_like(send)
+            torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
+
         output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))

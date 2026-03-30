@@ -662,8 +662,8 @@ def _get_row_parallel_op(
     | ShardedCPRowParallelOp
     | None
 ):
-    if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
-        return ShardedCPRowParallelOp(layer)
+    # if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
+    #     return ShardedCPRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
