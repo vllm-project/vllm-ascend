@@ -303,7 +303,7 @@ jobs:
 
   clear-pre-logs:
     needs: [multi-node-tests]
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a2b3-0
     steps:
       - name: Clear pre-logs on pvc
         run: |
