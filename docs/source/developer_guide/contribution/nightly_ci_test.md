@@ -198,7 +198,7 @@ need to post a new comment.
   `workflow_dispatch`.
 - The `parse-trigger` job logs show `is_pr_event` — check its value.
 
-**How to obtain more detailed logs to pinpoint problems for multi-node testing, ?**
+**How to obtain more detailed logs to pinpoint problems for multi-node tests**
 
 - For most issues, the stdout pop-up logs from GitHub actions are sufficient (this log always represents the logs from the first node).
 - If the logs from a first node are no longer sufficient to provide effective logging information, see the summary of you jobs to download log archive for the corresponding test, which includes the framework-side logs and plog information for each node, structured as follows:
