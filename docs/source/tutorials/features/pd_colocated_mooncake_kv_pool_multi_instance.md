@@ -1,4 +1,4 @@
-# PD-Colocated with Mooncake Multi-Instance
+# PD-Colocated with Mooncake KV Pool Multi-Instance
 
 ## Getting Started
 
@@ -10,6 +10,9 @@ Using the Qwen2.5-72B-Instruct model as an example, this guide demonstrates
 how to use vllm-ascend v0.11.0 (with vLLM v0.11.0) on two Atlas 800T A2
 nodes to deploy two vLLM instances. Each instance occupies 4 NPU cards and
 uses PD-colocated deployment.
+
+For a more complete KV Pool user guide, see
+{doc}`../../user_guide/feature_guide/kv_pool`.
 
 ## Verify Multi-Node Communication Environment
 
@@ -213,7 +216,12 @@ configuration.
 ```bash
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/\
 latest/python/site-packages:$LD_LIBRARY_PATH
+export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="/vllm-workspace/mooncake.json"
+# Required on Atlas 800T A2 for direct transmission over RoCE
+export HCCL_INTRA_ROCE_ENABLE=1
+# Required on Atlas 800 I/T A3 with HDK >= 26.0.0 and CANN >= 9.0.0
+export ASCEND_ENABLE_USE_FABRIC_MEM=1
 # NPU buffer pool: quantity:size(MB)
 # Allocates 4 buffers of 8MB each for KV transfer
 export ASCEND_BUFFER_POOL=4:8
@@ -228,13 +236,11 @@ vllm serve <path_to_your_model>/Qwen2.5-72B-Instruct/ \
 --max-num-batched-tokens 4096 \
 --gpu-memory-utilization 0.9 \
 --kv-transfer-config '{
-      "kv_connector": "MooncakeConnectorStoreV1",
+      "kv_connector": "AscendStoreConnector",
       "kv_role": "kv_both",
       "kv_connector_extra_config": {
-          "use_layerwise": false,
-          "mooncake_rpc_port": "0",
-          "load_async": true,
-          "register_buffer": true
+          "backend": "mooncake",
+          "lookup_rpc_port": "0"
       }
   }'
 ```
@@ -247,21 +253,18 @@ configuration.
 
 ### Configuration Parameters
 
-| Parameter         | Value                 | Explanation                      |
-| ----------------- | ----------------------| -------------------------------- |
-| kv_connector      | MooncakeConnectorStoreV1 | Use StoreV1 version           |
-| kv_role         | kv_both                | Enable both produce and consume  |
-| use_layerwise     | false                | Transfer entire cache (see note) |
-| mooncake_rpc_port | 0                    | Automatic port assignment        |
-| load_async        | true                 | Enable asynchronous loading      |
-| register_buffer   | true                 | Required for PD-colocated mode   |
+| Parameter | Description |
+| :--- | :--- |
+| `kv_connector` | Set to `AscendStoreConnector`, which is the recommended connector for Mooncake-backed KV Pool in PD-colocated multi-instance deployment. |
+| `kv_role` | Set to `kv_both` so each instance can both produce and consume KV Cache. |
+| `lookup_rpc_port` | Port for RPC communication between the pooling scheduler process and worker process. Each instance requires a unique port configuration. |
+| `backend` | Set the storage backend for kvpool to `mooncake`. |
+| `use_layerwise` | Optional. Controls whether KV Cache is transferred layer by layer. The default behavior is `false`, which transfers the entire KV Cache and is more suitable for cross-node scenarios with sufficient bandwidth. |
 
-**Note on use_layerwise:**
+**Note on `use_layerwise`:**
 
-- `false`: Transfer entire KV Cache (suitable for cross-node with sufficient
-  bandwidth)
-- `true`: Layer-by-layer transfer (suitable for single-node memory
-  constraints)
+- `false`: Transfer the entire KV Cache.
+- `true`: Transfer KV Cache layer by layer, which may help in memory-constrained scenarios.
 
 ## Benchmark
 
