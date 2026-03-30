@@ -257,7 +257,7 @@ class NPUWorker(WorkerBase):
         from vllm.triton_utils import HAS_TRITON
 
         if HAS_TRITON:
-        import torch_npu._inductor  # noqa: F401
+            import torch_npu._inductor  # noqa: F401
 
         gc.collect()
         torch.npu.empty_cache()
