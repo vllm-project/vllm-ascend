@@ -375,11 +375,9 @@ class NPUModelRunner(GPUModelRunner):
                 self.use_sparse,
             )
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
-            # Use plain tensors for positions and input_ids to match upstream vLLM expectations
-            # (they should be directly subscriptable, not CpuGpuBuffer)
-            self.input_ids = torch.zeros(
-                max_buffer_num_tokens, dtype=torch.int32, device=self.device
-            )
+            # Keep input_ids as CpuGpuBuffer (has .copy_to_gpu() method used by upstream)
+            # But positions must be a plain tensor (needs to be directly subscriptable)
+            self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
             self.positions = torch.zeros(
                 max_buffer_num_tokens, dtype=torch.int64, device=self.device
             )
