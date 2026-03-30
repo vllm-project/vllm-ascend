@@ -128,11 +128,10 @@ class MooncakeStoreConfig:
             protocol=config.get("protocol", "ascend"),
             device_name=config.get("device_name", ""),
             master_server_address=master_server_address
-            if master_server_address is not None else
-            config.get("master_server_address"),
+            if master_server_address is not None
+            else config.get("master_server_address"),
             preferred_segment=config.get("preferred_segment", False),
-            prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node",
-                                                 True),
+            prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
         )
 
     @staticmethod
