@@ -197,3 +197,25 @@ need to post a new comment.
 - Confirm the workflow was triggered by a `pull_request` event (label or push), not
   `workflow_dispatch`.
 - The `parse-trigger` job logs show `is_pr_event` — check its value.
+
+**How to obtain more detailed logs to pinpoint problems for multi-node testing, ?**
+
+- For most issues, the stdout pop-up logs from GitHub actions are sufficient (this log always represents the logs from the first node).
+- If the logs from a first node are no longer sufficient to provide effective logging information, see the summary of you jobs to download log archive for the corresponding test, which includes the framework-side logs and plog information for each node, structured as follows:
+  ```shell
+  .
+  ├── node0
+  │   ├── root
+  │   │   └── ascend
+  │   │       └── log
+  │   └── var
+  │       └── log
+  │           └── vllm-deepseek-v3-0f233d-0_logs.txt
+  └── node1
+      ├── root
+      │   └── ascend
+      │       └── log
+      └── var
+          └── log
+              └── vllm-deepseek-v3-0f233d-0-1_logs.txt
+  ```
