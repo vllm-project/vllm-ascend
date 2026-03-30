@@ -160,8 +160,9 @@ export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #export HCCL_INTRA_ROCE_ENABLE=1
 
 #Minimum retransmission timeout of the RDMA，equals 4.096 μs * 2 ^ timeout.
-#Needs to satisfy the equation: transfer time > RDMA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
-export HCCL_RDMA_TIMEOUT=16
+#Needs to satisfy the equation: ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
+#HCCL_RDMA_TIMEOUT also affects collective communication behavior and should be configured carefully.
+export HCCL_RDMA_TIMEOUT=17
 
 # Unit: ms. The timeout for one-sided communication connection establishment is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039). Users can adjust this value based on their specific setup.
 # The recommended formula is: ASCEND_CONNECT_TIMEOUT = connection_time_per_card (typically within 500ms) × total_number_of_Decode_cards.
@@ -235,7 +236,7 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
-export HCCL_RDMA_TIMEOUT=16
+export HCCL_RDMA_TIMEOUT=17
 export ASCEND_CONNECT_TIMEOUT=10000
 export ASCEND_TRANSFER_TIMEOUT=10000
 
@@ -350,7 +351,7 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
-export HCCL_RDMA_TIMEOUT=16
+export HCCL_RDMA_TIMEOUT=17
 export ASCEND_CONNECT_TIMEOUT=10000
 export ASCEND_TRANSFER_TIMEOUT=10000
 
