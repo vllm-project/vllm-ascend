@@ -25,29 +25,124 @@ msgid "Service Profiling Guide"
 msgstr "服务化性能采集指南"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "In inference service processes, we sometimes need to monitor the internal execution flow of the inference service framework to identify performance issues. By collecting start and end timestamps of key processes, identifying critical functions or iterations, recording key events, and capturing diverse types of information, we can quickly pinpoint performance bottlenecks."
-msgstr "在推理服务过程中，我们有时需要监控推理服务框架的内部执行流程以定位性能问题。通过采集关键流程的起止时间、识别关键函数或迭代、记录关键事件并捕获多种类型的信息，可以快速定位性能瓶颈。"
+msgid "In an inference service process, it is sometimes necessary to monitor the internal execution flow of the inference service framework to identify performance issues. By collecting start and end timestamps of key processes, identifying key functions or iterations, recording critical events, and gathering various types of information, performance bottlenecks can be quickly located."
+msgstr "在推理服务过程中，有时需要监控推理服务框架的内部执行流程以定位性能问题。通过采集关键流程的起止时间、识别关键函数或迭代、记录关键事件并收集各类信息，可以快速定位性能瓶颈。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid ""
-"This guide walks you through collecting performance data for the vllm-ascend "
-"service framework and operators. It covers the full workflow from preparation "
-"and collection to analysis and visualization, helping you quickly get started "
-"with the profiling tool."
+"This guide will walk you through the process of collecting performance data from the vLLM-Ascend service framework and operators. It covers the complete workflow from preparation, collection, analysis, to visualization, helping you quickly get started with performance collection tools."
 msgstr ""
-"本部分将指导你如何采集 vllm-ascend 的服务化框架性能数据以及算子性能数据，覆盖从准备、采集、解析到结果展示的完整流程，帮助你快速上手性能采集工具。"
+"本指南将介绍如何采集 vLLM-Ascend 服务化框架与算子的性能数据，覆盖从准备、采集、解析到可视化的完整流程，帮助你快速上手性能采集工具。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Quick Start"
-msgstr "快速开始"
+msgid "Two performance collection solutions are provided below: Ascend PyTorch Profiler and MS Service Profiler. You can choose the appropriate tool for performance analysis and troubleshooting based on your actual requirements."
+msgstr "下文提供两种性能采集方案：Ascend PyTorch Profiler 与 MS Service Profiler。可根据实际场景与排障需求选择合适工具。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "0 Installation"
-msgstr "0 安装"
+msgid "Solution Comparison"
+msgstr "方案对比"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Install the `msserviceprofiler` package using pip:"
-msgstr "使用 pip 安装 `msserviceprofiler` 包："
+msgid "Feature"
+msgstr "特性"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Ascend PyTorch Profiler"
+msgstr "Ascend PyTorch Profiler"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "MS Service Profiler"
+msgstr "MS Service Profiler"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Installation Method"
+msgstr "安装方式"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Built-in, no additional installation required"
+msgstr "内置，无需额外安装"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Requires building msserviceprofiler from source"
+msgstr "需从源码编译 msserviceprofiler"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Collection Granularity"
+msgstr "采集粒度"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "PyTorch operator level"
+msgstr "PyTorch 算子级"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Service framework function level"
+msgstr "服务框架函数级"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Control Method"
+msgstr "控制方式"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "API request control"
+msgstr "API 请求控制"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Configuration file control"
+msgstr "配置文件控制"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Applicable Scenarios"
+msgstr "适用场景"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Model operator performance analysis"
+msgstr "模型算子性能分析"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Service framework workflow analysis"
+msgstr "服务框架工作流分析"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Data Format"
+msgstr "数据格式"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "ascend_pt format"
+msgstr "ascend_pt 格式"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Chrome Tracing + CSV"
+msgstr "Chrome Tracing + CSV"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Main Advantage"
+msgstr "主要优势"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Operator-level performance analysis"
+msgstr "算子级性能分析"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Service framework workflow visualization"
+msgstr "服务框架工作流可视化"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Supported Collection Capabilities"
+msgstr "支持的采集能力"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "PyTorch operator level and Service framework function level"
+msgstr "PyTorch 算子级与服务框架函数级"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "0 Build from Source and Upgrade"
+msgstr "0 源码构建并安装升级"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid ""
+"The `msserviceprofiler` tool is pre-installed with the CANN Toolkit package. Use the following commands to install or upgrade from source."
+msgstr ""
+"`msserviceprofiler` 工具已随 CANN Toolkit 套件预装。使用以下命令可从源码安装或升级该工具。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "1 Preparation"
@@ -116,7 +211,7 @@ msgid ""
 msgstr "根据实际采集需求选择请求发送方式："
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "4 Analyze Data"
+msgid "4 Parse Data"
 msgstr "4 解析数据"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
@@ -124,7 +219,7 @@ msgid "xxxx-xxxx is the directory automatically created based on vLLM startup ti
 msgstr "xxxx-xxxx 为采集工具根据 vLLM 启动时间自动创建的存放目录"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Analyze data"
+msgid "parse data"
 msgstr "解析数据"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
@@ -132,15 +227,15 @@ msgid "5 View Results"
 msgstr "5 查看结果"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "After analysis, the `output` directory will contain:"
+msgid "After parsing, the `output` directory will contain:"
 msgstr "解析完成后，`output` 目录下会生成："
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid ""
 "`chrome_tracing.json`: Chrome tracing format data, which can be opened in "
-"[MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html)."
+"[MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html?framework=mindspore)."
 msgstr ""
-"`chrome_tracing.json`：Chrome 追踪格式数据，可在 [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html) 中打开。"
+"`chrome_tracing.json`：Chrome 追踪格式数据，可在 [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/830/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html?framework=mindspore) 中打开。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "`profiler.db`: Performance data in database format."
@@ -151,24 +246,12 @@ msgid "`request.csv`: Request-related data."
 msgstr "`request.csv`：请求相关数据。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "`request_summary.csv`: Overall request metrics."
-msgstr "`request_summary.csv`：请求总体统计指标。"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "`kvcache.csv`: KV Cache-related data."
 msgstr "`kvcache.csv`：KV Cache 相关数据。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "`batch.csv`: Batch scheduling-related data."
 msgstr "`batch.csv`：批次调度相关数据。"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "`batch_summary.csv`: Overall batch scheduling metrics."
-msgstr "`batch_summary.csv`：批次调度总体统计指标。"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "`service_summary.csv`: Overall service-level metrics."
-msgstr "`service_summary.csv`：服务化维度总体统计指标。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Appendix"
@@ -219,8 +302,8 @@ msgid "prof_dir"
 msgstr "prof_dir"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Directory to store collected performance data. <br />Default: $HOME/.ms_service_profiler"
-msgstr "采集到性能数据的存放路径，支持用户自定义。<br />默认值：$HOME/.ms_service_profiler"
+msgid "Directory to store collected performance data. <br />Default: `${HOME}/.ms_server_profiler`"
+msgstr "采集到的性能数据的存放路径。<br />默认值：`${HOME}/.ms_server_profiler`"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "No"
@@ -235,68 +318,60 @@ msgid "Data collection level. Default is \"INFO\" (normal level)."
 msgstr "数据采集等级。默认值为\"INFO\"，指普通级别的性能数据。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "host_system_usage_freq"
-msgstr "host_system_usage_freq"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Sampling frequency of host CPU and memory metrics. Disabled by default. Range: integer 1–50, unit: Hz (times per second). Set to -1 to disable. <br />Note: Enabling this may consume significant memory."
-msgstr "CPU和内存系统指标采集频率，默认关闭不采集。范围整数1~50，单位hz，表示每秒采集的次数。设置为-1时关闭采集该指标。<br />说明：开启该功能可能占用较大内存"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "npu_memory_usage_freq"
-msgstr "npu_memory_usage_freq"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Sampling frequency of NPU memory utilization. Disabled by default. Range: integer 1–50, unit: Hz (times per second). Set to -1 to disable. <br />Note: Enabling this may consume significant memory."
-msgstr "NPU Memory使用率指标的采集频率，默认关闭不采集。范围整数1~50，单位hz，表示每秒采集的次数。设置为-1时关闭采集该指标。<br />说明：开启该功能可能占用较大内存"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "acl_task_time"
 msgstr "acl_task_time"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Switch to collect operator dispatch latency and execution latency: <br />0: disable (default; 0 or invalid values mean disabled).<br />1: enable; calls `aclprofCreateConfig` with `ACL_PROF_TASK_TIME_L0`.<br />2: enable MSPTI-based data dumping; uses MSPTI for profiling and requires: `export LD_PRELOAD=$ASCEND_TOOLKIT_HOME/lib64/libmspti.so`"
-msgstr "开启采集算子下发耗时、算子执行耗时数据的开关，取值为：<br />0：关闭。默认值，配置为0或其他非法值均表示关闭。<br />1：开启。该功能开启时调用aclprofCreateConfig接口的ACL_PROF_TASK_TIME_L0参数。<br />2：开启基于MSPTI接口的数据落盘。该功能开启时调用MSPTI接口进行性能数据采集，需要配置如下环境变量：export LD_PRELOAD=$ASCEND_TOOLKIT_HOME/lib64/libmspti.so"
+msgid "Switch to collect operator dispatch latency and execution latency. Values: <br />0: off. Default; 0 or any invalid value means off.<br />1: on. When enabled, calls `aclprofCreateConfig` with `ACL_PROF_TASK_TIME_L0`.<br />2: on. MSPTI-based dump. When enabled, set before starting the service: `export LD_PRELOAD={INSTALL_DIR}/lib64/libmspti.so`, where `{INSTALL_DIR}` is the CANN installation root (e.g. `/usr/local/Ascend/cann` for a typical root install).<br />3: on. Torch Profiler–based dump."
+msgstr "开启采集算子下发耗时、算子执行耗时数据的开关，取值为：<br />0：关闭。默认值，配置为0或其他非法值均表示关闭。<br />1：开启。该功能开启时调用 aclprofCreateConfig 接口的 ACL_PROF_TASK_TIME_L0 参数。<br />2：开启基于 MSPTI 的数据落盘。启用时需在拉起服务前配置：`export LD_PRELOAD={INSTALL_DIR}/lib64/libmspti.so`，其中 `{INSTALL_DIR}` 为 CANN 安装根目录（例如 root 安装常见为 `/usr/local/Ascend/cann`）。<br />3：开启基于 Torch Profiler 的数据落盘。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "acl_prof_task_time_level"
 msgstr "acl_prof_task_time_level"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Level and duration for profiling: <br />L0: collect operator dispatch and execution latency only; lower overhead (no operator basic info).<br />L1: collect AscendCL interface performance (host–device and inter-device sync/async memory copy latencies), plus operator dispatch, execution, and basic info for comprehensive analysis.<br />time: profiling duration, integer 1–999, in seconds.<br />If unset, defaults to L0 until program exit; invalid values fall back to defaults.<br />Level and duration can be combined, e.g., `\"acl_prof_task_time_level\": \"L1,10\"`."
-msgstr "设置性能数据采集的Level等级和时长，取值为：<br />L0：Level0等级，表示采集算子下发耗时、算子执行耗时数据。与L1相比，由于不采集算子基本信息数据，采集时性能开销较小，可更精准统计相关耗时数据。<br />L1：Level1等级，采集AscendCL接口的性能数据，包括Host与Device之间、Device间的同步异步内存复制时延；采集算子下发耗时、算子执行耗时数据以及算子基本信息数据，提供更全面的性能分析数据。<br />time：采集时长，取值范围为1~999的正整数，单位s。<br />默认未配置本参数，表示采集L0数据，且采集到程序执行结束。配置其他非法值时取默认值。<br />采集的Level等级和时长可同时配置，例如\"acl_prof_task_time_level\": \"L1,10\"。"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "api_filter"
-msgstr "api_filter"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Filter to select API performance data to dump. For example, specifying \"matmul\" dumps all API data whose `name` contains \"matmul\". String, case-sensitive; use \"；\" to separate multiple targets. Empty means dump all. <br />Effective only when `acl_task_time` is 2."
-msgstr "对性能数据进行过滤，配置该参数可自定义采集配置的API性能数据，例如传入\"matmul\"会落盘所有API数据中name字段包含matmul的性能数据。str类型，区分大小写，多个不同的筛选目标用\"；\"隔开，默认为空，表示落盘所有数据。<br />仅当acl_task_time参数值为2时生效。"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "kernel_filter"
-msgstr "kernel_filter"
-
-#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Filter to select kernel performance data to dump. For example, specifying \"matmul\" dumps all kernel data whose `name` contains \"matmul\". String, case-sensitive; use \"；\" to separate multiple targets. Empty means dump all. <br />Effective only when `acl_task_time` is 2."
-msgstr "对性能数据进行过滤，配置该参数可自定义采集配置的kernel性能数据，例如传入\"matmul\"会落盘所有kernel数据中name字段包含matmul的性能数据。str类型，区分大小写，多个不同的筛选目标用\"；\"隔开，默认为空，表示落盘所有数据。<br />仅当acl_task_time参数值为2时生效。"
+msgid "Profiling level and duration. Values: <br />L0: collect operator dispatch and execution latency only; lower overhead (no operator basic info).<br />L1: collect AscendCL interface performance (host–device and inter-device sync/async memory copy latencies), plus operator dispatch, execution, and basic info for comprehensive analysis.<br />`{time}`: optional duration segment; integer 1–999, unit seconds.<br />If unset, defaults to L0 until program exit; invalid values fall back to defaults.<br />Level and duration can be combined, e.g., `\"acl_prof_task_time_level\": \"L1;10\"`.<br />**Note:** When Torch Profiler is used (`acl_task_time` set to `3`), `{time}` duration is not supported."
+msgstr "性能采集级别与时长。取值说明：<br />L0：仅采集算子下发与执行耗时；开销较低（不采集算子基本信息）。<br />L1：采集 AscendCL 接口性能（Host 与 Device、Device 间同步/异步内存拷贝时延），以及算子下发、执行与基本信息，便于综合分析。<br />`{time}`：可选时长段；整数 1–999，单位秒。<br />未配置时默认采集 L0 直至进程退出；非法值回退为默认值。<br />级别与时长可组合，例如 `\"acl_prof_task_time_level\": \"L1;10\"`.<br />**说明：**使用 Torch Profiler（`acl_task_time` 为 `3`）时，不支持 `{time}` 时长配置。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "timelimit"
 msgstr "timelimit"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Profiling duration for the service. The process stops automatically after this time. Range: integer 0–7200, unit: seconds. Default 0 means unlimited."
-msgstr "设置服务化性能数据采集的时长，配置该参数后，采集进程将在运行指定的时间后自动停止，取值范围为0~7200的整数，单位s，默认值0（表示不限制采集时间）"
+msgid "Profiling duration for the service. The process stops automatically after this time. Range: integer 0–7200, unit: seconds. Default 0 means unlimited. Recommend at least 120 s; shorter runs may lack data for parsed outputs and trigger warnings."
+msgstr "服务化性能采集时长；到达该时间后采集进程自动停止。取值范围 0–7200 的整数，单位秒；默认 0 表示不限制。建议至少 120 秒；过短可能导致解析输出件数据不足并触发告警。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "domain"
 msgstr "domain"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Limit profiling to the specified domains to reduce data volume. String, separated by semicolons, case-sensitive, e.g., \"Request; KVCache\".<br />Empty means all available domains.<br />Available domains: Request, KVCache, ModelExecute, BatchSchedule, Communication.<br />Note: If the selected domains are incomplete, analysis output may show warnings due to missing data. See [Reference Table 1](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/devaids/Profiling/mindieprofiling_0009.html#ZH-CN_TOPIC_0000002370256365__table1985410131831)."
-msgstr "设置采集指定domain域下的性能数据，减少采集数据量。输入参数为字符串格式，英文分号作为分隔符，区分大小写，例如：\"Request; KVCache\"。<br />默认为空，表示采集当前所有domain域内性能数据。<br />当前已有domain域为：Request、KVCache、ModelExecute、BatchSchedule、Communication。<br />说明：<br />若指定domain域不全，采集数据不满足解析输出件生成时，会有告警提示。[查看表1](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/devaids/Profiling/mindieprofiling_0009.html#ZH-CN_TOPIC_0000002370256365__table1985410131831)"
+msgid "Limit profiling to the specified domains to reduce data volume. String, separated by semicolons, case-sensitive, e.g., \"Request; KVCache\".<br />Empty means all available domains.<br />Available domains: Request, KVCache, ModelExecute, BatchSchedule, Communication.<br />Note: If the selected domains are incomplete, analysis output may show warnings due to missing data. See [Reference Table 1](https://www.hiascend.com/document/detail/zh/canncommercial/850/devaids/Profiling/mindieprofiling_0010.html)."
+msgstr "仅采集指定 domain 以减小数据量。字符串，英文分号分隔，区分大小写，例如 \"Request; KVCache\"。<br />为空表示采集全部可用 domain。<br />可用 domain：Request、KVCache、ModelExecute、BatchSchedule、Communication。<br />说明：若所选 domain 不完整，解析输出可能因数据缺失而告警。参见 [Reference Table 1](https://www.hiascend.com/document/detail/zh/canncommercial/850/devaids/Profiling/mindieprofiling_0010.html)。"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "torch_prof_stack"
+msgstr "torch_prof_stack"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Collect operator call stacks (framework and CPU operators). Values: `false` (default, off), `true` (on). Requires `acl_task_time` set to `3`. **Note:** Enabling this configuration introduces additional performance overhead."
+msgstr "是否采集算子调用栈（框架层与 CPU 算子层）。取值：`false`（默认，关闭）、`true`（开启）。需将 `acl_task_time` 设为 `3`。**说明：**开启后会引入额外性能开销。"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "torch_prof_step_num"
+msgstr "torch_prof_step_num"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Torch Profiler step limit. Integer ≥ 0. Default `0` means collect all steps.<br />Requires `acl_task_time` set to `3`."
+msgstr "Torch Profiler 的 step 上限。整数 ≥ 0；默认 `0` 表示采集全部 step。<br />需将 `acl_task_time` 设为 `3`。"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "profiler_step_num"
+msgstr "profiler_step_num"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Step limit for operator and service framework profiling. Integer ≥ 0.<br />`0` or invalid values stop the entire service profiling process.<br />The number of steps actually recorded depends on `modelRunnerExec` events."
+msgstr "算子与服务框架采集的 step 上限。整数 ≥ 0。<br />`0` 或非法值将终止整个服务化采集进程。<br />实际记录的 step 数取决于 `modelRunnerExec` 事件。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Example Configuration"
@@ -319,8 +394,16 @@ msgid "Default load path:`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.
 msgstr "默认加载路径：`~/.config/vllm_ascend/service_profiling_symbols.MAJOR.MINOR.PATCH.yaml`（随已安装的 vllm 版本变化）"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "If you need to customize the profiling points, it is highly recommended to copy a profiling configuration file to your working directory using the `PROFILING_SYMBOLS_PATH` environment variable."
-msgstr "如需自定义采集点，推荐通过设置环境变量`PROFILING_SYMBOLS_PATH`，将一份点位配置文件复制到工作目录进行修改使用。"
+msgid "If you need to customize the profiling points, it is highly recommended to copy a symbol configuration file to your working directory and point to it with the `PROFILING_SYMBOLS_PATH` environment variable."
+msgstr "如需自定义采集点，推荐通过设置环境变量 `PROFILING_SYMBOLS_PATH`，将一份点位配置文件复制到工作目录并指向该路径。"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "Configuration file updates"
+msgstr "点位配置文件更新"
+
+#: ../../developer_guide/performance_and_debug/service_profiling_guide.md
+msgid "After you change profiling symbols, restart the vLLM service so the updated configuration file is loaded."
+msgstr "采集点位有更新时，需重启 vLLM 服务以加载更新后的配置文件。"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "2.2 Field Descriptions"
@@ -391,12 +474,12 @@ msgid "max_version"
 msgstr "max_version"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Upper version constraint"
-msgstr "最高版本约束"
+msgid "Minimum supported vLLM version"
+msgstr "支持的最低 vLLM 版本"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Lower version constraint"
-msgstr "最低版本约束"
+msgid "Maximum supported vLLM version"
+msgstr "支持的最高 vLLM 版本"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "`\"0.9.1\"`"
@@ -415,12 +498,12 @@ msgid "Custom attribute collection"
 msgstr "自定义属性采集"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "Only support for `"timer"` handler. See the section below"
-msgstr "只支持 `"timer"` handler。详见下方自定义属性采集机制"
+msgid "Only supported for `"timer"` handler. See the section below"
+msgstr "仅在使用 `"timer"` handler 时支持。详见下文"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
-msgid "2.3 Examples"
-msgstr "2.3 配置示例"
+msgid "Configuration Examples"
+msgstr "配置示例"
 
 #: ../../developer_guide/performance_and_debug/service_profiling_guide.md
 msgid "Example 1: Custom handler"
