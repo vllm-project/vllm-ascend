@@ -224,9 +224,10 @@ class ProfilingChunkScheduler(Scheduler):
     # schedule() override
     # ------------------------------------------------------------------
     # The method below is copied from the upstream Scheduler.schedule()
-    # (vLLM v0.15.x) with a single change: profiling-based chunk sizing
-    # is applied to WAITING requests.  The modified section is clearly
-    # marked with ">>> PROFILING CHUNK" comments.
+    # (vLLM v0.15.x) with profiling-based chunk sizing applied to both
+    # RUNNING requests (chunked prefill continuation) and WAITING
+    # requests (new prefill).  Modified sections are marked with
+    # ">>> PROFILING CHUNK" comments.
     # ------------------------------------------------------------------
 
     def schedule(self) -> SchedulerOutput:  # noqa: C901
@@ -299,6 +300,27 @@ class ProfilingChunkScheduler(Scheduler):
                     encoder_compute_budget,
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
+
+            # >>> PROFILING CHUNK: dynamic chunk sizing for RUNNING >>>
+            if (
+                self.profiling_chunk_manager is not None
+                and self.profiling_chunk_manager.is_ready
+                and num_new_tokens > 1
+            ):
+                predicted_chunk = (
+                    self.profiling_chunk_manager
+                    .predict_chunk_size(
+                        history_len=request.num_computed_tokens,
+                    )
+                )
+                if (
+                    predicted_chunk is not None
+                    and predicted_chunk > 0
+                ):
+                    num_new_tokens = min(
+                        num_new_tokens, predicted_chunk
+                    )
+            # <<< PROFILING CHUNK <<<
 
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
