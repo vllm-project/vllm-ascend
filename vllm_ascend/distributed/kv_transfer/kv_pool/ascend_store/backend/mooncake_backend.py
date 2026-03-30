@@ -20,7 +20,6 @@ DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
 
 class MooncakeBackend(Backend):
-
     def __init__(self, parallel_config: ParallelConfig):
         try:
             from mooncake.store import MooncakeDistributedStore  # type: ignore
