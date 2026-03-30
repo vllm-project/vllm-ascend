@@ -47,6 +47,7 @@ from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+import vllm_ascend.envs as envs_ascend
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -883,6 +884,11 @@ class SpecDecodeBaseProposer(EagleProposer):
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = model_hidden_states
+
+            if envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0:
+                tp_size = get_tp_group().world_size
+                get_forward_context().pad_size = (tp_size -
+                            (model_hidden_states.shape[0] % tp_size)) % tp_size
 
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
