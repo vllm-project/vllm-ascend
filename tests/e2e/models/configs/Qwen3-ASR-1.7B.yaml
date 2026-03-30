@@ -1,5 +1,4 @@
 model_name: "Qwen/Qwen3-ASR-1.7B"
-served_model_name: "qwen3-asr"
 hardware: "Atlas A2 Series"
 trust_remote_code: true
 tasks:
