@@ -46,7 +46,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -154,6 +154,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         ]
 
         self._runnable = self._run_merged_draft
+        self.is_multimodal_model = self.vllm_config.model_config.is_multimodal_model
         if self.uses_mrope:
             self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1), dtype=torch.int32, device=device)
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
@@ -165,6 +166,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
+
+        self.token_arange_np = np.arange(self.max_num_tokens + 1)
 
     def _get_model(self) -> nn.Module:
         """
@@ -389,11 +392,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     : num_reqs * self.decode_threshold
                 ]
 
-            if vllm_version_is("0.17.0"):
-                assert len(self.draft_attn_groups) > 0
-                builder = self.draft_attn_groups[0].get_metadata_builder()
-            else:
-                builder = self.runner.attn_groups[0][0].get_metadata_builder()
+            assert len(self.draft_attn_groups) > 0
+            builder = self.draft_attn_groups[0].get_metadata_builder()
             # update the tensor's address for each step.
             for draft_step in range(self.num_speculative_tokens):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -415,6 +415,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )  # if not is_profile else self.runner.max_num_reqs
         if is_profile:
             batch_size = min(batch_size, self.runner.max_num_reqs)
+
+        if self.supports_mm_inputs:
+            mm_embeds, is_mm_embed = (None, None)
+            inputs_embeds = self.model.embed_input_ids(
+                self.input_ids[:num_tokens], multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
+            )
+            self.inputs_embeds[:num_tokens] = inputs_embeds
+            inputs_embeds = self.inputs_embeds[:num_tokens]
+        else:
+            inputs_embeds = None
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -439,9 +449,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 token_indices_to_sample=self.token_indices_to_sample[: batch_size * self.extra_slots_per_request],
                 # The target_position's address is same as the model_positions's
                 target_positions=model_positions,
-                inputs_embeds=None,
+                inputs_embeds=inputs_embeds,
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
-                is_dummy=True,
                 num_tokens=num_tokens,
             )
             forward_context = get_forward_context()
@@ -557,11 +566,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
         common_attn_metadata.num_input_tokens = num_input_tokens
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        if vllm_version_is("0.17.0"):
-            assert len(self.draft_attn_groups) > 0
-            builder = self.draft_attn_groups[0].get_metadata_builder()
-        else:
-            builder = self.runner.attn_groups[0][0].get_metadata_builder()
+        assert len(self.draft_attn_groups) > 0
+        builder = self.draft_attn_groups[0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
 
         if self.uses_mrope:
@@ -576,6 +582,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Copy the old attn_metadata and update
         attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
+
+        # Clone the data so that when calculating the data at position 2 and position 3
+        # in the merged graph, it does not affect position 1
+        # FIXME(lilinsiman)
+        common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
+
         if self.pcp_size * self.dcp_size > 1:
             if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
                 # For pcp/dcp, tokens are split across different cp ranks,
@@ -589,7 +601,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     - 1
                 )
                 num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
-                ori_seq_len = attn_metadata_i.seq_lens[:batch_size].clone()
+                ori_seq_len = attn_metadata_i.seq_lens_cpu[:batch_size].clone()
                 mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                 # slot_mapping index base offset:
@@ -707,7 +719,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         inputs_embeds,
         multi_steps_attn_metadata,
         num_tokens,
-        is_dummy=False,
         is_prefill=None,
     ) -> torch.Tensor:
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
@@ -760,7 +771,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: last_hidden_states.shape[0]],
                 )
 
-        if lmhead_tp_enable() and not is_dummy:
+        if lmhead_tp_enable():
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
@@ -771,7 +782,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
         logits = self.model.compute_logits(sample_hidden_states)
 
-        if lmhead_tp_enable() and num_indices < logits.shape[0] and not is_dummy:
+        if lmhead_tp_enable() and num_indices < logits.shape[0]:
             logits = logits[:num_indices]
             token_indices_to_sample = token_indices_to_sample[:num_indices]
 
@@ -884,7 +895,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
             num_indices = token_indices_to_sample.shape[0]
-            if lmhead_tp_enable() and not is_dummy:
+            if lmhead_tp_enable():
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
@@ -896,7 +907,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
             logits = self.model.compute_logits(sample_hidden_states)
 
-            if lmhead_tp_enable() and num_indices < logits.shape[0] and not is_dummy:
+            if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
 
@@ -1143,8 +1154,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.num_input_tokens = input_batch_size
 
         # The loop part
-
         used_update_positions += 1
+
+        # Clone the data so that when calculating the data at position 2 and position 3
+        # in the merged graph, it does not affect position 1
+        # FIXME(lilinsiman)
+        common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+        common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
+        common_attn_metadata.positions = common_attn_metadata.positions.clone()
 
         # NOTE(woosuk): We should handle the case where the draft model
         # generates tokens beyond the max model length. Since it is complex
@@ -1230,7 +1248,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.pcp_size * self.dcp_size > 1:
             if self.vllm_config.model_config.use_mla:
-                attn_metadata.decode.cp_seq_len = cp_seq_len
+                if getattr(attn_metadata, "decode", None):
+                    attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
 
@@ -1548,11 +1567,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
-        if vllm_version_is("0.17.0"):
-            assert len(self.draft_attn_groups) > 0
-            attn_backend = self.draft_attn_groups[0].backend
-        else:
-            attn_backend = self.runner.attn_backend
+        assert len(self.draft_attn_groups) > 0
+        attn_backend = self.draft_attn_groups[0].backend
         update_full_graph_params(
             attn_backend,
             self.update_stream,
@@ -1578,6 +1594,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.is_multimodal_model and _EXTRA_CTX.flash_comm_v1_enabled:
+            return hidden_states, positions
         if self.method == "mtp":
             if _EXTRA_CTX.flash_comm_v1_enabled:
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)

@@ -216,7 +216,7 @@ class NPUWorker(WorkerBase):
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
-        if tags is None or "weights" in tags:
+        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
             for name, param in model.named_parameters():
                 if "w2_weight" in name and param.shape[2] == hidden_size:
                     parts = name.split(".")
@@ -341,13 +341,6 @@ class NPUWorker(WorkerBase):
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
             self.model_runner.profile_run()
-            free_memory, total_memory = torch.npu.mem_get_info()
-            torch_memory = torch.npu.memory_reserved()
-            non_torch_memory_before_empty_cache = total_memory - free_memory - torch_memory
-
-        self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = profile_result.torch_peak_increase
-        non_torch_memory_cleared_by_empty_cache = non_torch_memory_before_empty_cache - self.non_torch_memory
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
@@ -359,16 +352,12 @@ class NPUWorker(WorkerBase):
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container."
         )
-        self.available_kv_cache_memory_bytes = (
-            self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
-        )
-
+        self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %.2f GiB",
-            GiB(self.available_kv_cache_memory_bytes),
-            scope="local",
+            "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
+
         return int(self.available_kv_cache_memory_bytes)
 
     def execute_model(
@@ -613,7 +602,7 @@ class NPUWorker(WorkerBase):
             export_type=torch_npu.profiler.ExportType.Text,
             profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
             msprof_tx=False,
-            aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+            aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
             l2_cache=False,
             op_attr=False,
             data_simplification=True,

@@ -15,11 +15,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/vllm-ascend:main-a3
+FROM quay.io/ascend/vllm-ascend:releases-v0.18.0-a3
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG AIS_BENCH_TAG="v3.0-20250930-master"
 ARG AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
+ARG GITEE_USERNAME=""
+ARG GITEE_TOKEN=""
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
@@ -35,7 +37,8 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
     python3 -m pip cache purge
 
 # Install benchmark tools
-RUN git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} /vllm-workspace/vllm-ascend/benchmark && \
+RUN CLONE_URL=$(echo "${AIS_BENCH_URL}" | sed "s|https://|https://${GITEE_USERNAME}:${GITEE_TOKEN}@|") && \
+    git clone -b ${AIS_BENCH_TAG} --depth 1 "${CLONE_URL}" /vllm-workspace/vllm-ascend/benchmark && \
     cd /vllm-workspace/vllm-ascend/benchmark && \
     pip install -e . -r requirements/api.txt -r requirements/extra.txt && \
     python3 -m pip cache purge
