@@ -112,9 +112,10 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "device_name": "",
     "master_server_address": "xx.xx.xx.xx:50088",
     "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824),
-    "default_kv_lease_ttl": 11000   # Suggestions：default_kv_lease_ttl > ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT*7
+    "default_kv_lease_ttl": 11000
 }
 ```
+**Suggestions：default_kv_lease_ttl > ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT*7**
 
 **metadata_server**: Configured as **P2PHANDSHAKE**.  
 **protocol:** Must be set to 'Ascend' on the NPU.
