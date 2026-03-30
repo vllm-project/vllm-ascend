@@ -1,0 +1,12 @@
+model_name: "OpenGVLab/InternVL2-1B"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+  - name: "mmmu_val"
+    metrics:
+    - name: "acc,none"
+      value: 0.3089
+trust_remote_code: True
+gpu_memory_utilization: 0.8
+max_model_len: 32768
+apply_chat_template: False
