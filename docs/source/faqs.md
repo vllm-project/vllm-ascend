@@ -292,7 +292,7 @@ export SOC_VERSION="<value starting with ascend950>"
 
 ### 24. Compilation error occasionally encounters with triton-ascend
 
-As shown in [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782), triton-ascend occasionally encounters compilation errors, which is a known issue in triton-ascend 3.2.0. To avoid this issue, please use the offical docker images or install the specific triton-ascend version as following:
+As shown in [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782), triton-ascend occasionally encounters compilation errors, which is a known issue in triton-ascend 3.2.0. To avoid this issue, please use the official docker images or install the specific triton-ascend version as following:
 
 ```bash
 PYTHON_TAG=$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')") && \
