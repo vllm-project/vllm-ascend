@@ -47,7 +47,8 @@ RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
     apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
-    cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
+    cd /vllm-workspace/Mooncake && \
+    T0=$(date +%s) && bash mooncake_installer.sh -y && echo "=== mooncake_installer.sh took $(($(date +%s)-T0))s ===" && \
     ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     if [ "${SCCACHE_GHA_ENABLED}" = "true" ]; then \
@@ -60,8 +61,10 @@ RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
         SCCACHE_CMAKE_FLAG=""; \
     fi && \
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
-    mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON ${SCCACHE_CMAKE_FLAG} && \
-    make -j$(nproc) && make install && \
+    mkdir -p build && cd build && \
+    T0=$(date +%s) && cmake .. -DUSE_ASCEND_DIRECT=ON ${SCCACHE_CMAKE_FLAG} && echo "=== cmake took $(($(date +%s)-T0))s ===" && \
+    T0=$(date +%s) && make -j$(nproc) && echo "=== make -j took $(($(date +%s)-T0))s ===" && \
+    T0=$(date +%s) && make install && echo "=== make install took $(($(date +%s)-T0))s ===" && \
     rm -fr /vllm-workspace/Mooncake/build && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
