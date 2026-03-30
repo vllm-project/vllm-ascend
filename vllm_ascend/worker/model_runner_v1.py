@@ -292,6 +292,16 @@ class NPUModelRunner(GPUModelRunner):
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
 
+        # Ensure query_pos is initialized (parent class should do this, but add
+        # fallback for compatibility with upstream vLLM versions)
+        if not hasattr(self, 'query_pos'):
+            arange_size = max(self.max_num_reqs + 1, self.max_num_tokens)
+            self.query_pos = self._make_buffer(arange_size, dtype=torch.int64)
+            logger.warning(
+                "query_pos was not initialized by parent GPUModelRunner, "
+                "initializing fallback buffer of size %d", arange_size
+            )
+
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
@@ -365,8 +375,14 @@ class NPUModelRunner(GPUModelRunner):
                 self.use_sparse,
             )
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
-            self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
-            self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
+            # Use plain tensors for positions and input_ids to match upstream vLLM expectations
+            # (they should be directly subscriptable, not CpuGpuBuffer)
+            self.input_ids = torch.zeros(
+                max_buffer_num_tokens, dtype=torch.int32, device=self.device
+            )
+            self.positions = torch.zeros(
+                max_buffer_num_tokens, dtype=torch.int64, device=self.device
+            )
 
         # Create a CPU numpy buffer for positions computation when
         # self.positions is a plain tensor (non-CpuGpuBuffer case).

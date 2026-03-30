@@ -5,10 +5,20 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
+
+# Handle import compatibility with different vLLM versions
+try:
+    from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+except ModuleNotFoundError:
+    # Fallback for older vLLM versions where the path might be different
+    try:
+        from vllm.v1.kv_offload.cpu_manager import CPUOffloadingManager  # noqa: F401
+    except ModuleNotFoundError:
+        # If still not found, let it fail at usage time with better error message
+        CPUOffloadingManager = None  # type: ignore
 
 from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
 
