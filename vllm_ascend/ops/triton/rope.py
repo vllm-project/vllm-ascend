@@ -328,6 +328,8 @@ def rope_forward_triton_siso(
         qk = qk.contiguous()
 
     num_tokens, n_head, head_dim = qk.shape
+    if num_tokens == 0:
+        return qk
     assert rope_dim <= head_dim
     pad_rope_dim = triton.next_power_of_2(rope_dim)
     pad_n_head = triton.next_power_of_2(n_head)

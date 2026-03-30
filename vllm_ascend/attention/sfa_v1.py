@@ -1088,11 +1088,37 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
                 _ctx = attn_metadata.dsa_cp_context
-                _num_cp_tokens = _ctx.local_end_with_pad - _ctx.local_start
-                _cp_local_offset = _ctx.local_start % hidden_states.shape[0]
-                hidden_states_for_kv = hidden_states[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
-                kv_no_split_for_kv = kv_no_split[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
-                q_c_for_kv = q_c[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
+                # cos.shape[0] == num_tokens_per_device is the authoritative CP-local
+                # token count (already padded to round_up(total, tp_size)/tp_size).
+                # hidden_states from FlashComm1 is sized by actual (non-padded) tokens
+                # divided by the SP factor, which may be slightly less than
+                # cos.shape[0] when the batch size is not divisible by both the SP
+                # factor and tp_size.  Guard against div-by-zero for empty batches.
+                _num_cp_tokens = cos.shape[0]
+                _cp_local_offset = (
+                    _ctx.local_start % hidden_states.shape[0]
+                    if hidden_states.shape[0] > 0
+                    else 0
+                )
+                _actual_cp_tokens = min(
+                    _num_cp_tokens, hidden_states.shape[0] - _cp_local_offset
+                )
+                _hs = hidden_states[_cp_local_offset : _cp_local_offset + _actual_cp_tokens]
+                _kv = kv_no_split[_cp_local_offset : _cp_local_offset + _actual_cp_tokens]
+                _qc = q_c[_cp_local_offset : _cp_local_offset + _actual_cp_tokens]
+                if _actual_cp_tokens < _num_cp_tokens:
+                    # Pad with zeros so every TP rank contributes the same
+                    # num_tokens_per_device entries to the all-gather.  The padded
+                    # positions have slot_mapping_cp == -1 and are not written to
+                    # the KV cache; their attention outputs are discarded below.
+                    _pad = _num_cp_tokens - _actual_cp_tokens
+                    hidden_states_for_kv = torch.nn.functional.pad(_hs, (0, 0, 0, _pad))
+                    kv_no_split_for_kv = torch.nn.functional.pad(_kv, (0, 0, 0, _pad))
+                    q_c_for_kv = torch.nn.functional.pad(_qc, (0, 0, 0, _pad))
+                else:
+                    hidden_states_for_kv = _hs
+                    kv_no_split_for_kv = _kv
+                    q_c_for_kv = _qc
             else:
                 hidden_states_for_kv = hidden_states
                 kv_no_split_for_kv = kv_no_split
@@ -1245,9 +1271,16 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.enable_dsa_cp and attn_metadata is not None and attn_metadata.dsa_cp_context is not None:
             _ctx = attn_metadata.dsa_cp_context
-            _num_cp_tokens = _ctx.local_end_with_pad - _ctx.local_start
-            _cp_local_offset = _ctx.local_start % output.shape[0]
-            output[_cp_local_offset : _cp_local_offset + _num_cp_tokens] = self.o_proj(attn_output)[0]
+            _cp_local_offset = (
+                _ctx.local_start % output.shape[0] if output.shape[0] > 0 else 0
+            )
+            # attn_output may include zero-padded rows (when the FC1-local slice
+            # was shorter than num_tokens_per_device).  Only write back the rows
+            # that correspond to real positions in the output buffer.
+            _actual_out = min(attn_output.shape[0], output.shape[0] - _cp_local_offset)
+            output[_cp_local_offset : _cp_local_offset + _actual_out] = (
+                self.o_proj(attn_output)[0][:_actual_out]
+            )
         else:
             output[...] = self.o_proj(attn_output)[0]
 
