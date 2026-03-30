@@ -97,8 +97,6 @@ class KVTransferThread(threading.Thread):
             res = self.m_store.exists(keys)  # type: ignore[assignment]
             exists_list = [False] * len(keys)
             for index, value in enumerate(res):  # type: ignore[arg-type]
-                if index >= len(exists_list):
-                    break
                 exists_list[index] = value == 1
             return exists_list
         except Exception as e:
