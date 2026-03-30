@@ -125,6 +125,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 **device_name**: ""
 **master_server_address**: Configured with the IP and port of the master service.  
 **global_segment_size**: Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.**
+
 #### 2.Start mooncake_master
 
 Under the mooncake folder:
