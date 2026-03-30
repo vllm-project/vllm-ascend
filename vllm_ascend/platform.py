@@ -518,17 +518,6 @@ class NPUPlatform(Platform):
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
             )
 
-        if model_config is not None:
-            if model_config.model is None:
-                return
-            if "Qwen" in model_config.model:
-                if model_config.get_num_attention_heads(vllm_config.parallel_config) == model_config.get_num_kv_heads(
-                    vllm_config.parallel_config
-                ) and model_config.get_head_size() not in [64, 128, 192]:
-                    raise ValueError(
-                        "Models with head dim out of [64, 128, 192] do not support tp >= 16 now. "
-                        "There is a known issue on torch_npu.npu_fused_infer_attention_score on this scenario."
-                    )
 
     @classmethod
     def import_kernels(cls) -> None:
