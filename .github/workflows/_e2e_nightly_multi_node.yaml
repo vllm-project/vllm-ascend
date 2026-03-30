@@ -48,6 +48,11 @@ on:
       should_run:
         required: true
         type: boolean
+      ascend_log_prefix:
+        required: false
+        default: /root/.cache/ascend-logs
+        type: string
+        description: the prefix path for ascend logs on shared PVC, default to /root/.cache/ascend-logs
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -103,11 +108,10 @@ jobs:
           rand_suffix=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-6)
           LWS_NAME="vllm-${lws_suffix}-${rand_suffix}"
 
-          # Ascend logs from all pods are backed up here (on the shared PVC) by run.sh trap
           {
             echo "LWS_NAME=${LWS_NAME}"
             echo "LEADER_POD=${LWS_NAME}-0"
-            echo "LOG_PREFIX=/root/.cache/ascend-logs/${LWS_NAME}"
+            echo "LOG_PREFIX=${{ inputs.ascend_log_prefix }}/${LWS_NAME}"
           } >> $GITHUB_ENV
 
       - name: Prepare scripts
