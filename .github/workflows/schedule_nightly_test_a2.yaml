@@ -24,6 +24,20 @@ on:
       # Run test at 23:45 Beijing time (UTC+8)
       - cron: "45 15 * * *"
   workflow_dispatch:
+    inputs:
+      vllm_ascend_branch:
+        description: 'Branch to test (main or releases/v0.18.0)'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+          - main
+          - releases/v0.18.0
+      test_cases:
+        description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
+        required: false
+        default: 'all'
+        type: string
   pull_request:
     branches:
       - 'main'
@@ -58,8 +72,19 @@ env:
   VLLM_VERSION: 'v0.18.0'
 
 jobs:
+  parse-trigger:
+    name: Parse trigger and determine test scope
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'nightly-test')
+    uses: ./.github/workflows/_parse_trigger.yaml
+    with:
+      test_cases: ${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}
+
   setup-vars:
     name: Export global env vars as job outputs
+    needs: parse-trigger
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.export.outputs.image }}
@@ -76,20 +101,15 @@ jobs:
             echo "vllm_version=${{ env.VLLM_VERSION }}"
           } >> $GITHUB_OUTPUT
 
-  parse-trigger:
-    name: Parse trigger and determine test scope
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'nightly-test')
-    uses: ./.github/workflows/_parse_trigger.yaml
-
   build-image:
     name: Build nightly-a2 image
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
-      matrix: 
-        vllm_ascend_branch: [main, releases/v0.18.0]
+      matrix:
+        vllm_ascend_branch: >-
+          ${{ github.event_name == 'workflow_dispatch' 
+              && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
+              || fromJSON('["main", "releases/v0.18.0"]') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
@@ -309,6 +329,7 @@ jobs:
   clear-pre-logs:
     needs: [multi-node-tests]
     runs-on: linux-aarch64-a2b3-0
+    if: always() 
     steps:
       - name: Clear pre-logs on pvc
         run: |

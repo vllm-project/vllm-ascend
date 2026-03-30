@@ -74,11 +74,18 @@ jobs:
         ref: ${{ inputs.branch_ref }}
 
     - uses: actions/checkout@v6
-      if: ${{ github.event_name == 'workflow_dispatch' }}
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
       with:
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.workflow_dispatch_tag }}
+
+    - uses: actions/checkout@v6
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }}
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+        ref: ${{ inputs.branch_ref }}
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -157,10 +164,17 @@ jobs:
     needs: build-push-digest
     if: ${{ inputs.should_push }}
     steps:
-      - name: Checkout
+      - name: Checkout branch
         uses: actions/checkout@v6
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '') }}
         with:
           ref: ${{ inputs.branch_ref }}
+
+      - name: Checkout tag
+        uses: actions/checkout@v6
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
+        with:
+          ref: ${{ inputs.workflow_dispatch_tag }}
 
       - name: Download arm64 digests
         uses: actions/download-artifact@v8
@@ -215,7 +229,8 @@ jobs:
           tags: |
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
             type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
-            type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' }},suffix=${{ env.SUFFIX }}
+            type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }},suffix=${{ env.SUFFIX }}
+            type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
           flavor:
             latest=false
 
