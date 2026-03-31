@@ -36,7 +36,6 @@ import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
-import vllm_ascend.patch.worker.patch_qwen3_vl  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_eagle  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
@@ -50,3 +49,4 @@ import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
+import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
