@@ -113,7 +113,7 @@ def _capture_acl_codegen(cache_path: str):
         try:
             os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
             torch.save(captured[0], cache_path)
-            logger.info("Saved npugraph_ex compilation cache: %s", cache_path)
+            logger.debug("Saved npugraph_ex compilation cache: %s", cache_path)
         except Exception as e:
             logger.warning("Failed to write npugraph_ex cache to %s: %s", cache_path, e)
 
