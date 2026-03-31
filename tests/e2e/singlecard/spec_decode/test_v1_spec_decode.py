@@ -329,6 +329,49 @@ def test_eagle_logprobs(
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 
+def test_suffix_logprobs(
+    model_name: str,
+):
+    """
+    Verify that suffix speculative decoding with logprobs enabled
+    does not crash and returns correct logprobs.
+    """
+    prompt = {"role": "user", "content": "Hello world " * 10}
+    sampling_params = SamplingParams(temperature=0, logprobs=1, max_tokens=10, ignore_eos=False)
+
+    ref_llm = LLM(model=model_name, max_model_len=2048)
+    ref_outputs = ref_llm.chat([prompt], sampling_params)
+    ref_logprobs = []
+    for output in ref_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                ref_logprobs.append(logprobs[token_id])
+    del ref_llm
+
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 8,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as runner:
+        spec_outputs = runner.model.chat([prompt], sampling_params)
+
+    spec_logprobs = []
+    for output in spec_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                spec_logprobs.append(logprobs[token_id])
+
+    assert len(spec_logprobs) > 0, "No logprobs returned from suffix spec decode"
+    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
+        assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1)
+        assert ref_logprob.rank == spec_logprob.rank
+        assert ref_logprob.decoded_token == spec_logprob.decoded_token
+
+
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
