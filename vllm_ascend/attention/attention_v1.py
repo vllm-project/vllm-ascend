@@ -694,13 +694,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
-                if isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2:
-                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-                elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+                if (
+                    isinstance(kv_cache, torch.Tensor)
+                    and kv_cache.dim() > 0
+                    and kv_cache.shape[0] == 2
+                    or isinstance(kv_cache, (list, tuple))
+                    and len(kv_cache) >= 2
+                ):
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
             if self.key_cache is None:
-                raise RuntimeError(f"key_cache is None in _get_fia_params for mode {attn_metadata.attn_state}. kv_cache={kv_cache}")
+                raise RuntimeError(
+                    f"key_cache is None in _get_fia_params for mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
+                )
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
@@ -795,7 +801,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sinks is None
         ):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata, kv_cache)
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata, kv_cache
+        )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (
@@ -982,9 +990,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # This is needed for DecodeOnly mode where key/value are None but we still
         # need access to the cache for attention computation.
         if self.key_cache is None and kv_cache is not None:
-            if isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2:
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-            elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+            if (
+                isinstance(kv_cache, torch.Tensor)
+                and kv_cache.dim() > 0
+                and kv_cache.shape[0] == 2
+                or isinstance(kv_cache, (list, tuple))
+                and len(kv_cache) >= 2
+            ):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
