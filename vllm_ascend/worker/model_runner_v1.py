@@ -30,6 +30,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
@@ -109,6 +110,7 @@ from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
+from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
@@ -1283,7 +1285,7 @@ class NPUModelRunner(GPUModelRunner):
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
                     or (enable_sp() and not self.model_config.use_mla)
-                    and self.pcp_size == 1  # TODO(lxs): fix this
+                    and self.pcp_size * self.dcp_size == 1
                 ):
                     # Currently, Graph Mode and SP will both pad num_tokens,
                     # Another possible condition is num_tokens_padded != num_tokens_unpadded
@@ -1823,11 +1825,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         forward_context = get_forward_context()
         assert forward_context is not None
-        if (
-            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and not forward_context.capturing
-            and not self.use_sparse
-        ):
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
             assert positions is not None
             update_full_graph_params(
                 self.attn_backend,
@@ -1846,7 +1844,7 @@ class NPUModelRunner(GPUModelRunner):
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if enable_sp(self.vllm_config) or enable_sp_by_pass(self.vllm_config):
+        if enable_sp(self.vllm_config) or enable_sp_by_pass():
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -1976,7 +1974,7 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_batch_across_dp(
                 num_tokens_padded=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode.value,
-                allow_dp_padding=cudagraph_mode != CUDAGraphMode.NONE,
+                allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
             )
 
             # Extract DP padding if there is any
@@ -2101,6 +2099,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens,
                     num_tokens_padded,
                     slot_mapping,
+                    kv_cache_gid,
                 )
             if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
                 self.cpu_slot_mapping = slot_mapping.cpu().numpy()
@@ -2165,6 +2164,12 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
+                # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
+                # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
+                if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
+                    and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
+                    if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
+                        attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
 
             if ubid is None:
                 assert isinstance(attn_metadata, dict)
@@ -2554,6 +2559,14 @@ class NPUModelRunner(GPUModelRunner):
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
 
+        if self.ascend_config.mix_placement:
+            # TODO: Enabling the mix placement in deepseek_v2.py
+            # remove this part after the mix placement merged into vllm
+            def mock_true():
+                return True
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_true
+            rocm_aiter_ops.is_fused_moe_enabled = mock_true
+
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             if self.eplb_enable:
                 self.vllm_config.parallel_config.enable_eplb = True
@@ -2757,7 +2770,7 @@ class NPUModelRunner(GPUModelRunner):
                             k_dim,
                             v_dim,
                         ]
-                        if self.is_kv_consumer and self.vllm_config.quant_config is not None:
+                        if self.is_kv_consumer and enable_fa_quant(self.vllm_config):
                             k_tensor_split_factor, v_tensor_split_factor = (
                                 self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
                             )
@@ -2944,7 +2957,7 @@ class NPUModelRunner(GPUModelRunner):
                             v_dim,
                         )
                     k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-                    if self.is_kv_consumer and self.vllm_config.quant_config is not None:
+                    if self.is_kv_consumer and enable_fa_quant(self.vllm_config):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
@@ -3041,6 +3054,8 @@ class NPUModelRunner(GPUModelRunner):
         # For other backends (like Mamba), use [0] (no splitting)
         self.kernel_block_sizes = []
         for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            if self.pcp_size > 1:
+                self.pcp_manager.initialize_slot_mapping()
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 # All layers in the UniformTypeKVCacheSpecs have the same type,

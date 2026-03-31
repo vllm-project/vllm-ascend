@@ -10,22 +10,21 @@
  */
 
 /*!
- * \file causal_conv1d_tiling_data.h
+ * \file causal_conv1d_v310_tiling_data.h
  * \brief
  */
 
-#ifndef ASCEND_OPS_CAUSAL_CONV1D_TILING_DATA_H
-#define ASCEND_OPS_CAUSAL_CONV1D_TILING_DATA_H
+#ifndef ASCEND_OPS_CAUSAL_CONV1D_V310_TILING_DATA_H
+#define ASCEND_OPS_CAUSAL_CONV1D_V310_TILING_DATA_H
 
 #include <cstdint>
 
-// #include "register/tilingdata_base.h"
-// #include "tiling/tiling_api.h"
 #include "register/tilingdata_base.h"
-#include "error_log.h"
 #include "register/op_impl_registry.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "platform/platform_infos_def.h"
+#include "../tiling_base/error_log.h"
+
 namespace optiling {
 
 BEGIN_TILING_DATA_DEF(CausalConv1dTilingData)
@@ -53,8 +52,8 @@ struct CausalConv1dCompileInfo {
     uint64_t ubSize = 0;
     uint32_t coreNum = 0;
 };
-REGISTER_TILING_DATA_CLASS(CausalConv1d, CausalConv1dTilingData)
+REGISTER_TILING_DATA_CLASS(CausalConv1dV310, CausalConv1dTilingData)
 
 } // namespace optiling
 
-#endif // ASCEND_OPS_CAUSAL_CONV1D_TILING_DATA_H
+#endif // ASCEND_OPS_CAUSAL_CONV1D_V310_TILING_DATA_H

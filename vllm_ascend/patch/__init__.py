@@ -137,6 +137,38 @@
 #       Remove this patch if upstream provides an official NPU graph-capture
 #       guidance / auto-configuration path for HCCL.
 #
+#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
+#    Why:
+#       Upstream vLLM's eagle3/extract_hidden_states restricts target model types
+#       via a whitelist. MiniMax-M2 should be allowed once the worker-side model
+#       can emit auxiliary hidden states.
+#    How：
+#       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
+#       MiniMax model_type when method is eagle3/extract_hidden_states.
+#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
+#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
+#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
+#       then `rebuild_dataclass(SpeculativeConfig, force=True)`.
+#       If `VllmConfig` was imported earlier, also `rebuild_dataclass(VllmConfig, ...)`
+#       so nested `speculative_config` validation does not use a stale schema.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream whitelist includes MiniMax.
+#
+#   4. `vllm.model_executor.models.registry` (spec decode aliases)
+#    Why:
+#       Some Eagle3 draft checkpoints may declare a MiniMax-specific architecture
+#       string while reusing the shared Eagle3 implementation.
+#    How：
+#       Register `Eagle3MiniMaxM2ForCausalLM` as an alias pointing to the
+#       existing Eagle3 implementation in the speculative decoding registry.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Drop the alias once upstream registry includes it or the checkpoint
+#       standardizes architecture strings.
+#
 # ** 8. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
@@ -167,15 +199,12 @@
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
 #    Why:
 #       vllm doesn't support all_to_all for GroupCoordinator.
-#       all_reduce in vLLM not is a customop, which will make MatmulAllReduceAddRMSNorm fusion failure.
 #    How：
 #       Add all_to_all implementation for GroupCoordinator.
-#       make all_reduce as a customop.
 #    Related PR (if no, explain why):
 #       No, we should use vlLM all2all manager to support all_to_all for npu.
 #    Future Plan:
 #       Remove this patch when the refactor of all2all manager is done.
-#       Remove this patch when vLLM support all_reduce as customop.
 #
 # ** 2. File: worker/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -315,7 +344,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest processor implementation.
 #
-# ** 10. File: worker/patch_v2_eagle.py**
+# ** 10. File: worker/patch_v2/patch_eagle.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
 #    Why:
@@ -351,7 +380,7 @@
 #    Future Plan:
 #       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
 #
-# ** 13. File: worker/patch_v2_uva.py**
+# ** 13. File: worker/patch_v2/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.states.UvaBuffer`
 #    Why:
@@ -435,6 +464,31 @@
 #       No, fp8 load format and backend constraints are model/backend specific.
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
+#
+#   4. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.forward`
+#    Why:
+#       Eagle3 speculative decoding needs auxiliary hidden states from specific
+#       transformer layers of the target model.
+#    How：
+#       Extend `MiniMaxM2Model.forward` to optionally collect and return
+#       `(final_hidden_states, aux_hidden_states)` when `aux_hidden_state_layers`
+#       is set by the runtime.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream MiniMax-M2 integrates Eagle3 support.
+#
+#   5. `vllm.model_executor.models.minimax_m2.MiniMaxM2ForCausalLM`
+#    Why:
+#       vLLM core uses SupportsEagle3-style methods to configure which layers
+#       should emit auxiliary hidden states.
+#    How：
+#       Inject `set_aux_hidden_state_layers` and default-layer getters onto
+#       `MiniMaxM2ForCausalLM` so vLLM can configure the target model.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream provides these methods on the model.
 #
 # ** 18. File: worker/patch_minimax_m2_linear_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -556,3 +610,71 @@
 #    Future Plan:
 #       The maybe_remap_kv_scale_name function of the community is reconstructed to support
 #       multiple backends.
+# ** 24. File: worker/patch_v2/patch_input_batch.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
+#    Why:
+#       vllm use InputBatch to make dummy tensors. in `model_runner.py` and `cudagraph_utils.py`
+#       which make it difficult to inherit from vllm methods.
+#    How：
+#       replace InputBatch with AscendInputBatch.
+#    Future Plan:
+#       remove this patch when vLLM-ascend's make_dummy behavior aligns with vLLM.
+# ** 25. File: worker/patch_v2/patch_block_table.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.block_table.BlockTables`
+#    Why:
+##      vllm-ascend need to initialize slot mapping as torch.int32 dtype,
+#       but vllm default is torch.int64 dtype.
+#    How：
+#       replace BlockTables with AscendBlockTables which initialize slot mapping
+#       as torch.int32 dtype.
+#    Future Plan:
+#       remove this patch when vLLM-ascend's BlockTables can initialize
+#       slot mapping as torch.int64 dtype.
+# ** 25. File: worker/patch_v2/patch_model_state.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.model_states.default.init_model_state`
+#    Why:
+##      vllm's prepare_attn in ModelState is different from vllm,
+#       we need to override init_model_state.
+#    How：
+#       Define AscendModelState and initialize it in init_model_state.
+#    Future Plan:
+#       remove this when vllm-ascend's attention metadata is align with vllm.
+# ** 26. File: worker/patch_v2/patch_triton.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
+#    Why:
+#       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
+#    How：
+#       override triton ops in vLLM with ascend implementation
+#    Related PR (if no, explain why):
+#       Let vLLM support triton ops dispatch.
+#    Future Plan:
+#       Remove this patch when vLLM support the dispatch function.
+#
+# ** 27. File: worker/patch_qwen3_c8.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.load_weights`
+#    Why:
+#       The Qwen3 W8A8C8 model stores per-channel KV cache scales and offsets
+#       (k_cache_scale, k_cache_offset, v_cache_scale, v_cache_offset) under
+#       weight names that AutoWeightsLoader does not recognise and would
+#       silently discard.  Without these scales the INT8 KV cache cannot be
+#       dequantised correctly at inference time.
+#    How:
+#       Wrap load_weights to intercept the C8 scale/offset tensors before they
+#       reach the base loader.  Each intercepted tensor is routed to the
+#       corresponding nn.Parameter via its weight_loader, then excluded from
+#       the remaining weight stream so the base loader never sees it.
+#    Related PR (if no, explain why):
+#       This PR (Qwen3-32B W8A8C8 support).  Upstream vLLM's weight-loading
+#       pipeline does not yet have a generic hook for hardware-plugin-defined
+#       KV cache parameters.
+#    Future Plan:
+#       Remove this patch when vLLM provides a first-class extension point
+#       for loading extra KV cache quantisation parameters in model load_weights,
+#       or when the Qwen3 model's weight names are aligned with the parameter
+#       names expected by the quantisation backend.

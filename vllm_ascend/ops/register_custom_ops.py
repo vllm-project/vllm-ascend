@@ -17,7 +17,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.utils import npu_stream_switch, prefetch_stream
+from vllm_ascend.utils import enable_sp_by_pass, is_vl_model, npu_stream_switch, prefetch_stream
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -43,7 +43,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_c
     except AssertionError:
         return x
 
-    flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
+    flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled or (enable_sp_by_pass() and is_ep_comm)
     if flash_comm_v1_enabled and label:
         dp_metadata = forward_context.dp_metadata
         if dp_metadata is None or not is_ep_comm:
@@ -53,6 +53,8 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool, is_ep_c
                 x = x[:-pad_size]
         else:
             x = get_ep_group().all_gather(x, 0)
+            if enable_sp_by_pass():  # TODO: do unpad
+                return x
             # unpad
             num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
             result = torch.empty((num_tokens_across_dp_cpu.sum(), *x.shape[1:]), device=x.device, dtype=x.dtype)
@@ -74,7 +76,11 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
     except AssertionError:
         return tensor_model_parallel_all_reduce(x)
 
-    if not getattr(forward_context, "flash_comm_v1_enabled", False):
+    flash_comm_v1_enabled = getattr(forward_context, "flash_comm_v1_enabled", False) or (
+        enable_sp_by_pass() and is_ep_comm
+    )
+
+    if not flash_comm_v1_enabled or (forward_context.is_draft_model and is_vl_model()):
         return tensor_model_parallel_all_reduce(x)
 
     dp_metadata = forward_context.dp_metadata
@@ -84,6 +90,8 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
             x = F.pad(x, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(x, 0)
     else:
+        if enable_sp_by_pass():
+            return get_ep_group().reduce_scatter(x.view(-1, *x.shape[1:]), 0)
         # padding
         dp_size = get_dp_group().world_size
         num_tokens_across_dp_cpu = get_forward_context().dp_metadata.num_tokens_across_dp_cpu
@@ -107,7 +115,7 @@ def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor, label: bool, is_ep_c
 
 
 def _maybe_pad_and_reduce_fake(x: torch.Tensor, is_ep_comm: bool = False) -> torch.Tensor:
-    if _EXTRA_CTX.flash_comm_v1_enabled:
+    if _EXTRA_CTX.flash_comm_v1_enabled or enable_sp_by_pass():
         return torch.empty(
             (x.shape[0] // get_tensor_model_parallel_world_size(), *x.shape[1:]), device=x.device, dtype=x.dtype
         )
