@@ -46,7 +46,7 @@ e2e-singlecard:
 - name: tests/e2e/singlecard/test_xlite.py
   estimated_time: 162
 - name: tests/e2e/singlecard/compile/test_norm_quant_fusion.py
-  estimated_time: 106
+  estimated_time: 103
 - name: tests/e2e/singlecard/compile/test_compiler_cache.py
   estimated_time: 30
 - name: tests/e2e/singlecard/pooling/test_classification.py
