@@ -274,6 +274,14 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
         self._gate = gate
+        # Recreate runner after shared_experts/gate are set so custom op dispatch
+        # goes through moe_forward_shared.
+        self.runner = self._init_runner()
+
+    @property
+    def is_internal_router(self) -> bool:
+        # 310P Ascend path expects router logits from the model forward path.
+        return False
 
     def forward(
         self,
@@ -298,9 +306,7 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
     def _forward_shared_experts(self, hidden_states: torch.Tensor):
         if self._shared_experts is None:
             return None
-        part1_out = self._shared_experts_part1(hidden_states)
-        shared_out = self._shared_experts_part2(hidden_states, part1_out)
-        return shared_out
+        return self._shared_experts(hidden_states)
 
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
