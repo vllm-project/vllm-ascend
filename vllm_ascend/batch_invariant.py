@@ -35,7 +35,7 @@ def vllm_is_batch_invariant() -> bool:
     in recent upstream vLLM refactoring.
     """
     # Try to access from envs module, fall back to environment variable
-    if hasattr(envs, 'VLLM_BATCH_INVARIANT'):
+    if hasattr(envs, "VLLM_BATCH_INVARIANT"):
         return bool(envs.VLLM_BATCH_INVARIANT)
     else:
         # Fallback to environment variable for older vLLM versions

@@ -27,9 +27,5 @@ def update_num_computed_tokens_for_batch_change(
     corrected = prev_computed + valid_counts.int()
 
     n = prev_positions.shape[0]
-    num_computed_tokens[:n].copy_(
-        torch.where(participating, corrected, cpu_num_computed_tokens)
-    )
-    num_accepted_tokens.copy_(
-        torch.where(participating, valid_counts, num_accepted_tokens)
-    )
+    num_computed_tokens[:n].copy_(torch.where(participating, corrected, cpu_num_computed_tokens))
+    num_accepted_tokens.copy_(torch.where(participating, valid_counts, num_accepted_tokens))
