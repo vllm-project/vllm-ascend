@@ -1,9 +1,12 @@
 import torch
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+from vllm.triton_utils import HAS_TRITON
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
@@ -36,6 +39,28 @@ def random_sample(
 
 
 class AscendSampler(Sampler):
+    @staticmethod
+    def apply_penalties(
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        output_token_ids: list[list[int]],
+    ) -> torch.Tensor:
+        """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
+        if not HAS_TRITON:
+            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
+
+        if sampling_metadata.no_penalties:
+            return logits
+        assert sampling_metadata.prompt_token_ids is not None
+        return apply_all_penalties(
+            logits,
+            sampling_metadata.prompt_token_ids,
+            sampling_metadata.presence_penalties,
+            sampling_metadata.frequency_penalties,
+            sampling_metadata.repetition_penalties,
+            output_token_ids,
+        )
+
     def __init__(self, logprobs_mode=DEFAULT_LOGPROBS_MODE):
         # TODO: support logprobs_mode in vllm-ascend
         super().__init__(logprobs_mode=logprobs_mode)
