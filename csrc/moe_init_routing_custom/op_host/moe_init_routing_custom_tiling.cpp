@@ -903,7 +903,7 @@ void MoeInitRountingCustomTilingBase::Tinlig4VBSMultiCoreCompute(MoeCustomVBSCom
     needCoreNum = std::min(needCoreNum, aivNum);
 
     if (needCoreNum == 0) {
-        OPS_LOG_E(context_->GetNodeName(), "Variale needCoreNum cannot be 0.");
+        OPS_LOG_E(context_->GetNodeName(), "Variate needCoreNum cannot be 0.");
         return;
     }
     int64_t perCoreElements = (needCoreNum == 0) ? 0 : (totalLength_ / needCoreNum);
@@ -1263,5 +1263,5 @@ void MoeInitRountingCustomTilingBase::Tiling4GatherOutCompute()
         lastCorePerLoopIndicesElements, lastCoreLastLoopIndicesElements);
 }
 
-REGISTER_TILING_TEMPLATE("MoeInitRoutingCustom", MoeInitRountingCustomTilingBase, 10000); // If not 910_95, fallback to this.
+REGISTER_TILING_TEMPLATE("MoeInitRoutingCustom", MoeInitRountingCustomTilingBase, 10000); // Fallback template for non-Ascend950 SoC.
 } // namespace optiling

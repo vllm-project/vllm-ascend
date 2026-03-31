@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* funtion: aclnnDispatchLayoutGetWorkspaceSize
+/* function: aclnnDispatchLayoutGetWorkspaceSize
  * topkIdx : required
  * numTokens : required
  * numRanks : required
@@ -31,7 +31,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnDispatchLayoutGetWorkspa
                                             uint64_t *workspaceSize,
                                             aclOpExecutor **executor);
 
-/* funtion: aclnnDispatchLayout
+/* function: aclnnDispatchLayout
  * workspace : workspace memory addr(input).
  * workspaceSize : size of workspace(input).
  * executor : executor context(input).

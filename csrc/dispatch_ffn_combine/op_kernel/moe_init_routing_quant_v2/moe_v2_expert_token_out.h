@@ -162,7 +162,7 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCumsum(bool isTai
     this->expertTokenValue += this->expertTokenIdxOutLocal.GetValue(i);
     this->expertTokenIdxOutLocal.SetValue(i, this->expertTokenValue);
   }
-  // if the remianing UB is sufficient, use the UB space to copy
+  // if the remaining UB is sufficient, use the UB space to copy
   // otherwise, copy the calculated data first, and then copy the last tokenValue to remaining expert position
   if (isTail && end <= this->expertNumUbAlign) {
     int64_t startAlign = Min(Align(copyLength, sizeof(int32_t)), end);

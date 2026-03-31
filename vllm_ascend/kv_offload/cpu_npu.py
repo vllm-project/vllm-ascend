@@ -1,12 +1,10 @@
 import numpy as np
 import torch
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
-
-logger = init_logger(__name__)
 
 
 def expand_block_ids(
@@ -153,11 +151,21 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
+        finished_job_ids = []
         for job_id, event in self.transfer_events.items():
             if event.query():
-                results.append((job_id, True))
+                results.append(
+                    TransferResult(
+                        job_id=job_id,
+                        success=True,
+                        transfer_size=None,
+                        transfer_time=None,
+                        transfer_type=None,
+                    )
+                )
+                finished_job_ids.append(job_id)
                 self.events_pool.append(event)
-        for job_id, _ in results:
+        for job_id in finished_job_ids:
             del self.transfer_events[job_id]
         return results
 

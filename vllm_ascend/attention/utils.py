@@ -101,6 +101,25 @@ class AscendPrefillContextParallelMetadata:
     # original max_query_len before pcp split
     max_query_len_pcp_full: int = 0
 
+    # the following attributes are specifically used in hybrid-attn models.
+    pcp_use_hybrid_attn: bool = False
+
+    pcp_unpad_mask: torch.Tensor = None
+
+    # to get the right order of query in prefill per rank
+    pcp_fa_query_idx: torch.Tensor = None
+
+    # restore the full sequence across all pcp ranks
+    # when entering from linear-attention to attention
+    pcp_enter_fa_restore_idx: torch.Tensor = None
+
+    # scatter the full sequence across all pcp ranks
+    # when exiting from attention to linear-attention
+    pcp_exit_fa_scatter_idx: torch.Tensor = None
+
+    # the number of tokens padded in linear-attn per rank
+    pcp_padded_tokens_fla: int = 0
+
 
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
@@ -305,6 +324,10 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
     return nz_mat
 
 
-def enabling_malpo(vllm_config: VllmConfig) -> bool:
-    is_decode_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+def enabling_mlapo(vllm_config: VllmConfig) -> bool:
+    is_decode_instance = (
+        vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.is_kv_consumer
+        and not vllm_config.kv_transfer_config.is_kv_producer
+    )
     return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)

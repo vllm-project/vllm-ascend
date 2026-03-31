@@ -10,7 +10,7 @@ The current process for registering and obtaining quantization methods in vLLM A
 
 ![get_quant_method](../../assets/quantization/get_quant_method.png)
 
-vLLM Ascend registers a custom ascend quantization method. By configuring the `--quantization ascend` parameter (or `quantization="ascend"` for offline), the quantization feature is enabled. When constructing the `quant_config`, the registered `AscendModelSlimConfig` is initialized and `get_quant_method` is called to obtain the quantization method corresponding to each weight part, stored in the `quant_method` attribute.
+vLLM Ascend registers a custom Ascend quantization method. By configuring the `--quantization ascend` parameter (or `quantization="ascend"` for offline), the quantization feature is enabled. When constructing the `quant_config`, the registered `AscendModelSlimConfig` is initialized and `get_quant_method` is called to obtain the quantization method corresponding to each weight part, stored in the `quant_method` attribute.
 
 Currently supported quantization methods include `AscendLinearMethod`, `AscendFusedMoEMethod`, `AscendEmbeddingMethod`, and their corresponding non-quantized methods:
 
@@ -26,7 +26,7 @@ The `create_weights` method is used for weight initialization; the `process_weig
 
 We need to implement the `create_weights`, `process_weights_after_loading`, and `apply` methods for different **layers** (**attention**, **mlp**, **moe**).
 
-**Supplemnet**: When loading the model, the quantized model's description file **quant_model_description.json** needs to be read. This file describes the quantization configuration and parameters for each part of the model weights, for example:
+**Supplement**: When loading the model, the quantized model's description file **quant_model_description.json** needs to be read. This file describes the quantization configuration and parameters for each part of the model weights, for example:
 
 ```json
 {

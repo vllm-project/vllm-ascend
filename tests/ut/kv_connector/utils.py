@@ -8,14 +8,11 @@ from typing import Any, Optional
 
 import torch
 from vllm import SamplingParams
-from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
-                         ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.config import CacheConfig, DeviceConfig, KVTransferConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
-                                         init_none_hash)
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -37,14 +34,10 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.encoder_cache_manager.cached) == 0
 
     # KVCache Manager.
-    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-               req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-               num_cached_block) == 0
-    num_free_blocks = (
-        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
-    assert num_free_blocks == (
-        scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].num_cached_block) == 0
+    num_free_blocks = scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
+    assert num_free_blocks == (scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
     # NOTE(rob): just the ref count on blocks will be 0. The hash
     # value, etc will remain since we lazily evict for prefix cache.
@@ -63,8 +56,7 @@ def create_vllm_config(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_num_batched_tokens,
     )
-    fake_weight_path = os.path.join(os.path.dirname(__file__), "..",
-                                    "fake_weight")
+    fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "fake_weight")
     model_config = ModelConfig(
         model=fake_weight_path,
         skip_tokenizer_init=True,
@@ -77,14 +69,14 @@ def create_vllm_config(
         cache_dtype="auto",
         enable_prefix_caching=True,
     )
-    kv_transfer_config = KVTransferConfig(
-        kv_connector="MooncakeConnectorV1",
-        kv_role="kv_both")
-    return VllmConfig(scheduler_config=scheduler_config,
-                      model_config=model_config,
-                      cache_config=cache_config,
-                      kv_transfer_config=kv_transfer_config,
-                      device_config=DeviceConfig("cpu"))
+    kv_transfer_config = KVTransferConfig(kv_connector="MooncakeConnectorV1", kv_role="kv_both")
+    return VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        kv_transfer_config=kv_transfer_config,
+        device_config=DeviceConfig("cpu"),
+    )
 
 
 def create_scheduler(
@@ -96,11 +88,7 @@ def create_scheduler(
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(['layer'],
-                             FullAttentionSpec(block_size, 1, 1, torch.float16,
-                                               False, False))
-        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], FullAttentionSpec(block_size, 1, 1, torch.float16, False, False))],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
 
@@ -138,19 +126,19 @@ def create_request(
 
     if do_remote_decode:
         assert not do_remote_prefill
-        kv_transfer_params = dict(do_remote_prefill=False,
-                                  do_remote_decode=True)
+        kv_transfer_params = dict(do_remote_prefill=False, do_remote_decode=True)
     elif do_remote_prefill:
-        kv_transfer_params = dict(do_remote_prefill=True,
-                                  do_remote_decode=False,
-                                  remote_engine_id="my-engine-id",
-                                  remote_block_ids=list(
-                                      range(num_remote_blocks)),
-                                  remote_host="my-host",
-                                  remote_port=1234,
-                                  remote_tp_size=1,
-                                  remote_pcp_size=1,
-                                  remote_dcp_size=1)
+        kv_transfer_params = dict(
+            do_remote_prefill=True,
+            do_remote_decode=False,
+            remote_engine_id="my-engine-id",
+            remote_block_ids=list(range(num_remote_blocks)),
+            remote_host="my-host",
+            remote_port=1234,
+            remote_tp_size=1,
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+        )
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
@@ -190,10 +178,9 @@ def create_model_runner_output(
 
     # Make output data structure.
     extra_args = {}
-    from vllm.v1.worker.kv_connector_model_runner_mixin import \
-        KVConnectorOutput  # type: ignore  # noqa
-    kv_connector_output = KVConnectorOutput(finished_sending=finished_sending,
-                                            finished_recving=finished_recving)
+    from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput  # type: ignore  # noqa
+
+    kv_connector_output = KVConnectorOutput(finished_sending=finished_sending, finished_recving=finished_recving)
     extra_args = {"kv_connector_output": kv_connector_output}
 
     model_runner_output = ModelRunnerOutput(

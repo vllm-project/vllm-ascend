@@ -38,7 +38,7 @@ Given that PCP and DCP behave similarly for KV cache sharding, we refer to them 
 
 As illustrated, a virtual block is defined in the block table, where blocks within the same CP device group form a virtual block. The virtual block size is `virtual_block_size = block_size * cp_size`.
 
-For any token `x`, referencing the folloing figure, its (virtual) block index is `x // virtual_block_size`, and the offset within the virtual block is `offset_within_virtual_block = x % virtual_block_size`.
+For any token `x`, referencing the following figure, its (virtual) block index is `x // virtual_block_size`, and the offset within the virtual block is `offset_within_virtual_block = x % virtual_block_size`.
 The local block index is `local_block_index = offset_within_virtual_block // cp_kv_cache_interleave_size`, and the device number is `target_rank = local_block_index % cp_size`.
 The offset within the local block is `(local_block_index // cp_size) * cp_kv_cache_interleave_size + offset_within_virtual_block % cp_kv_cache_interleave_size`.
 
@@ -79,9 +79,9 @@ After computing the results with the local KV cache, the results are updated via
 
 **Tokens Partition in Head-Tail Style**
 
-PCP requires splitting the input sequence and ensure balanced computational load across devices during the prefill phase.
+PCP requires splitting the input sequence and ensuring balanced computational load across devices during the prefill phase.
 We employ a head-tail style for splitting and concatenation: specifically, the sequence is first padded to a length of `2*pcp_size`, then divided into `2*pcp_size` equal parts.
-The first part is merged with the last part, the second part with the second last part, and so on, thereby assigning computationally balanced chunks to each devices.
+The first part is merged with the last part, the second part with the second last part, and so on, thereby assigning computationally balanced chunks to each device.
 Additionally, since allgather aggregation of KV or Q results in interleaved chunks from different requests, we compute `pcp_allgather_restore_idx` to quickly restore the original order.
 
 These logics are implemented in the function `_update_tokens_for_pcp`.

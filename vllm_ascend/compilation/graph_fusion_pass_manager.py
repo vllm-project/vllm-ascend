@@ -17,8 +17,8 @@
 #
 
 from torch import fx as fx
-from vllm.compilation.inductor_pass import get_pass_context
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.compilation.passes.inductor_pass import get_pass_context
+from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
 
@@ -63,3 +63,15 @@ class GraphFusionPassManager:
             from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
 
             self.passes.append(MatmulAllReduceAddRMSNormPass(config))
+
+        if self.ascend_compilation_config.get("fuse_muls_add", True):
+            from .passes.muls_add_pass import MulsAddFusionPass
+
+            self.passes.append(MulsAddFusionPass(config))
+
+        if config.compilation_config.pass_config.enable_sp:
+            from .passes.sequence_parallelism import SequenceParallelismPass
+            from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
+
+            self.passes.append(SequenceParallelismPass(config))
+            self.passes.append(SequenceParallelismMoePass(config))

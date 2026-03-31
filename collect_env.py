@@ -18,11 +18,11 @@
 import datetime
 import locale
 import os
-import re
 import subprocess
 import sys
 from collections import namedtuple
 
+import regex as re
 from vllm.envs import environment_variables
 
 try:
@@ -67,6 +67,7 @@ DEFAULT_CONDA_PATTERNS = {
     "transformers",
     "zmq",
     "pynvml",
+    "triton-ascend",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -79,6 +80,7 @@ DEFAULT_PIP_PATTERNS = {
     "transformers",
     "zmq",
     "pynvml",
+    "triton-ascend",
 }
 
 

@@ -37,6 +37,7 @@ class KVPoolScheduler:
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
+        self.original_block_size = vllm_config.cache_config.block_size
         self._block_size = vllm_config.cache_config.block_size
         if self.pcp_size > 1:
             self._block_size *= self.pcp_size
@@ -77,6 +78,9 @@ class KVPoolScheduler:
         else:
             token_len = len(request.prompt_token_ids)
 
+        if token_len < self._block_size:
+            return 0, False
+
         num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
@@ -87,7 +91,7 @@ class KVPoolScheduler:
         else:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
-        logger.info(
+        logger.debug(
             "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
             request.request_id,
             request.num_tokens,
@@ -159,6 +163,7 @@ class KVPoolScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
+            self._preempted_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
@@ -182,6 +187,7 @@ class KVPoolScheduler:
                 token_len=num_tokens_to_compute,
                 allocated_block_ids=unfolded_block_ids,
                 num_saved_tokens=0,
+                token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
@@ -198,6 +204,7 @@ class KVPoolScheduler:
                 block_hashes=request_real.block_hashes,
                 is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                 discard_partial_chunks=self._discard_partial_chunks,
+                original_block_size=self.original_block_size,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -226,6 +233,7 @@ class KVPoolScheduler:
                         token_len=num_tokens_to_compute,
                         allocated_block_ids=new_block_ids,
                         num_saved_tokens=0,
+                        token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
                     )
                     self._request_trackers[req_id] = request_tracker
                     last_chunk_tokens_num = (
@@ -241,6 +249,7 @@ class KVPoolScheduler:
                         block_hashes=request_real.block_hashes,
                         is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                         discard_partial_chunks=self._discard_partial_chunks,
+                        original_block_size=self.original_block_size,
                     )
 
                 # decode/chunked request
@@ -275,6 +284,7 @@ class KVPoolScheduler:
                         block_hashes=request.block_hashes,
                         is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                         discard_partial_chunks=self._discard_partial_chunks,
+                        original_block_size=self.original_block_size,
                     )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -298,7 +308,6 @@ class KVPoolScheduler:
                 )
 
                 self._request_trackers[request_id] = request_tracker
-
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
@@ -327,7 +336,7 @@ class KVPoolScheduler:
             return False, None
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
-            logger.info("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
+            logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
 
 

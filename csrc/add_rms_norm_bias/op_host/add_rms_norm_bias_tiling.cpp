@@ -144,10 +144,10 @@ static bool CheckInputOutputDim(const gert::TilingContext* context)
 
     OP_CHECK_IF(
         x1DimNum != x2DimNum,
-        OP_LOGE(context, "Input x2/x1 shape invaild, dim num is not equal x1 dim."), return false);
+        OP_LOGE(context, "Input x2/x1 shape invalid, dim num is not equal x1 dim."), return false);
     OP_CHECK_IF(
         (yDimNum != xDimNum) || (xDimNum != x1DimNum) || (rstdDimNum != x1DimNum),
-        OP_LOGE(context, "Output y/x/rstd shape invaild, dim num is not equal x1 dim."), return false);
+        OP_LOGE(context, "Output y/x/rstd shape invalid, dim num is not equal x1 dim."), return false);
     OP_CHECK_IF(
         x1DimNum < gammaDimNum, OP_LOGE(context, "X1 dim num should not be smaller than gamma dim num."),
         return false);
@@ -180,26 +180,26 @@ static bool CheckInputOutputShape(const gert::TilingContext* context)
             return false);
         OP_CHECK_IF(
             x2_shape->GetStorageShape().GetDim(i) != x1_shape->GetStorageShape().GetDim(i),
-            OP_LOGE(context, "Input x2/x1 shape invaild, shape is not equal x1 shape."), return false);
+            OP_LOGE(context, "Input x2/x1 shape invalid, shape is not equal x1 shape."), return false);
         OP_CHECK_IF(
             (y_shape->GetStorageShape().GetDim(i) != x1_shape->GetStorageShape().GetDim(i)) ||
                 (x_shape->GetStorageShape().GetDim(i) != x1_shape->GetStorageShape().GetDim(i)),
-            OP_LOGE(context, "Input y/x shape invaild, shape is not equal x1 shape."), return false);
+            OP_LOGE(context, "Input y/x shape invalid, shape is not equal x1 shape."), return false);
     }
     for (uint32_t i = 0; i < x1DimNum - gammaDimNum; i++) {
         OP_CHECK_IF(
             rstd_shape->GetStorageShape().GetDim(i) != x2_shape->GetStorageShape().GetDim(i),
-            OP_LOGE(context, "Output rstd shape invaild, shape is not equal x1 first few dim."),
+            OP_LOGE(context, "Output rstd shape invalid, shape is not equal x1 first few dim."),
             return false);
     }
     for (uint32_t i = 0; i < gammaDimNum; i++) {
         OP_CHECK_IF(
             gamma_shape->GetStorageShape().GetDim(i) != x1_shape->GetStorageShape().GetDim(x1DimNum - gammaDimNum + i),
-            OP_LOGE(context, "Input gamma shape invaild, gamma shape is not equal x1 last few dim."),
+            OP_LOGE(context, "Input gamma shape invalid, gamma shape is not equal x1 last few dim."),
             return false);
         OP_CHECK_IF(
             rstd_shape->GetStorageShape().GetDim(x1DimNum - 1 - i) != 1,
-            OP_LOGE(context, "Output rstd shape invaild, last few dim is not equal to 1."),
+            OP_LOGE(context, "Output rstd shape invalid, last few dim is not equal to 1."),
             return false);
     }
     return true;

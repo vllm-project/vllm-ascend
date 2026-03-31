@@ -15,47 +15,47 @@
 # limitations under the License.
 #
 
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any
 
 # Registry: maps (quant_type, layer_type) -> SchemeClass
-_SCHEME_REGISTRY: Dict[Tuple[str, str], Type[Any]] = {}
+_SCHEME_REGISTRY: dict[tuple[str, str], type[Any]] = {}
 
 
 def register_scheme(quant_type: str, layer_type: str):
     """Decorator to register a quantization scheme.
-    
+
     Args:
         quant_type: Quantization type (e.g., "W8A8", "W8A8_DYNAMIC").
         layer_type: Layer type (e.g., "linear", "moe").
-        
+
     Returns:
         Decorator function that registers the class.
-        
+
     Example:
         @register_scheme("W8A8_DYNAMIC", "linear")
         class W8A8DynamicLinearScheme(AscendLinearScheme):
             ...
     """
 
-    def decorator(cls: Type[Any]) -> Type[Any]:
+    def decorator(cls: type[Any]) -> type[Any]:
         key = (quant_type, layer_type)
         if key in _SCHEME_REGISTRY:
             raise ValueError(
-                f"Scheme already registered for {quant_type}/{layer_type}: "
-                f"{_SCHEME_REGISTRY[key].__name__}")
+                f"Scheme already registered for {quant_type}/{layer_type}: {_SCHEME_REGISTRY[key].__name__}"
+            )
         _SCHEME_REGISTRY[key] = cls
         return cls
 
     return decorator
 
 
-def get_scheme_class(quant_type: str, layer_type: str) -> Optional[Type[Any]]:
+def get_scheme_class(quant_type: str, layer_type: str) -> type[Any] | None:
     """Get scheme class for given quant_type and layer_type.
-    
+
     Args:
         quant_type: Quantization type (e.g., "W8A8", "W8A8_DYNAMIC").
         layer_type: Layer type (e.g., "linear", "moe").
-        
+
     Returns:
         The registered scheme class, or None if not found.
     """

@@ -36,11 +36,14 @@ def unquantized_gemm_fake(
     return torch.empty(output_shape, dtype=x.dtype, device=x.device)
 
 
-direct_register_custom_op(op_name="unquantized_gemm",
-                          op_func=unquantized_gemm,
-                          fake_impl=unquantized_gemm_fake,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
+direct_register_custom_op(
+    op_name="unquantized_gemm",
+    op_func=unquantized_gemm,
+    fake_impl=unquantized_gemm_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
 
 def default_unquantized_gemm(
     layer: torch.nn.Module,

@@ -1,9 +1,15 @@
 import threading
+from collections.abc import Iterable
 from typing import Any
 
 import torch
 import zmq
 from vllm.config import VllmConfig
+from vllm.distributed.kv_events import (
+    KVCacheEvent,
+    KVConnectorKVEvents,
+    KVEventAggregator,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
@@ -12,6 +18,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
@@ -20,6 +27,40 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+
+class AscendStoreKVEvents(KVConnectorKVEvents):
+    def __init__(self, num_workers: int) -> None:
+        self._aggregator = KVEventAggregator(num_workers)
+
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        self._aggregator.add_events(events)
+
+    def aggregate(self) -> "AscendStoreKVEvents":
+        """
+        Aggregate KV events and retain only common events.
+        """
+        common_events = self._aggregator.get_common_events()
+        self._aggregator.clear_events()
+        self._aggregator.add_events(common_events)
+        self._aggregator.reset_workers()
+        return self
+
+    def increment_workers(self, count: int = 1) -> None:
+        self._aggregator.increment_workers(count)
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        return self._aggregator.get_all_events()
+
+    def get_number_of_workers(self) -> int:
+        return self._aggregator.get_number_of_workers()
+
+    def clear_events(self) -> None:
+        self._aggregator.clear_events()
+        self._aggregator.reset_workers()
+
+    def __repr__(self) -> str:
+        return f"<AscendStoreKVEvents events={self.get_all_events()}>"
 
 
 class AscendStoreConnector(KVConnectorBase_V1):
@@ -40,6 +81,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
             )
 
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self.sended_but_unfinished_reqs: set[str] = set()
 
@@ -81,6 +123,39 @@ class AscendStoreConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        """
+        Update KVConnector state from worker-side connectors output.
+
+        Args:
+            connector_output (KVConnectorOutput): the worker-side connectors output.
+        """
+        # Get the KV events
+        kv_cache_events = connector_output.kv_cache_events
+        if not kv_cache_events or not isinstance(kv_cache_events, AscendStoreKVEvents):
+            return
+
+        if self._kv_cache_events is None:
+            self._kv_cache_events = kv_cache_events
+        else:
+            self._kv_cache_events.add_events(kv_cache_events.get_all_events())
+            self._kv_cache_events.increment_workers(kv_cache_events.get_number_of_workers())
+        return
+
+    def take_events(self) -> Iterable["KVCacheEvent"]:
+        """
+        Take the KV cache events from the connector.
+
+        Yields:
+            New KV cache events since the last call.
+        """
+        if self._kv_cache_events is not None:
+            self._kv_cache_events.aggregate()
+            kv_cache_events = self._kv_cache_events.get_all_events()
+            yield from kv_cache_events
+            self._kv_cache_events.clear_events()
+            self._kv_cache_events = None
 
     ############################################################
     # Worker Side Methods
@@ -126,6 +201,18 @@ class AscendStoreConnector(KVConnectorBase_V1):
             finished_req_ids, self._get_connector_metadata()
         )
         return done_sending, done_recving
+
+    def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
+        """
+        Get the KV connector kv cache events collected during the last interval.
+        """
+        events = self.connector_worker.get_kv_events()
+        if not events:
+            return None
+
+        ascend_store_kv_events = AscendStoreKVEvents(num_workers=1)
+        ascend_store_kv_events.add_events(events)
+        return ascend_store_kv_events
 
 
 class LookupKeyServer:

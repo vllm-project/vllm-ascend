@@ -19,8 +19,6 @@
 import os
 from unittest.mock import patch
 
-from modelscope import snapshot_download  # type: ignore
-
 from tests.e2e.conftest import VllmRunner
 
 
@@ -65,7 +63,7 @@ def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8"),
+            "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8",
             max_model_len=4096,
             tensor_parallel_size=4,
             gpu_memory_utilization=0.4,
@@ -75,3 +73,38 @@ def test_qwen3_next_w8a8dynamic_distributed_tp4_ep():
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+def test_qwen3_next_distributed_mp_flash_comm_tp4():
+    example_prompts = [
+        "Hello, my name is",
+    ] * 4
+    max_tokens = 5
+    with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
+                    tensor_parallel_size=4,
+                    max_model_len=4096,
+                    gpu_memory_utilization=0.7,
+                    distributed_executor_backend="mp",
+                    enable_expert_parallel=True,
+                    enforce_eager=True) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+        del vllm_model
+
+
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+def test_qwen3_next_distributed_mp_graph_mode_tp4():
+    example_prompts = [
+        "Hello, my name is",
+    ] * 4
+    max_tokens = 5
+    with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
+                    tensor_parallel_size=4,
+                    max_model_len=4096,
+                    gpu_memory_utilization=0.7,
+                    distributed_executor_backend="mp",
+                    enable_expert_parallel=True,
+                    enforce_eager=False) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+        del vllm_model

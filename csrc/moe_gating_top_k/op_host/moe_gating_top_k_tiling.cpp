@@ -444,11 +444,11 @@ ge::graphStatus MoeGatingTopKTilingBase::CheckOutShape()
     }
 
     OP_CHECK_IF((yShape_->GetDim(0) != xShape_->GetDim(0)),
-                OP_LOGE(context_, "y out dim[0] %ld not euqal x dim[0] %ld, please check.", yShape_->GetDim(0),
+                OP_LOGE(context_, "y out dim[0] %ld not equal x dim[0] %ld, please check.", yShape_->GetDim(0),
                      xShape_->GetDim(0)),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF((expertIdxShape_->GetDim(0) != xShape_->GetDim(0)),
-                OP_LOGE(context_, "expertId out dim[0] %ld not euqal x dim[0] %ld, please check.",
+                OP_LOGE(context_, "expertId out dim[0] %ld not equal x dim[0] %ld, please check.",
                      expertIdxShape_->GetDim(0), xShape_->GetDim(0)),
                 return ge::GRAPH_FAILED);
     if (outFlag_ && outShape_ != nullptr) {
@@ -459,10 +459,10 @@ ge::graphStatus MoeGatingTopKTilingBase::CheckOutShape()
     }
 
     OP_CHECK_IF((yShape_->GetDim(1) != k_),
-                OP_LOGE(context_, "y dim[1] %ld not euqal k %ld, please check.", yShape_->GetDim(1), k_),
+                OP_LOGE(context_, "y dim[1] %ld not equal k %ld, please check.", yShape_->GetDim(1), k_),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF((expertIdxShape_->GetDim(1) != k_),
-                OP_LOGE(context_, "expertId dim[1] %ld not euqal k %ld, please check.", expertIdxShape_->GetDim(1), k_),
+                OP_LOGE(context_, "expertId dim[1] %ld not equal k %ld, please check.", expertIdxShape_->GetDim(1), k_),
                 return ge::GRAPH_FAILED);
     if (outFlag_ && outShape_ != nullptr) {
         OP_CHECK_IF((outShape_->GetDim(1) != xShape_->GetDim(1)),
