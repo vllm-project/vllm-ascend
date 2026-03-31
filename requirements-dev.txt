@@ -1,6 +1,6 @@
 -r requirements-lint.txt
 -r requirements.txt
-modelscope
+modelscope>=1.35.1
 openai
 pytest >= 6.0,<9.0.0
 pytest-asyncio
@@ -18,7 +18,6 @@ protobuf>3.20.0
 librosa 
 soundfile
 pytest_mock
-msserviceprofiler>=1.2.2
 mindstudio-probe>=8.3.0
 arctic-inference==0.1.1
 xlite==0.1.0rc3
