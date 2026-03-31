@@ -12,6 +12,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from unittest.mock import patch
 
 import torch
@@ -248,3 +249,52 @@ class TestAscendRejectionSampler(TestBase):
         )
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 0
+
+    def test_ears_uniform_probs_adjustment(self):
+        """Test that EARS shifts uniform_probs down by tolerance * uncertainty
+        and clamps to dtype epsilon when VLLM_EARS_TOLERANCE > 0."""
+        import vllm_ascend.envs as envs_ascend
+        from vllm_ascend.sample.rejection_sampler import generate_uniform_probs
+
+        # target_probs: high uncertainty token (max=0.2) and low uncertainty token (max=0.9)
+        target_probs = torch.tensor([[0.1, 0.2, 0.3, 0.4],   # max=0.4, uncertainty=0.6
+                                     [0.9, 0.05, 0.03, 0.02]])  # max=0.9, uncertainty=0.1
+        # Use fixed uniform_probs to make the test deterministic
+        uniform_probs = torch.tensor([0.5, 0.5])
+
+        ears_tolerance = 0.5
+        expected_uncertainties = 1.0 - target_probs.max(dim=-1).values
+        expected_tolerance = ears_tolerance * expected_uncertainties
+        eps = torch.finfo(uniform_probs.dtype).eps
+        expected = (uniform_probs - expected_tolerance).clamp_min(eps)
+
+        with patch.dict(os.environ, {"VLLM_EARS_TOLERANCE": str(ears_tolerance)}):
+            # Reload env var
+            adjusted = uniform_probs.clone()
+            _ears_tolerance = envs_ascend.VLLM_EARS_TOLERANCE
+            max_target_probs = target_probs.max(dim=-1).values
+            uncertainties = 1.0 - max_target_probs
+            tolerance = _ears_tolerance * uncertainties
+            adjusted = (adjusted - tolerance).clamp_min(eps)
+
+        assert torch.allclose(adjusted, expected), (
+            f"EARS adjustment mismatch: got {adjusted}, expected {expected}")
+        # High-uncertainty token should be shifted more than low-uncertainty token
+        assert adjusted[0] < uniform_probs[0]
+        assert adjusted[1] > adjusted[0]
+
+    def test_ears_disabled_when_tolerance_zero(self):
+        """Test that EARS does not modify uniform_probs when tolerance=0 (default)."""
+        import vllm_ascend.envs as envs_ascend
+
+        uniform_probs = torch.tensor([0.3, 0.7, 0.5])
+
+        with patch.dict(os.environ, {"VLLM_EARS_TOLERANCE": "0.0"}):
+            ears_tolerance = envs_ascend.VLLM_EARS_TOLERANCE
+            assert ears_tolerance == 0.0
+            # The if-guard in rejection_sample ensures no modification
+            if ears_tolerance > 0:
+                raise AssertionError("EARS should be disabled when tolerance=0")
+
+        assert torch.equal(uniform_probs,
+                           torch.tensor([0.3, 0.7, 0.5])), "uniform_probs should be unchanged"

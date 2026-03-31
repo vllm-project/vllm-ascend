@@ -37,10 +37,13 @@ class TestEnvVariables(TestBase):
                                      var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if 'int(' in handler_source:
-                        test_vals = ["123", "456"]
-                    elif 'bool(int(' in handler_source:
+                    if 'bool(int(' in handler_source:
                         test_vals = ["0", "1"]
+                    elif 'int(' in handler_source:
+                        test_vals = ["123", "456"]
+                    elif ('float(' in handler_source
+                          or '_parse_ears_tolerance' in handler_source):
+                        test_vals = ["0.3", "0.7"]
                     else:
                         test_vals = [f"test_{var_name}", f"custom_{var_name}"]
 

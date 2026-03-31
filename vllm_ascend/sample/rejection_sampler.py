@@ -189,7 +189,8 @@ def rejection_sample(
         max_target_probs = target_probs.max(dim=-1).values  # [num_tokens]
         uncertainties = 1.0 - max_target_probs
         tolerance = ears_tolerance * uncertainties
-        uniform_probs = (uniform_probs - tolerance).clamp(min=0.01)
+        eps = torch.finfo(uniform_probs.dtype).eps
+        uniform_probs = (uniform_probs - tolerance).clamp_min(eps)
 
     # Sample recovered tokens for each position.
     # [num_tokens]

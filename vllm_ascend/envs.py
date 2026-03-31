@@ -22,6 +22,14 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+
+def _parse_ears_tolerance(value: str) -> float:
+    v = float(value)
+    if not (0.0 <= v <= 1.0):
+        raise ValueError(f"VLLM_EARS_TOLERANCE must be in [0.0, 1.0], got {v}")
+    return v
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -111,7 +119,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # When > 0, dynamically relaxes rejection threshold based on target model uncertainty.
     # Higher values accept more draft tokens but may reduce quality.
     # Only effective for random sampling (not greedy). Range: [0.0, 1.0]. Default: 0.0 (disabled).
-    "VLLM_EARS_TOLERANCE": lambda: float(os.getenv("VLLM_EARS_TOLERANCE", "0.0")),
+    "VLLM_EARS_TOLERANCE": lambda: _parse_ears_tolerance(os.getenv("VLLM_EARS_TOLERANCE", "0.0")),
 }
 
 # end-env-vars-definition
