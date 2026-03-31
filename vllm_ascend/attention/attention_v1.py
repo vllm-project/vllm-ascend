@@ -694,13 +694,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
-                if isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+                if isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2:
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-                elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) == 1:
-                    # Handle case where kv_cache is a list with a single tuple inside
-                    inner = kv_cache[0]
-                    if isinstance(inner, (list, tuple)) and len(inner) >= 2:
-                        self.key_cache, self.value_cache = inner[0], inner[1]
+                elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
             if self.key_cache is None:
                 raise RuntimeError(f"key_cache is None in _get_fia_params for mode {attn_metadata.attn_state}. kv_cache={kv_cache}")
@@ -985,13 +982,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # This is needed for DecodeOnly mode where key/value are None but we still
         # need access to the cache for attention computation.
         if self.key_cache is None and kv_cache is not None:
-            if isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+            if isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-            elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) == 1:
-                # Handle case where kv_cache is a list with a single tuple inside
-                inner = kv_cache[0]
-                if isinstance(inner, (list, tuple)) and len(inner) >= 2:
-                    self.key_cache, self.value_cache = inner[0], inner[1]
+            elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
         if key is not None and value is not None:
