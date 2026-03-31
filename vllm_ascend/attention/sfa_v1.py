@@ -448,7 +448,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Improves glm5 accuracy after enabling dsa-cp in scenarios with strict accuracy requirements,
         # especially for customized cases, at the cost of performance degradation due to extra communication.
         self.enable_dsa_cp_strict_accuracy = (
-            self.enable_dsa_cp_with_layer_shard and self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]
+            self.enable_dsa_cp_with_layer_shard
+            and self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]
         )
 
         # use original TP o_proj weight in PD mix stage, and full gather
@@ -1040,7 +1041,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
-
         if attn_metadata is None:
             # Profiling run.
             if self.enable_dsa_cp_with_layer_shard and not _EXTRA_CTX.in_profile_run:

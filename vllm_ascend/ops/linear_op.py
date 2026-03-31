@@ -668,7 +668,7 @@ def _get_row_parallel_op(
     if (
         enable_dsa_cp_with_layer_shard()
         and "o_proj" in prefix
-        and not vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]
+        and vllm_config.model_config.hf_config.model_type not in ["glm_moe_dsa"]
     ):
         return ShardedCPRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
