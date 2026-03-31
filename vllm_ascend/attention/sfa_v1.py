@@ -445,10 +445,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
         self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
 
-        # Improves dsv3.2/glm5 accuracy after enabling dsa-cp in scenarios with strict accuracy requirements,
+        # Improves glm5 accuracy after enabling dsa-cp in scenarios with strict accuracy requirements,
         # especially for customized cases, at the cost of performance degradation due to extra communication.
         self.enable_dsa_cp_strict_accuracy = (
-            self.enable_dsa_cp_with_layer_shard and ascend_config.enable_dsa_cp_strict_accuracy
+            self.enable_dsa_cp_with_layer_shard and self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]
         )
 
         # use original TP o_proj weight in PD mix stage, and full gather
@@ -1048,10 +1048,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
-
-        if self.enable_dsa_cp:
-            need_gather_q_kv = False
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), need_gather_q_kv)
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin

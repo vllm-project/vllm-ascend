@@ -662,10 +662,13 @@ def _get_row_parallel_op(
     | ShardedCPRowParallelOp
     | None
 ):
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+
     if (
         enable_dsa_cp_with_layer_shard()
         and "o_proj" in prefix
-        and not get_ascend_config().enable_dsa_cp_strict_accuracy
+        and not vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]
     ):
         return ShardedCPRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):

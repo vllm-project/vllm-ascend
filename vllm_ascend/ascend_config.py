@@ -168,10 +168,6 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
-        # Improves dsv3.2/glm5 accuracy after enabling dsa-cp in scenarios with strict accuracy requirements,
-        # especially for customized cases, at the cost of performance degradation due to extra communication.
-        self.enable_dsa_cp_strict_accuracy = additional_config.get("enable_dsa_cp_strict_accuracy", False)
-
     @staticmethod
     def _get_compile_ranges(compilation_config):
         return compilation_config.compile_ranges_endpoints or []

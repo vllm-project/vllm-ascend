@@ -1169,7 +1169,7 @@ def enable_dsa_cp() -> bool:
     is_ds_v32 = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
         vllm_config.model_config.hf_text_config, "index_topk"
     )
-    return bool(is_ds_v32 and envs_ascend.VLLM_ASCEND_ENABLE_DSA_CP)
+    return bool(is_ds_v32 and enable_sp())
 
 
 @lru_cache(maxsize=1)
