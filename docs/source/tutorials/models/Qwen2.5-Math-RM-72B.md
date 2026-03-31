@@ -40,10 +40,10 @@ Select an image based on your machine type and start the docker image on your no
    :substitutions:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
     --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
