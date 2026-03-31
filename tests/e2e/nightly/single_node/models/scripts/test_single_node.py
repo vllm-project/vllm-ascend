@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 from typing import Any
 
 import openai
@@ -128,9 +130,134 @@ async def _dispatch_tests(config: SingleNodeConfig, server: "RemoteOpenAIServer 
             logger.warning("No handler registered for test content type: %s", test_name)
 
 
+def _extract_server_cmd_value(server_cmd: list[str], flag: str) -> str | None:
+    """Return the value following `flag` in a server_cmd list, or None."""
+    try:
+        idx = server_cmd.index(flag)
+        return server_cmd[idx + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def _extract_hardware(runner: str) -> str:
+    """Derive hardware label (e.g. 'A2', 'A3') from runner name."""
+    runner_lower = runner.lower()
+    for label in ("a3", "a2"):
+        if label in runner_lower:
+            return label.upper()
+    return runner
+
+
+def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -> dict[str, Any]:
+    """Build a single task dict in the required format."""
+    dataset_conf = case_config.get("dataset_conf", "") or case_config.get("dataset_path", "")
+    task_name = dataset_conf.split("/")[0] if dataset_conf else case_key
+    case_type = case_config.get("case_type", "unknown")
+    metrics: list[dict[str, Any]] = []
+
+    if result == "":
+        # benchmark run failed — no metrics available
+        pass
+    elif case_type == "accuracy" and isinstance(result, (int, float)):
+        metrics.append({"name": "accuracy", "value": round(float(result), 4)})
+    elif case_type == "performance" and isinstance(result, list) and len(result) == 2:
+        _, result_json = result
+        for metric_name, metric_data in result_json.items():
+            if not isinstance(metric_data, dict):
+                continue
+            total_str = metric_data.get("total", "")
+            try:
+                value = float(
+                    total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip()
+                )
+                metrics.append({"name": metric_name, "value": round(value, 4)})
+            except (ValueError, AttributeError):
+                pass
+
+    return {"name": task_name, "metrics": metrics}
+
+
+def _build_test_config(config: SingleNodeConfig) -> dict[str, Any]:
+    """Extract test configuration from server_cmd and benchmark case configs."""
+    perf_case: dict[str, Any] = next(
+        (v for v in config.benchmarks.values() if v and v.get("case_type") == "performance"),
+        {},
+    )
+    tp_str = _extract_server_cmd_value(config.server_cmd, "--tensor-parallel-size")
+    gmu_str = _extract_server_cmd_value(config.server_cmd, "--gpu-memory-utilization")
+
+    test_cfg: dict[str, Any] = {
+        "output_len": perf_case.get("max_out_len"),
+        "batch_size": perf_case.get("batch_size"),
+        "num_prompts": perf_case.get("num_prompts"),
+        "tensor_parallel_size": int(tp_str) if tp_str else None,
+        "gpu_memory_utilization": float(gmu_str) if gmu_str else None,
+    }
+    return {k: v for k, v in test_cfg.items() if v is not None}
+
+
+def _all_passed(case_configs: list[dict[str, Any]], results: list[Any]) -> bool:
+    """Return True only when every benchmark result meets its baseline/threshold."""
+    for case_config, result in zip(case_configs, results):
+        if result == "":
+            return False
+        case_type = case_config.get("case_type")
+        baseline = case_config.get("baseline")
+        threshold = case_config.get("threshold")
+        if baseline is None or threshold is None:
+            continue
+        if case_type == "accuracy" and isinstance(result, (int, float)):
+            if abs(float(result) - float(baseline)) > float(threshold):
+                return False
+        elif case_type == "performance" and isinstance(result, list) and len(result) == 2:
+            _, result_json = result
+            throughput_str = result_json.get("Output Token Throughput", {}).get("total", "")
+            try:
+                throughput_val = float(throughput_str.replace("token/s", "").strip())
+                if throughput_val < float(threshold) * float(baseline):
+                    return False
+            except (ValueError, AttributeError):
+                return False
+    return True
+
+
+def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[str], results: list[Any]) -> None:
+    """Serialize acc & perf benchmark results to a JSON file under benchmark_results/."""
+    runner = os.environ.get("VLLM_CI_RUNNER", "")
+    case_configs = [config.benchmarks[k] for k in benchmark_keys]
+
+    tasks = [
+        _build_task_entry(key, case_cfg, result)
+        for key, case_cfg, result in zip(benchmark_keys, case_configs, results)
+    ]
+
+    passed = _all_passed(case_configs, results)
+
+    output: dict[str, Any] = {
+        "model_name": config.model,
+        "hardware": _extract_hardware(runner),
+        "vllm_version": os.environ.get("VLLM_VERSION", ""),
+        "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
+        "pass_fail": "pass" if passed else "fail",
+        "tasks": tasks,
+        "test_config": _build_test_config(config),
+        "known_issues": config.extra_config.get("known_issues", ""),
+        "notes": config.extra_config.get("notes", ""),
+    }
+
+    os.makedirs("benchmark_results", exist_ok=True)
+    safe_name = config.name.replace("/", "_").replace(" ", "_")
+    output_path = os.path.join("benchmark_results", f"{safe_name}.json")
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+    logger.info("Benchmark results saved to %s", output_path)
+    print(f"Benchmark results saved to {output_path}")
+
+
 def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
     """Run Aisbench benchmarks and process benchmark-dependent custom assertions."""
-    aisbench_cases = [v for v in config.benchmarks.values() if v]
+    benchmark_keys = [k for k, v in config.benchmarks.items() if v]
+    aisbench_cases = [config.benchmarks[k] for k in benchmark_keys]
     if not aisbench_cases:
         return
 
@@ -139,6 +266,8 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
         port=port,
         aisbench_cases=aisbench_cases,
     )
+
+    _save_benchmark_results_json(config, benchmark_keys, result)
 
     if "benchmark_comparisons" in config.test_content:
         run_benchmark_comparisons(config, result)
