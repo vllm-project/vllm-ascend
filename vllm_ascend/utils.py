@@ -604,7 +604,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.conv import AscendConv2dLayer, AscendConv3dLayer
+    from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -616,6 +616,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
+    from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
+    from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
@@ -653,8 +655,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
-        "Conv2dLayer": AscendConv2dLayer,
         "Conv3dLayer": AscendConv3dLayer,
+        "RelPosAttention": AscendRelPosAttention,
+        "CustomQwen2Decoder": AscendCustomQwen2Decoder,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
@@ -991,7 +994,9 @@ def calculate_dp_buffer_size() -> int:
 # and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
 # significantly improve communication performance of MC2 ops dispatch/combine.
 def is_hierarchical_communication_enabled():
-    return os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
+    return (
+        os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
+    ) or get_ascend_config().enable_mc2_hierarchy_comm
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
@@ -1101,12 +1106,12 @@ def refresh_block_size(vllm_config):
     if not scheduler_config or not model_config:
         return
 
-    # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if (
-        "qwen3_next" not in model_config.hf_text_config.model_type
-        and "qwen3_5" not in model_config.hf_text_config.model_type
-        and cache_config.block_size != 128
-    ):
+    if model_config.is_hybrid:
+        # Hybrid attention+mamba models rely on the model-specific sizing
+        # logic rather than the generic platform default.
+        return
+
+    if cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128

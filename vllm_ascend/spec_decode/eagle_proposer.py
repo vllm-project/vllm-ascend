@@ -168,6 +168,8 @@ class SpecDecodeBaseProposer(EagleProposer):
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
+        self.token_arange_np = np.arange(self.max_num_tokens + 1)
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -600,7 +602,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                     - 1
                 )
                 num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
-                ori_seq_len = attn_metadata_i.seq_lens[:batch_size].clone()
+                ori_seq_len = attn_metadata_i.seq_lens_cpu[:batch_size].clone()
                 mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                 # slot_mapping index base offset:
@@ -1247,7 +1249,8 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         if self.pcp_size * self.dcp_size > 1:
             if self.vllm_config.model_config.use_mla:
-                attn_metadata.decode.cp_seq_len = cp_seq_len
+                if getattr(attn_metadata, "decode", None):
+                    attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
 
