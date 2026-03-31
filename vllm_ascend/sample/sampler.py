@@ -1,4 +1,6 @@
 import torch
+from vllm.triton_utils import HAS_TRITON
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
