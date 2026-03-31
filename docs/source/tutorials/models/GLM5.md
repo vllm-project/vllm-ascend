@@ -4,6 +4,8 @@
 
 [GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targeting at complex systems engineering and long-horizon agentic tasks.
 
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`.
+
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
 ## Supported Features
@@ -1308,6 +1310,16 @@ python load_balance_proxy_server_example.py \
       6721 6722 6723 6724      
 ```
 
+**Notice:**
+
+Some configurations for optimization are shown below:
+
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator.
+- `VLLM_ASCEND_ENABLE_MLAPO`: Enable fused operator MlaPreprocessOperation.
+
+Please refer to following python file for further explanation and restrictions of the environment variables above: [envs.py] (https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) 
+
 ## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
@@ -1346,3 +1358,29 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 ### Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+
+## Best Practices
+
+In this chapter, we recommend best practices in prefill-decode disaggregation scenario with 1P1D architecture using 4 Atlas 800 A3 (64G × 16):
+
+- Low-latency: We recommend setting `dp4 tp8` on prefill nodes and `dp4 tp8` on decode nodes for low latency situation.
+- High-throughput: `dp4 tp8` on prefill nodes and `dp8 tp4` on decode nodes is recommended for high throughput situation. 
+
+**Notice:**
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
+
+## FAQ
+
+- **Q: How to solve ValueError: Tokenizer class TokenizersBackend does not exist or is not currently imported?**
+
+  A: Please update the version of transformers to 5.2.0
+
+- **Q: How to enable function calling for GLM-5?**
+
+  A: Please add following configurations in vLLM startup command
+
+  ```shell
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45 \
+  --enable-auto-tool-choice \
+  ```
