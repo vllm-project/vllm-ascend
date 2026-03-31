@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -59,6 +60,50 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+
+
+def _ensure_ascend_worker_multiproc_method() -> None:
+    current_method = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+    if current_method:
+        logger.debug(
+            "Keeping user-specified VLLM_WORKER_MULTIPROC_METHOD=%s for Ascend.",
+            current_method,
+        )
+        return
+
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    logger.info(
+        "VLLM_WORKER_MULTIPROC_METHOD is not set; defaulting to 'spawn' on Ascend "
+        "because torch-npu/ACL runtime is not fork-safe."
+    )
+
+
+def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
+    for line in lines:
+        normalized = " ".join(line.split())
+        if normalized.startswith(f"{key} :"):
+            return normalized.split(":", 1)[1].strip()
+    return None
+
+
+def _get_npu_smi_hbm_capacity_mb(device_id: int) -> int | None:
+    try:
+        output = subprocess.check_output(
+            ["npu-smi", "info", "-t", "memory", "-i", str(device_id), "-c", "0"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    value = _get_npu_smi_field(output.splitlines(), "HBM Capacity(MB)")
+    if value is None:
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def config_deprecated_logging():
@@ -132,6 +177,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
+        _ensure_ascend_worker_multiproc_method()
+
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
 
@@ -220,6 +267,21 @@ class NPUPlatform(Platform):
         return device_props.uuid
 
     @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """
+        Return total memory of the device in bytes.
+        """
+        hbm_capacity_mb = _get_npu_smi_hbm_capacity_mb(device_id)
+        if hbm_capacity_mb is not None:
+            return hbm_capacity_mb * 1024 * 1024
+
+        device_props = torch.npu.get_device_properties(device_id)
+        total_memory = getattr(device_props, "total_memory", None)
+        if total_memory is not None:
+            return int(total_memory)
+        raise RuntimeError(f"Unable to determine total memory for device {device_id}.")
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
@@ -248,8 +310,21 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
-        if vllm_config.model_config is not None:
-            maybe_auto_detect_quantization(vllm_config)
+        _ensure_ascend_worker_multiproc_method()
+
+        device_config = getattr(vllm_config, "device_config", None)
+        if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
+            logger.debug(
+                "Skipping Ascend-specific config updates for device type %s.",
+                device_config.device_type,
+            )
+            return
+
+        if vllm_config.model_config is None:
+            logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
+            return
+
+        maybe_auto_detect_quantization(vllm_config)
 
         cls._validate_layer_sharding_config(vllm_config)
 
@@ -288,11 +363,7 @@ class NPUPlatform(Platform):
                 vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
             )
 
-        if model_config is None:
-            logger.warning("Model config is missing. This may indicate that we are running a test case")
-            enforce_eager = False
-        else:
-            enforce_eager = getattr(model_config, "enforce_eager", False)
+        enforce_eager = getattr(model_config, "enforce_eager", False)
 
         from vllm.config.compilation import CUDAGraphMode
 
