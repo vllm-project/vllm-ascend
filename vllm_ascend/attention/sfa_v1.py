@@ -444,12 +444,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
         self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
-        
+
         # Improves dsv3.2/glm5 accuracy after enabling dsa-cp in scenarios with strict accuracy requirements,
         # especially for customized cases, at the cost of performance degradation due to extra communication.
         self.enable_dsa_cp_strict_accuracy = (
-            self.enable_dsa_cp_with_layer_shard
-            and ascend_config.enable_dsa_cp_strict_accuracy
+            self.enable_dsa_cp_with_layer_shard and ascend_config.enable_dsa_cp_strict_accuracy
         )
 
         # use original TP o_proj weight in PD mix stage, and full gather
