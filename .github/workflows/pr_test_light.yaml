@@ -44,7 +44,7 @@ jobs:
     with:
       vllm: 35141a7eeda941a60ad5a4956670c60fd5a77029
   changes:
-    runs-on: linux-aarch64-a2b3-0
+    runs-on: linux-aarch64-a2b3-test-0
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
@@ -95,7 +95,7 @@ jobs:
     uses: ./.github/workflows/_unit_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      runner: linux-amd64-cpu-8-hk
+      runner: linux-amd64-cpu-test-8-hk
       image: quay.nju.edu.cn/ascend/cann:8.5.1-910b-ubuntu22.04-py3.11
       type: pr
 
