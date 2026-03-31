@@ -14,16 +14,6 @@ on:
       image:
         required: true
         type: string
-      type:
-        required: true
-        type: string
-      contains_310:
-        required: true
-        type: boolean
-      continue_on_error:
-        required: false
-        type: boolean
-        default: false
       image_a3_2:
         required: false
         type: string
@@ -36,7 +26,40 @@ on:
         required: false
         type: string
         default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
-
+      type:
+        required: true
+        type: string
+      contains_310:
+        required: false
+        type: boolean
+        default: false
+      continue_on_error:
+        required: false
+        type: boolean
+        default: false
+      # The following inputs are used by comment-triggered E2E tests (/e2e <tests>).
+      # They carry space-separated pytest paths, categorized by runner type.
+      # Leave empty (default) when running label-triggered full/light suites.
+      ref:
+        required: false
+        type: string
+        default: ''
+      singlecard_tests:
+        required: false
+        type: string
+        default: ''
+      multicard_2_tests:
+        required: false
+        type: string
+        default: ''
+      multicard_4_tests:
+        required: false
+        type: string
+        default: ''
+      p310_tests:
+        required: false
+        type: string
+        default: ''
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
   UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
@@ -180,12 +203,12 @@ jobs:
 
   e2e-full:
     name: singlecard-full
-    if: ${{ inputs.type == 'full' }}
+    if: ${{ inputs.type == 'full' || inputs.singlecard_tests != '' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
       fail-fast: false
       matrix:
-        part: [0, 1]
+        part: ${{ fromJSON(inputs.type == 'full' && '[0, 1]' || '[0]') }}
     container:
       image: ${{ inputs.image }}
       env:
@@ -196,6 +219,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Check npu and CANN info
         run: |
@@ -266,6 +291,7 @@ jobs:
             uv pip install -v -e .
           fi
       - name: Run e2e test
+        if: ${{ inputs.type == 'full' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
@@ -290,7 +316,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize singlecard-full failure
-        if: ${{ always() }}
+        if: ${{ inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run singlecard-full test" \
@@ -305,6 +331,14 @@ jobs:
           path: test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
+
+      - name: Run E2E tests (comment-singlecard)
+        if: ${{ inputs.singlecard_tests != '' }}
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 ${{ inputs.singlecard_tests }}
 
   e2e-2-cards-light:
     name: multicard-2-light
@@ -435,7 +469,7 @@ jobs:
 
   e2e-2-cards-full:
     name: multicard-2-full
-    if: ${{ inputs.type == 'full' }}
+    if: ${{ inputs.type == 'full' || inputs.multicard_2_tests != '' }}
     runs-on: linux-aarch64-a3-2
     strategy:
       fail-fast: false
@@ -451,6 +485,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -520,6 +556,7 @@ jobs:
             uv pip install -v -e .
           fi
       - name: Run vllm-project/vllm-ascend test (full)
+        if: ${{ inputs.type == 'full' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
@@ -543,7 +580,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-2-full failure
-        if: ${{ always() }}
+        if: ${{ inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run multicard-2-full test " \
@@ -559,6 +596,13 @@ jobs:
           path: test_timing_data.json
           if-no-files-found: warn
           retention-days: 5
+
+      - name: Run E2E tests (comment-multicard-2)
+        if: ${{ inputs.multicard_2_tests != '' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 ${{ inputs.multicard_2_tests }}
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' && matrix.part == 0 }}
@@ -582,7 +626,7 @@ jobs:
 
   e2e-4-cards-full:
     name: multicard-4-full
-    if: ${{ inputs.type == 'full' }}
+    if: ${{ inputs.type == 'full' || inputs.multicard_4_tests != '' }}
     runs-on: linux-aarch64-a3-4
     strategy:
       fail-fast: false
@@ -597,6 +641,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -667,6 +713,7 @@ jobs:
           fi
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
+        if: ${{ inputs.type == 'full' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
@@ -690,7 +737,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-4-full failure
-        if: ${{ always() }}
+        if: ${{ inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run vllm-project/vllm-ascend test for V1 Engine" \
@@ -707,10 +754,17 @@ jobs:
           if-no-files-found: warn
           retention-days: 5
 
+      - name: Run E2E tests (comment-multicard-4)
+        if: ${{ inputs.multicard_4_tests != '' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 ${{ inputs.multicard_4_tests }}
+
   e2e_310p:
     name: 310p singlecard
     runs-on: linux-aarch64-310p-1
-    if: ${{ inputs.contains_310 }}
+    if: ${{ inputs.contains_310 || inputs.p310_tests != '' }}
     container:
       image: ${{ inputs.image_310p }}
       env:
@@ -733,6 +787,8 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install system dependencies
         run: |
@@ -787,6 +843,7 @@ jobs:
           fi
 
       - name: Run vllm-project/vllm-ascend test
+        if: ${{ inputs.contains_310 }}
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -805,6 +862,14 @@ jobs:
             --step-name "Run vllm-project/vllm-ascend test" \
             --log-file /tmp/e2e-310p-singlecard.log \
             --output "$GITHUB_STEP_SUMMARY"
+
+      - name: Run E2E tests (comment-310p)
+        if: ${{ inputs.p310_tests != '' }}
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 ${{ inputs.p310_tests }}
 
   e2e_310p-4cards:
     name: 310p multicards 4cards
