@@ -19,15 +19,15 @@ on:
         required: false
         type: boolean
         default: false
-      a3_2_image:
+      image_a3_2:
         required: false
         type: string
         default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
-      a3_4_image:
+      image_a3_4:
         required: false
         type: string
         default: m.daocloud.io/quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
-      310p_image:
+      image_310p:
         required: false
         type: string
         default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
@@ -310,7 +310,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: ${{ inputs.a3_2_image }}
+      image: ${{ inputs.image_a3_2 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -372,9 +372,9 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.a3_2_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.a3_2_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -437,7 +437,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: ${{ inputs.a3_2_image }}
+      image: ${{ inputs.image_a3_2 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -499,9 +499,9 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.a3_2_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.a3_2_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -584,7 +584,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: ${{ inputs.a3_4_image }}
+      image: ${{ inputs.image_a3_4 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -645,9 +645,9 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.a3_4_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_4 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.a3_4_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_4 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -707,7 +707,7 @@ jobs:
     runs-on: linux-aarch64-310p-1
     if: ${{ inputs.contains_310 }}
     container:
-      image: ${{ inputs.310p_image }}
+      image: ${{ inputs.image_310p }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -765,9 +765,9 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.310p_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.310p_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -806,7 +806,7 @@ jobs:
     runs-on: linux-aarch64-310p-4
     if: ${{ inputs.contains_310 }}
     container:
-      image: ${{ inputs.310p_image }}
+      image: ${{ inputs.image_310p }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -864,9 +864,9 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.310p_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.310p_image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
