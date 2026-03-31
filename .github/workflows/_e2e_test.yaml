@@ -88,7 +88,6 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .
-          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -195,7 +194,6 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .
-          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run e2e test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -299,7 +297,6 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .
-          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -403,7 +400,6 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .
-          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -526,7 +522,6 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .
-          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
@@ -623,7 +618,6 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .
-          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -699,7 +693,6 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .
-          uv pip install git+https://github.com/modelscope/modelscope.git@dbbcbf631fe6d10cc6446df2ad2fef24039fe7fe
 
       - name: Run vllm-project/vllm-ascend test
         env:

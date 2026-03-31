@@ -49,6 +49,7 @@ from vllm_ascend.ops.layer_shard_linear import (
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
+from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -82,7 +83,13 @@ class AscendMLABackend(AttentionBackend):
         return AscendMLAMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int) -> tuple[int, ...]:
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
         return num_blocks, block_size, num_kv_heads, head_size
 
     @staticmethod
@@ -174,6 +181,7 @@ class AscendMLAMetadata:
     slot_mapping: torch.Tensor
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
+    seq_lens_cpu: torch.Tensor
     block_tables: torch.Tensor
 
     # New for MLA (compared to FlashAttention)
@@ -457,6 +465,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             query_start_loc=query_start_loc,
             block_tables=self.block_table,
             seq_lens=self.seq_lens,
+            seq_lens_cpu=self.seq_lens,
         )
 
     def build_chunked_metadata(
@@ -728,10 +737,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
         self.layer_name = kwargs.get("layer_name")
-        quant_config = self.vllm_config.quant_config
-        self.fa_quant_layer = (
-            quant_config.enabling_fa_quant(self.vllm_config, self.layer_name) if quant_config is not None else False
-        )
+        self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         self.dtype = torch.int8 if self.fa_quant_layer else self.vllm_config.model_config.dtype
         self.layer_sharding_kwargs = []
         for layer_name in get_ascend_config().layer_sharding or []:
@@ -884,10 +890,17 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # Convert from (L, N, V) to (N, L, V)
-        self.W_UV = W_UV.transpose(0, 1).contiguous()
-        # Convert from (L, N, P) to (N, P, L)
-        self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
+        # NOTE: When we make a incontiguous weight contiguous, a new address will be allocated for the weight,
+        # in graph + RL scenario, we only capture the graph once, and the weight address is expected to be the same
+        # across iterations, so we need to copy the weight to the original address after making it contiguous.
+        if not hasattr(self, "W_UV"):
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1).contiguous()
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
+        else:
+            self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
+            self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
 
         # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
         # self.W_UV = maybe_trans_nz(self.W_UV)

@@ -35,6 +35,9 @@ def select_experts(
     routed_scaling_factor=1.0,
     e_score_correction_bias: torch.Tensor | None = None,
     indices_type: torch.dtype | None = None,
+    mix_placement: bool = False,
+    num_logical_experts: int = -1,
+    num_shared_experts: int = 0,
     global_num_experts: int = -1,
 ):
     """
@@ -99,6 +102,23 @@ def select_experts(
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )
+    if mix_placement:
+        shared_expert_routing_factor = 1.0 if is_support_npu_moe_gating_top_k else (1 / routed_scaling_factor)
+        batch_size = topk_ids.shape[0]
+        pad_shared_expert_ids = torch.arange(
+            num_logical_experts, num_logical_experts + num_shared_experts, dtype=topk_ids.dtype, device=topk_ids.device
+        ).repeat(batch_size, 1)
+
+        pad_shared_expert_weights = torch.full(
+            (topk_weights.shape[0], num_shared_experts),
+            shared_expert_routing_factor,
+            dtype=topk_weights.dtype,
+            device=topk_weights.device,
+        )
+
+        topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
+        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights], dim=1)
+
     return topk_weights, topk_ids
 
 
