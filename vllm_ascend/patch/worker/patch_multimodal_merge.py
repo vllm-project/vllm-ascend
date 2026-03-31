@@ -18,15 +18,14 @@
 
 import torch
 import vllm
-from vllm.model_executor.models.utils import (_embedding_count_expression,
-                                              _flatten_embeddings)
+from vllm.model_executor.models.utils import _embedding_count_expression, _flatten_embeddings
 from vllm.multimodal import NestedTensors
 
 
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
-    is_multimodal: torch.Tensor,
     multimodal_embeddings: NestedTensors,
+    is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the

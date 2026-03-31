@@ -83,7 +83,9 @@ class TestAscendUnquantizedLinearMethod(TestBase):
 
 class TestAscendRowParallelLinear(BaseLinearTest):
 
-    def test_mlp_optimize(self):
+    @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method",
+           return_value=MagicMock())
+    def test_mlp_optimize(self, mock_get_weight_prefetch_method):
 
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.recompute_scheduler_enable = False
@@ -100,7 +102,9 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         input_tensor = torch.randn(16, 8)
         linear(input_tensor)
 
-    def test_oproj_tp(self):
+    @patch("vllm_ascend.ops.linear_op.get_weight_prefetch_method",
+           return_value=MagicMock())
+    def test_oproj_tp(self, mock_get_weight_prefetch_method):
 
         config._current_vllm_config = MagicMock()
 

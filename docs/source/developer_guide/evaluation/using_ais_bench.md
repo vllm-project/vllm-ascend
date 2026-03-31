@@ -53,7 +53,7 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### 2. Run different dataset using AISBench
+### 2. Run different datasets using AISBench
 
 #### Install AISBench
 
@@ -81,7 +81,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
 1. `C-Eval` dataset.
 
-Take `C-Eval` dataset as an example. And you can refer to [Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Every datasets have a `README.md` for detailed download and installation process.
+Take `C-Eval` dataset as an example. You can refer to [Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `README.md` with detailed download and installation instructions.
 
 Download dataset and install it to specific path.
 

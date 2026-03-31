@@ -22,15 +22,14 @@ for prefill and decode phases:
 - Decode (KV consumer): Uses static W8A8 quantization
 """
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 from vllm.config import get_current_vllm_config
 
 from .base import AscendLinearScheme
 from .registry import register_scheme
-from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
-                           AscendW8A8DynamicLinearMethod)
+from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 from .w8a8_static import AscendW8A8LinearMethod
 
 
@@ -53,31 +52,27 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
         self._dynamic_method = AscendW8A8DynamicLinearMethod()
 
         kv_transfer_config = get_current_vllm_config().kv_transfer_config
-        self._is_kv_consumer = (kv_transfer_config is not None
-                                and kv_transfer_config.is_kv_consumer)
+        self._is_kv_consumer = kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
 
-    def get_weight(self, input_size: int, output_size: int,
-                   params_dtype: torch.dtype) -> Dict[str, Any]:
-        return self._static_method.get_weight(input_size, output_size,
-                                              params_dtype)
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        return self._static_method.get_weight(input_size, output_size, params_dtype)
 
-    def get_pertensor_param(self, params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(self, params_dtype: torch.dtype) -> dict[str, Any]:
         return self._static_method.get_pertensor_param(params_dtype)
 
     def get_perchannel_param(
         self,
         output_size: int,
         params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
-        return self._static_method.get_perchannel_param(
-            output_size, params_dtype)
+    ) -> dict[str, Any]:
+        return self._static_method.get_perchannel_param(output_size, params_dtype)
 
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        tp_rank: Optional[int] = 0,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
     ) -> torch.Tensor:
         if layer.is_kv_consumer:
             return self._static_method.apply(layer, x, bias, tp_rank)
@@ -92,26 +87,15 @@ class AscendW8A8PDMixLinearMethod(AscendLinearScheme):
 
 @register_scheme("W8A8_MIX", "moe")
 class AscendW8A8PDMixFusedMoeMethod(AscendW8A8DynamicFusedMoEMethod):
-
-    def get_dynamic_quant_param(self, num_experts: int,
-                                intermediate_size_per_partition: int,
-                                hidden_sizes: int,
-                                params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_dynamic_quant_param(
+        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+    ) -> dict[str, Any]:
         param_dict = super().get_dynamic_quant_param(
-            num_experts, intermediate_size_per_partition, hidden_sizes,
-            params_dtype)
-        param_dict["w2_deq_scale"] = torch.empty(num_experts,
-                                                 hidden_sizes,
-                                                 dtype=torch.float32)
-        param_dict["w13_deq_scale"] = torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            dtype=torch.float32)
-        param_dict["w2_input_offset"] = torch.empty(num_experts,
-                                                    1,
-                                                    dtype=torch.int8)
-        param_dict["w13_input_offset"] = torch.empty(num_experts,
-                                                     1,
-                                                     dtype=torch.int8)
+            num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype
+        )
+        param_dict["w2_deq_scale"] = torch.empty(num_experts, hidden_sizes, dtype=torch.float32)
+        param_dict["w13_deq_scale"] = torch.empty(num_experts, 2 * intermediate_size_per_partition, dtype=torch.float32)
+        param_dict["w2_input_offset"] = torch.empty(num_experts, 1, dtype=torch.int8)
+        param_dict["w13_input_offset"] = torch.empty(num_experts, 1, dtype=torch.int8)
 
         return param_dict

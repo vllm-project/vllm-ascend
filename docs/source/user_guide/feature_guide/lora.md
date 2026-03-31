@@ -8,10 +8,10 @@ You can refer to [Supported Models](https://docs.vllm.ai/en/latest/models/suppor
 
 You can run LoRA with ACLGraph mode now. Please refer to [Graph Mode Guide](./graph_mode.md) for a better LoRA performance.
 
-Address for downloading models:\
-base model: <https://www.modelscope.cn/models/vllm-ascend/Llama-2-7b-hf/files> \
-lora model:
-<https://www.modelscope.cn/models/vllm-ascend/llama-2-7b-sql-lora-test/files>
+Address for downloading models:
+
+- base model: <https://www.modelscope.cn/models/vllm-ascend/Llama-2-7b-hf/files>
+- lora model: <https://www.modelscope.cn/models/vllm-ascend/llama-2-7b-sql-lora-test/files>
 
 ## Example
 

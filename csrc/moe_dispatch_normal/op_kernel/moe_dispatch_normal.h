@@ -3,7 +3,7 @@
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
-#include "../common/moe_distribute_base.h"
+#include "moe_distribute_base.h"
 #include "moe_dispatch_normal_tiling.h"
 
 namespace MoeDispatchNormalImpl {

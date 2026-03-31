@@ -18,12 +18,13 @@
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def prepare_inputs_padded_kernel(
     cu_num_draft_tokens_ptr,  # [num_reqs]
     valid_sampled_tokens_count_ptr,  # [num_reqs]
     query_start_loc_gpu_ptr,  # [num_reqs + 1]
     token_indices_to_sample_ptr,  # [num_reqs] (output)
+    num_rejected_tokens_gpu_ptr,
     num_reqs,  # tl.int32
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -61,3 +62,4 @@ def prepare_inputs_padded_kernel(
 
         index_to_sample = q_last_tok_idx - num_rejected
         tl.store(token_indices_to_sample_ptr + offsets, index_to_sample, mask=mask)
+        tl.store(num_rejected_tokens_gpu_ptr + offsets, num_rejected, mask=mask)

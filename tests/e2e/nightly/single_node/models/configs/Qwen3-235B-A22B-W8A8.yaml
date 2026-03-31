@@ -1,0 +1,85 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  OMP_NUM_THREADS: "10"
+  OMP_PROC_BIND: "false"
+  HCCL_BUFFSIZE: "1024"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--quantization"
+  - "ascend"
+  - "--async-scheduling"
+  - "--data-parallel-size"
+  - "4"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--enable-expert-parallel"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "40960"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--max-num-seqs"
+  - "12"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+
+_benchmarks: &benchmarks
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
+    batch_size: 32
+    top_k: 20
+    baseline: 95
+    threshold: 5
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3-235B-A22B-W8A8-full_graph"
+    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks
+
+  - name: "Qwen3-235B-A22B-W8A8-piecewise"
+    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_mode": "PIECEWISE"}'
+    benchmarks:
+      <<: *benchmarks
+
+  - name: "Qwen3-235B-A22B-W8A8-EPLB"
+    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    envs:
+      <<: *envs
+      DYNAMIC_EPLB: "true"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--additional-config"
+      - '{"eplb_config": {"dynamic_eplb": "true", "expert_heat_collection_interval": 600, "algorithm_execution_interval": 50, "num_redundant_experts": 16, "eplb_policy_type": 2}}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks

@@ -1,0 +1,46 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3-30B-A3B-W8A8-TP1"
+    model: "vllm-ascend/Qwen3-30B-A3B-W8A8"
+    envs:
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      HCCL_BUFFSIZE: "1024"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--async-scheduling"
+      - "--no-enable-prefix-caching"
+      - "--tensor-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-model-len"
+      - "5600"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--max-num-seqs"
+      - "100"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs400
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 180
+        max_out_len: 1500
+        batch_size: 45
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97

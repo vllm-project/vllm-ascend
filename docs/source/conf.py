@@ -65,19 +65,32 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    "vllm_version": "v0.13.0",
+    "vllm_version": "v0.17.0",
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    "vllm_ascend_version": "v0.13.0rc1",
+    "vllm_ascend_version": "v0.17.0rc1",
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    "pip_vllm_ascend_version": "0.13.0rc1",
-    "pip_vllm_version": "0.13.0",
+    "pip_vllm_ascend_version": "0.17.0rc1",
+    "pip_vllm_version": "0.17.0",
     # CANN image tag
-    "cann_image_tag": "8.5.0-910b-ubuntu22.04-py3.11",
+    "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
     # vllm version in ci
-    "ci_vllm_version": "v0.14.1",
+    "ci_vllm_version": "v0.18.0",
+    # main branch compatibility matrix - updated dynamically
+    # vLLM commit hash for main branch
+    "main_vllm_commit": "35141a7eeda941a60ad5a4956670c60fd5a77029",
+    # vLLM tag for main branch
+    "main_vllm_tag": "v0.18.0",
+    # Python version for main branch
+    "main_python_version": ">= 3.10, < 3.12",
+    # CANN version for main branch
+    "main_cann_version": "8.5.0",
+    # PyTorch/torch_npu version for main branch
+    "main_pytorch_torch_npu_version": "2.9.0 / 2.9.0",
+    # Triton Ascend version for main branch
+    "main_triton_ascend_version": "3.2.0",
 }
 
 # For cross-file header anchors
@@ -125,6 +138,8 @@ html_theme_options = {
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 # html_static_path = ['_static']
+# Copy llms.txt to site root so it is available as /llms.txt.
+html_extra_path = ["llms.txt"]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
 if READTHEDOCS_VERSION_TYPE == "tag":

@@ -18,6 +18,7 @@ import os
 from threading import Lock
 from unittest import mock
 
+import pytest
 import torch
 from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
                          VllmConfig)
@@ -104,6 +105,8 @@ class TestUtils(TestBase):
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
 
+    @pytest.mark.skip(
+        "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()
         self.assertTrue(result)
@@ -246,56 +249,91 @@ class TestUtils(TestBase):
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count,
                          len(REGISTERED_ASCEND_OPS))
+    
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_maybe_trans_nz(self, mock_npu_format_cast):
+        from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+        mock_npu_format_cast.side_effect = lambda weight, fmt: weight
 
+        def assert_nz_cast(weight):
+            mock_npu_format_cast.assert_called_once()
+            args, kwargs = mock_npu_format_cast.call_args
+            self.assertIs(args[0], weight)
+            self.assertEqual(args[1], ACL_FORMAT_FRACTAL_NZ)
+            self.assertEqual(kwargs, {})
 
-class TestProfileExecuteDuration(TestBase):
+        # Test case 1: non-310P, NZ is disabled
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.randn(32, 64, dtype=torch.float16)
+            result = utils.maybe_trans_nz(weight)
+            self.assertIs(result, weight)
+            mock_npu_format_cast.assert_not_called()
 
-    def setUp(self):
-        utils.ProfileExecuteDuration._instance = None
-        utils.ProfileExecuteDuration._observations = []
-        utils.ProfileExecuteDuration._lock = Lock()
+        # Test case 2: 310P always converts non-fp32 weights, even when NZ=0
+        mock_npu_format_cast.reset_mock()
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        ):
+            weight = torch.randn(32, 64, dtype=torch.float16)
+            result = utils.maybe_trans_nz(weight)
+            self.assertIs(result, weight)
+            assert_nz_cast(weight)
 
-    def test_singleton_creation(self):
-        instance1 = utils.ProfileExecuteDuration()
-        self.assertIsNotNone(instance1)
-        self.assertIs(instance1, utils.ProfileExecuteDuration._instance)
+        # Test case 3: fp32 never converts, including on 310P
+        mock_npu_format_cast.reset_mock()
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        ):
+            weight = torch.randn(32, 64, dtype=torch.float32)
+            result = utils.maybe_trans_nz(weight)
+            self.assertIs(result, weight)
+            mock_npu_format_cast.assert_not_called()
 
-        instance2 = utils.ProfileExecuteDuration()
-        self.assertIs(instance1, instance2)
+        # Test case 4: non-310P fp16 converts only when NZ=2
+        mock_npu_format_cast.reset_mock()
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.randn(32, 64, dtype=torch.float16)
+            result = utils.maybe_trans_nz(weight)
+            self.assertIs(result, weight)
+            mock_npu_format_cast.assert_not_called()
 
-    def test_thread_safety(self):
-        from threading import Thread
+        # Test case 5: non-310P fp16 converts when NZ=2
+        mock_npu_format_cast.reset_mock()
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.randn(32, 64, dtype=torch.float16)
+            result = utils.maybe_trans_nz(weight)
+            self.assertIs(result, weight)
+            assert_nz_cast(weight)
 
-        instances = []
+        # Test case 6: non-310P bf16 converts when NZ=2
+        mock_npu_format_cast.reset_mock()
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"}),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.randn(32, 64, dtype=torch.bfloat16)
+            result = utils.maybe_trans_nz(weight)
+            self.assertIs(result, weight)
+            assert_nz_cast(weight)
 
-        def create_instance():
-            instances.append(utils.ProfileExecuteDuration())
-
-        threads = [Thread(target=create_instance) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        first_instance = instances[0]
-        for instance in instances[1:]:
-            self.assertIs(first_instance, instance)
-
-    def test_atexit_registration(self):
-        with mock.patch('atexit.register') as mock_register:
-            instance = utils.ProfileExecuteDuration()
-            mock_register.assert_called_once_with(instance.destroy)
-
-    def test_lock_usage(self):
-        original_lock = utils.ProfileExecuteDuration._lock
-
-        with mock.patch.object(utils.ProfileExecuteDuration,
-                               '_lock',
-                               wraps=original_lock) as mock_lock:
-            utils.ProfileExecuteDuration()
-            mock_lock.__enter__.assert_called()
-            mock_lock.__exit__.assert_called()
-
-    def test_observations_initialization(self):
-        instance = utils.ProfileExecuteDuration()
-        self.assertEqual(instance._observations, [])
+        # Test case 7: non-310P quantized weights still convert by default
+        mock_npu_format_cast.reset_mock()
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"}),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.zeros(32, 64, dtype=torch.int8)
+            result = utils.maybe_trans_nz(weight)
+            self.assertIs(result, weight)
+            assert_nz_cast(weight)

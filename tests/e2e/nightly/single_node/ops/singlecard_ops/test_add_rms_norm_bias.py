@@ -1,3 +1,4 @@
+import gc
 import random
 
 import numpy as np
@@ -147,3 +148,6 @@ def test_quant_fpx_linear(row: int, col: int, dtype, atol, rtol, kernelType):
     torch.testing.assert_close(rstd * b1, rstd1 * b1, rtol=rtol, atol=100)
     torch.testing.assert_close(x * c, x1 * c, atol=atol, rtol=100)
     torch.testing.assert_close(x * c1, x1 * c1, rtol=rtol, atol=100)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

@@ -22,7 +22,7 @@ from .utils import prepare_chunk_offsets, safe_exp
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["chunk_offsets", "scale", "T", "H", "Hg", "K", "V"])
 def chunk_fwd_kernel_o(
     q,
     k,
@@ -34,10 +34,10 @@ def chunk_fwd_kernel_o(
     chunk_offsets,
     scale,
     T,
-    H: tl.constexpr,
-    Hg: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
+    H,
+    Hg,
+    K,
+    V,
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,

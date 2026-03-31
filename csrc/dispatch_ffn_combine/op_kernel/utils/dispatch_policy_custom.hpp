@@ -33,13 +33,13 @@ namespace Catlass::Epilogue {
     };
 
     template <uint32_t UB_STAGES_>
-    struct EpilogueAtlasA2PerTokenDequantQuant {
+    struct EpilogueAtlasA2PerTokenDequantSwigluQuant {
         using ArchTag = Arch::AtlasA2;
         static constexpr uint32_t UB_STAGES = UB_STAGES_;
     };
     
     template <uint32_t UB_STAGES_>
-    struct EpilogueAtlasA2PerTokenDequantSwigluQuant {
+    struct EpilogueAtlasA2PerTokenDequantV2  {
         using ArchTag = Arch::AtlasA2;
         static constexpr uint32_t UB_STAGES = UB_STAGES_;
     };

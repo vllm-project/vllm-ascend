@@ -2,9 +2,9 @@
 
 Multi-Node CI is designed to test distributed scenarios of very large models, eg: disaggregated_prefill multi DP across multi nodes and so on.
 
-## How is works
+## How it works
 
-The following picture shows the basic deployment view of the multi-node CI mechanism, It shows how the github action interact with [lws](https://lws.sigs.k8s.io/docs/overview/) (a kind of kubernetes crd resource)
+The following picture shows the basic deployment view of the multi-node CI mechanism. It shows how the GitHub action interacts with [lws](https://lws.sigs.k8s.io/docs/overview/) (a kind of kubernetes crd resource).
 
 ![alt text](../../assets/deployment.png)
 
@@ -16,7 +16,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 1. Upload custom weights
 
-   If you need customized weights, for example, you quantized a w8a8 weight for DeepSeek-V3 and you want your weight to run on CI, Uploading weights to ModelScope's [vllm-ascend](https://www.modelscope.cn/organization/vllm-ascend) organization is welcome, If you do not have permission to upload, please contact @Potabk
+   If you need customized weights, for example, you quantized a w8a8 weight for DeepSeek-V3 and you want your weight to run on CI, uploading weights to ModelScope's [vllm-ascend](https://www.modelscope.cn/organization/vllm-ascend) organization is welcome. If you do not have permission to upload, please contact @Potabk
 
 2. Add config yaml
 
@@ -71,7 +71,8 @@ From the workflow perspective, we can see how the final test script is executed,
     ```
 
 3. Add the case to nightly workflow
-currently, the multi-node test workflow defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/nightly_test_a3.yaml)
+
+Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/nightly_test_a3.yaml)
 
    ```yaml
     multi-node-tests:
@@ -106,7 +107,7 @@ currently, the multi-node test workflow defined in the [nightly_test_a3.yaml](ht
         KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
    ```
   
-The matrix above defines all the parameters required to add a multi-machine use case, The parameters worth paying attention to (I mean if you are adding a new use case) are size and the path to the yaml configuration file. The former defines the number of nodes required for your use case, and the latter defines the path to the configuration file you have completed in step 2.
+The matrix above defines all the parameters required to add a multi-machine use case. The parameters worth noting (if you are adding a new use case) are `size` and the path to the yaml configuration file. The former defines the number of nodes required for your use case, and the latter defines the path to the configuration file you have completed in step 2.
 
 ## Run Multi-Node tests locally
 

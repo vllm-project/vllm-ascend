@@ -26,7 +26,7 @@ _CONDITIONS = ("seq7168",)
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H", "Hg", "K", "V"])
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     k,
     v,
@@ -38,11 +38,12 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
+    h_update,
     T,
-    H: tl.constexpr,
-    Hg: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
+    H,
+    Hg,
+    K,
+    V,
     BT: tl.constexpr,
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
@@ -72,6 +73,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     b_h1_bv1 = tl.zeros([128, 64], dtype=tl.float32)
     b_h1_bv2 = tl.zeros([128, 64], dtype=tl.float32)
+    # create b_hupd_bv1 and b_hupd_bv2
 
     v_start1 = 0
     v_start2 = 64
@@ -184,6 +186,8 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
@@ -191,19 +195,23 @@ def chunk_gated_delta_rule_fwd_h(
     H = u.shape[-2]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if cu_seqlens is not None and chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
         N, NT, chunk_offsets = (
             len(cu_seqlens) - 1,
             len(chunk_indices),
-            prepare_chunk_offsets(cu_seqlens, BT),
+            chunk_offsets,
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     h = k.new_empty(B, NT, H, K, V)
+    h_update = k.new_empty(B, NT, H, K, K)
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     v_new = torch.empty_like(u) if save_new_value else None
@@ -223,6 +231,7 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        h_update=h_update,
         T=T,
         H=H,
         Hg=Hg,

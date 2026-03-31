@@ -13,6 +13,7 @@ env_common:
   HCCL_DETERMINISTIC: True
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_RETRY_ENABLE: "L0:0, L1:0"
+  VLLM_NIXL_ABORT_REQUEST_TIMEOUT: 300000
 
 disaggregated_prefill:
   enabled: true
@@ -34,7 +35,7 @@ deployment:
           --enable-expert-parallel
           --seed 1024
           --quantization ascend
-          --max-num-seqs 4
+          --max-num-seqs 3
           --max-model-len 32768
           --max-num-batched-tokens 16384
           --trust-remote-code
@@ -71,12 +72,12 @@ deployment:
         --enable-expert-parallel
         --seed 1024
         --quantization ascend
-        --max-num-seqs 4
+        --max-num-seqs 8
         --max-model-len 32768
         --max-num-batched-tokens 256
         --trust-remote-code
         --gpu-memory-utilization 0.85
-        --compilation_config '{"cudagraph_capture_sizes":[4,8,12,16],"cudagraph_mode": "FULL_DECODE_ONLY"}'
+        --compilation_config '{"cudagraph_capture_sizes":[4,8,16,32],"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --enable-chunked-prefill
         --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}'
         --kv-transfer-config
@@ -103,6 +104,6 @@ benchmarks:
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 24576
-    batch_size: 512
+    batch_size: 16
     baseline: 95
     threshold: 5

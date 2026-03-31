@@ -55,16 +55,12 @@ def report_dir(pytestconfig):
 
 def pytest_generate_tests(metafunc):
     if "config_filename" in metafunc.fixturenames:
-
         if metafunc.config.getoption("--config-list-file"):
             rel_path = metafunc.config.getoption("--config-list-file")
             config_list_file = Path(rel_path).resolve()
             config_dir = config_list_file.parent
             with open(config_list_file, encoding="utf-8") as f:
-                configs = [
-                    config_dir / line.strip() for line in f
-                    if line.strip() and not line.startswith("#")
-                ]
+                configs = [config_dir / line.strip() for line in f if line.strip() and not line.startswith("#")]
             metafunc.parametrize("config_filename", configs)
         else:
             single_config = metafunc.config.getoption("--config")

@@ -66,7 +66,7 @@ curl http://localhost:8000/v1/completions \
 "C. Asset-Liability Ratio=65.22%, Current Ratio=1.75\n"\
 "D. Asset-Liability Ratio=68.00%, Current Ratio=2.50<|im_end|>\n"\
 "<|im_start|>assistant\n"'",
-        "max_tokens": 1,
+        "max_completion_tokens": 1,
         "temperature": 0,
         "stop": ["<|im_end|>"]
     }' | python3 -m json.tool
@@ -106,8 +106,16 @@ Install lm-eval in the container:
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
+export USE_MODELSCOPE_HUB=0
 pip install lm-eval[api]
 ```
+
+:::{note}
+The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
+cause lm-eval to download datasets from ModelScope instead of HuggingFace.
+Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
+fetch datasets from HuggingFace correctly.
+:::
 
 Run the following command:
 
@@ -170,8 +178,16 @@ Install lm-eval in the container:
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
+export USE_MODELSCOPE_HUB=0
 pip install lm-eval
 ```
+
+:::{note}
+The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
+cause lm-eval to download datasets from ModelScope instead of HuggingFace.
+Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
+fetch datasets from HuggingFace correctly.
+:::
 
 Run the following command:
 

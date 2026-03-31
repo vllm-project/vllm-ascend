@@ -17,20 +17,36 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 # isort: skip_file
 import torch.nn as nn
+from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 class XliteModelRunner(NPUModelRunner):
-
     def get_model(self) -> nn.Module:
         return self.model.unwrap()
 
     def load_model(self) -> None:
         super().load_model()
         from vllm_ascend.xlite.xlite import XliteWrapper
+
         self.model = XliteWrapper(self.model, self.vllm_config)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         super().initialize_kv_cache(kv_cache_config)
         self.model.register_kv_caches(self.kv_caches)
+
+    def _should_build_dummy_attn_metadata(
+        self,
+        force_attention: bool = False,
+        is_profile: bool = False,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+    ) -> bool:
+        """
+        Override to build attention metadata during dummy_run when xlite is enable.
+        For xlite, we need to build metadata during DP dummy_run to ensure all ranks
+        have consistent metadata, even when some ranks have no requests.
+        """
+        base_condition = super()._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode)
+        xlite_condition = self.ascend_config.xlite_graph_config.enabled and not is_profile
+        return base_condition or xlite_condition

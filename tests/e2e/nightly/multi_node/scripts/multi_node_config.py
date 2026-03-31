@@ -10,7 +10,7 @@ import yaml
 # isort: off
 from tests.e2e.nightly.multi_node.scripts.utils import (
     CONFIG_BASE_PATH, DEFAULT_SERVER_PORT, get_all_ipv4, get_cluster_ips,
-    get_net_interface, setup_logger, get_avaliable_port)
+    get_net_interface, setup_logger, get_available_port)
 # isort: on
 setup_logger()
 logger = logging.getLogger(__name__)
@@ -136,8 +136,8 @@ class ProxyLauncher:
         if not self.is_master or self.cfg is None:
             logger.info("Not launching proxy on non-master node")
             return self
-        prefiller_ips = [self.nodes[i].ip for i in self.cfg.prefiller_indices]
-        decoder_ips = [self.nodes[i].ip for i in self.cfg.decoder_indices]
+        prefiller_ips = [self.nodes[i].ip for i in self.cfg.prefiller_indices if not self.nodes[i].headless]
+        decoder_ips = [self.nodes[i].ip for i in self.cfg.decoder_indices if not self.nodes[i].headless]
 
         cmd = [
             "python",
@@ -202,7 +202,7 @@ class MultiNodeConfig:
         master_ip = (self.disagg_cfg.master_ip_for_node(
             self.cur_index, self.nodes)
                      if self.disagg_cfg else self.nodes[0].ip)
-        self.proxy_port = get_avaliable_port()
+        self.proxy_port = get_available_port()
 
         self.envs = DistEnvBuilder(
             cur_node=self.cur_node,

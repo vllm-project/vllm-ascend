@@ -33,8 +33,11 @@ class NPUOffloadingSpec(OffloadingSpec):
         if not self._manager:
             kv_events_config = self.vllm_config.kv_events_config
             enable_events = kv_events_config is not None and kv_events_config.enable_kv_cache_events
+            assert len(self.gpu_block_size) == 1
+            gpu_block_size = self.gpu_block_size[0]
+            offloaded_block_size = gpu_block_size * self.block_size_factor
             self._manager = LRUOffloadingManager(
-                CPUBackend(block_size=self.offloaded_block_size, num_blocks=self.num_cpu_blocks),
+                CPUBackend(block_size=offloaded_block_size, num_blocks=self.num_cpu_blocks),
                 enable_events=enable_events,
             )
         return self._manager
@@ -45,10 +48,12 @@ class NPUOffloadingSpec(OffloadingSpec):
         attn_backends: dict[str, type[AttentionBackend]],
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handler:
+            assert len(self.gpu_block_size) == 1
+            gpu_block_size = self.gpu_block_size[0]
             self._handler = CpuNpuOffloadingHandler(
                 attn_backends=attn_backends,
-                gpu_block_size=self.gpu_block_size,
-                cpu_block_size=self.offloaded_block_size,
+                gpu_block_size=gpu_block_size,
+                cpu_block_size=gpu_block_size * self.block_size_factor,
                 num_cpu_blocks=self.num_cpu_blocks,
                 gpu_caches=kv_caches,
             )

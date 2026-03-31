@@ -29,7 +29,7 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
     - Models: Qwen2.5-VL-7B-Instruct, Qwen2.5-7B-Instruct, Qwen3-8B.
     - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
 
-**Benchmarking Duration**: about 800 senond for single model.
+**Benchmarking Duration**: about 800 seconds for single model.
 
 ## Quick Use
 
@@ -145,7 +145,7 @@ These files contain detailed benchmarking results for further analysis.
 #### Use benchmark cli
 
 For more flexible and customized use, benchmark cli is also provided to run online/offline benchmarks
-Similarly, let’s take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
+Similarly, let's take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
 
 ##### Online serving
 

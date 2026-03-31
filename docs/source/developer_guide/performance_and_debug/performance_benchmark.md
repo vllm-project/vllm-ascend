@@ -222,7 +222,7 @@ vllm bench serve \
   --backend openai-embeddings \
   --endpoint /v1/embeddings \
   --dataset-name sharegpt \
-  --num-prompt 10 \
+  --num-prompts 10 \
   --dataset-path <your dataset path>/datasets/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
 

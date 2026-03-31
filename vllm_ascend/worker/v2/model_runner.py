@@ -20,32 +20,35 @@
 import numpy as np
 import torch
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.worker.gpu.input_batch import (InputBatch,
-                                            combine_sampled_and_draft_tokens,
-                                            prepare_pos_seq_lens,
-                                            prepare_prefill_inputs)
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import (
+    combine_sampled_and_draft_tokens,
+    expand_idx_mapping,
+    prepare_pos_seq_lens,
+    prepare_prefill_inputs,
+)
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
-from vllm_ascend.worker.v2.attn_utils import (build_attn_metadata,
-                                              build_attn_state)
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import set_weight_prefetch_method
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
-from vllm_ascend.worker.v2.states import AscendRequestState, uva_wrapper
+from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
-
-logger = init_logger(__name__)
 
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with (torch_cuda_wrapper(), uva_wrapper()):
+        with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to
@@ -57,9 +60,12 @@ class NPUModelRunner(GPUModelRunner):
         del self.speculator
 
         # NPU specific initializations can be added below.
-        self.cudagraph_manager: AclGraphManager = AclGraphManager(
-            vllm_config,
-            device,
+        self.cudagraph_manager: ModelAclGraphManager = ModelAclGraphManager(
+            self.vllm_config,
+            self.device,
+            self.compilation_config.cudagraph_mode,
+            decode_query_len=self.decode_query_len,
+            model_runner=self,
         )
 
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
@@ -78,23 +84,24 @@ class NPUModelRunner(GPUModelRunner):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            inputs_embeds_size=self.inputs_embeds_size,
-            vocab_size=self.vocab_size,
-            dtype=self.dtype,
             device=self.device,
-            pin_memory=self.pin_memory,
         )
         # we need to adjust triton operators in sampler,
         # so reinitialize sampler here.
         self.sampler: AscendSampler = AscendSampler(
-            logprobs_mode=self.model_config.logprobs_mode, )
+            max_num_reqs=self.max_num_reqs,
+            vocab_size=self.vocab_size,
+            device=self.device,
+            req_states=self.req_states,
+            logprobs_mode=self.model_config.logprobs_mode,
+            num_speculative_tokens=self.num_speculative_steps + 1,
+        )
 
         # we need to copy num_computed_tokens back to cpu to help
         # update actual seq_lens_cpu. gpu attention backend doesn't need these
@@ -106,41 +113,56 @@ class NPUModelRunner(GPUModelRunner):
             self.max_num_reqs,
             dtype=torch.int32,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=True,
         )
+
+        # Ascend-specific configurations
+        self.ascend_config = get_ascend_config()
+        # set this just the same as model runner v1, or it will raise error.
+        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+
+        # we need to update full graph params in run_fullgraph,
+        # so create a stream to update full graph params.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
+
+        # we need to use return value of `get_cudagraph_and_dp_padding`
+        # to set forward_context in `run_fullgraph`.
+        # so we can inherit `execute_model` method.
+        self.cudagraph_and_dp_padding: tuple[int, torch.Tensor | None, int] | None = None
+
+        # we need to use input_batch to set forward_context in run_fullgraph.
+        # so we can inherit `execute_model` method.
+        self.input_batch: AscendInputBatch | None = None
 
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
-        num_tokens_after_padding: int,
-    ) -> InputBatch:
+        batch_desc: BatchExecutionDescriptor,
+    ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
         num_tokens = scheduler_output.total_num_scheduled_tokens
+        num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
-        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
 
         # Decode first, then prefill.
         # batch_idx -> req_id
-        req_ids = sorted(
-            scheduler_output.num_scheduled_tokens.keys(),
-            key=lambda k: scheduler_output.num_scheduled_tokens[k],
-        )
+        req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore
 
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
-        num_scheduled_tokens = np.array(
-            [scheduler_output.num_scheduled_tokens[i] for i in req_ids],
-            dtype=np.int32)
+        numtoks_iter = map(num_tokens_per_req.get, req_ids)
+        num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
         num_valid_tokens = num_scheduled_tokens
         if scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = np.array(
                 [
-                    num_tokens - len(
-                        scheduler_output.scheduled_spec_decode_tokens.get(
-                            i, []))
+                    num_tokens - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
                     for num_tokens, i in zip(num_scheduled_tokens, req_ids)
                 ],
                 dtype=np.int32,
@@ -152,94 +174,97 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens,
             num_valid_tokens,
         )
-
-        idx_mapping_list = [
-            self.req_states.req_id_to_index[req_id] for req_id in req_ids
-        ]
-        idx_mapping = self.input_buffers.idx_mapping
-        idx_mapping.np[:num_reqs] = idx_mapping_list
-        idx_mapping_np = idx_mapping.np[:num_reqs]
-        idx_mapping_cpu = idx_mapping.cpu[:num_reqs]
-        idx_mapping_npu = idx_mapping.copy_to_gpu(num_reqs)
+        idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
+        idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
+        idx_mapping_cpu = torch.from_numpy(idx_mapping_np)
+        idx_mapping = async_copy_to_gpu(idx_mapping_cpu, device=self.device)
 
         # Get the number of draft tokens for each request.
-        if not scheduler_output.scheduled_spec_decode_tokens:
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        if not draft_tokens:
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits = torch.arange(num_reqs + 1,
-                                         device=self.device,
-                                         dtype=torch.int32)
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+            cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
+            expanded_idx_mapping = idx_mapping
+            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
-            draft_tokens = scheduler_output.scheduled_spec_decode_tokens
             num_draft_tokens = np.array(
-                [
-                    len(draft_tokens[req_id]) if req_id in draft_tokens else 0
-                    for req_id in req_ids
-                ],
+                [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
                 dtype=np.int32,
             )
             total_num_draft_tokens = int(num_draft_tokens.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
 
-            np.cumsum(
-                num_draft_tokens + 1,
-                out=self.input_buffers.cu_num_logits.np[1:num_reqs + 1],
-            )
-            cu_num_logits = self.input_buffers.cu_num_logits.copy_to_gpu(
-                num_reqs + 1)
+            num_logits = num_draft_tokens + 1
+            cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np[0] = 0
+            np.cumsum(num_logits, out=cu_num_logits_np[1:])
+            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
-        # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(idx_mapping_npu)
+            max_expand_len = self.num_speculative_steps + 1
+            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+                idx_mapping, total_num_logits, cu_num_logits, max_expand_len
+            )
 
         # Get query_start_loc.
-        np.cumsum(
-            num_scheduled_tokens,
-            out=self.input_buffers.query_start_loc.np[1:num_reqs + 1],
-        )
+        # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
+        # See _pad_query_start_loc_for_fia.
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+        query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
-        self.input_buffers.query_start_loc.np[num_reqs + 1:] = num_tokens
-        self.input_buffers.query_start_loc.copy_to_gpu()
-        query_start_loc_gpu = self.input_buffers.query_start_loc.gpu[:
-                                                                     num_reqs +
-                                                                     1]
-        query_start_loc_cpu = self.input_buffers.query_start_loc.cpu[:
-                                                                     num_reqs +
-                                                                     1]
-        query_start_loc_np = self.input_buffers.query_start_loc.np[:num_reqs +
-                                                                   1]
+        query_start_loc_np[num_reqs + 1 :] = num_tokens
 
-        # Get prefill tokens.
-        prepare_prefill_inputs(
-            self.input_buffers.input_ids,
-            self.req_states.next_prefill_tokens,
-            idx_mapping_npu,
-            query_start_loc_gpu,
-            # use prefill_token_ids.copy_to_gpu() because npu doesn't
-            # support uva buffer.
-            self.req_states.prefill_token_ids.copy_to_gpu(),
-            self.req_states.prefill_len.gpu,
-            self.req_states.num_computed_tokens,
+        # This is only required for vllm-ascend.
+        query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
+            num_tokens_after_padding,
+            num_reqs_padded,
+            num_reqs,
+            query_start_loc_np,
+            batch_desc.cg_mode,
+            batch_desc.num_reqs,
         )
+        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
+
+        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+
+        # Get prefill tokens if any.
+        if self.req_states.any_prefills(idx_mapping_np):
+            prepare_prefill_inputs(
+                self.input_buffers.input_ids,
+                self.req_states.next_prefill_tokens,
+                idx_mapping,
+                query_start_loc,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prefill_len.gpu,
+                self.req_states.num_computed_tokens.gpu,
+            )
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
-            idx_mapping_npu,
-            query_start_loc_gpu,
-            self.req_states.num_computed_tokens,
+            idx_mapping,
+            query_start_loc,
+            self.req_states.num_computed_tokens.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
 
+        # Pad for full CUDA graph mode.
+        self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
+
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
-            idx_mapping_npu,
+            idx_mapping,
             self.req_states.last_sampled_tokens,
-            query_start_loc_gpu,
+            query_start_loc,
             seq_lens,
             self.req_states.prefill_len.gpu,
             self.req_states.draft_tokens,
@@ -247,51 +272,36 @@ class NPUModelRunner(GPUModelRunner):
             total_num_logits,
         )
 
-        # Compute slot mappings: [num_kv_cache_groups, num_tokens]
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, self.input_buffers.positions[:num_tokens])
-
-        # Layer name -> attention metadata.
-        # TODO(Ronald1995): try to add a new method `build_attn_metadata` in
-        # vllm gpu_model_runner_v2, maybe we don't overwrite `prepare_inputs`
-        # method like this.
-        attn_metadata = build_attn_metadata(
-            attn_metadata_builders=self.attn_metadata_builders,
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            query_start_loc_gpu=query_start_loc_gpu,
-            query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens=self.input_buffers.seq_lens,
-            seq_lens_np=self.input_buffers.seq_lens_np,
-            num_computed_tokens_cpu=self.req_states.
-            num_computed_tokens_cpu[idx_mapping_cpu],
-            block_tables=block_tables,
-            slot_mappings=slot_mappings,
-            kv_cache_config=self.kv_cache_config,
-            attn_state=attn_state,
-        )
-
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
-        return InputBatch(
+
+        self.input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
-            idx_mapping=idx_mapping_npu,
+            num_reqs_after_padding=num_reqs_padded,
+            idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
+            expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
             num_draft_tokens=total_num_draft_tokens,
-            query_start_loc=query_start_loc_gpu,
+            query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
-            seq_lens_np=self.input_buffers.seq_lens_np,
+            dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             input_ids=input_ids,
             positions=positions,
-            attn_metadata=attn_metadata,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
+            cu_num_logits_np=cu_num_logits_np,
+            has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+            # extra attributes for ascend npus.
+            seq_lens_np=self.input_buffers.seq_lens_np,
+            attn_state=attn_state,
         )
+        return self.input_batch
 
     def postprocess(
         self,
@@ -318,7 +328,7 @@ class NPUModelRunner(GPUModelRunner):
         with torch.npu.stream(self.num_computed_tokens_stream):
             self.num_computed_tokens_stream.wait_stream(default_stream)
             self.num_computed_tokens_cpu.copy_(
-                self.req_states.num_computed_tokens,
+                self.req_states.num_computed_tokens.gpu,
                 non_blocking=True,
             )
             self.num_computed_tokens_event.record()
@@ -335,18 +345,53 @@ class NPUModelRunner(GPUModelRunner):
             req_index = self.req_states.req_id_to_index[req_id]
             # num_computed_tokens_cpu has reverted by num_rejected_tokens already.
             # in super postprocess method.
-            self.req_states.num_computed_tokens_cpu[
-                req_index] = self.num_computed_tokens_cpu[req_index]
+            self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
 
         # update seq_lens_cpu
-        for i, req_id in enumerate(req_ids):
+        for i, req_id in enumerate(req_ids):  # type: ignore
             req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[
-                req_index]
-            self.input_buffers.seq_lens_cpu[
-                i] = num_computed_tokens + num_scheduled_tokens[req_id]
+            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
+            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
 
     def eplb_warmup(self):
         # TODO(Ronald1995): just define the method in case calling error in
         # worker, implement it in the future.
         pass
+
+    def _pad_query_start_loc_for_fia(
+        self,
+        num_tokens_padded: int,
+        num_reqs_padded: int,
+        num_reqs: int,
+        query_start_loc_np: np.ndarray,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+        batch_desc_num_reqs: int | None = None,
+    ) -> tuple[np.ndarray, int]:
+        """
+        This function is only designed to satisfied the constraint that when the layout is TND,
+        the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
+        """
+        # TODO: need refactor later, related to vllm PR #34043 this pr delete func
+        # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            num_reqs_padded = num_reqs
+        else:
+            num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
+
+        if num_tokens_padded == num_reqs_padded * self.decode_query_len:
+            # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
+            assert num_reqs <= num_reqs_padded
+
+            last_loc = query_start_loc_np[num_reqs]
+            query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
+            )
+        else:
+            # Mixed-batch case: num_reqs must equal num_reqs_padded
+            assert num_reqs == num_reqs_padded
+
+            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
+            query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
+            num_reqs_padded = num_reqs_padded + 1
+
+        return query_start_loc_np, num_reqs_padded
