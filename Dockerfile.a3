@@ -34,7 +34,7 @@ WORKDIR /workspace
 
 # Install Mooncake dependencies
 RUN apt-get update -y && \
-    apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 && \
+    apt-get install -y git vim wget net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
