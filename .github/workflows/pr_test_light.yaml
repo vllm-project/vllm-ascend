@@ -41,11 +41,7 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-<<<<<<< HEAD
-      vllm: 35141a7eeda941a60ad5a4956670c60fd5a77029
-=======
       vllm: 14acf429ac08b6d538ca6feb3e06b6d13895804d
->>>>>>> a8b92f94 (update to 0324)
   changes:
     runs-on: linux-aarch64-a2b3-0
     outputs:
