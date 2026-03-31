@@ -2535,6 +2535,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         # TODO: need to rum a dummy sampler for generate task
+        hidden_states = hidden_states[logit_indices]
         output = self.model.compute_logits(hidden_states)
         return output
 
