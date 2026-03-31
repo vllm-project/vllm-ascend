@@ -1393,10 +1393,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
-            # When the graph is compiled to aclgraph (run_eagerly disabled),
-            # make_graph_return_tuple wraps the output as a tuple. Unwrap it.
-            if not self.use_aux_hidden_state_outputs and isinstance(hidden_states, tuple) and len(hidden_states) == 1:
-                hidden_states = hidden_states[0]
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
             if self.pcp_size > 1:
@@ -2504,10 +2500,6 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states, _ = outputs
             else:
                 hidden_states = outputs
-                # When the graph is compiled to aclgraph (run_eagerly disabled),
-                # make_graph_return_tuple wraps the output as a tuple. Unwrap it.
-                if isinstance(hidden_states, tuple) and len(hidden_states) == 1:
-                    hidden_states = hidden_states[0]
             dummy_compute_logits(hidden_states)
 
             if self.drafter:
@@ -2543,8 +2535,6 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         # TODO: need to rum a dummy sampler for generate task
-        # NPU tensors do not support numpy array fancy indexing, convert to torch tensor first.
-        hidden_states = hidden_states[torch.from_numpy(logit_indices).to(hidden_states.device)]
         output = self.model.compute_logits(hidden_states)
         return output
 

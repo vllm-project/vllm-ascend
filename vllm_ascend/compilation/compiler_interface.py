@@ -19,6 +19,7 @@ import copy
 import functools
 import os
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -68,35 +69,53 @@ def fusion_pass_compile(
     return compiled_fn, None
 
 
-def _patch_acl_graph_run_eagerly() -> None:
-    import importlib
+@contextmanager
+def _capture_acl_codegen(cache_path: str):
+    """Patch AclConcreteGraph.optimize_graph_without_runtime to capture the optimized fx_graph.
 
-    classes_to_patch = []
-    for mod_path in (
-        "torch_npu.dynamo.torchair._acl_concrete_graph.acl_graph",
-        "torchair._acl_concrete_graph.acl_graph",
-    ):
+    After the expensive graph optimization completes, the resulting fx_graph (optimized
+    eager-runnable GraphModule) is captured and saved to cache_path via torch.save.
+    """
+    try:
+        from torchair._acl_concrete_graph.fx2acl_converter import AclConcreteGraph
+    except ImportError:
+        logger.debug("torchair AclConcreteGraph not available, skipping cache capture")
+        yield []
+        return
+
+    captured: list = []
+    original = AclConcreteGraph.optimize_graph_without_runtime
+
+    def _patched(self, *sample_args, observer=None):
+        original(self, *sample_args, observer=observer)
+        # After optimization self is a fully-optimized AclConcreteGraph.
+        # Only capture once per compile() call.
+        if captured:
+            return
         try:
-            mod = importlib.import_module(mod_path)
-            cls = mod.AclGraph
-            if cls not in classes_to_patch:
-                classes_to_patch.append(cls)
-        except Exception:
-            pass
+            fx_graph = getattr(self, "fx_graph", None)
+            if fx_graph is not None:
+                captured.append(fx_graph)
+                logger.debug("Captured optimized fx_graph for cache")
+            else:
+                logger.debug("No fx_graph found on AclConcreteGraph, skipping cache capture")
+        except Exception as e:
+            logger.debug("Failed to capture optimized fx_graph: %s", e)
 
-    for AclGraph in classes_to_patch:
+    AclConcreteGraph.optimize_graph_without_runtime = _patched
+    try:
+        yield captured
+    finally:
+        AclConcreteGraph.optimize_graph_without_runtime = original
 
-        def patched_call(self, *args, **kwargs):
-            return self.fx_run_eagerly(*args, **kwargs)
-
-        AclGraph.__call__ = patched_call
-
-    logger.debug(
-        "Patched AclGraph.__call__ to use fx_run_eagerly for cache-loaded graphs (%d class(es))", len(classes_to_patch)
-    )
-
-
-_patch_acl_graph_run_eagerly()
+    # Save to disk after the with-block (and after the patch is restored).
+    if captured and cache_path:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+            torch.save(captured[0], cache_path)
+            logger.info("Saved npugraph_ex compilation cache: %s", cache_path)
+        except Exception as e:
+            logger.warning("Failed to write npugraph_ex cache to %s: %s", cache_path, e)
 
 
 def npugraph_ex_compile(
@@ -110,19 +129,17 @@ def npugraph_ex_compile(
     cache_dir: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
     import torchair
-    from torchair.npu_fx_compiler import _CompiledFxGraph
-
-    cache_path = os.path.join(cache_dir, key) if (cache_dir and key) else None
 
     torch.npu.set_compile_mode(jit_compile=False)
     config = torchair.CompilerConfig()
     # use aclgraph mode, avoid the transformation from fx graph to Ascend IR.
     config.mode = "reduce-overhead"
+    # execute FX graph in eager mode before graph mode to optimize FX graph.
+    config.debug.run_eagerly = True
     # This is a temporary fix to resolve issues with inplace operations in some testcases like test_whisper.
     # Avoid to change torch.ops.aten.gelu.default to torch.ops.aten.gelu_.default which will fallback to CPU
     # and cause copy_between_host_and_device error.
     config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
-
     if ascend_compilation_config.enable_static_kernel:
         logger.info(
             "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution."
@@ -142,34 +159,30 @@ def npugraph_ex_compile(
         ]
         config.experimental_config.aclgraph._aclnn_static_shape_kernel_sym_value_range = decode_cudagraph_batch_sizes
 
-    py_code_holder: list[str | None] = [None]
-    original_get_code = _CompiledFxGraph.get_code
+    npugraph_ex = torchair.get_npu_backend(compiler_config=config)
 
-    def hijacked_get_code(self, extend_config=None):
-        code = original_get_code(self, extend_config)
-        if isinstance(code, str):
-            py_code_holder[0] = code
-        return code
+    # Determine the cache artifact path for this graph.
+    cache_path: str | None = None
+    if cache_dir and key:
+        cache_path = os.path.join(cache_dir, key + ".acl_fx.pt")
 
-    _CompiledFxGraph.get_code = hijacked_get_code
-    try:
-        npugraph_ex = torchair.get_npu_backend(compiler_config=config)
+    if cache_path:
+        # Patch optimize_graph_without_runtime to capture the optimized fx_graph while
+        # keeping run_eagerly=True so ACLGraphWrapper behaviour is unchanged.
+        with _capture_acl_codegen(cache_path) as captured:
+            if not graph_returns_tuple(graph):
+                compiled_fn = make_graph_return_tuple(graph, example_inputs, npugraph_ex)
+            else:
+                compiled_fn = npugraph_ex(graph, example_inputs)
+        handle = (key, cache_path) if captured else None
+    else:
         # torch.compile requires the output of the fx graph to be a tuple
         if not graph_returns_tuple(graph):
             compiled_fn = make_graph_return_tuple(graph, example_inputs, npugraph_ex)
         else:
             compiled_fn = npugraph_ex(graph, example_inputs)
+        handle = None
 
-    finally:
-        _CompiledFxGraph.get_code = original_get_code
-
-    handle = None
-    if cache_path and py_code_holder[0]:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, "w") as f:
-            f.write(py_code_holder[0])
-        handle = (key, cache_path)
-        logger.info(f"Saved compiled graph to cache: {cache_path}")
     return compiled_fn, handle
 
 
@@ -182,24 +195,25 @@ class AscendCompiler(CompilerInterface):
 
     name = "AscendCompiler"
 
+    def initialize_cache(self, cache_dir: str, disable_cache: bool = False, prefix: str = "") -> None:
+        self.cache_dir: str | None = None if disable_cache else cache_dir
+
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         self.vllm_config = vllm_config
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         from hashlib import sha256
 
         import torch_npu
+        import torchair
 
         factors = {
-            "torch_npu_version": torch_npu.__version__,
+            "torchair_version": getattr(torchair, "__version__", "unknown"),
+            "torch_npu_version": getattr(torch_npu, "__version__", "unknown"),
             "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
         }
         logger.debug("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
-
-    def initialize_cache(self, cache_dir, disable_cache=False, prefix=""):
-        self.cache_dir = cache_dir
-        self.disable_cache = disable_cache
 
     def compile(
         self,
@@ -230,11 +244,8 @@ class AscendCompiler(CompilerInterface):
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex:
-            cache_dir = getattr(self, "cache_dir", None)
-            if getattr(self, "disable_cache", False):
-                cache_dir = None
             logger.info("enable_npugraph_ex is enabled, which will bring graph compilation optimization.")
-            assert hasattr(self, "vllm_config")
+            cache_dir = getattr(self, "cache_dir", None)
             return npugraph_ex_compile(
                 graph,
                 example_inputs,
@@ -243,18 +254,47 @@ class AscendCompiler(CompilerInterface):
                 ascend_compilation_config,
                 compile_range,
                 key,
-                cache_dir,
+                cache_dir=cache_dir,
             )
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
 
-    def load(self, handle, graph, example_inputs, graph_index, compile_range):
-        key, path = handle
-        from torchair.npu_fx_compiler import _CompiledFxArtifacts, _CompiledFxGraph
+    def load(
+        self,
+        handle: Any,
+        graph: fx.GraphModule,
+        example_inputs: list[Any],
+        graph_index: int,
+        compile_range: Range,
+    ) -> Callable:
+        assert isinstance(handle, tuple) and len(handle) == 2, f"Unexpected handle format: {handle}"
+        _key, cache_path = handle
 
-        with open(path) as f:
-            py_code = f.read()
-        artifacts = _CompiledFxArtifacts()
-        artifacts.py_code = py_code
-        logger.info("Loaded npugraph_ex compilation cache from %s", path)
-        return _CompiledFxGraph.load_artifacts(artifacts)
+        if not os.path.exists(cache_path):
+            raise RuntimeError(
+                f"npugraph_ex cache file not found: {cache_path}. Delete the cache directory and restart to recompile."
+            )
+
+        try:
+            # Load the optimized FX graph (eager-runnable GraphModule).
+            # weights_only=False is required because we saved a full GraphModule, not just tensors.
+            fx_graph = torch.load(cache_path, weights_only=False)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load npugraph_ex cache {cache_path}: {e}") from e
+
+        # The cached fx_graph was compiled from the (possibly tuple-wrapped) AOT graph,
+        # so it always returns a tuple. Restore the calling convention that the original
+        # compile() call would have produced.
+        returns_tuple = graph_returns_tuple(graph)
+
+        def compiled(*args: Any) -> Any:
+            result = fx_graph(*args)
+            if returns_tuple:
+                return result
+            # Non-tuple graph: unwrap the single output element.
+            if isinstance(result, (list, tuple)):
+                return result[0]
+            return result
+
+        logger.info("Loaded npugraph_ex compilation cache from %s", cache_path)
+        return compiled
