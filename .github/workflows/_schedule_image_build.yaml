@@ -101,6 +101,13 @@ jobs:
           echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
         fi
 
+    - name: Configure sccache
+      uses: actions/github-script@v7
+      with:
+        script: |
+          core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
     - name: Build and push
       uses: docker/build-push-action@v7
       id: build
@@ -114,6 +121,11 @@ jobs:
         outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
+          SCCACHE_GHA_ENABLED=true
+          MATRIX_ARCH=${{ matrix.arch }}
+        secrets: |
+          ACTIONS_RESULTS_URL=${{ env.ACTIONS_RESULTS_URL }}
+          ACTIONS_RUNTIME_TOKEN=${{ env.ACTIONS_RUNTIME_TOKEN }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
