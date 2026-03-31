@@ -215,8 +215,24 @@ If this is insufficient to pinpoint the error, please download and review the lo
     fi
 }
 
+clear_logs() {
+    print_section "Clearing logs from previous runs"
+    rm -fr "$HOME/ascend/log" || true
+}
+
+backup_ascend_logs() {
+    if [ -n "${LOG_PREFIX:-}" ]; then
+        local dest="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-unknown}_plogs"
+        mkdir -p "$dest"
+        cp -r /root/ascend/log/. "$dest/" 2>/dev/null || true
+        echo "Ascend logs backed up to $dest"
+    fi
+}
+
 main() {
+    trap backup_ascend_logs EXIT
     check_npu_info
+    clear_logs
     check_and_config
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
