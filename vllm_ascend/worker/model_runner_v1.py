@@ -2566,7 +2566,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.seq_lens[num_reqs_padded:] = 0
             self._safe_copy_to_gpu(self.seq_lens)
 
-            cum_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.arange_np)
+            cum_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
             if hasattr(self.query_start_loc, 'np'):
                 self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             else:
