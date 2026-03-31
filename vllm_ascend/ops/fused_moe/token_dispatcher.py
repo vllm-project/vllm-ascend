@@ -172,7 +172,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp:
+        if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp and token_dispatch_input.quant.dispatch_with_quant:
             y_dtype = torch.float8_e4m3fn
             if (
                 token_dispatch_input.quant.mxfp is not None
@@ -212,6 +212,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             tp_recv_counts,
             expand_scales,
         ) = output[0:7]
+        
+        # When quant_mode is set to 0, dispatch operator also generates a not None dynamic_scale.
+        if not token_dispatch_input.quant.dispatch_with_quant:
+            dynamic_scale = None
 
         group_list_type = 0
         return MoETokenDispatchOutput(

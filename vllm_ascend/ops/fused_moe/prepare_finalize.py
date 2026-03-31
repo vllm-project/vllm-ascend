@@ -339,6 +339,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             # TODO(linfeng): MXFP8 with AllGather+EP currently does not pre-quantize
             # per-token activations in prepare. Keep quantization in the MoE MLP path.
             pass
+        elif quant_type == QuantType.MXFP4:
+            # MXFP4 with AllGather+EP currently does not pre-quantize
+            # per-token activations in prepare. Keep quantization in the MoE MLP path.
+            pass
 
         if self.multistream_overlap_gate:
             assert PrepareAndFinalize.quant_stream is not None

@@ -307,6 +307,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
+        act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
     ):
         if not use_mxfp_quant:
             return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
@@ -328,7 +330,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             dequant_mode=2,
             quant_mode=2,
             dequant_dtype=torch.float32,
-            quant_dtype=torch.float8_e4m3fn,
+            quant_dtype=act_quant_type,
+            x_dtype=act_quant_type,
+            weight_dtype=weight_quant_type,
             weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
         )

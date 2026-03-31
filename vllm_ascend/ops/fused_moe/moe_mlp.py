@@ -160,6 +160,8 @@ def quant_apply_mlp(
                 x_scale=pertoken_scale,
                 bias=None,
                 use_mxfp_quant=use_mxfp_quant,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
@@ -265,6 +267,8 @@ def quant_apply_mlp(
                 x_scale=pertoken_scale,
                 bias=bias1,
                 use_mxfp_quant=use_mxfp_quant,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
