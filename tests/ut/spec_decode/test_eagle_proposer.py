@@ -134,7 +134,7 @@ class TestEagleProposerInitialization(TestBase):
             proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
             self.assertEqual(proposer.hidden_size, 2048)
-            self.assertFalse(proposer.use_cuda_graph)
+            self.assertTrue(proposer.use_cuda_graph)
             expected_max_num_tokens = proposer.max_num_tokens
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 2048))
 
