@@ -155,6 +155,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         ]
 
         self._runnable = self._run_merged_draft
+        self.is_multimodal_model = self.vllm_config.model_config.is_multimodal_model
         if self.uses_mrope:
             self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1), dtype=torch.int32, device=device)
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
@@ -166,6 +167,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
+
+        self.token_arange_np = np.arange(self.max_num_tokens + 1)
 
     def _get_model(self) -> nn.Module:
         """
@@ -414,6 +417,16 @@ class SpecDecodeBaseProposer(EagleProposer):
         if is_profile:
             batch_size = min(batch_size, self.runner.max_num_reqs)
 
+        if self.supports_mm_inputs:
+            mm_embeds, is_mm_embed = (None, None)
+            inputs_embeds = self.model.embed_input_ids(
+                self.input_ids[:num_tokens], multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
+            )
+            self.inputs_embeds[:num_tokens] = inputs_embeds
+            inputs_embeds = self.inputs_embeds[:num_tokens]
+        else:
+            inputs_embeds = None
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
@@ -437,7 +450,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 token_indices_to_sample=self.token_indices_to_sample[: batch_size * self.extra_slots_per_request],
                 # The target_position's address is same as the model_positions's
                 target_positions=model_positions,
-                inputs_embeds=None,
+                inputs_embeds=inputs_embeds,
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
                 num_tokens=num_tokens,
             )
@@ -570,6 +583,12 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         # Copy the old attn_metadata and update
         attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
+
+        # Clone the data so that when calculating the data at position 2 and position 3
+        # in the merged graph, it does not affect position 1
+        # FIXME(lilinsiman)
+        common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
+
         if self.pcp_size * self.dcp_size > 1:
             if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
                 # For pcp/dcp, tokens are split across different cp ranks,
@@ -583,7 +602,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                     - 1
                 )
                 num_accept_tokens = query_lens_d.to(self.device) - num_reject_tokens
-                ori_seq_len = attn_metadata_i.seq_lens[:batch_size].clone()
+                ori_seq_len = attn_metadata_i.seq_lens_cpu[:batch_size].clone()
                 mtp_slot_mapping = self.runner.pcp_manager.mtp_slot_pad
 
                 # slot_mapping index base offset:
@@ -1136,8 +1155,15 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.num_input_tokens = input_batch_size
 
         # The loop part
-
         used_update_positions += 1
+
+        # Clone the data so that when calculating the data at position 2 and position 3
+        # in the merged graph, it does not affect position 1
+        # FIXME(lilinsiman)
+        common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+        common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
+        common_attn_metadata.positions = common_attn_metadata.positions.clone()
 
         # NOTE(woosuk): We should handle the case where the draft model
         # generates tokens beyond the max model length. Since it is complex
@@ -1223,7 +1249,8 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         if self.pcp_size * self.dcp_size > 1:
             if self.vllm_config.model_config.use_mla:
-                attn_metadata.decode.cp_seq_len = cp_seq_len
+                if getattr(attn_metadata, "decode", None):
+                    attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
                 attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
 
@@ -1568,6 +1595,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.is_multimodal_model and _EXTRA_CTX.flash_comm_v1_enabled:
+            return hidden_states, positions
         if self.method == "mtp":
             if _EXTRA_CTX.flash_comm_v1_enabled:
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)

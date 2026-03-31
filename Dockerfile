@@ -31,7 +31,7 @@ ENV SOC_VERSION=$SOC_VERSION \
 
 WORKDIR /workspace
 
-COPY . /vllm-workspace/vllm-ascend/
+COPY ./tools/mooncake_installer.sh /vllm-workspace/
 
 RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
     --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,required=false \
@@ -39,15 +39,14 @@ RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
         bash /vllm-workspace/vllm-ascend/tools/sccache_installer.sh; \
     fi
 
-# Install Mooncake dependencies
-RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
-    --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,required=false \
-    apt-get update -y && \
-    apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 && \
+# Install clang-15 (for triton-ascend) and Mooncake
+RUN apt-get update -y && \
+    apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 clang-15 && \
+    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
+    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
-    cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
-    cd /vllm-workspace/Mooncake && \
-    T0=$(date +%s) && bash mooncake_installer.sh -y && echo "=== mooncake_installer.sh took $(($(date +%s)-T0))s ===" && \
+    mv /vllm-workspace/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
+    cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
     ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     if [ "${SCCACHE_GHA_ENABLED}" = "true" ]; then \
@@ -60,15 +59,16 @@ RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
         SCCACHE_CMAKE_FLAG=""; \
     fi && \
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
-    mkdir -p build && cd build && \
-    T0=$(date +%s) && cmake .. -DUSE_ASCEND_DIRECT=ON ${SCCACHE_CMAKE_FLAG} && echo "=== cmake took $(($(date +%s)-T0))s ===" && \
-    T0=$(date +%s) && make -j$(nproc) && echo "=== make -j took $(($(date +%s)-T0))s ===" && \
-    T0=$(date +%s) && make install && echo "=== make install took $(($(date +%s)-T0))s ===" && \
-    rm -fr /vllm-workspace/Mooncake/build && \
+    mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON ${SCCACHE_CMAKE_FLAG} && \
+    make -j$(nproc) && make install && \
+    rm -rf /vllm-workspace/Mooncake/build && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip config set global.index-url ${PIP_INDEX_URL}
+# Install modelscope (for fast download) and ray (for multinode)
+RUN pip config set global.index-url ${PIP_INDEX_URL} && \
+    python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
+    python3 -m pip cache purge
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
@@ -80,8 +80,13 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm
     python3 -m pip cache purge
 
 # Install vllm-ascend
-# Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
-# Installing vllm-ascend on x86 can pull upstream triton back in alongside triton-ascend. Remove it immediately after this step.
+ARG SOC_VERSION="ascend910b1"
+ENV DEBIAN_FRONTEND=noninteractive
+ENV SOC_VERSION=$SOC_VERSION \
+    TASK_QUEUE_ENABLE=1 \
+    OMP_NUM_THREADS=1
+COPY . /vllm-workspace/vllm-ascend/
+
 RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
     --mount=type=secret,id=ACTIONS_RUNTIME_TOKEN,required=false \
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
@@ -96,21 +101,11 @@ RUN --mount=type=secret,id=ACTIONS_RESULTS_URL,required=false \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     if [ -f /usr/bin/sccache ]; then rm -f /usr/bin/sccache; fi && \
-    if [ "$(uname -i)" = "x86_64" ]; then python3 -m pip uninstall -y triton; fi && \
+    python3 -m pip uninstall -y triton triton-ascend && \
+    python3 -m pip install -v triton-ascend==3.2.0 && \
     python3 -m pip cache purge
 
-# Install clang-15 (for triton-ascend)
-RUN apt-get update -y && \
-    apt-get -y install clang-15 && \
-    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
-    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
-    rm -rf /var/cache/apt/* && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install modelscope (for fast download) and ray (for multinode)
-RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
-    python3 -m pip cache purge
-
+# Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
 RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 
