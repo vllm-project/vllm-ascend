@@ -663,6 +663,7 @@ def _get_row_parallel_op(
     | None
 ):
     from vllm.config import get_current_vllm_config
+
     vllm_config = get_current_vllm_config()
 
     if (
