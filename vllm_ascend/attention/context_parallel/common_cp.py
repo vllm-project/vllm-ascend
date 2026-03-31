@@ -34,6 +34,8 @@ class AscendPCPMetadata:
     block_table_cp: torch.Tensor = None
     valid_block_ids: torch.Tensor = None
     prefill_q_cum_seqlens: torch.Tensor = None
+    max_num_tokens_across_pcp: int = 0
+    total_num_scheduled_tokens: int = 0
     block_arange: torch.Tensor = None
 
 
