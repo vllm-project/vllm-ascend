@@ -74,7 +74,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        self.bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
+        self.bgmv_shrink(x, w_t_all, y, self._get_token_lora_indices(x), scale)
 
     def _expand_prefill(
         self,
@@ -101,7 +101,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         add_inputs: bool,
     ):
-        self.bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
+        self.bgmv_expand(x, w_t_all, y, self._get_token_lora_indices(x), add_inputs)
 
     def _expand_slice_prefill(
         self,
@@ -134,7 +134,18 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
-        self.bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset, y_slice_size, add_inputs)
+        self.bgmv_expand_slice(
+            x,
+            w_t_all,
+            y,
+            self._get_token_lora_indices(x),
+            y_offset,
+            y_slice_size,
+            add_inputs,
+        )
+
+    def _get_token_lora_indices(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
     def _apply_expand(
         self,

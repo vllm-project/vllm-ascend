@@ -31,6 +31,7 @@ class AscendConfig:
 
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
+        model_config = vllm_config.model_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -91,7 +92,7 @@ class AscendConfig:
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
-        if vllm_config.kv_transfer_config is not None and not vllm_config.model_config.is_deepseek_mla:
+        if vllm_config.kv_transfer_config is not None and model_config is not None and not model_config.is_deepseek_mla:
             prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {"tp_size": 1})["tp_size"]
             decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config("decode", {"tp_size": 1})["tp_size"]
             assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
@@ -100,7 +101,7 @@ class AscendConfig:
                 try:
                     # only support Qwen model now
                     # TODO: use a more robust method to get kv_head_num
-                    num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
+                    num_kv_head = model_config.hf_text_config.num_key_value_heads
                     self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
@@ -136,8 +137,10 @@ class AscendConfig:
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
-            use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
-            if not vllm_config.model_config.is_deepseek_mla or use_sparse:
+            if model_config is None:
+                raise RuntimeError("enable_kv_nz requires a valid model_config.")
+            use_sparse = hasattr(model_config.hf_text_config, "index_topk")
+            if not model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError("enable_kv_nz is only supported for mla currently.")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise NotImplementedError(
