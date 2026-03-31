@@ -81,12 +81,13 @@ class PCPManager:
             device=device,
             pin_memory=pin_memory,
         )
-        self.pcp_padded_slot_mapping = torch.full(
+        self.sample_slot_mapping = torch.full(
             (max_buffer_num_tokens,),
             fill_value=-1,
             dtype=torch.int32,
             device=device,
         )
+        self.pcp_padded_slot_mapping_list: list = []  # reinitialized in initialize_slot_mapping
         self.pcp_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.total_num_sampled_tokens_pcp = 0
         self.num_pcp_pads_cpu_tensor = torch.zeros((max_num_reqs,), device="cpu", dtype=torch.int64)
@@ -130,9 +131,10 @@ class PCPManager:
         self.pcp_pads_logits_hybrid_attn = torch.ones(self.max_num_reqs, dtype=torch.int32) * (self.pcp_world_size - 1)
         self.pcp_padded_tokens_fla = 0
         self.pcp_padded_tokens_length = 0
-        self.num_scheduled_tokens_padded = None
+        self.num_scheduled_tokens_padded: np.ndarray | None = None
         self.max_num_tokens_across_pcp = 0
         self.pcp_tokens_padded = None
+        self.total_num_scheduled_tokens = 0
 
     def _get_cumsum_and_arange(
         self,
@@ -169,10 +171,25 @@ class PCPManager:
         self.num_decode_reqs = first_prefill
         self.num_prefill_reqs = num_reqs - self.num_decode_reqs
         self.num_decode_tokens = num_scheduled_tokens[: self.num_decode_reqs].sum()
+        self.num_scheduled_tokens_padded = num_scheduled_tokens  # for graph compiling in hybrid_attn
 
         self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
         self.query_lens_pcp_full.cpu[self.num_reqs :].fill_(0)
         self.query_lens_pcp_full.copy_to_gpu()
+
+    def initialize_slot_mapping(self) -> None:
+        """
+        Hyrbid-attention models, such as qwen3_next, have plural kv_cache_groups, which may lead to
+        problems like overwriting last group's pcp_padded_slot_mapping, since they share the same
+        address. Therefore we need as many pcp_padded_slot_mappings as kv_cache_groups.
+        """
+        pcp_padded_slot_mapping = torch.full(
+            (self.sample_slot_mapping.shape[0],),
+            fill_value=-1,
+            dtype=torch.int32,
+            device=self.sample_slot_mapping.device,
+        )
+        self.pcp_padded_slot_mapping_list.append(pcp_padded_slot_mapping)
 
     def update_tokens_for_pcp(
         self,
@@ -455,6 +472,7 @@ class PCPManager:
             self.max_num_tokens_across_pcp = max_scheduled_tokens
             self.pcp_tokens_padded = pcp_tokens[: self.num_reqs]
             self.num_scheduled_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
+            self.total_num_scheduled_tokens = num_padded_scheduled_tokens[: self.num_reqs].sum()
             return num_padded_scheduled_tokens, positions_linear
         return pcp_tokens[: self.num_reqs], positions
 
@@ -480,24 +498,27 @@ class PCPManager:
             logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
         return logits_indices
 
-    def get_padded_slot_mapping(self, num_tokens: int, num_tokens_padded: int, slot_mapping: torch.Tensor):
+    def get_padded_slot_mapping(
+        self,
+        num_tokens: int,
+        num_tokens_padded: int,
+        slot_mapping: torch.Tensor,
+        kv_cache_group_id: int,
+    ):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
+        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping_list[kv_cache_group_id]
         if self.pcp_use_hybrid_attn:
             assert self.num_scheduled_tokens_padded is not None
             num_tokens = self.num_scheduled_tokens_padded.sum()
-        pcp_padded_slot_mapping = (
-            self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
-            if not self.pcp_use_hybrid_attn
-            else self.pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
-        )
+        if not self.pcp_use_hybrid_attn or self.total_num_sampled_tokens_pcp != num_tokens_padded:
+            pcp_padded_slot_mapping = pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
+        else:
+            pcp_padded_slot_mapping = pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping
-        if self.pcp_use_hybrid_attn:
-            return pcp_padded_slot_mapping.clone()
-        else:
-            return pcp_padded_slot_mapping
+        return pcp_padded_slot_mapping
 
     def get_restore_hidden_states(
         self,
@@ -519,11 +540,13 @@ class PCPManager:
                 restore_idx,
             )
         else:
-            if self.pcp_padded_tokens_fla > 0:
+            if hidden_states.shape[0] == self.total_num_scheduled_tokens and self.pcp_padded_tokens_fla > 0:
                 hidden_states = F.pad(
                     hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
                 )
-            hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states[: self.max_num_tokens_across_pcp].contiguous(), dim=0
+            )
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
             return torch.index_select(hidden_states, 0, restore_idx)
 
@@ -920,6 +943,8 @@ class PCPManager:
                     long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
                         : pcp_unpad_mask.sum() + self.num_decode_reqs * (self.pcp_world_size - 1)
                     ]
+                    long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
+                    long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
                 long_seq_metadata.q_full_idx = self.q_full_idx
