@@ -104,8 +104,7 @@ def quant_apply_mlp(
     use_bf16: bool = True,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
-    #use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
-    use_gmm_swiglu_quant_fusion = use_mxfp_quant  and not dynamic_eplb
+    use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
 
     if use_mxfp_quant:
         ensure_mxfp8_moe_available("MXFP MoE MLP path")
@@ -165,8 +164,6 @@ def quant_apply_mlp(
                     use_mxfp_quant=use_mxfp_quant,
                 )
             else:
-                #TODO now only apply for w4a8 mxfp
-                #print(f"111===== x {hidden_states.dtype} weight {_require_single_tensor_for_swiglu_quant(w1, name='w1').dtype}  antiquant_scale {_require_single_tensor_for_swiglu_quant(w1_scale, name='w1_scale').dtype}  pertoken_scale {pertoken_scale.dtype}  antiquant_scale {_require_single_tensor_for_swiglu_quant(w1_scale, name='w1_scale').shape}")
                 antiquant_scale = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
                 antiquant_scale = antiquant_scale.reshape(antiquant_scale.shape[0], antiquant_scale.shape[1] // 2, 2, antiquant_scale.shape[2]).transpose(-1, -2)
                 hidden_states = torch_npu.npu_grouped_matmul(
@@ -174,7 +171,7 @@ def quant_apply_mlp(
                     weight=[_require_single_tensor_for_swiglu_quant(w1, name="w1")],
                     scale=None,
                     antiquant_scale=[antiquant_scale],
-                    scale_dtype=None, #FLOAT8_E8M0FNU_DTYPE,
+                    scale_dtype=None,
                     per_token_scale=[pertoken_scale],
                     per_token_scale_dtype=torch.float8_e8m0fnu,
                     split_item=2,

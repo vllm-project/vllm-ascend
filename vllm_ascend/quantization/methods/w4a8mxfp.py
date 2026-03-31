@@ -73,7 +73,6 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(
             output_size, input_size // self.group_size, dtype=torch.uint8)
-        #print(f'111=== {output_size} {input_size // self.group_size}')
         return params_dict
 
     def apply(
@@ -145,7 +144,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod:
                                               hidden_sizes,
                                               intermediate_size_per_partition // 2,
                                               dtype=torch.uint8)
-        #print(f'======= w13_weight {param_dict["w13_weight"].shape}  w2_weight {param_dict["w2_weight"].shape}  intermediate_size_per_partition {intermediate_size_per_partition}  hidden_sizes {hidden_sizes}')
         return param_dict
 
     def get_dynamic_quant_param(
