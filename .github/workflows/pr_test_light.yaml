@@ -18,6 +18,7 @@
 name: E2E-Light
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - 'main'
@@ -87,7 +88,7 @@ jobs:
     needs: [lint, changes]
     name: unit test
     # only trigger unit test after lint passed and the change is e2e and ut related.
-    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    # if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     strategy:
       matrix:
         vllm_version: [35141a7eeda941a60ad5a4956670c60fd5a77029, v0.18.0]
@@ -106,7 +107,7 @@ jobs:
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+    # if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
