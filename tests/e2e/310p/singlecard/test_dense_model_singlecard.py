@@ -47,3 +47,18 @@ def test_qwen3_dense_tp1_w8a8():
         max_model_len=16384,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_qwen3_5_dense_tp1_fp16():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+        "Qwen/Qwen3.5-4B",
+        tensor_parallel_size=1,
+        enforce_eager=True,
+        dtype="float16",
+        max_model_len=16384,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
