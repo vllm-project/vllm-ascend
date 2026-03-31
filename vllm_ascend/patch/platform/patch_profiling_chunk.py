@@ -20,33 +20,26 @@ This module patches ``EngineCore`` to:
 1. Run profiling at startup (after model_executor is ready).
 2. Record execution timing after each model step to refine the
    history-aware chunk prediction model online.
+
+In multiprocessing ``spawn`` mode the child process starts a fresh Python
+interpreter, so class-level monkey-patches applied in the parent are lost.
+To handle this we additionally wrap ``EngineCoreProc.run_engine_core``
+(the subprocess entry-point): when pickle resolves the wrapper it triggers
+an import of this module, which re-applies the ``EngineCore.__init__``
+patches inside the child process before any ``EngineCore`` is instantiated.
 """
 
 from vllm.logger import init_logger
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
 logger = init_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# 1. Patch EngineCore.__init__ to trigger profiling after initialization
-# ---------------------------------------------------------------------------
-_original_engine_core_init = EngineCore.__init__
-
-
-def _patched_engine_core_init(self, *args, **kwargs):
-    _original_engine_core_init(self, *args, **kwargs)
-
-    if hasattr(self.scheduler, "run_profiling_chunk_init"):
-        logger.info("[ProfilingChunk] Running profiling initialization...")
-        self.scheduler.run_profiling_chunk_init(self.model_executor)
-
-
-EngineCore.__init__ = _patched_engine_core_init
+_profiling_patches_applied = False
+_original_update_from_output = None
 
 
 # ---------------------------------------------------------------------------
-# 2. Patch step / step_with_batch_queue to record execution timing
+# Helper: record execution timing
 # ---------------------------------------------------------------------------
 
 def _record_execution_timing(scheduler, scheduler_output, model_output):
@@ -121,13 +114,8 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
 
 
 # ---------------------------------------------------------------------------
-# 3. Wrap scheduler.update_from_output to intercept model_output for timing
+# Helper: wrap scheduler.update_from_output for timing
 # ---------------------------------------------------------------------------
-# Both step() and step_with_batch_queue() call
-# scheduler.update_from_output(scheduler_output, model_output), so
-# wrapping this single method captures timing in all code paths.
-_original_update_from_output = None
-
 
 def _ensure_update_from_output_wrapped(scheduler):
     """Wrap scheduler.update_from_output to record execution timing."""
@@ -149,14 +137,52 @@ def _ensure_update_from_output_wrapped(scheduler):
     cls.update_from_output = _wrapped_update_from_output
 
 
-# Chain onto the __init__ patch to apply the wrapper once the scheduler
-# instance exists.
-_init_before_wrap = EngineCore.__init__
+# ---------------------------------------------------------------------------
+# Core: apply EngineCore.__init__ patches (idempotent)
+# ---------------------------------------------------------------------------
+
+def _apply_profiling_patches():
+    """Patch ``EngineCore.__init__`` to trigger profiling and timing hooks.
+
+    Safe to call multiple times; the guard ``_profiling_patches_applied``
+    ensures the patch is applied at most once per process.
+    """
+    global _profiling_patches_applied
+    if _profiling_patches_applied:
+        return
+    _profiling_patches_applied = True
+
+    original_init = EngineCore.__init__
+
+    def _patched_engine_core_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+
+        if hasattr(self.scheduler, "run_profiling_chunk_init"):
+            logger.info("[ProfilingChunk] Running profiling initialization...")
+            self.scheduler.run_profiling_chunk_init(self.model_executor)
+
+        _ensure_update_from_output_wrapped(self.scheduler)
+
+    EngineCore.__init__ = _patched_engine_core_init
 
 
-def _patched_engine_core_init_with_wrap(self, *args, **kwargs):
-    _init_before_wrap(self, *args, **kwargs)
-    _ensure_update_from_output_wrapped(self.scheduler)
+# ---------------------------------------------------------------------------
+# 1. Apply patches at module level for the InprocClient (in-process) path.
+# ---------------------------------------------------------------------------
+_apply_profiling_patches()
+
+# ---------------------------------------------------------------------------
+# 2. Wrap EngineCoreProc.run_engine_core so that spawned subprocesses
+#    re-apply the patches.  When the child unpickles this wrapper it
+#    imports this module, which triggers _apply_profiling_patches() above,
+#    ensuring EngineCore.__init__ is patched before any instance is created.
+# ---------------------------------------------------------------------------
+_original_run_engine_core = EngineCoreProc.run_engine_core
 
 
-EngineCore.__init__ = _patched_engine_core_init_with_wrap
+def _patched_run_engine_core(*args, **kwargs):
+    _apply_profiling_patches()
+    return _original_run_engine_core(*args, **kwargs)
+
+
+EngineCoreProc.run_engine_core = _patched_run_engine_core
