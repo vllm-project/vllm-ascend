@@ -20,6 +20,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: LOG_PREFIX
+                value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -80,6 +82,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: LOG_PREFIX
+                value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG

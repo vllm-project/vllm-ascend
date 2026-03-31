@@ -469,6 +469,19 @@ class AscendSFAImpl(MLAAttentionImpl):
                         )
                 register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        # sfa does not need to update graph params
+        pass
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)

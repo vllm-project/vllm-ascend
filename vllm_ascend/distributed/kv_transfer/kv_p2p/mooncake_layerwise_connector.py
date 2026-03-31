@@ -226,6 +226,12 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.kv_cache_config = kv_cache_config
         self.kv_cache_specs = kv_cache_specs
         self.attn_resharding_group_idx = attn_resharding_group_idx
+        self.mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        self.num_speculative_tokens = (
+            self.vllm_config.speculative_config.num_speculative_tokens
+            if self.vllm_config.speculative_config is not None
+            else 0
+        )
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.pd_head_ratio = pd_head_ratio
@@ -274,6 +280,10 @@ class KVCacheSendingLayerThread(threading.Thread):
 
         if isinstance(layer_kv_cache_spec, MambaSpec):
             # only support one block transfer for mamba
+            if self.mamba_cache_mode == "align":
+                transfer_block_idx = len(local_block_ids) - self.num_speculative_tokens - 1
+            else:
+                transfer_block_idx = 0
             local_conv_addr, local_ssm_addr = local_layer_metadata.kv_caches_base_addr
             remote_conv_addr, remote_ssm_addr = remote_layer_metadata.kv_caches_base_addr
             local_conv_len, local_ssm_len = local_layer_metadata.block_len
@@ -281,8 +291,8 @@ class KVCacheSendingLayerThread(threading.Thread):
             if tp_ratio == 1:
                 src_list.extend(
                     [
-                        local_conv_addr + local_block_ids[0] * local_conv_len,
-                        local_ssm_addr + local_block_ids[0] * local_ssm_len,
+                        local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len,
+                        local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len,
                     ]
                 )
                 dst_list.extend(
@@ -320,12 +330,14 @@ class KVCacheSendingLayerThread(threading.Thread):
                             (i * conv_shape[1] + local_conv_offset) * tp_ratio
                             + (self.tp_rank % tp_ratio) * local_conv_size
                         ) * get_dtype_size(conv_dtype)
-                        src_list.append(local_conv_addr + local_block_ids[0] * local_conv_len + local_addr_offset)
+                        src_list.append(
+                            local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len + local_addr_offset
+                        )
                         dst_list.append(remote_conv_addr + remote_block_ids[0] * remote_conv_len + remote_addr_offset)
                         length_list.append(local_conv_size * get_dtype_size(conv_dtype))
                 # ssm
                 remote_addr_offset = (self.tp_rank % tp_ratio) * math.prod(ssm_shape) * get_dtype_size(ssm_dtype)
-                src_list.append(local_ssm_addr + local_block_ids[0] * local_ssm_len)
+                src_list.append(local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len)
                 dst_list.append(remote_ssm_addr + remote_block_ids[0] * remote_ssm_len + remote_addr_offset)
                 length_list.append(local_ssm_len)
         else:
@@ -496,7 +508,6 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.lock = threading.Lock()
         self.done_requests = set[str]()
         self.task_tracker = dict[str, int]()
-        self.request_map = dict[str, str]()
         self.ready_event = ready_event
         self.metadata = metadata
 
@@ -513,11 +524,12 @@ class KVCacheRecvingLayerThread(threading.Thread):
 
     def update_task(self, req_id, trans_count):
         with self.lock:
+            if req_id not in self.task_tracker:
+                self.task_tracker[req_id] = 0
             self.task_tracker[req_id] += 1
             if self.task_tracker[req_id] == trans_count:
                 self.task_tracker.pop(req_id)
-                self.done_requests.add(self.request_map[req_id])
-                self.request_map.pop(req_id)
+                self.done_requests.add(req_id)
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -984,6 +996,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.side_channel_host = get_ip()
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.use_mla = self.vllm_config.model_config.use_mla
+        self.request_map = dict[str, str]()
         if self.use_mla:
             self.total_num_kv_heads = 1
         else:
@@ -1236,8 +1249,12 @@ class MooncakeLayerwiseConnectorWorker:
             if self.vllm_config.kv_transfer_config.is_kv_consumer
             else set()
         )
+        done_recving = {self.request_map[s] for s in done_recving if s in self.request_map}
         done_recving.update(self.virtual_request)
         self.virtual_request = set()
+        for req_id in done_recving:
+            req_id = req_id[:-9]
+            self.request_map.pop(req_id, None)
         if len(done_recving) > 0:
             logger.info(
                 f"Number of completed KV cache recv requests: {len(done_recving)}, receive requests: {done_recving}"
@@ -1415,9 +1432,7 @@ class MooncakeLayerwiseConnectorWorker:
                     continue
                 external_req_id = get_external_request_id(req_id)
                 assert self.kv_recv_layer_thread is not None
-                with self.kv_recv_layer_thread.lock:
-                    self.kv_recv_layer_thread.task_tracker[external_req_id] = 0
-                    self.kv_recv_layer_thread.request_map[external_req_id] = req_id
+                self.request_map[external_req_id] = req_id
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
             # update trans info
             update_metadata = {}
@@ -1729,7 +1744,19 @@ class MooncakeLayerwiseConnectorWorker:
             encoded_data = msg_encoder.encode((DONE_SENDING_MSG, external_req_id, req_meta.trans_count[group_idx]))
             with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore
                 ensure_zmq_send(sock, encoded_data, f"{req_meta.remote_host}:{req_meta.remote_port}")
-                ack = sock.recv()
+                # Avoid blocking forever waiting for the REQ/ACK response.
+                sock.setsockopt(zmq.RCVTIMEO, int(self.timeout * 1000))  # type: ignore
+                try:
+                    ack = sock.recv()
+                except zmq.Again:  # type: ignore
+                    logger.warning(
+                        "Timeout waiting ACK for request %s from %s:%d (timeout=%.3fs)",
+                        external_req_id,
+                        req_meta.remote_host,
+                        req_meta.remote_port,
+                        self.timeout,
+                    )
+                    return
                 if ack != b"ACK":
                     raise ValueError(f"Unexpected ACK response: {ack}")
         except Exception as e:
