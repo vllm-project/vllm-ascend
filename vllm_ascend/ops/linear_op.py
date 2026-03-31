@@ -662,7 +662,7 @@ def _get_row_parallel_op(
     | ShardedCPRowParallelOp
     | None
 ):
-    if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix: 
+    if enable_dsa_cp_with_layer_shard() and "o_proj" in prefix:
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
