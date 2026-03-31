@@ -857,6 +857,15 @@ class NPUModelRunner(GPUModelRunner):
 
         self._safe_copy_to_gpu(self.seq_lens)
 
+        # Compute optimistic seq_lens on CPU (assumes all draft tokens from
+        # previous iteration accepted). Used by _pool() and discard logic.
+        torch.add(
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+            torch.from_numpy(num_scheduled_tokens),
+            out=self.optimistic_seq_lens_cpu[:num_reqs],
+        )
+        self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
+
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         if hasattr(self.query_start_loc, 'gpu'):
             self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
