@@ -1825,11 +1825,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         forward_context = get_forward_context()
         assert forward_context is not None
-        if (
-            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and not forward_context.capturing
-            and not self.use_sparse
-        ):
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
             assert positions is not None
             update_full_graph_params(
                 self.attn_backend,
