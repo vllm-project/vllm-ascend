@@ -164,6 +164,7 @@ Remarks:
 - `minimax_m2_append_think` keeps `<think>...</think>` inside `content`.
 - If you mainly rely on the reasoning semantics of `/v1/responses`, it is recommended to use `--reasoning-parser minimax_m2` instead.
 - To receive a better performance on long-context like 128k or 64k, we recommand to do changes as shown bellow, and you can remove `export VLLM_ASCEND_BALANCE_SCHEDULING=1`.
+
 ```
     --tensor-parallel-size 8 \
     --data-parallel-size 1 \
@@ -176,7 +177,9 @@ Remarks:
     --gpu-memory-utilization 0.85 \
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
 ```
+
 - If you will to test with `curl` command, you can add following commands addition to start up command above.
+
 ```
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
