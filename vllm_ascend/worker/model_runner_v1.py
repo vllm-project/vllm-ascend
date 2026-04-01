@@ -24,6 +24,7 @@ from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
 import numpy as np
@@ -645,6 +646,7 @@ class NPUModelRunner(GPUModelRunner):
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
 
         if self.use_cp:
+            self.pcp_manager.clear_mm_preprocess_state()
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 self.input_batch.num_reqs,
@@ -680,6 +682,19 @@ class NPUModelRunner(GPUModelRunner):
                 position_pcp[:total_num_scheduled_tokens],
                 out=positions_np,
             )
+
+            if (
+                self.supports_mm_inputs
+                and get_pp_group().is_first_rank
+                and not self.model_config.is_encoder_decoder
+            ):
+                self.pcp_manager.prepare_mm_preprocess_state(
+                    self.input_batch.req_ids,
+                    num_scheduled_tokens[:num_reqs],
+                    positions_np,
+                    total_num_scheduled_tokens,
+                )
+
         if self.pcp_size > 1 and self.pcp_manager.pcp_use_hybrid_attn:
             assert self.pcp_manager.num_scheduled_tokens_padded is not None
             self.query_lens = torch.from_numpy(self.pcp_manager.num_scheduled_tokens_padded)
@@ -727,22 +742,42 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
-                start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
+                if self.pcp_size > 1:
+                    # PCP can split one request into non-contiguous token positions.
+                    # We must gather prompt embeds by actual scheduled positions.
+                    req_positions_np = positions_np[output_idx : output_idx + num_sched]
+                    valid_mask_np = req_positions_np < req_embeds.shape[0]
 
-                # Skip if trying to read beyond available embeddings
-                if start_pos >= req_embeds.shape[0]:
-                    output_idx += num_sched
-                    continue
+                    if valid_mask_np.any():
+                        dst_slice = self.inputs_embeds.cpu[output_idx : output_idx + num_sched]
+                        if valid_mask_np.all():
+                            torch.index_select(
+                                req_embeds,
+                                0,
+                                torch.from_numpy(req_positions_np.astype(np.int64)),
+                                out=dst_slice,
+                            )
+                        else:
+                            src_positions = torch.from_numpy(req_positions_np[valid_mask_np].astype(np.int64))
+                            dst_positions = torch.from_numpy(np.nonzero(valid_mask_np)[0].astype(np.int64))
+                            dst_slice.index_copy_(0, dst_positions, req_embeds.index_select(0, src_positions))
+                else:
+                    start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
 
-                # Copy available embeddings
-                end_pos = start_pos + num_sched
-                actual_end = min(end_pos, req_embeds.shape[0])
-                actual_num_sched = actual_end - start_pos
+                    # Skip if trying to read beyond available embeddings
+                    if start_pos >= req_embeds.shape[0]:
+                        output_idx += num_sched
+                        continue
 
-                if actual_num_sched > 0:
-                    self.inputs_embeds.cpu[output_idx : output_idx + actual_num_sched].copy_(
-                        req_embeds[start_pos:actual_end]
-                    )
+                    # Copy available embeddings
+                    end_pos = start_pos + num_sched
+                    actual_end = min(end_pos, req_embeds.shape[0])
+                    actual_num_sched = actual_end - start_pos
+
+                    if actual_num_sched > 0:
+                        self.inputs_embeds.cpu[output_idx : output_idx + actual_num_sched].copy_(
+                            req_embeds[start_pos:actual_end]
+                        )
 
                 output_idx += num_sched
 
@@ -1779,6 +1814,329 @@ class NPUModelRunner(GPUModelRunner):
             req_ids_output_copy,
             req_id_to_index_output_copy,
             invalid_req_indices,
+        )
+
+    def _gather_mm_embeddings(
+        self,
+        scheduler_output: "SchedulerOutput",
+        shift_computed_tokens: int = 0,
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        local_num_scheduled_tokens: np.ndarray | None = None
+        local_num_scheduled_tokens_map: dict[str, int] | None = None
+        req_positions_override: list[np.ndarray] | None = None
+        if self.use_cp and self.pcp_size > 1:
+            mm_preprocess_state = self.pcp_manager.pcp_mm_preprocess_state
+            req_positions_override = self.pcp_manager.mm_req_positions_override
+            if mm_preprocess_state is not None:
+                local_num_scheduled_tokens = mm_preprocess_state["local_num_scheduled_tokens"]
+                local_num_scheduled_tokens_map = mm_preprocess_state["local_num_scheduled_tokens_map"]
+                total_num_scheduled_tokens = mm_preprocess_state["local_total_num_scheduled_tokens"]
+
+        # Swap to the other buffer to avoid race condition with previous
+        # iteration's async copy that may still be reading from CPU.
+        self.is_mm_embed_idx = 1 - self.is_mm_embed_idx
+        is_mm_embed_buf = self.is_mm_embed_buffers[self.is_mm_embed_idx]
+
+        mm_embeds = list[torch.Tensor]()
+        is_mm_embed = is_mm_embed_buf.cpu
+        is_mm_embed[:total_num_scheduled_tokens] = False
+
+        req_start_idx = 0
+        should_sync_mrope_positions = False
+        should_sync_xdrope_positions = False
+
+        for req_idx, req_id in enumerate(self.input_batch.req_ids):
+            mm_embeds_req: list[torch.Tensor] = []
+
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            if local_num_scheduled_tokens is not None and req_idx < len(local_num_scheduled_tokens):
+                num_scheduled_tokens = int(local_num_scheduled_tokens[req_idx])
+
+            req_positions = None
+            if req_positions_override is not None and req_idx < len(req_positions_override):
+                req_positions = req_positions_override[req_idx]
+                num_scheduled_tokens = int(req_positions.shape[0])
+                if shift_computed_tokens:
+                    req_positions = req_positions + shift_computed_tokens
+
+            req_state = self.requests[req_id]
+
+            if req_positions is None:
+                num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
+
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    start_pos = pos_info.offset
+                    num_encoder_tokens = pos_info.length
+
+                    # The encoder output is needed if the two ranges overlap:
+                    # [num_computed_tokens,
+                    #  num_computed_tokens + num_scheduled_tokens) and
+                    # [start_pos, start_pos + num_encoder_tokens)
+                    if start_pos >= num_computed_tokens + num_scheduled_tokens:
+                        # The encoder output is not needed in this step.
+                        break
+                    if start_pos + num_encoder_tokens <= num_computed_tokens:
+                        # The encoder output is already processed and stored
+                        # in the decoder's KV cache.
+                        continue
+
+                    start_idx = max(num_computed_tokens - start_pos, 0)
+                    end_idx = min(
+                        num_computed_tokens - start_pos + num_scheduled_tokens,
+                        num_encoder_tokens,
+                    )
+                    assert start_idx < end_idx
+                    curr_embeds_start, curr_embeds_end = (
+                        pos_info.get_embeds_indices_in_range(start_idx, end_idx)
+                    )
+                    # If there are no embeddings in the current range, we skip
+                    # gathering the embeddings.
+                    if curr_embeds_start == curr_embeds_end:
+                        continue
+
+                    mm_hash = mm_feature.identifier
+                    encoder_output = self.encoder_cache.get(mm_hash, None)
+                    assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+
+                    if (is_embed := pos_info.is_embed) is not None:
+                        is_embed = is_embed[start_idx:end_idx]
+                        mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
+                    else:
+                        mm_embeds_item = encoder_output[start_idx:end_idx]
+
+                    req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                    # OR mask for overlapping mm_features (use_audio_in_video)
+                    if is_embed is None:
+                        is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
+                            True
+                        )
+                    else:
+                        is_mm_embed[
+                            req_start_pos + start_idx : req_start_pos + end_idx
+                        ] |= is_embed
+                    mm_embeds_req.append(mm_embeds_item)
+            else:
+                req_taken_mask = np.zeros(num_scheduled_tokens, dtype=np.bool_)
+                req_mm_local_indices: list[np.ndarray] = []
+
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    start_pos = pos_info.offset
+                    end_pos = start_pos + pos_info.length
+                    mm_hash = mm_feature.identifier
+
+                    local_mask = (req_positions >= start_pos) & (req_positions < end_pos)
+                    if not local_mask.any():
+                        continue
+
+                    local_indices = np.nonzero(local_mask)[0]
+                    rel_positions = req_positions[local_indices] - start_pos
+
+                    is_embed = pos_info.is_embed
+                    if is_embed is not None:
+                        is_embed_np = is_embed.cpu().numpy()
+                        keep_mask = is_embed_np[rel_positions]
+                        if not keep_mask.any():
+                            continue
+                        local_indices = local_indices[keep_mask]
+                        rel_positions = rel_positions[keep_mask]
+                        embed_index_map = np.cumsum(is_embed_np.astype(np.int64)) - 1
+                        embed_indices = embed_index_map[rel_positions]
+                    else:
+                        embed_indices = rel_positions
+
+                    # OR semantics for overlapping mm features: keep first writer.
+                    keep_new = ~req_taken_mask[local_indices]
+                    if not keep_new.any():
+                        continue
+                    local_indices = local_indices[keep_new]
+                    embed_indices = embed_indices[keep_new]
+                    req_taken_mask[local_indices] = True
+
+                    encoder_output = self.encoder_cache.get(mm_hash, None)
+                    assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                    embed_index_tensor = torch.from_numpy(embed_indices.astype(np.int64, copy=False)).to(
+                        device=encoder_output.device,
+                        non_blocking=True,
+                    )
+                    mm_embeds_item = torch.index_select(encoder_output, 0, embed_index_tensor)
+                    mm_embeds_req.append(mm_embeds_item)
+                    req_mm_local_indices.append(local_indices.astype(np.int64, copy=False))
+                    is_mm_embed[req_start_idx + local_indices] = True
+
+                # Keep multimodal embedding order aligned with is_mm_embed scanning order.
+                if len(mm_embeds_req) > 1:
+                    total_local_idx = sum(x.size for x in req_mm_local_indices)
+                    total_embed_rows = sum(x.shape[0] for x in mm_embeds_req)
+                    if total_local_idx == total_embed_rows and total_local_idx > 0:
+                        local_idx_cat = np.concatenate(req_mm_local_indices, axis=0)
+                        embed_cat = torch.cat(mm_embeds_req, dim=0)
+                        order = np.argsort(local_idx_cat, kind="stable")
+                        order_t = torch.from_numpy(order.astype(np.int64)).to(
+                            device=embed_cat.device,
+                            non_blocking=True,
+                        )
+                        mm_embeds_req = [embed_cat.index_select(0, order_t)]
+                    else:
+                        logger.warning_once(
+                            "MM reorder skipped due to size mismatch: local_idx=%d, embed_rows=%d",
+                            total_local_idx,
+                            total_embed_rows,
+                        )
+
+            if self.is_multimodal_pruning_enabled and self.uses_mrope:
+                assert req_state.mrope_positions is not None
+                should_sync_mrope_positions = True
+                mm_embeds_req, new_mrope_positions, new_delta = (
+                    self.model.recompute_mrope_positions(
+                        input_ids=req_state.prompt_token_ids,
+                        multimodal_embeddings=mm_embeds_req,
+                        mrope_positions=req_state.mrope_positions,
+                        num_computed_tokens=req_state.num_computed_tokens,
+                    )
+                )
+                req_state.mrope_positions.copy_(new_mrope_positions)
+                req_state.mrope_position_delta = new_delta
+
+            mm_embeds.extend(mm_embeds_req)
+            req_start_idx += num_scheduled_tokens
+
+        is_mm_embed = is_mm_embed_buf.copy_to_gpu(total_num_scheduled_tokens)
+
+        if should_sync_mrope_positions:
+            if local_num_scheduled_tokens_map is not None:
+                self._calc_mrope_positions(
+                    SimpleNamespace(num_scheduled_tokens=local_num_scheduled_tokens_map),
+                )
+            else:
+                self._calc_mrope_positions(scheduler_output)
+            self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        if should_sync_xdrope_positions:
+            if local_num_scheduled_tokens_map is not None:
+                self._calc_xdrope_positions(
+                    SimpleNamespace(num_scheduled_tokens=local_num_scheduled_tokens_map),
+                )
+            else:
+                self._calc_xdrope_positions(scheduler_output)
+            self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        return mm_embeds, is_mm_embed
+
+    def _preprocess(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_input_tokens: int,  # Padded
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor,
+        IntermediateTensors | None,
+        dict[str, Any],
+        ECConnectorOutput | None,
+    ]:
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if self.use_cp and self.pcp_size > 1 and self.pcp_manager.pcp_mm_preprocess_state is not None:
+            num_scheduled_tokens = self.pcp_manager.pcp_mm_preprocess_state["local_total_num_scheduled_tokens"]
+        is_first_rank = get_pp_group().is_first_rank
+        is_encoder_decoder = self.model_config.is_encoder_decoder
+
+        # _prepare_inputs may reorder the batch, so we must gather multi
+        # modal outputs after that to ensure the correct order
+        ec_connector_output = None
+        clear_mm_preprocess_state = self.use_cp and self.pcp_size > 1
+
+        try:
+            if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
+                # Run the multimodal encoder if any.
+                with self.maybe_get_ec_connector_output(
+                    scheduler_output,
+                    encoder_cache=self.encoder_cache,
+                ) as ec_connector_output:
+                    self._execute_mm_encoder(scheduler_output)
+                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+
+                # NOTE(woosuk): To unify token ids and soft tokens (vision
+                # embeddings), we always use embeddings (rather than token ids)
+                # as input to the multimodal model, even when the input is text.
+                inputs_embeds_scheduled = self.model.embed_input_ids(
+                    self.input_ids.gpu[:num_scheduled_tokens],
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
+
+                # TODO(woosuk): Avoid the copy. Optimize.
+                self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
+
+                input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
+                model_kwargs = {
+                    **self._init_model_kwargs(),
+                    **self._extract_mm_kwargs(scheduler_output),
+                }
+            elif self.enable_prompt_embeds and is_first_rank:
+                # Get the input embeddings for the tokens that are not input embeds,
+                # then put them into the appropriate positions.
+                token_ids_idx = (
+                    self.is_token_ids.gpu[:num_scheduled_tokens]
+                    .nonzero(as_tuple=False)
+                    .squeeze(1)
+                )
+                # Some token ids may need to become embeds
+                if token_ids_idx.numel() > 0:
+                    token_ids = self.input_ids.gpu[token_ids_idx]
+                    tokens_to_embeds = self.model.embed_input_ids(input_ids=token_ids)
+                    self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
+
+                inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
+                model_kwargs = self._init_model_kwargs()
+                input_ids = None
+            else:
+                # For text-only models, we use token ids as input.
+                # While it is possible to use embeddings as input just like the
+                # multimodal models, it is not desirable for performance since
+                # then the embedding layer is not included in the CUDA graph.
+                input_ids = self.input_ids.gpu[:num_input_tokens]
+                inputs_embeds = None
+                model_kwargs = self._init_model_kwargs()
+
+            if self.uses_mrope:
+                positions = self.mrope_positions.gpu[:, :num_input_tokens]
+            elif self.uses_xdrope_dim > 0:
+                positions = self.xdrope_positions.gpu[:, :num_input_tokens]
+            else:
+                positions = self.positions.gpu[:num_input_tokens]
+
+            if is_first_rank:
+                intermediate_tensors = None
+            else:
+                assert intermediate_tensors is not None
+                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                    num_input_tokens, intermediate_tensors, True
+                )
+
+            if is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
+                # Run the encoder, just like we do with other multimodal inputs.
+                # For an encoder-decoder model, our processing here is a bit
+                # simpler, because the outputs are just passed to the decoder.
+                # We are not doing any prompt replacement. We also will only
+                # ever have a single encoder input.
+                encoder_outputs = self._execute_mm_encoder(scheduler_output)
+                model_kwargs.update({"encoder_outputs": encoder_outputs})
+        finally:
+            if clear_mm_preprocess_state:
+                self.pcp_manager.clear_mm_preprocess_state()
+
+        return (
+            input_ids,
+            inputs_embeds,
+            positions,
+            intermediate_tensors,
+            model_kwargs,
+            ec_connector_output,
         )
 
     # all-gather one hidden-states in sp scene

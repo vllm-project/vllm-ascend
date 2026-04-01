@@ -17,7 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -135,6 +135,8 @@ class PCPManager:
         self.max_num_tokens_across_pcp = 0
         self.pcp_tokens_padded = None
         self.total_num_scheduled_tokens = 0
+        self.pcp_mm_preprocess_state: dict[str, Any] | None = None
+        self.mm_req_positions_override: list[np.ndarray] | None = None
 
     def _get_cumsum_and_arange(
         self,
@@ -190,6 +192,51 @@ class PCPManager:
             device=self.sample_slot_mapping.device,
         )
         self.pcp_padded_slot_mapping_list.append(pcp_padded_slot_mapping)
+
+    def clear_mm_preprocess_state(self) -> None:
+        self.pcp_mm_preprocess_state = None
+        self.mm_req_positions_override = None
+
+    def prepare_mm_preprocess_state(
+        self,
+        req_ids: list[str],
+        num_scheduled_tokens: np.ndarray,
+        positions_np: np.ndarray,
+        total_num_scheduled_tokens: int,
+    ) -> None:
+        self.clear_mm_preprocess_state()
+        if self.pcp_world_size <= 1:
+            return
+
+        local_num_scheduled_tokens = np.array(
+            num_scheduled_tokens[: len(req_ids)],
+            dtype=np.int32,
+            copy=True,
+        )
+
+        req_positions = list[np.ndarray]()
+        req_start_idx = 0
+        for num_sched in local_num_scheduled_tokens:
+            req_end_idx = req_start_idx + int(num_sched)
+            req_positions.append(
+                np.array(
+                    positions_np[req_start_idx:req_end_idx],
+                    dtype=np.int64,
+                    copy=True,
+                )
+            )
+            req_start_idx = req_end_idx
+
+        self.pcp_mm_preprocess_state = {
+            "req_ids": tuple(req_ids),
+            "local_num_scheduled_tokens": local_num_scheduled_tokens,
+            "local_num_scheduled_tokens_map": {
+                req_id: int(local_num_scheduled_tokens[idx])
+                for idx, req_id in enumerate(req_ids)
+            },
+            "local_total_num_scheduled_tokens": int(total_num_scheduled_tokens),
+        }
+        self.mm_req_positions_override = req_positions
 
     def update_tokens_for_pcp(
         self,
