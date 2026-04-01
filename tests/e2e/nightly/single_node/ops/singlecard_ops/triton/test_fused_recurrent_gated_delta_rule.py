@@ -25,7 +25,7 @@ def test_fused_recurrent_gated_delta_rule_310p_parity_precision():
         torch.float16
     )
 
-    initial_state = torch.randn(2, num_v_heads, kdim, vdim, dtype=torch.float16, device=device)
+    initial_state = torch.randn(2, num_v_heads, vdim, kdim, dtype=torch.float16, device=device)
     cu_seqlens = torch.tensor([0, 4, 9], dtype=torch.long, device=device)
     # For inplace_final_state=True, Ascend triton kernel expects explicit per-token state indices.
     # seq0 (len=4) -> state 0, seq1 (len=5) -> state 1.
