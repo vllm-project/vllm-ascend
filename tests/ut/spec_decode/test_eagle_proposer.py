@@ -504,7 +504,7 @@ class TestEagleProposerPropose():
         self.runner.dcp_size = 1
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
-        self.runner.pin_memory = True
+        self.runner.pin_memory = False
         self.runner._sync_metadata_across_dp.return_value = (13, None, False)
 
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024

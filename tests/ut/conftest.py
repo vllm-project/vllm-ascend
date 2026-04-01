@@ -18,7 +18,6 @@
 import sys
 from unittest.mock import MagicMock
 
-# triton and torch_npu is not available in the environment, so we need to mock them
 triton_runtime = MagicMock()
 triton_runtime.driver.active.utils.get_device_properties.return_value = {
     'num_aic': 8,
@@ -26,12 +25,12 @@ triton_runtime.driver.active.utils.get_device_properties.return_value = {
 }
 sys.modules['triton.runtime'] = triton_runtime
 
-mock_torch_npu = MagicMock()
-mock_torch_npu.npu.current_device = MagicMock(return_value=0)
-sys.modules['torch_npu'] = mock_torch_npu
-sys.modules['torch_npu._inductor'] = MagicMock()
+from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import register_ascend_customop  # noqa E402
 
-from vllm_ascend.utils import adapt_patch, register_ascend_customop  # noqa E402
+# triton and torch_npu is not available in the environment, so we need to mock them
+sys.modules['torch_npu'].npu.current_device = MagicMock(return_value=0)
+sys.modules['torch_npu._inductor'] = MagicMock()
 
 adapt_patch()
 adapt_patch(True)
