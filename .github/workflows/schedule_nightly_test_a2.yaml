@@ -69,7 +69,7 @@ env:
   IMAGE_REGISTRY: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
   CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
-  VLLM_VERSION: 'v0.18.0'
+  VLLM_VERSION: '35141a7eeda941a60ad5a4956670c60fd5a77029'
 
 jobs:
   parse-trigger:

@@ -39,7 +39,7 @@ on:
       vllm_version:
         required: false
         type: string
-        default: "v0.18.0"
+        default: "35141a7eeda941a60ad5a4956670c60fd5a77029"
       should_run:
         required: true
         type: boolean
