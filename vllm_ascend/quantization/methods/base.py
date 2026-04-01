@@ -235,6 +235,7 @@ class AscendMoEScheme(ABC):
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor | None = None,
+        global_redundant_expert_num: int = 0,
         pertoken_scale: Any | None = None,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,

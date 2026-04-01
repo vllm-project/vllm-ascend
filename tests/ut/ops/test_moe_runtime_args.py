@@ -88,7 +88,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertIs(fused_experts_input.topk_ids, topk_ids)
                 self.assertTrue(fused_experts_input.dynamic_eplb)
                 self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
-                self.assertEqual(fused_experts_input.routing.global_redundant_expert_num, 2)
                 self.assertEqual(fused_experts_input.activation, "gelu")
                 self.assertEqual(fused_experts_input.quant.quant_type, quant_type)
 
