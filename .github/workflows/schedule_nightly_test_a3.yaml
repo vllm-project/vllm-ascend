@@ -205,6 +205,9 @@ jobs:
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/
           # YAML-driven tests
+          - name: qwen3-vl-235b-a22b-instruct-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
           - name: deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
             config_file_path: DeepSeek-R1-0528-W8A8.yaml
