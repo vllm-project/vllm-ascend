@@ -767,7 +767,6 @@ Before you start, please
         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
           
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
