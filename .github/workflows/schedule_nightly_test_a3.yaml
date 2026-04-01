@@ -25,6 +25,20 @@ on:
       # Run test at 23:45 Beijing time (UTC+8)
       - cron: "45 15 * * *"
   workflow_dispatch:
+    inputs:
+      vllm_ascend_branch:
+        description: 'Branch to test (main or releases/v0.18.0)'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+          - main
+          - releases/v0.18.0
+      test_cases:
+        description: 'Test cases to run (comma-separated, e.g., "test_custom_op,qwen3-32b,accuracy-group" or "all" for all tests)'
+        required: false
+        default: 'all'
+        type: string
   pull_request:
     branches:
       - 'main'
@@ -56,8 +70,19 @@ env:
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
+  parse-trigger:
+    name: Parse trigger and determine test scope
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'nightly-test')
+    uses: ./.github/workflows/_parse_trigger.yaml
+    with:
+      test_cases: ${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}
+
   setup-vars:
     name: Export global env vars as job outputs
+    needs: parse-trigger
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.export.outputs.image }}
@@ -70,20 +95,19 @@ jobs:
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
           } >> $GITHUB_OUTPUT
 
-  parse-trigger:
-    name: Parse trigger and determine test scope
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'nightly-test')
-    uses: ./.github/workflows/_parse_trigger.yaml
-
   build-image:
     name: Build nightly-a3 image
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        vllm_ascend_branch: >-
+          ${{ github.event_name == 'workflow_dispatch' 
+              && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
+              || fromJSON('["main", "releases/v0.18.0"]') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -100,6 +124,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
+        vllm_ascend_branch: [releases-v0.18.0]
         test_config:
           - name: multi-node-deepseek-pd
             config_file_path: DeepSeek-V3.yaml
@@ -144,7 +169,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: ${{ needs.setup-vars.outputs.image }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
@@ -170,6 +195,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        vllm_ascend_branch: [releases-v0.18.0]
         test_config:
           # pytest-driven tests
           - name: qwen3-30b-acc
@@ -245,7 +271,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: ${{ needs.setup-vars.outputs.image }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ matrix.vllm_ascend_branch }}-a3'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
@@ -260,6 +286,8 @@ jobs:
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
+    needs: [multi-node-tests]
+    if: always() 
     steps:
       - name: Clear pre-logs on pvc
         run: |
