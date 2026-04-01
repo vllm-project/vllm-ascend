@@ -1,12 +1,14 @@
 from unittest.mock import MagicMock, patch
 import unittest
-
+import pytest
 import numpy as np
 import torch
 from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
-
+from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
 
@@ -486,3 +488,245 @@ class TestEagleProposerHelperMethods(TestBase):
         ):
             return_attn, indices = self.proposer.prepare_inputs(mock_attn, num_rejected)
             self.assertEqual(indices.tolist(), [1, 2, 4])
+
+
+class TestEagleProposerPropose():
+    @pytest.fixture(autouse=True)
+    def setUp_and_tearDown(self):
+        self.vllm_config = MagicMock(spec=VllmConfig)
+        self.vllm_config.speculative_config = MagicMock()
+        self.vllm_config.speculative_config.num_speculative_tokens = 3
+        self.vllm_config.speculative_config.method = "eagle3"
+        self.vllm_config.speculative_config.parallel_drafting = False
+        self.device = torch.device("cpu")
+        self.runner = MagicMock()
+        self.runner.pcp_size = 1
+        self.runner.dcp_size = 1
+        self.runner.max_num_tokens = 8192
+        self.runner.max_num_reqs = 256
+        self.runner.pin_memory = False
+        self.runner._sync_metadata_across_dp.return_value = (13, None, False)
+
+        self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
+        self.vllm_config.scheduler_config.max_num_seqs = 32
+        self.vllm_config.model_config.dtype = torch.float16
+        self.vllm_config.model_config.max_model_len = 32768
+        self.vllm_config.model_config.uses_mrope = False
+        self.vllm_config.model_config.uses_xdrope_dim = 0
+        self.vllm_config.model_config.use_mla = False
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+        self.vllm_config.parallel_config.data_parallel_rank = 0
+        self.vllm_config.parallel_config.data_parallel_size = 1
+        self.vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
+        self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(4)])
+        self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
+        self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
+        self.vllm_config.speculative_config.disable_padded_drafter_batch = False
+        self.vllm_config.additional_config = None
+        init_ascend_config(self.vllm_config)
+
+        self.mock_cpugpubuffer = patch("vllm.v1.spec_decode.eagle.CpuGpuBuffer")
+        self.mock_cpugpubuffer.start()
+        self.mock_supports_multimodal_inputs = patch(
+            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+        )
+        self.mock_supports_multimodal_inputs.start()
+
+        # Mock parallel state functions
+        self.mock_tp_world_size = patch(
+            "vllm_ascend.ascend_forward_context.get_tensor_model_parallel_world_size", return_value=1
+        )
+        self.mock_tp_world_size.start()
+
+        mock_dp_group = MagicMock()
+        mock_dp_group.world_size = 1
+        self.mock_dp_group = patch("vllm_ascend.ascend_forward_context.get_dp_group", return_value=mock_dp_group)
+        self.mock_dp_group.start()
+
+        # Mock sp
+        self.mock_enable_sp = patch(
+            "vllm_ascend.utils.enable_sp", return_value=False
+        )
+        self.mock_enable_sp.start()
+
+        # Set the current vllm config
+        set_current_vllm_config(self.vllm_config)
+        self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+
+        yield
+
+        self.mock_cpugpubuffer.stop()
+        self.mock_supports_multimodal_inputs.stop()
+        self.mock_tp_world_size.stop()
+        self.mock_dp_group.stop()
+        # Clear the current vllm config
+        set_current_vllm_config(None)
+
+    # config: prefill, Qwen3-8B, tp1, enforce_eager, no_async_scheduling, eagle3, k=3, "disable_padded_drafter_batch": False
+    @pytest.mark.parametrize(
+        'query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,' \
+        'num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,' \
+        'slot_mapping, causal, logits_indices_padded, num_logits_indices,' \
+        'encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,' \
+        'dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,' \
+        '_num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,' \
+        'decode_token_per_req, actual_seq_lengths_q, positions, attn_state,' \
+        'graph_pad_size, num_input_tokens, prefill_context_parallel_metadata',
+        [
+            (
+                torch.tensor([ 0, 13], device=torch.device("cpu"), dtype=torch.int32), torch.tensor([ 0, 13], dtype=torch.int32), 
+                torch.tensor([13], device=torch.device("cpu"), dtype=torch.int32), 1, 13, 13, 13,
+                torch.eye(256, device=torch.device("cpu"), dtype=torch.int32)[0].unsqueeze(0),
+                torch.tensor([128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140], device=torch.device("cpu"), dtype=torch.int32),
+                True, None, None, None, None, None, None, None, None, None, torch.tensor([13], dtype=torch.int32), torch.tensor([0], dtype=torch.int32), 4, [],
+                torch.cat([torch.arange(13), torch.zeros(8704 - 13)]),
+                AscendAttentionState.PrefillNoCache, -1, 13, None
+            ),
+        ]
+    )
+    @patch('vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer.get_model')
+    def test_propose(self, mock_get_model, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
+                     num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
+                     slot_mapping, causal, logits_indices_padded, num_logits_indices,
+                     encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,
+                     dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
+                     _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
+                     decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
+                     graph_pad_size, num_input_tokens, prefill_context_parallel_metadata
+                    ):
+        # mock and adjust functions and var in propose
+        self.proposer.model = MagicMock(spec=Eagle3LlamaForCausalLM)
+        custom_combined_hidden_states = torch.zeros(13, 4096, device=self.device, dtype=torch.bfloat16)
+        self.proposer.model.combine_hidden_states.return_value = custom_combined_hidden_states
+        mock_get_model.return_value = self.proposer.model
+        self.proposer.hidden_size = 4096
+        self.proposer.hidden_states = torch.zeros(8192, 4096, device=self.device, dtype=torch.bfloat16)
+        mock_attn_group = MagicMock()
+        mock_builder = MagicMock()
+        mock_attn_metadata = MagicMock()
+        mock_builder.build.return_value = mock_attn_metadata
+        mock_attn_group.get_metadata_builder.return_value = mock_builder
+        self.proposer.draft_attn_groups = [mock_attn_group]
+        self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
+        self.proposer.kernel_block_size = 128
+        self.proposer._runnable = MagicMock()
+        self.proposer._runnable.return_value = [0, 0, 0]
+        captured_common_attn_metadata = None
+        original_method = self.proposer.attn_update_stack_num_spec_norm
+
+        def side_effect(*args, **kwargs):
+            nonlocal captured_common_attn_metadata
+            res_common, res_attn = original_method(*args, **kwargs)
+            captured_common_attn_metadata = res_common
+            return res_common, res_attn
+
+        # create common_attn_metadata
+        mock_common_attn_metadata= MagicMock()
+        mock_common_attn_metadata.batch_size.return_value = 1
+        self.value_mock_common_attn_metadata(mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
+                                        num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
+                                        slot_mapping, causal, logits_indices_padded, num_logits_indices,
+                                        encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,
+                                        dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
+                                        _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
+                                        decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
+                                        graph_pad_size, num_input_tokens, prefill_context_parallel_metadata
+                                        )
+        
+        # create other parameters
+        target_token_ids = torch.tensor([151644, 872, 198, 5501, 7512, 14678, 51765, 30, 151645, 198, 151644, 77091, 198], device=self.device, dtype=torch.int32)
+        target_positions = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], device=self.device)
+        target_hidden_states = torch.zeros(13, 12288, device=self.device, dtype=torch.bfloat16)
+        next_token_ids = torch.tensor([151667], device=self.device, dtype=torch.int32)
+        token_indices_to_sample = None
+        target_model_batch_desc = BatchDescriptor(num_tokens=13, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0)
+        mock_sampling_metadata = MagicMock()
+        mm_embed_inputs = None
+        req_scheduled_tokens = {'0-8222703c': 13}
+        long_seq_metadata = None
+        num_prefill_reqs = 0
+        num_decode_reqs = 0
+        scheduler_output = MagicMock()
+        num_scheduled_tokens = 13
+        num_rejected_tokens_gpu = None
+
+        #run
+        with patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect):
+            with set_current_vllm_config(self.vllm_config):
+                self.proposer._propose(target_token_ids, target_positions, target_hidden_states, next_token_ids,
+                                    token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
+                                    mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
+                                    scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
+                                    )
+                self.assert_value_common_attn_metadata(captured_common_attn_metadata)
+
+    # give common_attn_metadata value
+    def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
+                                        num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
+                                        slot_mapping, causal, logits_indices_padded, num_logits_indices,
+                                        encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,
+                                        dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
+                                        _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
+                                        decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
+                                        graph_pad_size, num_input_tokens, prefill_context_parallel_metadata
+                                        ):
+        mock_common_attn_metadata.query_start_loc = query_start_loc
+        mock_common_attn_metadata.query_start_loc_cpu = query_start_loc_cpu
+        mock_common_attn_metadata.seq_lens = seq_lens
+        mock_common_attn_metadata.num_reqs = num_reqs
+        mock_common_attn_metadata.num_actual_tokens = num_actual_tokens
+        mock_common_attn_metadata.max_query_len = max_query_len
+        mock_common_attn_metadata.max_seq_len = max_seq_len
+        mock_common_attn_metadata.block_table_tensor = block_table_tensor
+        mock_common_attn_metadata.slot_mapping = slot_mapping
+        mock_common_attn_metadata.causal = causal
+        mock_common_attn_metadata.logits_indices_padded = logits_indices_padded
+        mock_common_attn_metadata.num_logits_indices = num_logits_indices
+        mock_common_attn_metadata.encoder_seq_lens = encoder_seq_lens
+        mock_common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
+        mock_common_attn_metadata.dcp_local_seq_lens = dcp_local_seq_lens
+        mock_common_attn_metadata.dcp_local_seq_lens_cpu = dcp_local_seq_lens_cpu
+        mock_common_attn_metadata._seq_lens_cpu = _seq_lens_cpu
+        mock_common_attn_metadata._num_computed_tokens_cpu = _num_computed_tokens_cpu
+        mock_common_attn_metadata._num_computed_tokens_cache = _num_computed_tokens_cache
+        mock_common_attn_metadata.seq_lens_cpu = seq_lens_cpu
+        mock_common_attn_metadata.num_computed_tokens_cpu = num_computed_tokens_cpu
+        mock_common_attn_metadata.decode_token_per_req = decode_token_per_req
+        mock_common_attn_metadata.actual_seq_lengths_q = actual_seq_lengths_q
+        mock_common_attn_metadata.positions = positions
+        mock_common_attn_metadata.attn_state = attn_state
+        mock_common_attn_metadata.graph_pad_size = graph_pad_size
+        mock_common_attn_metadata.num_input_tokens = num_input_tokens
+        mock_common_attn_metadata.prefill_context_parallel_metadata = prefill_context_parallel_metadata
+
+    # assert the value common_attn_metadata
+    def assert_value_common_attn_metadata(self, captured_common_attn_metadata):
+        assert torch.equal(captured_common_attn_metadata.query_start_loc, torch.tensor([0, 1]))
+        assert torch.equal(captured_common_attn_metadata.query_start_loc_cpu, torch.tensor([0, 1]))
+        assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15]))
+        assert captured_common_attn_metadata.num_reqs == 1
+        assert captured_common_attn_metadata.num_actual_tokens == 1
+        assert captured_common_attn_metadata.max_query_len == 1
+        assert captured_common_attn_metadata.max_seq_len == 13
+        assert torch.equal(captured_common_attn_metadata.block_table_tensor, torch.eye(256, dtype=torch.int32)[0].unsqueeze(0))
+        assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142]), torch.full((8703,), -1)]))
+        assert captured_common_attn_metadata.causal == True
+        assert captured_common_attn_metadata.logits_indices_padded == None
+        assert captured_common_attn_metadata.num_logits_indices == None
+        assert captured_common_attn_metadata.encoder_seq_lens == None
+        assert captured_common_attn_metadata.encoder_seq_lens_cpu == None
+        assert captured_common_attn_metadata.dcp_local_seq_lens == None
+        assert captured_common_attn_metadata.dcp_local_seq_lens_cpu == None
+        assert captured_common_attn_metadata._seq_lens_cpu == None
+        assert captured_common_attn_metadata._num_computed_tokens_cpu == None
+        assert captured_common_attn_metadata._num_computed_tokens_cache == None
+        assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([15]))
+        assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([2]))
+        assert captured_common_attn_metadata.decode_token_per_req == 1
+        assert captured_common_attn_metadata.actual_seq_lengths_q == []
+        assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-13), dtype=torch.int64))
+        assert captured_common_attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+        assert captured_common_attn_metadata.graph_pad_size == -1
+        assert captured_common_attn_metadata.num_input_tokens == 13
+        assert captured_common_attn_metadata.prefill_context_parallel_metadata == None
