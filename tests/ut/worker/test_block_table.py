@@ -18,7 +18,8 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
-import vllm.utils.cpu_triton_utils as cpu_tl
+
+# import vllm.utils.cpu_triton_utils as cpu_tl
 from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.base import TestBase
@@ -113,7 +114,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 # positions must be a torch int64 tensor to match the
                 # _compute_slot_mapping_kernel's positions_ptr type.
                 positions_tensor = torch.from_numpy(positions.astype(np.int64))
-                block_table._compute_slot_mapping_kernel = cpu_tl.compute_slot_mapping_kernel
+                # block_table._compute_slot_mapping_kernel = cpu_tl.compute_slot_mapping_kernel
                 block_table.compute_slot_mapping(num_reqs, query_start_loc, positions_tensor)
 
                 actual_result = block_table.slot_mapping.np[:num_tokens]
