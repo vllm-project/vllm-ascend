@@ -34,11 +34,6 @@ def verify_and_update_config(cls, vllm_config) -> None:
         kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
     kernel_block_size = 128
-    # get attention block size
-    attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-    attn_head_size = model_config.get_head_size()
-    attn_single_token_k_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
-
     model_cls, _ = ModelRegistry.resolve_model_cls(
         model_config.architecture,
         model_config=model_config,
@@ -55,6 +50,18 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # NOTE(zxr): because of the limit of Ascend Hardware, we need to keep
     # all cache tensors contiguous, so we align the page size of ssm_block
     # and single attn_block
+    if model_config.use_mla:
+        attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        kv_lora_rank = model_config.hf_text_config.kv_lora_rank
+        qk_rope_head_dim = model_config.hf_text_config.qk_rope_head_dim
+        attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        attn_rope_token_page_size = qk_rope_head_dim * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        attn_token_page_size = attn_single_token_k_page_size + attn_rope_token_page_size
+    else:
+        attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        attn_head_size = model_config.get_head_size()
+        attn_single_token_k_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        attn_token_page_size = 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
     attn_block_size = kernel_block_size * cdiv(ssm_block_page_size, kernel_block_size * attn_single_token_k_page_size)
     assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
         "Cannot align ssm_page_size and attn_page_size."
@@ -71,7 +78,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         )
 
     # compute new attention page size
-    attn_page_size = cache_config.block_size * 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+    attn_page_size = cache_config.block_size * attn_token_page_size
 
     # pad mamba page size for conv_blocks
     if (
