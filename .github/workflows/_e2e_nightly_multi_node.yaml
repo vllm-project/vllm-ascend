@@ -32,7 +32,7 @@ on:
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
       vllm_version:
         required: false
-        default: "35141a7eeda941a60ad5a4956670c60fd5a77029"
+        default: "v0.18.0"
         type: string
         description: vllm version to use
       vllm_ascend_remote_url:
