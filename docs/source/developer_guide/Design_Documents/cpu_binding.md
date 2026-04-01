@@ -201,7 +201,7 @@ To resolve, either reduce total_npus or enlarge the cpuset so that each NPU has 
 - Logs show the selected binding mode and the allocation plan, for example:
     - `[cpu_bind_mode] mode=global_slice rank=0 visible_npus=[...]`
     - `The CPU allocation plan is as follows: ...`
-- You can verify affinity via taskset or /proc/<pid>/status after startup.
+- You can verify affinity via taskset or `/proc/<pid>/status` after startup.
 
 ## Limitations & Notes
 
