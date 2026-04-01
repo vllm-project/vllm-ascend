@@ -5,6 +5,7 @@ Qwen2-Audio-7B-Instruct.yaml
 Qwen3-VL-30B-A3B-Instruct.yaml
 Qwen3-VL-8B-Instruct.yaml
 Qwen2.5-Omni-7B.yaml
+Qwen2.5-Math-RM-72B.yaml
 Qwen3-Omni-30B-A3B-Instruct.yaml
 InternVL3_5-8B-hf.yaml
 ERNIE-4.5-21B-A3B-PT.yaml
