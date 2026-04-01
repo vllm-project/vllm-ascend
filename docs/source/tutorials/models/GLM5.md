@@ -771,7 +771,6 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
           
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         vllm serve /root/.cache/glm5-w8a8 \
@@ -851,7 +850,6 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
        
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         vllm serve /root/.cache/glm5-w8a8 \
