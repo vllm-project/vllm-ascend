@@ -77,7 +77,7 @@ class PrepareAndFinalize(ABC):
             router_logits (torch.Tensor): Router outputs, shape [num_tokens, num_experts]
             enable_shared_expert_dp (bool): Skip DP communication for shared experts
             replace_allreduce (bool): Bypass default all-reduce behavior
-            quant_type: none, w8a8, w4a8 or mxfp8
+            quant_type: none, w8a8, w4a8, mxfp8, or mxfp4
 
         Returns:
             MoEPrepareOutput:

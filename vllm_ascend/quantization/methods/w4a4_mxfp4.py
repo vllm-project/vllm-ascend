@@ -39,17 +39,17 @@ from .registry import register_scheme
 
 @register_scheme("W4A4_MXFP4", "linear")
 class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
-    """Linear method for Ascend W8A8_MXFP8 (Microscaling FP8) quantization.
+    """Linear method for Ascend W4A4_MXFP4 (Microscaling FP4) quantization.
 
-    This scheme uses microscaling FP8 quantization with per-group scales.
-    The activation is dynamically quantized to FP8 (E4M3FN format) with
-    microscaling, and weights are stored in FP8 format with per-group scales.
+    This scheme uses microscaling FP4 quantization with per-group scales.
+    The activation is dynamically quantized to FP4 with microscaling, and
+    weights are stored in packed FP4-compatible format with per-group scales.
     """
 
     model_dtype = None
 
     def __init__(self):
-        ensure_mxfp4_linear_available("W8A8_MXFP8 linear quantization")
+        ensure_mxfp4_linear_available("W4A4_MXFP4 linear quantization")
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
@@ -75,7 +75,9 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         original_shape = x.shape
         if x.dim() > 2:
             x = x.view(-1, x.shape[-1])
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch_npu.float4_e2m1fn_x2, round_mode="round")
+        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+            x, dst_type=torch_npu.float4_e2m1fn_x2, round_mode="round"
+        )
         pertoken_scale = dynamic_scale
         output_dtype = x.dtype
         if bias is not None and bias.dtype != torch.float32:
@@ -116,13 +118,13 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
 
 @register_scheme("W4A4_MXFP4", "moe")
 class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
-    """FusedMoe method for Ascend W8A8_DYNAMIC."""
+    """FusedMoe method for Ascend W4A4_MXFP4."""
 
     model_dtype = None
     quant_type: QuantType = QuantType.MXFP4
 
     def __init__(self):
-        ensure_mxfp4_moe_available("W8A8_MXFP8 MoE quantization")
+        ensure_mxfp4_moe_available("W4A4_MXFP4 MoE quantization")
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()

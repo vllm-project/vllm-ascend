@@ -139,7 +139,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         assert expert_map is not None, "expert_map is required for MC2 token dispatch."
         # NOTE: quant_mode differs by quant feature:
         # - Legacy int communication quantization uses quant_mode=2.
-        # - A5 MXFP8 communication uses quant_mode=4.
+        # - A5 MXFP communication uses quant_mode=4 only for dispatch-enabled
+        #   MXFP paths (currently MXFP8).
+        # - MXFP4 keeps quant_mode=0 which means that activations are quantized in
+        #   the MoE MLP path instead of during MC2 dispatch.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif token_dispatch_input.quant.dispatch_with_quant:
@@ -172,7 +175,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp and token_dispatch_input.quant.dispatch_with_quant:
+        # Only dispatch-enabled MXFP paths pass y_dtype through MC2. MXFP4
+        # keeps dispatch unquantized and quantizes again inside the MLP path.
+        if (
+            self.a5_need_extra_args
+            and token_dispatch_input.quant.is_mxfp
+            and token_dispatch_input.quant.dispatch_with_quant
+        ):
             y_dtype = torch.float8_e4m3fn
             if (
                 token_dispatch_input.quant.mxfp is not None
@@ -212,8 +221,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             tp_recv_counts,
             expand_scales,
         ) = output[0:7]
-        
-        # When quant_mode is set to 0, dispatch operator also generates a not None dynamic_scale.
+
+        # The dispatch operator may still return a non-None dynamic_scale when
+        # quant_mode=0. Clear it for unquantized dispatch paths such as MXFP4.
         if not token_dispatch_input.quant.dispatch_with_quant:
             dynamic_scale = None
 
