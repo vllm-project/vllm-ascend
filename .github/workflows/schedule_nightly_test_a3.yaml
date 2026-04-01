@@ -296,8 +296,12 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a3.zip
-    needs: [multi-node-tests, single-node-tests]
-    if: always()
+    needs: [parse-trigger, single-node-tests, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.result == 'success' &&
+      (needs.single-node-tests.result != 'skipped' ||
+       needs.multi-node-tests.result != 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Merge all benchmark result artifacts

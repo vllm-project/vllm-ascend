@@ -327,7 +327,7 @@ jobs:
           /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
 
   clear-pre-logs:
-    needs: [multi-node-tests]
+    needs: [parse-trigger, multi-node-tests]
     runs-on: linux-aarch64-a2b3-0
     if: github.event_name == 'schedule' && needs.multi-node-tests.result != 'skipped'
     steps:
@@ -338,8 +338,12 @@ jobs:
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into nightly-a2.zip
-    needs: [single-node-tests, multi-node-tests]
-    if: always()
+    needs: [parse-trigger, single-node-tests, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.result == 'success' &&
+      (needs.single-node-tests.result != 'skipped' ||
+       needs.multi-node-tests.result != 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: Merge all benchmark result artifacts

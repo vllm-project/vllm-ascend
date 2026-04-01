@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shlex
 from typing import Any
 
 import openai
@@ -150,6 +151,16 @@ def _extract_hardware(runner: str) -> str:
 
 _PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
 
+_FEATURE_ENVS: dict[str, str] = {
+    "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
+    "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
+    "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
+    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
+    "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
+    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "context_parallel",
+    "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
+}
+
 _PERF_METRIC_RENAME: dict[str, str] = {
     "Benchmark Duration": "Benchmark_Duration(BD)",
     "Prefill Token Throughput": "Prefill_Token_Throughput(PTT)",
@@ -164,6 +175,70 @@ def _extract_dtype(config: SingleNodeConfig) -> str:
     has_w8a8 = "w8a8" in config.model.lower()
     has_quant_ascend = _extract_server_cmd_value(config.server_cmd, "--quantization") == "ascend"
     return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
+
+
+def _parse_json_flag(cmd_list: list[str], flag: str) -> dict[str, Any]:
+    """Extract and JSON-parse the value following `flag` in a command list."""
+    val = _extract_server_cmd_value(cmd_list, flag)
+    if not val:
+        return {}
+    try:
+        return json.loads(val)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list[str]:
+    """Extract enabled feature names from server_cmd and environment variables."""
+    if isinstance(server_cmd, str):
+        try:
+            cmd_list = shlex.split(server_cmd)
+        except ValueError:
+            cmd_list = server_cmd.split()
+    else:
+        cmd_list = list(server_cmd)
+
+    features: list[str] = []
+
+    # Features from --additional-config JSON
+    additional = _parse_json_flag(cmd_list, "--additional-config")
+    if additional.get("enable_weight_nz_layout"):
+        features.append("weight_nz_layout")
+    wp = additional.get("weight_prefetch_config") or {}
+    if isinstance(wp, dict) and wp.get("enabled"):
+        features.append("weight_prefetch")
+    tc = additional.get("torchair_graph_config") or {}
+    if isinstance(tc, dict) and tc.get("enabled"):
+        features.append("torchair_graph")
+    asc = additional.get("ascend_scheduler_config") or {}
+    if isinstance(asc, dict) and asc.get("enabled"):
+        features.append("ascend_scheduler")
+
+    # Features from --compilation-config JSON
+    compilation = _parse_json_flag(cmd_list, "--compilation-config")
+    if compilation.get("cudagraph_mode"):
+        features.append("aclgraph")
+
+    # Features from --speculative-config JSON
+    speculative = _parse_json_flag(cmd_list, "--speculative-config")
+    if speculative:
+        features.append(speculative.get("method", "speculative"))
+
+    # Features from direct flags
+    if "--async-scheduling" in cmd_list:
+        features.append("async_scheduling")
+    if "--enable-expert-parallel" in cmd_list:
+        features.append("expert_parallel")
+
+    # Features from environment variables
+    for env_key, feature_name in _FEATURE_ENVS.items():
+        val = str(envs.get(env_key, "0"))
+        if val not in ("0", "", "false", "False"):
+            features.append(feature_name)
+    if int(envs.get("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)) > 0:
+        features.append("flashcomm2")
+
+    return features
 
 
 def _build_serve_cmd(config: SingleNodeConfig) -> dict[str, str]:
@@ -201,8 +276,14 @@ def _task_passed(case_config: dict[str, Any], result: Any) -> bool:
 
 def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -> dict[str, Any]:
     """Build a single task dict in the required format."""
-    dataset_conf = case_config.get("dataset_conf", "") or case_config.get("dataset_path", "")
-    task_name = dataset_conf.split("/")[0] if dataset_conf else case_key
+    dataset_path = case_config.get("dataset_path", "")
+    dataset_conf = case_config.get("dataset_conf", "")
+    if dataset_path:
+        task_name = dataset_path.split("/", 1)[-1]
+    elif dataset_conf:
+        task_name = dataset_conf.split("/")[0]
+    else:
+        task_name = case_key
     case_type = case_config.get("case_type", "unknown")
     metrics: dict[str, float] = {}
 
@@ -262,7 +343,7 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         "model_name": config.model,
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
-        "feature": config.extra_config.get("feature", []),
+        "feature": _extract_features(config.server_cmd, config.envs),
         "vllm_version": os.environ.get("VLLM_VERSION", ""),
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
         "tasks": tasks,
