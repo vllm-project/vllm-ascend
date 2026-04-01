@@ -1356,7 +1356,6 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-<<<<<<< glm5_document
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 ## Best Practices
@@ -1384,6 +1383,3 @@ In this chapter, we recommend best practices in prefill-decode disaggregation sc
   --reasoning-parser glm45 \
   --enable-auto-tool-choice \
   ```
-=======
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
->>>>>>> main
