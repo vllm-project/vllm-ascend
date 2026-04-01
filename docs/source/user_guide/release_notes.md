@@ -572,7 +572,7 @@ This is the first release candidate of v0.12.0 for vLLM Ascend. We landed lots o
 ### Other
 
 - [Experimental] Mooncake layerwise connector is supported now.
-- [Experimental] [KV cache pool](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/feature_guide/KV_Cache_Pool_Guide.html) feature is added
+- [Experimental] [KV cache pool](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/Design_Documents/KV_Cache_Pool_Guide.html) feature is added
 - [Experimental] A new graph mode `xlite` is introduced. It performs good with some models. Following the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html#using-xlitegraph) to start using it.
 - LLMdatadist kv connector is removed. Please use mooncake connector instead.
 - Ascend scheduler is removed. `--additional-config {"ascend_scheduler": {"enabled": true}` doesn't work anymore.

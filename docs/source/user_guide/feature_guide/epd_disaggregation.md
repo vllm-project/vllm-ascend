@@ -66,7 +66,7 @@ We create the example setup with the **MooncakeLayerwiseConnector** from `vllm_a
 [https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
 
 For the PD disaggregation part, when using MooncakeLayerwiseConnector: The request first enters the Decoder instance,the Decoder triggers a remote prefill task in reverse via the Metaserver. The Prefill node then executes inference and pushes KV Cache layer-wise to the Decoder, overlapping computation with transmission. Once the transfer is complete, the Decoder seamlessly continues with the subsequent token generation.
-`docs/source/developer_guide/feature_guide/disaggregated_prefill.md` shows the brief idea about the disaggregated prefill.
+`docs/source/developer_guide/Design_Documents/disaggregated_prefill.md` shows the brief idea about the disaggregated prefill.
 
 ## Limitations
 
