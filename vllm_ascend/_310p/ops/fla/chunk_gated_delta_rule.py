@@ -167,9 +167,8 @@ def _torch_chunk_gated_delta_rule_chunked(
         v_new = v_i - v_prime
         inter_state = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state.transpose(-1, -2)
         core_attn_out[:, :, i] = inter_state + attn_inter_chunk @ v_new
-        last_recurrent_state = (
-            last_recurrent_state * g[:, :, i, -1, None, None].exp()
-            + v_new.transpose(-1, -2) @ (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None])
+        last_recurrent_state = last_recurrent_state * g[:, :, i, -1, None, None].exp() + v_new.transpose(-1, -2) @ (
+            k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]
         )
 
     if not output_final_state:
