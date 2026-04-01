@@ -46,10 +46,11 @@ class KVPoolScheduler:
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         self._preempted_req_ids: set[str] = set()
+        self.prefill_offload = True
         # Whether to discard partial chunks
-        self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
-            "discard_partial_chunks", True
-        )
+        self._discard_partial_chunks = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "discard_partial_chunks", not self.prefill_offload))
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
@@ -214,7 +215,8 @@ class KVPoolScheduler:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 # resumed request
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids:
+                # TODO 调试的时候，添加decode，为了验证精度
+                if not new_block_ids and not self.prefill_offload:
                     continue
                 if req_id in self._preempted_req_ids:
                     if isinstance(new_block_ids, tuple):
@@ -223,6 +225,12 @@ class KVPoolScheduler:
                         new_block_ids = new_block_ids.copy()
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
+                    if self.prefill_offload:
+                        load_spec = LoadSpec(
+                            vllm_cached_tokens=0,
+                            kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
+                            can_load=True,
+                        )
                     request_tuple = self._unfinished_requests.get(req_id)
                     request_real = request_tuple[0]  # type: ignore[index]
                     num_tokens_to_compute = (
@@ -267,19 +275,28 @@ class KVPoolScheduler:
                             f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
                         )
                     num_computed_token = cached_reqs.num_computed_tokens[i]
-                    if num_computed_token >= len(request.prompt_token_ids):
-                        continue
-                    request_tracker.update(new_block_ids)
+                    # TODO 调试的时候，添加decode，为了验证精度
+                    # if num_computed_token >= len(request.prompt_token_ids):
+                    #     continue
+                    if new_block_ids is not None:
+                        request_tracker.update(new_block_ids)
 
                     last_chunk_tokens_num = (
                         (len(request.prompt_token_ids) // self._block_size * self._block_size)
                         if self._discard_partial_chunks
                         else len(request.prompt_token_ids)
                     )
+                    load_spec = None
+                    if self.prefill_offload:
+                        load_spec = LoadSpec(
+                            vllm_cached_tokens=0,
+                            kvpool_cached_tokens=cached_reqs.num_computed_tokens[i],
+                            can_load=True,
+                        )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
-                        load_spec=None,
+                        load_spec=load_spec,
                         skip_save=force_skip_save,
                         block_hashes=request.block_hashes,
                         is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
