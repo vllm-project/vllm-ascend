@@ -28,7 +28,7 @@ SHELL ["/bin/bash", "-c"]
 
 # Install clang (for triton-ascend) and Mooncake
 RUN yum update -y && \
-    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl-devel jemalloc clang && \
+    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc clang && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     mv /vllm-workspace/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     ARCH=$(uname -m) && \
