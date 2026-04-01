@@ -28,7 +28,7 @@ This is the first release candidate of v0.18.0 for vLLM Ascend. Please follow th
 
 ### Others
 
-- Fixed a PD separation issue where decode nodes could get stuck because shapes were not aligned across DP nodes. [#7534](https://github.com/vllm-project/vllm-ascend/pull/7534)
+- Fixed a PD Disaggregation issue where decode nodes could get stuck because shapes were not aligned across DP nodes. [#7534](https://github.com/vllm-project/vllm-ascend/pull/7534)
 - Fixed a regression where hybrid attention plus mamba models on Ascend could start with an incorrect block size after the v0.18.0 upgrade. [#7528](https://github.com/vllm-project/vllm-ascend/pull/7528)
 - Fixed multi-instance serving OOM calculation on single-card deployments. [#7427](https://github.com/vllm-project/vllm-ascend/pull/7427)
 - Fixed DeepSeek v3.1 C8 when overlaying MTP with full decode and full graph modes. [#7571](https://github.com/vllm-project/vllm-ascend/pull/7571)
@@ -39,6 +39,7 @@ This is the first release candidate of v0.18.0 for vLLM Ascend. Please follow th
 - When running DeepSeek-R1 W8A8 with MTP and KV Pool enabled under high concurrency, a `ValueError: Counters can only be incremented by non-negative amounts` may occur. [#7489](https://github.com/vllm-project/vllm-ascend/issues/7489)
 - triton-ascend may fail to compile with a g++ internal compiler error (Segmentation fault). Workaround: update to `triton-ascend==3.2.0.dev20260322` and clear the Triton cache (`rm -rf ~/.triton/cache/*`). [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782)
 - FIA does not support all MHA head dimensions when using tp-size >= 16 on Ascend. Affected models will fail with an error on unsupported head dimensions. This will be resolved in a future release when FIA supports more head dimensions. [#7729](https://github.com/vllm-project/vllm-ascend/pull/7729)
+- While Minimax-2.5 now supports PD Disaggregation, internal testing has identified a 13% regression on the GPQA benchmark when this feature is enabled. We currently do not recommend enabling PD Disaggregation for this model and We are working on an optimization fix.
 
 ## v0.17.0rc1 - 2026.03.15
 
