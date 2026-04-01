@@ -23,6 +23,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config = MagicMock()
         mock_vllm_config.compilation_config = MagicMock()
         mock_vllm_config.model_config = MagicMock()
+        mock_vllm_config.device_config = MagicMock()
+        mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
