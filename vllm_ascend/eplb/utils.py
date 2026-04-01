@@ -19,20 +19,29 @@ import types
 
 import torch
 
+from vllm_ascend.utils import get_max_hidden_layers
+
+
+def get_model_layers(model):
+    if hasattr(model, "language_model"):
+        return model.language_model.model.layers
+    return model.layers
+
 
 def get_expert_map(self, layer_id):
-    return self.model.layers[layer_id].mlp.experts.expert_map
+    return get_model_layers(self.model)[layer_id].mlp.experts.expert_map
 
 
 def get_log2phy_map(self, layer_id):
-    return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
+    return get_model_layers(self.model)[layer_id].mlp.experts.get_log2phy_map()
 
 
 def get_all_moe_loads(self):
     num_dense_layers = getattr(self.model.config, "first_k_dense_replace", 0)
-    num_layers = self.model.config.num_hidden_layers
+    num_layers = get_max_hidden_layers(self.model.config)
     all_moe_loads = torch.stack(
-        [self.model.layers[layer_id].mlp.experts.moe_load for layer_id in range(num_dense_layers, num_layers)],
+        [get_model_layers(self.model)[layer_id].mlp.experts.moe_load
+         for layer_id in range(num_dense_layers, num_layers)],
         dim=0,
     )
     return all_moe_loads
@@ -40,9 +49,9 @@ def get_all_moe_loads(self):
 
 def clear_all_moe_loads(self):
     num_dense_layers = getattr(self.model.config, "first_k_dense_replace", 0)
-    num_layers = self.model.config.num_hidden_layers
+    num_layers = get_max_hidden_layers(self.model.config)
     for layer_id in range(num_dense_layers, num_layers):
-        self.model.layers[layer_id].mlp.experts.clear_moe_load()
+        get_model_layers(self.model)[layer_id].mlp.experts.clear_moe_load()
 
 
 def model_register(model):
