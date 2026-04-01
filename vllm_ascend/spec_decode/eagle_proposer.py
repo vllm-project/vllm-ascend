@@ -376,8 +376,8 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
-                seq_lens_cpu=self.runner.seq_lens.cpu,
-                seq_lens=self.runner.seq_lens.gpu[:num_reqs],
+                seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                seq_lens=self.runner.seq_lens[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_tokens,
                 num_input_tokens=num_tokens,
@@ -387,7 +387,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
-                positions=self.runner.positions.gpu,
+                positions=self.runner.positions,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
