@@ -146,7 +146,7 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
-export HCCL_BUFFSIZE=512
+export HCCL_BUFFSIZE=800
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
@@ -244,11 +244,11 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --tensor-parallel-size 4 \
   --enable-expert-parallel \
   --async-scheduling \
-  --max-num-seqs 64 \
+  --max-num-seqs 16 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --gpu-memory-utilization 0.9 \
-  --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64,128,256], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
   --mm-encoder-tp-mode data
 ```
@@ -310,11 +310,11 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
   --tensor-parallel-size 4 \
   --enable-expert-parallel \
   --async-scheduling \
-  --max-num-seqs 64 \
+  --max-num-seqs 16 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --gpu-memory-utilization 0.9 \
-  --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64,128,256], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --compilation-config '{"cudagraph_capture_sizes":[4,8,16,32,64], "cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}' \
   --mm-encoder-tp-mode data
 ```
