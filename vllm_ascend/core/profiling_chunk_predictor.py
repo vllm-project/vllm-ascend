@@ -35,8 +35,6 @@ import numpy as np
 
 from vllm.logger import logger
 
-from vllm_ascend import envs as envs_ascend
-
 
 class ChunkSizePredictor:
     """Predictor for dynamic chunk size based on quadratic latency model.
@@ -49,7 +47,7 @@ class ChunkSizePredictor:
     This expands to the quadratic equation: a*x^2 + (2aL+b)*x - T = 0
     """
 
-    def __init__(self, smooth_factor: float = 0.8):
+    def __init__(self, smooth_factor: float = 0.8, min_chunk: int = 4096):
         self.quadratic_coeff_a: float = 0.0
         self.linear_coeff_b: float = 0.0
         self.constant_coeff_c: float = 0.0
@@ -62,7 +60,7 @@ class ChunkSizePredictor:
         self.is_ready: bool = False
         self.with_history_ready: bool = False
         self.smooth_factor = smooth_factor
-        self.min_chunk = 4096
+        self.min_chunk = min_chunk
         self.history_fitted = False
 
     def fit(self, seq_lens: List[int], latencies: List[float]) -> bool:
@@ -174,10 +172,10 @@ class ChunkSizePredictor:
 
     def set_target_latency(self, base_chunk_size: int, elapsed_time: float = 0.0) -> None:
         """Set target latency based on base chunk size."""
-        def f(l: float) -> float:
+        def f(seq_lens: float) -> float:
             return (
-                self.quadratic_coeff_a * l * l
-                + self.linear_coeff_b * l
+                self.quadratic_coeff_a * seq_lens * seq_lens
+                + self.linear_coeff_b * seq_lens
                 + self.constant_coeff_c
             )
 
@@ -310,6 +308,8 @@ class ProfilingChunkManager:
         page_size: int,
         context_len: int,
         max_prefill_tokens: Optional[int] = None,
+        smooth_factor: float = 0.8,
+        min_chunk: int = 4096,
     ):
         self.base_chunk_size = base_chunk_size
         self.page_size = page_size
@@ -317,10 +317,9 @@ class ProfilingChunkManager:
         self.max_prefill_tokens = max_prefill_tokens
         self.chunked_fit_data: list = []
 
-        smooth_factor = float(
-            envs_ascend.VLLM_ASCEND_PROFILING_CHUNK_SMOOTH_FACTOR
+        self.predictor = ChunkSizePredictor(
+            smooth_factor=smooth_factor, min_chunk=min_chunk
         )
-        self.predictor = ChunkSizePredictor(smooth_factor)
         self._profiling_done = False
 
     @property

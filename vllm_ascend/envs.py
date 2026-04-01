@@ -107,23 +107,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
-    # Whether to enable profiling-based dynamic chunk sizing.
-    # When enabled, the scheduler will profile prefill latency during initialization
-    # and use a quadratic model to predict optimal chunk sizes.
-    # This is an alternative to vLLM's FLOPs-based DCPP approach.
-    # Options:
-    #   - "0", "false", "no": Disabled (default)
-    #   - "1", "true", "yes": Enabled
-    "VLLM_ASCEND_PROFILING_CHUNK_ENABLED":
-    lambda: os.getenv("VLLM_ASCEND_PROFILING_CHUNK_ENABLED", "0").lower() in
-    ("1", "true", "yes"),
-    # Smooth factor for profiling-based dynamic chunk sizing.
-    # Controls how aggressively chunk sizes are adjusted based on predictions.
-    # Value range: (0, 1], where 1.0 means no smoothing.
-    # Default: 0.8
-    "VLLM_ASCEND_PROFILING_CHUNK_SMOOTH_FACTOR":
-    lambda: float(os.getenv("VLLM_ASCEND_PROFILING_CHUNK_SMOOTH_FACTOR", "0.8"
-                            )),
 }
 
 # end-env-vars-definition

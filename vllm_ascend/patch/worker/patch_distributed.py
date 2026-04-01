@@ -21,8 +21,7 @@ from typing import Any, cast
 
 import torch
 import vllm
-from torch import Tensor
-from torch.distributed import Backend, Work
+from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
@@ -125,7 +124,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.device = None
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
-        self._async_send_buff:deque[tuple[Work, Tensor]] = deque()
 
         reuse_domain = _resolve_reuse_domain(group_name)
 

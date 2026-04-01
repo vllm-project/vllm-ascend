@@ -72,6 +72,9 @@ class ProfilingChunkScheduler(Scheduler):
             log_stats=log_stats,
         )
 
+        from vllm_ascend.ascend_config import get_ascend_config
+        profiling_cfg = get_ascend_config().profiling_chunk_config
+
         base_chunk = self.scheduler_config.long_prefill_token_threshold
         if base_chunk <= 0:
             base_chunk = self.max_num_scheduled_tokens
@@ -81,14 +84,18 @@ class ProfilingChunkScheduler(Scheduler):
             page_size=self.block_size,
             context_len=self.max_model_len,
             max_prefill_tokens=self.max_num_scheduled_tokens,
+            smooth_factor=profiling_cfg.smooth_factor,
+            min_chunk=profiling_cfg.min_chunk,
         )
         self._profiling_initialized = False
 
         logger.info(
             "[ProfilingChunk] Scheduler initialized. "
-            "base_chunk=%d, page_size=%d",
+            "base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",
             base_chunk,
             self.block_size,
+            profiling_cfg.smooth_factor,
+            profiling_cfg.min_chunk,
         )
 
     # ------------------------------------------------------------------

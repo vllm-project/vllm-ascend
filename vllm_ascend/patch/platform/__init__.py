@@ -35,6 +35,3 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
 
 if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
     import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
-
-if envs.VLLM_ASCEND_PROFILING_CHUNK_ENABLED:
-    import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa

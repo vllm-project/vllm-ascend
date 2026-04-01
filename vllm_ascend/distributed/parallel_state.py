@@ -226,7 +226,6 @@ def init_ascend_model_parallel(
             _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
 
 
-
 def model_parallel_initialized():
     return _MC2 is not None
 

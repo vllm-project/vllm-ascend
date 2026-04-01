@@ -50,6 +50,9 @@ class AscendConfig:
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
 
+        profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
+        self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
+
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
         self.layer_sharding = additional_config.get("layer_sharding", None)
@@ -423,6 +426,42 @@ class WeightPrefetchConfig:
     def __init__(self, weight_prefetch_config: dict):
         self.enabled = weight_prefetch_config.get("enabled", False)
         self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
+
+
+class ProfilingChunkConfig:
+    """Configuration for profiling-based dynamic chunk sizing.
+
+    When enabled, the scheduler profiles prefill latency during initialization
+    and uses a quadratic model to predict optimal chunk sizes at runtime.
+
+    Usage (online)::
+
+        vllm serve <model> --additional-config '{"profiling_chunk_config": {"enabled": true}}'
+
+    Usage (offline)::
+
+        llm = LLM(model, additional_config={"profiling_chunk_config": {"enabled": true}})
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        self.enabled: bool = config.get("enabled", False)
+        self.smooth_factor: float = float(config.get("smooth_factor", 0.8))
+        self.min_chunk: int = int(config.get("min_chunk", 4096))
+        self._validate()
+
+    def _validate(self):
+        if not (0 < self.smooth_factor <= 1.0):
+            raise ValueError(
+                f"profiling_chunk_config.smooth_factor must be in (0, 1], "
+                f"got {self.smooth_factor}"
+            )
+        if self.min_chunk <= 0:
+            raise ValueError(
+                f"profiling_chunk_config.min_chunk must be positive, "
+                f"got {self.min_chunk}"
+            )
 
 
 class EplbConfig:
