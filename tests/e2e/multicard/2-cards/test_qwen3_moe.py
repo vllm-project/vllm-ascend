@@ -74,6 +74,21 @@ def test_qwen3_moe_distributed_aiv_tp2():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024", "VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_qwen3_moe_distributed_tp2_mrv2():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+        "Qwen/Qwen3-30B-A3B",
+        tensor_parallel_size=2,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        enforce_eager=True,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"

@@ -33,6 +33,14 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import (
+    MoECommType,
+    get_mc2_tokens_capacity,
+    override_mrv2_in_profile_run,
+    select_moe_comm_method,
+    set_mc2_mask,
+    set_mc2_tokens_capacity,
+)
 from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -48,6 +56,9 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        self.ascend_config = get_ascend_config()
+        self.validate_supported_v2_features(vllm_config, self.ascend_config)
+
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
@@ -116,10 +127,7 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # Ascend-specific configurations
-        self.ascend_config = get_ascend_config()
-        # set this just the same as model runner v1, or it will raise error.
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        self._initialize_runtime_state(vllm_config)
 
         # we need to update full graph params in run_fullgraph,
         # so create a stream to update full graph params.
@@ -134,6 +142,41 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
+
+    def _initialize_runtime_state(self, vllm_config: VllmConfig) -> None:
+        # Keep Ascend runtime state aligned with model runner v1.
+        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
+        set_mc2_mask(vllm_config, self.device)
+
+    @staticmethod
+    def validate_supported_v2_features(vllm_config: VllmConfig, ascend_config) -> None:
+        if ascend_config.weight_prefetch_config.enabled:
+            raise NotImplementedError("Weight prefetch is not supported by Ascend NPU model runner v2.")
+
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
+
+        if ascend_config.eplb_config.dynamic_eplb:
+            raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
+
+    @torch.inference_mode()
+    def _dummy_run(self, num_tokens: int, *args, in_profile_run: bool = False, **kwargs):
+        with override_mrv2_in_profile_run(in_profile_run):
+            return super()._dummy_run(num_tokens, *args, **kwargs)
+
+    @torch.inference_mode()
+    def profile_run(self) -> None:
+        mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if (
+            mc2_tokens_capacity is not None
+            and self.max_num_tokens > mc2_tokens_capacity
+            and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
+            in {MoECommType.MC2, MoECommType.FUSED_MC2}
+        ):
+            self._dummy_run(mc2_tokens_capacity, skip_attn=True, in_profile_run=True)
+        super().profile_run()
 
     def prepare_inputs(
         self,
