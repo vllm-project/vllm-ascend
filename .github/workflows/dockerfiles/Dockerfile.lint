@@ -27,10 +27,17 @@ RUN apt-get update -y && \
 
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 # For lint purpose, actually we need make a main2main matching.
+ARG VLLM_COMMIT=2f5c3c1ec07ff0d26fb667eadd1566615325fdd9
 RUN git init /vllm-workspace/vllm && \
     git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO $VLLM_COMMIT && \
     git -C /vllm-workspace/vllm checkout FETCH_HEAD
 
+# # Install vLLM common dependencies
+RUN python3 -m pip install -r /vllm-workspace/vllm/requirements/common.txt --extra-index https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip uninstall -y triton && \
+    python3 -m pip cache purge
+
+COPY . /vllm-workspace/vllm-ascend/
 
 RUN pip install -r /vllm-workspace/vllm-ascend/requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu && \
     pip cache purge && \
