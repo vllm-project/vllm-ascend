@@ -20,12 +20,12 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../developer_guide/feature_guide/index.md:1
-#: ../../developer_guide/feature_guide/index.md:5
+#: ../../developer_guide/Design_Documents/index.md:1
+#: ../../developer_guide/Design_Documents/index.md:5
 msgid "Feature Guide"
 msgstr "功能指南"
 
-#: ../../developer_guide/feature_guide/index.md:3
+#: ../../developer_guide/Design_Documents/index.md:3
 msgid ""
 "This section provides an overview of the features implemented in vLLM "
 "Ascend. Developers can refer to this guide to understand how vLLM Ascend "

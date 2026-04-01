@@ -153,7 +153,7 @@ pip install -r requirements-dev.txt
 There are several principles to follow when writing unit tests:
 
 - The test file path should be consistent with the source file and start with the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> `tests/ut/worker/test_worker.py`
-- The vLLM Ascend test uses unittest framework. See [here](https://docs.python.org/3/library/unittest.html#module-unittest) to understand how to write unit tests.
+- The vLLM Ascend test uses unittest framework. See [the Python unittest documentation](https://docs.python.org/3/library/unittest.html#module-unittest) to understand how to write unit tests.
 - All unit tests can be run on CPUs, so you must mock the device-related function to host.
 - Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py).
 - You can run the unit tests using `pytest`:

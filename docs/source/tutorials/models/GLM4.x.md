@@ -668,31 +668,31 @@ Once the preparation is done, you can start the server with the following comman
 
 1. Prefill node 0
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 12880 --vllm-start-port 9300
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 12880 --vllm-start-port 9300
+    ```
 
 2. Prefill node 1
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p1_ip --dp-rpc-port 12880 --vllm-start-port 9300
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p1_ip --dp-rpc-port 12880 --vllm-start-port 9300
+    ```
 
 3. Decode node 0
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
+    ```
 
 4. Decode node 1
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
+    ```
 
 ### Request Forwarding
 
@@ -775,7 +775,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `GLM-4.x` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 

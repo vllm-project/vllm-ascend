@@ -11,7 +11,7 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
+    | Ascend HDK    | Refer to the documentation [CANN 8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
     | CANN          | == 8.5.1                        | Required for vllm-ascend and torch-npu    |
     | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
