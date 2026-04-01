@@ -335,3 +335,17 @@ jobs:
         run: |
           # Clear logs generated before the test to avoid confusion
           rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+
+  merge-benchmark-artifacts:
+    name: Merge benchmark artifacts into nightly-a2.zip
+    needs: [single-node-tests, multi-node-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge all benchmark result artifacts
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: nightly-a2
+          pattern: nightly-test-benchmark-results-*
+          compression-level: 0
+          delete-merged: true

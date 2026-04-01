@@ -246,7 +246,8 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     }
 
     os.makedirs("benchmark_results", exist_ok=True)
-    safe_name = config.name.replace("/", "_").replace(" ", "_")
+    job_name = os.environ.get("BENCHMARK_JOB_NAME") or config.name
+    safe_name = job_name.replace("/", "_").replace(" ", "_")
     output_path = os.path.join("benchmark_results", f"{safe_name}.json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)

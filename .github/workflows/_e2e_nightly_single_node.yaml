@@ -144,6 +144,9 @@ jobs:
           echo "Installed vLLM-related Python packages:"
           pip list | grep vllm || echo "No vllm packages found."
 
+          echo "VLLM_VERSION=$(pip show vllm | grep ^Version | awk '{print $2}')" >> $GITHUB_ENV
+          echo "VLLM_ASCEND_VERSION=$(pip show vllm-ascend | grep ^Version | awk '{print $2}')" >> $GITHUB_ENV
+
           echo ""
           echo "============================"
           echo "vLLM Git information"
@@ -216,6 +219,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
           CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
+          BENCHMARK_JOB_NAME: ${{ inputs.name }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
@@ -233,6 +237,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
-          path: /vllm-workspace/vllm-ascend/benchmark_results/
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
           if-no-files-found: warn
           retention-days: 90
+          compression-level: 0
