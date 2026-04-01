@@ -688,7 +688,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params.handles[num_tokens].append(handle)
             return output
 
-    def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata):
+    def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
+        # PrefillNoCache doesn't need key_cache, but other modes do
+        # Only initialize/require cache for modes that actually use it
+        if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
+            # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
+            if self.key_cache is None and kv_cache is not None:
+                if isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2:
+                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+                elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+
+            if self.key_cache is None:
+                raise RuntimeError(f"key_cache is None in _get_fia_params for mode {attn_metadata.attn_state}. kv_cache={kv_cache}")
+
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
@@ -766,6 +779,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        kv_cache=None,
     ):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
@@ -781,7 +795,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sinks is None
         ):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
-        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata, kv_cache)
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (
@@ -927,7 +941,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
-            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output)
+            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 
         return output
 
@@ -963,6 +977,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
+
+        # Initialize key_cache and value_cache from kv_cache if not already set.
+        # This is needed for DecodeOnly mode where key/value are None but we still
+        # need access to the cache for attention computation.
+        if self.key_cache is None and kv_cache is not None:
+            if isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+
         output_padded = None
         if key is not None and value is not None:
             output_padded = output
