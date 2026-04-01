@@ -286,6 +286,7 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
@@ -329,6 +330,7 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-bf16 \
@@ -380,6 +382,7 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
@@ -425,6 +428,7 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5-w4a8 \
@@ -544,6 +548,7 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
@@ -593,6 +598,7 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
