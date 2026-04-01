@@ -265,307 +265,307 @@ Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes)
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_dp_program.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
 1. `launch_online_dp.py` to launch external dp vllm servers.
-[launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+    [launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
 2. Prefill Node 0 `run_dp_template.sh` script
 
-```shell
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="141.xx.xx.1"
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="141.xx.xx.1"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
 
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=120
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=256
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_BUFFER_POOL=4:8
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=256
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_BUFFER_POOL=4:8
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve /weights/Kimi-K2.5-w4a8 \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name kimi_k25 \
-  --max-model-len 65536 \
-  --max-num-batched-tokens 16384 \
-  --max-num-seqs 8 \
-  --enforce-eager \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --additional-config '{"recompute_scheduler_enable":true}' \
-  --mm-processor-cache-type shm \
-  --mm-encoder-tp-mode data \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_producer",
-  "kv_port": "30000",
-  "engine_id": "0",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+    vllm serve /weights/Kimi-K2.5-w4a8 \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name kimi_k25 \
+      --max-model-len 65536 \
+      --max-num-batched-tokens 16384 \
+      --max-num-seqs 8 \
+      --enforce-eager \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.9 \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --additional-config '{"recompute_scheduler_enable":true}' \
+      --mm-processor-cache-type shm \
+      --mm-encoder-tp-mode data \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_producer",
+      "kv_port": "30000",
+      "engine_id": "0",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                }
+          }
+      }'
+    ```
 
 3. Prefill Node 1 `run_dp_template.sh` script
 
-```shell
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="141.xx.xx.2"
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="141.xx.xx.2"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
 
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=120
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=256
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_BUFFER_POOL=4:8
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=256
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_BUFFER_POOL=4:8
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-vllm serve /weights/Kimi-K2.5-w4a8 \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name kimi_k25 \
-  --max-model-len 65536 \
-  --max-num-batched-tokens 16384 \
-  --max-num-seqs 8 \
-  --enforce-eager \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --additional-config '{"recompute_scheduler_enable":true}' \
-  --mm-processor-cache-type shm \
-  --mm-encoder-tp-mode data \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_producer",
-  "kv_port": "30100",
-  "engine_id": "1",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+    vllm serve /weights/Kimi-K2.5-w4a8 \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name kimi_k25 \
+      --max-model-len 65536 \
+      --max-num-batched-tokens 16384 \
+      --max-num-seqs 8 \
+      --enforce-eager \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.9 \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --additional-config '{"recompute_scheduler_enable":true}' \
+      --mm-processor-cache-type shm \
+      --mm-encoder-tp-mode data \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_producer",
+      "kv_port": "30100",
+      "engine_id": "1",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                }
+          }
+      }'
+    ```
 
 4. Decode Node 0 `run_dp_template.sh` script
 
-```shell
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="141.xx.xx.3"
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="141.xx.xx.3"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
 
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=120
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=1100
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_BUFFER_POOL=4:8
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-export VLLM_ASCEND_ENABLE_MLAPO=1
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1100
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_BUFFER_POOL=4:8
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export VLLM_ASCEND_ENABLE_MLAPO=1
 
-vllm serve /weights/Kimi-K2.5-w4a8 \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name kimi_k25 \
-  --max-model-len 65536 \
-  --max-num-batched-tokens 256 \
-  --max-num-seqs 28 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.92 \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --async-scheduling \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_consumer",
-  "kv_port": "30200",
-  "engine_id": "2",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+    vllm serve /weights/Kimi-K2.5-w4a8 \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name kimi_k25 \
+      --max-model-len 65536 \
+      --max-num-batched-tokens 256 \
+      --max-num-seqs 28 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --async-scheduling \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
+      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "30200",
+      "engine_id": "2",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                }
+          }
+      }'
+    ```
 
 5. Decode Node 1 `run_dp_template.sh` script
 
-```shell
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="141.xx.xx.4"
+    ```shell
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxx"
+    local_ip="141.xx.xx.4"
 
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+    # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+    node0_ip="xxxx"
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # [Optional] jemalloc
+    # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+    # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
 
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=120
+    export VLLM_RPC_TIMEOUT=3600000
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_EXEC_TIMEOUT=204
+    export HCCL_CONNECT_TIMEOUT=120
 
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=1100
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_BUFFER_POOL=4:8
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-export VLLM_ASCEND_ENABLE_MLAPO=1
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1100
+    export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export ASCEND_BUFFER_POOL=4:8
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export VLLM_ASCEND_ENABLE_MLAPO=1
 
-vllm serve /weights/Kimi-K2.5-w4a8 \
-  --host 0.0.0.0 \
-  --port $2 \
-  --data-parallel-size $3 \
-  --data-parallel-rank $4 \
-  --data-parallel-address $5 \
-  --data-parallel-rpc-port $6 \
-  --tensor-parallel-size $7 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name kimi_k25 \
-  --max-model-len 65536 \
-  --max-num-batched-tokens 256 \
-  --max-num-seqs 28 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.92 \
-  --quantization ascend \
-  --no-enable-prefix-caching \
-  --async-scheduling \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
-  --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}' \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-  "kv_role": "kv_consumer",
-  "kv_port": "30200",
-  "engine_id": "2",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
-             }
-      }
-  }'
-```
+    vllm serve /weights/Kimi-K2.5-w4a8 \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name kimi_k25 \
+      --max-model-len 65536 \
+      --max-num-batched-tokens 256 \
+      --max-num-seqs 28 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --async-scheduling \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
+      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "30200",
+      "engine_id": "2",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                }
+          }
+      }'
+    ```
 
 **Notice:**
 The parameters are explained as follows:
@@ -579,18 +579,18 @@ The parameters are explained as follows:
 
 1. run server for each node:
 
-```shell
-# p0
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
-# p1
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
-# d0
-python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
-# d1
-python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
-```
+    ```shell
+    # p0
+    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    # p1
+    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d0
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    # d1
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    ```
 
-7. Run the `proxy.sh` script on the prefill master node
+2. Run the `proxy.sh` script on the prefill master node
 
 Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
