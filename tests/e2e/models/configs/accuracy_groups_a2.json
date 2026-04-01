@@ -54,7 +54,7 @@
       "name": "pr-accuracy-group-4-cards",
       "os": "linux-x86_64-ascend-4",
       "model_list": [
-        "Qwen2.5-Math-RM-72B“
+        "Qwen2.5-Math-RM-72B"
       ]
     }
   ]
