@@ -15,8 +15,7 @@ This document provides a unified deployment guide for `MiniMax-M2.5` on vLLM Asc
 
 - `MiniMax-M2.5` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5).
 - `MiniMax-M2.5-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot).
-- `Eagle3` : Download the model weights from [vllm-ascend/MiniMax-M2.5-eagel-model
-](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagel-model-0318).
+- `Eagle3` : Download the model weights from [vllm-ascend/MiniMax-M2.5-eagel-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagel-model-0318).
 
 It is recommended to download the model weights to a shared directory, such as `/mnt/sfs_turbo/.cache/`. The current release automatically detects the MiniMax-M2 fp8 checkpoint, disables fp8 quantization kernels on NPU, and loads the weights by dequantizing to bf16. This behavior may be removed once public bf16 weights are available.
 
@@ -163,9 +162,9 @@ Remarks:
 
 - `minimax_m2_append_think` keeps `<think>...</think>` inside `content`.
 - If you mainly rely on the reasoning semantics of `/v1/responses`, it is recommended to use `--reasoning-parser minimax_m2` instead.
-- To receive a better performance on long-context like 128k or 64k, we recommand to do changes as shown bellow, and you can remove `export VLLM_ASCEND_BALANCE_SCHEDULING=1`.
+- To receive a better performance on long-context like 128k or 64k, we recommend to do changes as shown below, and you can remove `export VLLM_ASCEND_BALANCE_SCHEDULING=1`.
 
-```
+```{code-block} bash
     --tensor-parallel-size 8 \
     --data-parallel-size 1 \
     --decode-context-parallel-size 1 \
@@ -180,7 +179,7 @@ Remarks:
 
 - If you will to test with `curl` command, you can add following commands addition to start up command above.
 
-```
+```{code-block} bash
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
     --reasoning-parser minimax_m2_append_think \
