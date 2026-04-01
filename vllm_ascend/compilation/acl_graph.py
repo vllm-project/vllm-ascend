@@ -208,13 +208,31 @@ class ACLGraphWrapper:
         return entry.output
 
 
+GraphKey = int | tuple[int, int]
+
+
+def _get_graph_key(num_tokens: int, num_dycp_reqs: int = 0) -> GraphKey:
+    return (num_tokens, num_dycp_reqs) if num_dycp_reqs > 0 else num_tokens
+
+
+def _ensure_graph_key_initialized(params: "GraphParams", graph_key: GraphKey) -> None:
+    if graph_key not in params.events:
+        params.events[graph_key] = []
+    if graph_key not in params.workspaces:
+        params.workspaces[graph_key] = None
+    if graph_key not in params.handles:
+        params.handles[graph_key] = []
+    if graph_key not in params.attn_params:
+        params.attn_params[graph_key] = []
+
+
 def weak_ref_workspaces(params):
     if params is None:
         return
-    for num_tokens in params.workspaces:
-        if params.workspaces[num_tokens] is None:
+    for graph_key in params.workspaces:
+        if params.workspaces[graph_key] is None:
             continue
-        params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
+        params.workspaces[graph_key] = weak_ref_tensors(params.workspaces[graph_key])
 
 
 def update_full_graph_params(
@@ -226,25 +244,48 @@ def update_full_graph_params(
     speculative_config=None,
     num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
+    num_cp_reqs: int = 0,
+    num_dycp_reqs: int = 0,
 ):
+    if num_cp_reqs > 0:
+        effective_num_cp_reqs = num_cp_reqs
+    elif num_dycp_reqs > 0:
+        effective_num_cp_reqs = num_dycp_reqs
+    else:
+        batch_descriptor = getattr(forward_context, "batch_descriptor", None)
+        effective_num_cp_reqs = getattr(
+            batch_descriptor,
+            "num_cp_reqs",
+            getattr(
+                batch_descriptor,
+                "num_dycp_reqs",
+                getattr(
+                    forward_context,
+                    "num_cp_reqs",
+                    getattr(forward_context, "num_dycp_reqs", 0),
+                ),
+            ),
+        )
     impl_cls = attn_backend.get_impl_cls()
     impl_cls.update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config,
-        num_dcp_pcp_tokens,
-        draft_attn_metadatas,
+        update_stream=update_stream,
+        forward_context=forward_context,
+        num_tokens=num_tokens,
+        vllm_config=vllm_config,
+        speculative_config=speculative_config,
+        num_dcp_pcp_tokens=num_dcp_pcp_tokens,
+        draft_attn_metadatas=draft_attn_metadatas,
+        num_dycp_reqs=effective_num_cp_reqs,
     )
 
 
 @dataclass
 class GraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
+    events: dict[GraphKey, list[torch.npu.ExternalEvent]]
+    workspaces: dict[GraphKey, torch.Tensor]
+    handles: dict[GraphKey, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[GraphKey, list[tuple]]
+
 
 
 _graph_params: GraphParams | None = None
@@ -262,10 +303,12 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     )
 
 
-def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
+def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor, num_dycp_reqs: int = 0):
     global _graph_params
     if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
+        graph_key = _get_graph_key(num_tokens, num_dycp_reqs)
+        _ensure_graph_key_initialized(_graph_params, graph_key)
+        _graph_params.workspaces[graph_key] = workspace
 
 
 def get_graph_params():
@@ -287,10 +330,12 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     )
 
 
-def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
+def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any, num_dycp_reqs: int = 0):
     global _draft_graph_params
     if _draft_graph_params is not None:
-        _draft_graph_params.workspaces[num_tokens] = workspace
+        graph_key = _get_graph_key(num_tokens, num_dycp_reqs)
+        _ensure_graph_key_initialized(_draft_graph_params, graph_key)
+        _draft_graph_params.workspaces[graph_key] = workspace
 
 
 def get_draft_graph_params():

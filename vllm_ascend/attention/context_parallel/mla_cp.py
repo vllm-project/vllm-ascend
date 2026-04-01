@@ -369,19 +369,25 @@ class AscendMlaCPImpl(AscendMLAImpl):
         speculative_config=None,
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
+        num_dycp_reqs: int = 0,
     ):
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        graph_key = (num_tokens, num_dycp_reqs) if num_dycp_reqs > 0 else num_tokens
+        attn_params = graph_params.attn_params.get(graph_key, graph_params.attn_params.get(num_tokens, []))
+        handles = graph_params.handles.get(graph_key, graph_params.handles.get(num_tokens, []))
+        events = graph_params.events.get(graph_key, graph_params.events.get(num_tokens, []))
+        workspace = graph_params.workspaces.get(graph_key, graph_params.workspaces.get(num_tokens))
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
                 forward_context.attn_metadata,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
+                attn_params,
+                handles,
+                events,
             ):
                 (
                     q_nope,
@@ -436,7 +442,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     block_size=block_size,
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
                     actual_seq_lengths=actual_seq_lengths,
-                    workspace=graph_params.workspaces.get(num_tokens),
+                    workspace=workspace,
                     out=[attn_output, softmax_lse],
                 )
                 torch.npu.graph_task_update_end(update_stream)
@@ -457,7 +463,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 if is_hidden_layer(layer):
                     reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
-
         dycp_metadata, dp_metadata = split_attn_metadata(attn_metadata, attn_metadata.num_dycp_reqs, self.dycp_size)
         num_decode_tokens = attn_metadata.num_decode_tokens
         if self.common_pcp_size > 1 and attn_metadata.num_dycp_reqs and (attn_metadata.decode is None or attn_metadata.decode == 0):
@@ -871,13 +876,19 @@ class AscendMlaCPImpl(AscendMLAImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        graph_key = (num_tokens, num_dycp_reqs) if num_dycp_reqs > 0 else num_tokens
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
             event.wait(stream)
             event.reset(stream)
-            graph_params.events[num_tokens].append(event)
-            workspace = graph_params.workspaces.get(num_tokens)
+            if graph_key not in graph_params.events:
+                graph_params.events[graph_key] = []
+                graph_params.attn_params[graph_key] = []
+                graph_params.handles[graph_key] = []
+                graph_params.workspaces[graph_key] = None
+            graph_params.events[graph_key].append(event)
+            workspace = graph_params.workspaces.get(graph_key)
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope,
@@ -885,14 +896,14 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     k_nope,
                     **common_kwargs,
                 )
-                update_graph_params_workspaces(num_tokens, workspace)
+                update_graph_params_workspaces(num_tokens, workspace, num_dycp_reqs=num_dycp_reqs)
             attn_output = torch.empty_like(q_nope)
             if input_layout == "BNSD":
                 softmax_lse = torch.empty((num_tokens, num_heads, 1, 1), dtype=torch.float, device=q_nope.device)
             else:
                 softmax_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=q_nope.device)
 
-            graph_params.attn_params[num_tokens].append(
+            graph_params.attn_params[graph_key].append(
                 (
                     weak_ref_tensors(q_nope),
                     weak_ref_tensors(k_nope),
@@ -917,7 +928,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
             )
             handle = torch.npu.graph_task_group_end(stream)
-            graph_params.handles[num_tokens].append(handle)
+            graph_params.handles[graph_key].append(handle)
         else:
             attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
                 q_nope,
@@ -1220,4 +1231,4 @@ def split_prefill_metadata(
         pcp_metadata=None,  # DP 不需要
     )
 
-    return dycp_prefill, dp_prefill
+    return dycp_prefill, dp_prefill    

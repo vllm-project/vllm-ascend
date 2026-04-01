@@ -46,11 +46,14 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    num_cp_reqs: int = 0,
+    num_dycp_reqs: int = 0,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
     """
+    num_cp_reqs = num_cp_reqs if num_cp_reqs > 0 else num_dycp_reqs
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -59,12 +62,15 @@ def set_ascend_forward_context(
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
+        # Keep the legacy key for compatibility with current forward context setup.
+        "num_dycp_reqs": num_cp_reqs,
     }
     if vllm_version_is("0.18.0"):
         forward_context_kwargs["virtual_engine"] = virtual_engine
 
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
+        forward_context.num_cp_reqs = num_cp_reqs
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method

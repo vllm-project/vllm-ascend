@@ -768,6 +768,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         speculative_config=None,
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
+        num_dycp_reqs: int = 0,
     ):
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
