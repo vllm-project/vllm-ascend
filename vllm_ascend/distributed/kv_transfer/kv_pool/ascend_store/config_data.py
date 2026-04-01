@@ -141,6 +141,7 @@ class ChunkedTokenDatabase:
         token_len: int,
         block_hashes: list[BlockHash] | list[str],
         mask_num: int = 0,
+        req_id = 'no_need',
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -162,11 +163,13 @@ class ChunkedTokenDatabase:
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        if req_id != 'no_need' and token_len % self.block_size != 0:
+            block_hashes.append(f'{req_id}_lastblock')
         if not block_hashes:
             return
         if not isinstance(block_hashes[0], str):
             block_hashes = [
-                h.hex()  # type: ignore[union-attr]
+                h.hex() if not isinstance(h, str) else h   # type: ignore[union-attr]
                 for h in block_hashes
             ]
         start_idx = 0
@@ -174,7 +177,8 @@ class ChunkedTokenDatabase:
             start_idx = chunk_id * self.block_size
             if start_idx >= token_len:
                 break
-            end_idx = min(start_idx + self.block_size, token_len)
+            # end_idx = min(start_idx + self.block_size, token_len)
+            end_idx = start_idx + self.block_size
             if start_idx < mask_num:
                 continue
             else:
