@@ -14,6 +14,9 @@ This document provides a unified deployment guide for `MiniMax-M2.5` on vLLM Asc
 ### Model Weights
 
 - `MiniMax-M2.5` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5).
+- `MiniMax-M2.5-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot).
+- `Eagle3` : Download the model weights from [vllm-ascend/MiniMax-M2.5-eagel-model
+](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagel-model-0318).
 
 It is recommended to download the model weights to a shared directory, such as `/mnt/sfs_turbo/.cache/`. The current release automatically detects the MiniMax-M2 fp8 checkpoint, disables fp8 quantization kernels on NPU, and loads the weights by dequantizing to bf16. This behavior may be removed once public bf16 weights are available.
 
@@ -112,41 +115,74 @@ docker run -itd -u 0 --ipc=host --privileged \
 
 ## Online Inference on Multi-NPU
 
-### A3 (single node, tp=16)
+### A3 (single node)
 
-Below is a recommended startup configuration (default performance profile: full context + Tool Calling + Reasoning).
+Below is a recommended startup configuration for short-context condition like 3.5k/1.5k to reach a good performance.
 
 Notes:
 
-- By default, `--max-model-len` is not explicitly set. The server reads the model config (M2.5 uses `196608`) and enables verified performance parameters.
-- If you only care about short-context low latency, you can explicitly set `--max-model-len 32768`.
+- If you only care about short-context low latency, you can explicitly set `--max-model-len 32768`. You may also set `tensor-parallel-size` to 16 and set `data-parallel-size` to 1.
+- `export VLLM_ASCEND_BALANCE_SCHEDULING=1` is used to enhance scheduling capacity between prefill and decode. This will work remarkably with a lager `data-parallel-size`. This can increace performance when cuncurrency gets closer to values equals to `data-parallel-size` times `max-num-seqs`.
 
 ```{code-block} bash
-cd /workspace
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_BUFFSIZE=1024
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+export OMP_NUM_THREADS=1
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-vllm serve /models/MiniMax-M2.5 \
-  --served-model-name MiniMax-M2.5 \
-  --trust-remote-code \
-  --dtype bfloat16 \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --max-num-seqs 32 \
-  --max-num-batched-tokens 32768 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --enable-auto-tool-choice \
-  --tool-call-parser minimax_m2 \
-  --reasoning-parser minimax_m2_append_think \
-  --port 8000 \
-  > /tmp/minimax-m25-serve.log 2>&1 &
-
-tail -f /tmp/minimax-m25-serve.log
+vllm serve /path/to/weight/MiniMax-M2.5-w8a8-QuaRot
+    --served-model-name "MiniMax-M2.5"
+    --host 0.0.0.0
+    --port 8000
+    --trust-remote-code
+    --quantization ascend
+    --async-scheduling
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    --additional-config '{"enable_cpu_binding":true}'
+    --tensor-parallel-size 4
+    --data-parallel-size 4
+    --enable-expert-parallel
+    --max-num-seqs 48
+    --max-model-len 40690
+    --max-num-batched-tokens 16384
+    --gpu-memory-utilization 0.85
+    --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
 ```
 
 Remarks:
 
 - `minimax_m2_append_think` keeps `<think>...</think>` inside `content`.
 - If you mainly rely on the reasoning semantics of `/v1/responses`, it is recommended to use `--reasoning-parser minimax_m2` instead.
+- To receive a better performance on long-context like 128k or 64k, we recommand to do changes as shown bellow, and you can remove `export VLLM_ASCEND_BALANCE_SCHEDULING=1`.
+```
+    --tensor-parallel-size 8
+    --data-parallel-size 1
+    --decode-context-parallel-size 1
+    --prefill-context-parallel-size 2
+    --cp-kv-cache-interleave-size 128
+    --max-num-seqs 16
+    --max-model-len 138000
+    --max-num-batched-tokens 65536
+    --gpu-memory-utilization 0.85
+    --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
+```
+- If you will to test with `curl` command, you can add following commands addition to start up command above.
+```
+    --enable-auto-tool-choice \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2_append_think \
+```
 
 ### A2 (dual node, tp=8 + dp=2)
 
