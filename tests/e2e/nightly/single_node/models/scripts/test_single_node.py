@@ -148,18 +148,69 @@ def _extract_hardware(runner: str) -> str:
     return runner
 
 
+_PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
+
+_PERF_METRIC_RENAME: dict[str, str] = {
+    "Benchmark Duration": "Benchmark_Duration(BD)",
+    "Prefill Token Throughput": "Prefill_Token_Throughput(PTT)",
+    "Input Token Throughput": "Input_Token_Throughput(ITT)",
+    "Output Token Throughput": "Output_Token_Throughput(OTT)",
+    "Total Token Throughput": "Total_Token_Throughput(TTT)",
+}
+
+
+def _extract_dtype(config: SingleNodeConfig) -> str:
+    """Determine weight dtype: w8a8 if model name contains 'w8a8' and --quantization ascend is set, else bf16."""
+    has_w8a8 = "w8a8" in config.model.lower()
+    has_quant_ascend = _extract_server_cmd_value(config.server_cmd, "--quantization") == "ascend"
+    return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
+
+
+def _build_serve_cmd(config: SingleNodeConfig) -> dict[str, str]:
+    """Build serve_cmd dict with mix key for single-node deployments."""
+    args = " ".join(config.server_cmd)
+    return {"mix": f"vllm serve {config.model} {args}".strip()}
+
+
+def _filter_environment(envs: dict[str, Any]) -> dict[str, Any]:
+    """Return env vars with internal port keys removed."""
+    return {k: v for k, v in envs.items() if k not in _PORT_ENV_KEYS}
+
+
+def _task_passed(case_config: dict[str, Any], result: Any) -> bool:
+    """Return True if a single benchmark result meets its baseline/threshold."""
+    if result == "":
+        return False
+    case_type = case_config.get("case_type")
+    baseline = case_config.get("baseline")
+    threshold = case_config.get("threshold")
+    if baseline is None or threshold is None:
+        return True
+    if case_type == "accuracy" and isinstance(result, (int, float)):
+        return abs(float(result) - float(baseline)) <= float(threshold)
+    if case_type == "performance" and isinstance(result, list) and len(result) == 2:
+        _, result_json = result
+        throughput_str = result_json.get("Output Token Throughput", {}).get("total", "")
+        try:
+            throughput_val = float(throughput_str.replace("token/s", "").strip())
+            return throughput_val >= float(threshold) * float(baseline)
+        except (ValueError, AttributeError):
+            return False
+    return True
+
+
 def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -> dict[str, Any]:
     """Build a single task dict in the required format."""
     dataset_conf = case_config.get("dataset_conf", "") or case_config.get("dataset_path", "")
     task_name = dataset_conf.split("/")[0] if dataset_conf else case_key
     case_type = case_config.get("case_type", "unknown")
-    metrics: list[dict[str, Any]] = []
+    metrics: dict[str, float] = {}
 
     if result == "":
         # benchmark run failed — no metrics available
         pass
     elif case_type == "accuracy" and isinstance(result, (int, float)):
-        metrics.append({"name": "accuracy", "value": round(float(result), 4)})
+        metrics["accuracy"] = round(float(result), 4)
     elif case_type == "performance" and isinstance(result, list) and len(result) == 2:
         _, result_json = result
         for metric_name, metric_data in result_json.items():
@@ -170,55 +221,29 @@ def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -
                 value = float(
                     total_str.replace("token/s", "").replace("ms", "").replace("s", "").strip()
                 )
-                metrics.append({"name": metric_name, "value": round(value, 4)})
+                metrics[_PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
             except (ValueError, AttributeError):
                 pass
 
-    return {"name": task_name, "metrics": metrics}
+    test_input_keys = ("num_prompts", "max_out_len", "batch_size", "request_rate")
+    test_input = {k: case_config[k] for k in test_input_keys if k in case_config}
 
+    target: dict[str, Any] = {}
+    if case_config.get("baseline") is not None:
+        target["baseline"] = case_config["baseline"]
+    if case_config.get("threshold") is not None:
+        target["threshold"] = case_config["threshold"]
 
-def _build_test_config(config: SingleNodeConfig) -> dict[str, Any]:
-    """Extract test configuration from server_cmd and benchmark case configs."""
-    perf_case: dict[str, Any] = next(
-        (v for v in config.benchmarks.values() if v and v.get("case_type") == "performance"),
-        {},
-    )
-    tp_str = _extract_server_cmd_value(config.server_cmd, "--tensor-parallel-size")
-    gmu_str = _extract_server_cmd_value(config.server_cmd, "--gpu-memory-utilization")
-
-    test_cfg: dict[str, Any] = {
-        "output_len": perf_case.get("max_out_len"),
-        "batch_size": perf_case.get("batch_size"),
-        "num_prompts": perf_case.get("num_prompts"),
-        "tensor_parallel_size": int(tp_str) if tp_str else None,
-        "gpu_memory_utilization": float(gmu_str) if gmu_str else None,
-    }
-    return {k: v for k, v in test_cfg.items() if v is not None}
+    entry: dict[str, Any] = {"name": task_name, "metrics": metrics, "test_input": test_input}
+    if target:
+        entry["target"] = target
+    entry["pass_fail"] = "pass" if _task_passed(case_config, result) else "fail"
+    return entry
 
 
 def _all_passed(case_configs: list[dict[str, Any]], results: list[Any]) -> bool:
     """Return True only when every benchmark result meets its baseline/threshold."""
-    for case_config, result in zip(case_configs, results):
-        if result == "":
-            return False
-        case_type = case_config.get("case_type")
-        baseline = case_config.get("baseline")
-        threshold = case_config.get("threshold")
-        if baseline is None or threshold is None:
-            continue
-        if case_type == "accuracy" and isinstance(result, (int, float)):
-            if abs(float(result) - float(baseline)) > float(threshold):
-                return False
-        elif case_type == "performance" and isinstance(result, list) and len(result) == 2:
-            _, result_json = result
-            throughput_str = result_json.get("Output Token Throughput", {}).get("total", "")
-            try:
-                throughput_val = float(throughput_str.replace("token/s", "").strip())
-                if throughput_val < float(threshold) * float(baseline):
-                    return False
-            except (ValueError, AttributeError):
-                return False
-    return True
+    return all(_task_passed(cfg, res) for cfg, res in zip(case_configs, results))
 
 
 def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[str], results: list[Any]) -> None:
@@ -236,13 +261,14 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     output: dict[str, Any] = {
         "model_name": config.model,
         "hardware": _extract_hardware(runner),
+        "dtype": _extract_dtype(config),
+        "feature": config.extra_config.get("feature", []),
         "vllm_version": os.environ.get("VLLM_VERSION", ""),
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
-        "pass_fail": "pass" if passed else "fail",
         "tasks": tasks,
-        "test_config": _build_test_config(config),
-        "known_issues": config.extra_config.get("known_issues", ""),
-        "notes": config.extra_config.get("notes", ""),
+        "serve_cmd": _build_serve_cmd(config),
+        "environment": _filter_environment(config.envs),
+        "pass_fail": "pass" if passed else "fail",
     }
 
     os.makedirs("benchmark_results", exist_ok=True)
