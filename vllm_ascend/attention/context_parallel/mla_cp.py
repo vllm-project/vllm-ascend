@@ -289,6 +289,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
+        if common_attn_metadata.num_dycp_reqs:
+            decode_metadata.seq_len[:common_attn_metadata.num_dycp_reqs] = decode_metadata.cp_seq_len[:common_attn_metadata.num_dycp_reqs]
 
         actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
@@ -363,7 +365,6 @@ class AscendMlaCPImpl(AscendMLAImpl):
         update_stream,
         forward_context,
         num_tokens,
-        num_dycp_reqs: int = 0,
         vllm_config=None,
         speculative_config=None,
         num_dcp_pcp_tokens=None,
@@ -402,10 +403,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 ) = param
 
                 decode_meta = forward_context.attn_metadata[key].decode
-                if num_dycp_reqs > 0:
-                    seq_len = decode_meta.seq_lens
-                else:
-                    seq_len = decode_meta.cp_seq_len
+                # if num_dycp_reqs > 0:
+                # seq_len = decode_meta.seq_lens
+                # else:
+                seq_len = decode_meta.cp_seq_len
                 if isinstance(seq_len, torch.Tensor):
                     seq_len = seq_len.tolist()
                 actual_seq_lengths_kv = seq_len
@@ -811,17 +812,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         decode_meta = attn_metadata.decode
         num_dycp_reqs = attn_metadata.num_dycp_reqs
         assert decode_meta is not None
-        if num_dycp_reqs > 0:
-            seq_lens = decode_meta.seq_lens
-            dycp_seq_lens = get_dcp_local_seq_lens(
-                seq_lens[:num_dycp_reqs],
-                self.dycp_size,
-                self.dycp_rank,
-                self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
-            )
-            seq_lens[:num_dycp_reqs] = dycp_seq_lens
-        else:
-            seq_lens = decode_meta.cp_seq_len
+
+        seq_lens = decode_meta.cp_seq_len
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]

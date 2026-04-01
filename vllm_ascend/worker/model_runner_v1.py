@@ -2332,6 +2332,7 @@ class NPUModelRunner(GPUModelRunner):
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        num_dycp_reqs: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()

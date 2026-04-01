@@ -173,7 +173,10 @@ def _npu_update_dycp_attn_with_mask(dycp_mask: torch.Tensor, attn_output: torch.
     Returns:
         Updated attention output for DYCP requests [num_dycp_reqs, H, D]
     """
-    assert dycp_mask.any(), "dycp_mask should have at least one True value"
+    # assert dycp_mask.any(), "dycp_mask should have at least one True value"
+    if dycp_mask is None:
+        return attn_output
+
     assert dycp_mask.dtype == torch.bool, "dycp_mask should be a boolean tensor"
     dycp_size = dycp_group.world_size
     total_reqs = attn_output.shape[0]
