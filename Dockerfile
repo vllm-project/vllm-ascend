@@ -26,7 +26,7 @@ COPY ./tools/mooncake_installer.sh /vllm-workspace/
 
 # Install clang-15 (for triton-ascend) and Mooncake
 RUN apt-get update -y && \
-    apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 clang-15 && \
+    apt-get install -y git vim wget net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
