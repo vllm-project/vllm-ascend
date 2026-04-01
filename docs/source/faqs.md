@@ -108,7 +108,7 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
-Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html) for example.
+Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake backend. See the [official tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html) for example.
 
 ### 9. Does vllm-ascend support quantization method?
 
