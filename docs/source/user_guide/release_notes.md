@@ -1,5 +1,46 @@
 # Release Notes
 
+## v0.18.0rc1 - 2026.04.01
+
+This is the first release candidate of v0.18.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+
+### Highlights
+
+- C8(INT8 KV cache) is now supported for GQA attention models, and also supported on DeepSeek-V3.1 with PD disaggregation scenario. [#7474](https://github.com/vllm-project/vllm-ascend/pull/7474), [#7222](https://github.com/vllm-project/vllm-ascend/pull/7222)
+- DeepSeek models are now supported on A5 through new MLA operators. [#7232](https://github.com/vllm-project/vllm-ascend/pull/7232)
+
+### Features
+
+- Flash Comm V1 now supports VL models with MLA, removing a previous limitation for multimodal serving. [#7390](https://github.com/vllm-project/vllm-ascend/pull/7390)
+- Support separate attention backends for target and draft models in speculative decoding, allowing finer backend tuning per model. [#7342](https://github.com/vllm-project/vllm-ascend/pull/7342)
+- VL MoE models now support SP, and `sp_threshold` is removed in favor of `sp_min_token_num` from vLLM. [#7044](https://github.com/vllm-project/vllm-ascend/pull/7044)
+- Qwen VL models now support `w8a8_mxfp8` quantization. [#7417](https://github.com/vllm-project/vllm-ascend/pull/7417)
+
+### Performance
+
+- Optimized Triton operator recompilation to reduce redundant rebuilds and unnecessary recompilation triggered by function parameter optimization. [#7647](https://github.com/vllm-project/vllm-ascend/pull/7647) [#7645](https://github.com/vllm-project/vllm-ascend/pull/7645)
+- Optimized the Qwen3.5 and Qwen3-Next GDN prefill path by prebuilding chunk metadata, reducing host-device synchronization overhead. [#7487](https://github.com/vllm-project/vllm-ascend/pull/7487)
+- Simplified the FIA prefill context merge path for better runtime efficiency. [#7293](https://github.com/vllm-project/vllm-ascend/pull/7293)
+
+### Documentation
+
+- Refreshed deployment and model docs for Kimi-K2.5, GLM-4.7, DeepSeek-V3.2, MiniMax-M2.5, and PD disaggregation guides. [#7371](https://github.com/vllm-project/vllm-ascend/pull/7371) [#7403](https://github.com/vllm-project/vllm-ascend/pull/7403) [#7292](https://github.com/vllm-project/vllm-ascend/pull/7292) [#7296](https://github.com/vllm-project/vllm-ascend/pull/7296) [#7300](https://github.com/vllm-project/vllm-ascend/pull/7300)
+
+### Others
+
+- Fixed a PD Disaggregation issue where decode nodes could get stuck because shapes were not aligned across DP nodes. [#7534](https://github.com/vllm-project/vllm-ascend/pull/7534)
+- Fixed a regression where hybrid attention plus mamba models on Ascend could start with an incorrect block size after the v0.18.0 upgrade. [#7528](https://github.com/vllm-project/vllm-ascend/pull/7528)
+- Fixed multi-instance serving OOM calculation on single-card deployments. [#7427](https://github.com/vllm-project/vllm-ascend/pull/7427)
+- Fixed DeepSeek v3.1 C8 when overlaying MTP with full decode and full graph modes. [#7571](https://github.com/vllm-project/vllm-ascend/pull/7571)
+- Fixed quantization config key mapping in `AscendModelSlimConfig` by switching from reverse mapping to forward mapping. [#7716](https://github.com/vllm-project/vllm-ascend/pull/7716)
+
+### Known Issue
+
+- When running DeepSeek-R1 W8A8 with MTP and KV Pool enabled under high concurrency, a `ValueError: Counters can only be incremented by non-negative amounts` may occur. [#7489](https://github.com/vllm-project/vllm-ascend/issues/7489)
+- triton-ascend may fail to compile with a g++ internal compiler error (Segmentation fault). Workaround: update to `triton-ascend==3.2.0.dev20260322` and clear the Triton cache (`rm -rf ~/.triton/cache/*`). [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782)
+- FIA does not support all MHA head dimensions when using tp-size >= 16 on Ascend. Affected models will fail with an error on unsupported head dimensions. This will be resolved in a future release when FIA supports more head dimensions. [#7729](https://github.com/vllm-project/vllm-ascend/pull/7729)
+- While Minimax-2.5 now supports PD Disaggregation, internal testing has identified a 13% regression on the GPQA benchmark when this feature is enabled. We currently do not recommend enabling PD Disaggregation for this model and We are working on an optimization fix.
+
 ## v0.17.0rc1 - 2026.03.15
 
 This is the first release candidate of v0.17.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
