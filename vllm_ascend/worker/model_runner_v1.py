@@ -1714,7 +1714,6 @@ class NPUModelRunner(GPUModelRunner):
 
         execution_time_ms = 0.0
         if hasattr(self, '_execution_start_time'):
-            torch.npu.synchronize()
             execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -1980,6 +1979,34 @@ class NPUModelRunner(GPUModelRunner):
         if enable_sp(self.vllm_config) or enable_sp_by_pass():
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
+
+    def sync_and_slice_intermediate_tensors(
+        self,
+        num_tokens: int,
+        intermediate_tensors: IntermediateTensors | None,
+        sync_self: bool,
+    ) -> IntermediateTensors:
+        assert self.intermediate_tensors is not None
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+
+        # When sequence parallelism is enabled, the "residual" tensor is sharded
+        # across tensor parallel ranks, so each rank only needs its own slice.
+        if sync_self:
+            assert intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                self.intermediate_tensors[k][:copy_len].copy_(
+                    v[:copy_len], non_blocking=True
+                )
+
+        return IntermediateTensors(
+            {
+                k: v[: (num_tokens + tp - 1) // tp]
+                if enable_sp()
+                else v[:num_tokens]
+                for k, v in self.intermediate_tensors.items()
+            }
+        )
 
     def _sync_batch_across_dp(
         self,
@@ -2475,7 +2502,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_scheduled_tokens=max_query_len,
             use_cascade_attn=False,
             allow_microbatching=allow_microbatching,
-            force_eager=is_profile or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+            force_eager=is_profile or (cudagraph_runtime_mode == CUDAGraphMode.NONE) or profile_cpp,
             # `force_uniform_decode` is used for cudagraph capture; because for
             # capturing mixed prefill-decode batches, we sometimes use
             # num_tokens == num_reqs which looks like a uniform decode batch to the
@@ -2546,9 +2573,11 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
-            num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
-            )
+
+            if not profile_cpp:
+                num_reqs_padded = self._pad_query_start_loc_for_fia(
+                    num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
+                )
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             attn_metadata, _ = self._build_attention_metadata(
@@ -2595,8 +2624,7 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by tp_size;
                 # otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading to incorrect memory estimation and potentially causing OOM.
-                # actual_tokens = num_tokens
-                actual_tokens = num_tokens_padded
+                intermediate_tokens = num_tokens_padded
                 sp_will_be_enabled = enable_sp() and (
                     is_moe_model(self.vllm_config) or num_tokens_padded > 1000
                 )

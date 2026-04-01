@@ -33,11 +33,9 @@ from typing import Callable, List, Optional
 
 import numpy as np
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend import envs as envs_ascend
-
-logger = init_logger(__name__)
 
 
 class ChunkSizePredictor:
@@ -64,7 +62,7 @@ class ChunkSizePredictor:
         self.is_ready: bool = False
         self.with_history_ready: bool = False
         self.smooth_factor = smooth_factor
-        self.min_chunk = 8192
+        self.min_chunk = 4096
         self.history_fitted = False
 
     def fit(self, seq_lens: List[int], latencies: List[float]) -> bool:
@@ -174,9 +172,8 @@ class ChunkSizePredictor:
         )
         return True
 
-    def set_target_latency(self, base_chunk_size: int) -> None:
+    def set_target_latency(self, base_chunk_size: int, elapsed_time: float = 0.0) -> None:
         """Set target latency based on base chunk size."""
-
         def f(l: float) -> float:
             return (
                 self.quadratic_coeff_a * l * l
@@ -184,7 +181,10 @@ class ChunkSizePredictor:
                 + self.constant_coeff_c
             )
 
-        self.target_latency = f(float(base_chunk_size)) - f(0.0)
+        if elapsed_time > 0:
+            self.target_latency = elapsed_time
+        else:
+            self.target_latency = f(float(base_chunk_size)) - f(0.0)
         if self.target_latency <= 0:
             self.target_latency = 1.0
 
@@ -406,7 +406,7 @@ class ProfilingChunkManager:
         if not self.is_ready:
             return None
 
-        if history_len == 0 or not self.history_ready:
+        if not self.history_ready:
             predict_func = self.predictor.predict
         else:
             predict_func = self.predictor.predict_with_history
@@ -436,40 +436,8 @@ class ProfilingChunkManager:
             x2 += chunk + hist
             x3 += 1
         self.chunked_fit_data.append([x1, x2, x3, elapsed_time * 1000])
-
         if not self.predictor.fit_chunk(self.chunked_fit_data):
             return False
 
         self.predictor.with_history_ready = True
-        return True
-
-    def broadcast_and_init(
-        self,
-        seq_lens: List[int],
-        latencies: List[float],
-        src_rank: int = 0,
-    ) -> bool:
-        """Broadcast profiling data from src_rank and initialize predictor.
-
-        Used in distributed settings.
-        """
-        try:
-            import torch.distributed as dist
-
-            if dist.is_available() and dist.is_initialized():
-                data = [seq_lens, latencies]
-                dist.broadcast_object_list(data, src=src_rank)
-                seq_lens, latencies = data[0], data[1]
-        except Exception:
-            pass
-
-        if len(seq_lens) < 8:
-            return False
-
-        if not self.predictor.fit(seq_lens, latencies):
-            return False
-
-        self.predictor.set_target_latency(self.base_chunk_size)
-        self.predictor.is_ready = True
-        self._profiling_done = True
         return True

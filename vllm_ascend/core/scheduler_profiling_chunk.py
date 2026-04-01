@@ -24,7 +24,7 @@ import time
 from typing import List, Optional
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import (
@@ -40,8 +40,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
-
-logger = init_logger(__name__)
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -238,6 +236,7 @@ class ProfilingChunkScheduler(Scheduler):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
+        dynamic_chunking_full = False
         token_budget = self.max_num_scheduled_tokens
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -248,6 +247,8 @@ class ProfilingChunkScheduler(Scheduler):
         # ---- Schedule RUNNING requests (unchanged from upstream) ----
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
+            if dynamic_chunking_full:
+                break
             request = self.running[req_index]
 
             if self.use_pp and request.num_output_placeholders > 0:
@@ -306,6 +307,7 @@ class ProfilingChunkScheduler(Scheduler):
                 self.profiling_chunk_manager is not None
                 and self.profiling_chunk_manager.is_ready
                 and num_new_tokens > 1
+                and request.num_computed_tokens > 0
             ):
                 predicted_chunk = (
                     self.profiling_chunk_manager
@@ -317,9 +319,9 @@ class ProfilingChunkScheduler(Scheduler):
                     predicted_chunk is not None
                     and predicted_chunk > 0
                 ):
-                    num_new_tokens = min(
-                        num_new_tokens, predicted_chunk
-                    )
+                    if predicted_chunk <= num_new_tokens:
+                        dynamic_chunking_full = True
+                        num_new_tokens = predicted_chunk
             # <<< PROFILING CHUNK <<<
 
             if self.need_mamba_block_aligned_split:
@@ -443,7 +445,7 @@ class ProfilingChunkScheduler(Scheduler):
         # ---- Schedule WAITING requests ----
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                if len(self.running) == self.max_num_running_reqs or dynamic_chunking_full:
                     break
 
                 request = self.waiting.peek_request()
@@ -570,6 +572,7 @@ class ProfilingChunkScheduler(Scheduler):
                         self.profiling_chunk_manager is not None
                         and self.profiling_chunk_manager.is_ready
                         and num_new_tokens > 1
+                        and request.num_computed_tokens > 0
                     ):
                         predicted_chunk = (
                             self.profiling_chunk_manager

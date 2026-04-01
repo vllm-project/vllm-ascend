@@ -29,10 +29,8 @@ an import of this module, which re-applies the ``EngineCore.__init__``
 patches inside the child process before any ``EngineCore`` is instantiated.
 """
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-
-logger = init_logger(__name__)
 
 _profiling_patches_applied = False
 _original_update_from_output = None
@@ -71,6 +69,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
         )
         request_chunks = []
 
+        total_hist_tokens = 0
         new_reqs = getattr(scheduler_output, "scheduled_new_reqs", [])
         for req in new_reqs:
             req_id = getattr(req, "request_id", None) or getattr(
@@ -79,6 +78,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
             if req_id and req_id in num_scheduled_tokens:
                 chunk_size = num_scheduled_tokens[req_id]
                 hist_seq_len = getattr(req, "num_computed_tokens", 0)
+                total_hist_tokens += hist_seq_len
                 if chunk_size > 0:
                     request_chunks.append((chunk_size, hist_seq_len))
 
@@ -98,8 +98,14 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
                         if i < len(computed_tokens_list)
                         else 0
                     )
+                    total_hist_tokens += hist_seq_len
                     if chunk_size > 0:
                         request_chunks.append((chunk_size, hist_seq_len))
+
+        # is first chunk processing
+        if total_hist_tokens == 0 and not profiling_mgr._set_time_done:
+            profiling_mgr.predictor.set_target_latency(0, elapsed_time * 1000)
+            profiling_mgr._set_time_done = True
 
         if not request_chunks:
             request_chunks = [(total_tokens, 0)]
