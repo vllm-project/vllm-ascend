@@ -53,6 +53,11 @@ on:
         default: /root/.cache/ascend-logs
         type: string
         description: the prefix path for ascend logs on shared PVC, default to /root/.cache/ascend-logs
+      name:
+        required: false
+        type: string
+        default: ''
+        description: job name used as benchmark artifact identifier, defaults to config_file_path stem
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -171,6 +176,11 @@ jobs:
             pvc_name=vllm-project-hk001
           fi
 
+          benchmark_job_name="${{ inputs.name }}"
+          if [ -z "$benchmark_job_name" ]; then
+            benchmark_job_name="${config_file_path%.yaml}"
+          fi
+
           jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
             -D lws_name="$LWS_NAME" \
             -D log_prefix="$LOG_PREFIX" \
@@ -268,6 +278,14 @@ jobs:
             fi
           done
 
+      - name: Fetch benchmark results from leader pod
+        if: always()
+        run: |
+          mkdir -p /tmp/benchmark_results
+          kubectl cp \
+            "$NAMESPACE/$LEADER_POD:/vllm-workspace/vllm-ascend/benchmark_results/." \
+            /tmp/benchmark_results/ 2>/dev/null || true
+
       - name: Post process
         if: always()
         run: |
@@ -332,3 +350,18 @@ jobs:
           name: ${{ inputs.config_file_path }}-ascend-logs
           path: /tmp/ascend-logs.tar.gz
           retention-days: 7
+
+      - name: Set benchmark artifact timestamp
+        if: always()
+        id: bench_ts
+        run: echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /tmp/benchmark_results/
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0
