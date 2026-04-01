@@ -9,6 +9,7 @@ _envs: &envs
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_BALANCE_SCHEDULING: "1"
 
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"
@@ -31,7 +32,7 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--async-scheduling"
   - "--additional-config"
-  - '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+  - '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
