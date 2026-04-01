@@ -119,7 +119,7 @@ repos:
     entry: python tools/check_docs_yaml_sync.py
     language: python
     files: ^docs/source/tutorials/models/.*\.md$
-    additional_dependencies: [pyyaml, regex]
+    additional_dependencies: [pyyaml, regex, tomli]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
