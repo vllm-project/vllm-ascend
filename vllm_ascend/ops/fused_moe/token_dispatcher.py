@@ -124,7 +124,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             raise RuntimeError(
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
-        self.global_num_experts = getattr(kwargs, "global_num_experts", 0)
+        self.global_num_experts = kwargs.get("num_experts", 0)
+        self.num_local_experts = (
+            self.global_num_experts // self.ep_world_size if self.ep_world_size > 0 else self.global_num_experts
+        )
 
     def get_dispatch_mc2_kwargs(
         self,
@@ -306,17 +309,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadata]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.ep_rank_id = get_ep_group().rank_in_group
+        self.ep_world_size = get_ep_group().world_size
+        global_num_experts = kwargs.get("num_experts", 0)
         self.max_num_tokens = kwargs.get("max_num_tokens")
-        num_experts_local = kwargs.get("num_local_experts", 0)
+        num_experts_local = global_num_experts // self.ep_world_size
         self.num_experts_local = (
             num_experts_local.item() if torch.is_tensor(num_experts_local) else int(num_experts_local)
         )
-        self.original_shape = None
-        self.with_quant = False
-        self.ep_rank_id = get_ep_group().rank_in_group
-        self.ep_world_size = get_ep_group().world_size
-
-        global_num_experts = getattr(kwargs, "global_num_experts", 0)
         self.expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
         start_idx = self.ep_rank_id * num_experts_local
         end_idx = (self.ep_rank_id + 1) * num_experts_local

@@ -102,7 +102,6 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 w2=layer.w2_weight,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=False,
-                expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             ),
         )

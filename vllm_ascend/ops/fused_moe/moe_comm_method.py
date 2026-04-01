@@ -191,7 +191,7 @@ class AllGatherCommImpl(MoECommMethod):
     def _get_token_dispatcher(self):
         return TokenDispatcherWithAllGather(
             top_k=self.moe_config.experts_per_token,
-            global_num_experts=self.moe_config.num_experts,
+            num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts,
         )
 
@@ -210,7 +210,7 @@ class MC2CommImpl(MoECommMethod):
     """
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return TokenDispatcherWithMC2(num_experts=self.moe_config.num_experts)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
@@ -229,7 +229,7 @@ class AlltoAllCommImpl(MoECommMethod):
     def _get_token_dispatcher(self):
         return TokenDispatcherWithAll2AllV(
             top_k=self.moe_config.experts_per_token,
-            global_num_experts=self.moe_config.num_experts,
+            num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts,
         )
 
@@ -255,7 +255,7 @@ class FusedMC2CommImpl(MoECommMethod):
             self.expert_token_nums = None
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return TokenDispatcherWithMC2(num_experts=self.moe_config.num_experts)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
