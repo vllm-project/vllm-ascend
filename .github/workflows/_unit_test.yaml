@@ -67,6 +67,7 @@ jobs:
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           uv pip install -v . --extra-index-url https://download.pytorch.org/whl/cpu/
           uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/
+          uv pip uninstall torch_npu
 
       - name: Run unit test
         env:
