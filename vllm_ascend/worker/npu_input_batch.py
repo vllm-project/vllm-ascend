@@ -59,6 +59,7 @@ class NPUInputBatch(InputBatch):
 
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
+        self.req_id_to_cp_size: dict[str, int] = {}
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.

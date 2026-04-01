@@ -459,7 +459,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         dycp_metadata, dp_metadata = split_attn_metadata(attn_metadata, attn_metadata.num_dycp_reqs, self.dycp_size)
         num_decode_tokens = attn_metadata.num_decode_tokens
-        if self.common_pcp_size > 1 and attn_metadata.num_dycp_reqs and attn_metadata.decode == 0:
+        if self.common_pcp_size > 1 and attn_metadata.num_dycp_reqs and (attn_metadata.decode is None or attn_metadata.decode == 0):
             if dycp_metadata:
                 cp_hidden_states = hidden_states[num_decode_tokens: num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size]
                 self._forward_common(layer_name, cp_hidden_states, kv_cache, dycp_metadata, need_gather_q_kv, output[num_decode_tokens: num_decode_tokens + attn_metadata.num_actual_tokens_pcp_padded // self.common_pcp_size])
@@ -1060,42 +1060,42 @@ def split_attn_metadata(
 
     prefill_meta = attn_metadata.prefill
     num_prefills = attn_metadata.num_prefills
-    
+
     if num_dycp_reqs == 0:
         return None, attn_metadata
     if num_dycp_reqs >= num_prefills:
         return attn_metadata, None
-    
+
     if isinstance(prefill_meta.query_lens, torch.Tensor):
         dycp_token_num = prefill_meta.query_lens[:num_dycp_reqs].sum().item()
         dp_token_num = prefill_meta.query_lens[num_dycp_reqs:].sum().item()
     else:
         dycp_token_num = sum(prefill_meta.query_lens[:num_dycp_reqs])
         dp_token_num = sum(prefill_meta.query_lens[num_dycp_reqs:])
-    
+
     dycp_prefill, dp_prefill = split_prefill_metadata(
         prefill_meta, num_dycp_reqs, dycp_token_num, dycp_cp_size
     )
-        
+
     # slot_mapping (Tensor)
     dycp_slot_mapping = attn_metadata.slot_mapping[:dycp_token_num*dycp_cp_size]
     dp_slot_mapping = attn_metadata.slot_mapping[dycp_token_num*dycp_cp_size:]
-    
+
     # query_start_loc (Tensor)
     dycp_query_start_loc = attn_metadata.query_start_loc[:num_dycp_reqs + 1]
     dp_query_start_loc = attn_metadata.query_start_loc[num_dycp_reqs:] - dycp_token_num
-    
+
     # seq_lens (Tensor)
     dycp_seq_lens = attn_metadata.seq_lens[:num_dycp_reqs]
     dp_seq_lens = attn_metadata.seq_lens[num_dycp_reqs:]
-    
+
     # block_tables (Tensor)
     dycp_block_tables = attn_metadata.block_tables[:num_dycp_reqs]
     dp_block_tables = attn_metadata.block_tables[num_dycp_reqs:]
     # query_lens (list)
     dycp_query_lens = attn_metadata.query_lens[:num_dycp_reqs]
     dp_query_lens = attn_metadata.query_lens[num_dycp_reqs:]
-    
+
     dycp_metadata = AscendMLAMetadata(
         num_actual_tokens_pcp_padded=attn_metadata.num_actual_tokens_pcp_padded,
         num_actual_tokens=dycp_token_num*dycp_cp_size,
@@ -1115,7 +1115,7 @@ def split_attn_metadata(
         prefill=dycp_prefill,
         num_dycp_reqs=num_dycp_reqs,
     )
-    
+
     dp_metadata = AscendMLAMetadata(
         num_actual_tokens_pcp_padded=attn_metadata.num_actual_tokens_pcp_padded,
         num_actual_tokens=dp_token_num,
@@ -1135,7 +1135,7 @@ def split_attn_metadata(
         prefill=dp_prefill,
         num_dycp_reqs=0,
     )
-    
+
     return dycp_metadata, dp_metadata
 
 
@@ -1145,14 +1145,14 @@ def split_prefill_metadata(
     dycp_token_num: int,
     dycp_cp_size: int,
 ) -> Tuple[AscendMLAPrefillMetadata, AscendMLAPrefillMetadata]:
-    
+
     if isinstance(prefill_meta.query_lens, torch.Tensor):
         dycp_query_lens = prefill_meta.query_lens[:num_dycp_reqs]
         dp_query_lens = prefill_meta.query_lens[num_dycp_reqs:]
     else:
         dycp_query_lens = prefill_meta.query_lens[:num_dycp_reqs]
         dp_query_lens = prefill_meta.query_lens[num_dycp_reqs:]
-    
+
     if isinstance(prefill_meta.query_lens, torch.Tensor):
         dp_token_num = prefill_meta.query_lens[num_dycp_reqs:].sum().item()
     else:
@@ -1160,40 +1160,40 @@ def split_prefill_metadata(
 
     dycp_seq_lens = prefill_meta.seq_lens[:num_dycp_reqs]
     dp_seq_lens = prefill_meta.seq_lens[num_dycp_reqs:]
-    
+
     dycp_context_lens = prefill_meta.context_lens[:num_dycp_reqs]
     dp_context_lens = prefill_meta.context_lens[num_dycp_reqs:]
-    
+
     dycp_input_positions = prefill_meta.input_positions[:dycp_token_num]
     dp_input_positions = prefill_meta.input_positions[dycp_token_num:]
-    
+
     dycp_query_start_loc = prefill_meta.query_start_loc[:num_dycp_reqs + 1]
     dp_query_start_loc = prefill_meta.query_start_loc[num_dycp_reqs:] - dycp_token_num
-    
+
     dycp_block_table = prefill_meta.block_table[:num_dycp_reqs]
     dp_block_table = prefill_meta.block_table[num_dycp_reqs:]
-    
+
     dycp_attn_mask = prefill_meta.attn_mask[:dycp_token_num]
     dp_attn_mask = prefill_meta.attn_mask[dycp_token_num:]
-    
+
     dycp_sin = prefill_meta.sin[:dycp_token_num] if prefill_meta.sin is not None else None
     dp_sin = prefill_meta.sin[dycp_token_num: dycp_token_num + dp_token_num] if prefill_meta.sin is not None else None
     dycp_cos = prefill_meta.cos[:dycp_token_num] if prefill_meta.cos is not None else None
     dp_cos = prefill_meta.cos[dycp_token_num: dycp_token_num + dp_token_num] if prefill_meta.cos is not None else None
-    
+
     if isinstance(dycp_query_lens, torch.Tensor):
         dycp_max_query_len = dycp_query_lens.max().item() if dycp_query_lens.numel() > 0 else 0
         dp_max_query_len = dp_query_lens.max().item() if dp_query_lens.numel() > 0 else 0
     else:
         dycp_max_query_len = max(dycp_query_lens) if dycp_query_lens else 0
         dp_max_query_len = max(dp_query_lens) if dp_query_lens else 0
-    
+
     dycp_max_seq_lens = dycp_seq_lens.max().item() if dycp_seq_lens.numel() > 0 else 0
     dp_max_seq_lens = dp_seq_lens.max().item() if dp_seq_lens.numel() > 0 else 0
-    
+
     dycp_pcp_metadata = prefill_meta.pcp_metadata
     dycp_chunked_context = prefill_meta.chunked_context
-    
+
     # ========== init DYCP Prefill Metadata ==========
     dycp_prefill = AscendMLAPrefillMetadata(
         attn_mask=dycp_attn_mask,
@@ -1210,7 +1210,7 @@ def split_prefill_metadata(
         cos=dycp_cos,
         pcp_metadata=dycp_pcp_metadata,
     )
-    
+
     # ========== init DP Prefill Metadata ==========
     dp_prefill = AscendMLAPrefillMetadata(
         attn_mask=dp_attn_mask,
@@ -1227,5 +1227,5 @@ def split_prefill_metadata(
         cos=dp_cos,
         pcp_metadata=None,  # DP 不需要
     )
-    
+
     return dycp_prefill, dp_prefill

@@ -1409,7 +1409,7 @@ class MooncakeConnectorWorker:
                     dcp_repeat_offset = dcp_size * dcp_repeat_idx
                     dycp_rank_select = 0 if pcp_size > 1 else dycp_ranks[0]
                     for pcp_rank in range(pcp_size):
-                        pcp_rank_offset = tp_size * pcp_rank + dycp_rank_select
+                        pcp_rank_offset = tp_size * (pcp_rank + dycp_rank_select)
                         for dcp_rank in range(dcp_size):
                             cp_group.append(
                                 dcp_rank + port_base + pcp_rank_offset + dcp_repeat_offset + kv_head_group_offset
@@ -1468,13 +1468,15 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
+            dycp_port_offset = 0 if remote_pcp_size > 1 else remote_dycp_ranks[0]
             for port in range(prefill_tp_size * remote_pcp_size):
-                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(port), None)
+                dycp_port = port + dycp_port_offset * prefill_tp_size
+                remote_host_info = meta.remote_multi_nodes_meta_mapping.get(str(dycp_port), None)
                 if remote_host_info is None:
                     remote_host = meta.remote_host
                 else:
                     remote_host = remote_host_info["host"]
-                remote_port_send_num[meta.remote_port + port] = {"num": 0, "host": remote_host}
+                remote_port_send_num[meta.remote_port + dycp_port] = {"num": 0, "host": remote_host}
 
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:

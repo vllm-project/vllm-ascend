@@ -328,6 +328,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self.common_pcp_size = self.prefill_dycp_size if self.prefill_dycp_size > 1 else self.pcp_size
         self.common_pcp_rank = self.prefill_dycp_rank if self.prefill_dycp_size > 1 else self.pcp_rank
+
         if self.use_prefill_cp:
             self.model_config.max_model_len += 2 * self.common_pcp_size * self.max_num_reqs
         max_buffer_num_tokens = self.max_num_tokens
@@ -912,6 +913,14 @@ class NPUModelRunner(GPUModelRunner):
         if lmhead_tp_enable():
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+        cp_index = num_cp_request
+        domain_count = self.vllm_config.parallel_config.data_parallel_size // self.vllm_config.parallel_config.dp_per_domain
+        for req_id in self.input_batch.req_ids:
+            if cp_index > 0:
+                self.input_batch.req_id_to_cp_size[req_id] = domain_count
+            else:
+                self.input_batch.req_id_to_cp_size[req_id] = 1
+            cp_index-=1
 
         return (
             logits_indices,
@@ -1636,6 +1645,7 @@ class NPUModelRunner(GPUModelRunner):
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
+            req_id_to_cp_size=self.input_batch.req_id_to_cp_size,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
