@@ -3,9 +3,19 @@ import torch.nn as nn
 from typing_extensions import override
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
 
 from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
+
+# Import with fallback for version compatibility
+try:
+    from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
+except ImportError:
+    # Fallback for vLLM versions where the function is not available
+    # In this case, use the config as-is without modifications
+    def create_vllm_config_for_draft_model(
+        target_model_vllm_config: VllmConfig,
+    ) -> VllmConfig:
+        return target_model_vllm_config
 
 
 class AscendDraftModelProposer(SpecDecodeBaseProposer):
