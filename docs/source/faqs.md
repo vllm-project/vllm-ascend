@@ -2,6 +2,7 @@
 
 ## Version Specific FAQs
 
+- [[v0.18.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7633)
 - [[v0.17.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7173)
 - [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
 
@@ -104,7 +105,7 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 7. How vllm-ascend work with vLLM?
 
-`vllm-ascend` is a hardware plugin for vLLM. The version of `vllm-ascend` is the same as the version of `vllm`. For example, if you use `vllm` 0.9.1, you should use vllm-ascend 0.9.1 as well. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
+`vllm-ascend` is a hardware plugin for vLLM. Stable releases usually align with the same vLLM version, while RC releases may use the corresponding vLLM final release version. For example, `vllm-ascend` `v0.18.0rc1` matches vLLM `v0.18.0`. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
