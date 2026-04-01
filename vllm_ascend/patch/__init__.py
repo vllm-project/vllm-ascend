@@ -701,4 +701,23 @@
 #       Let vLLM support triton ops dispatch.
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
-#
+# ** 27. File: worker/patch_qwen3vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3.Qwen3Attention.forward` and
+#      `vllm.model_executor.models.qwen3_moe.Qwen3MoeAttention.forward`
+#    Why:
+#       support triton_split_qkv_rmsnorm_mrope fused kernel for Qwen3Attention and Qwen3MoeAttention.
+#    How：
+#       override forward method with the triton_split_qkv_rmsnorm_mrope fused kernel,
+#       when using mrope.
+#    Future Plan:
+#       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
+# ** 28. File: worker/patch_qwen3vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
+#    Why:
+#       support flash comm v1 for qwen3vl.
+#    How：
+#       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
+#    Future Plan:
+#       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
