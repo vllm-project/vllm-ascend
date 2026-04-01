@@ -22,6 +22,7 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+
 MODELS = ["Qwen/Qwen3-0.6B"]
 
 MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
