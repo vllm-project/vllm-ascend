@@ -28,6 +28,10 @@ on:
         required: false
         type: boolean
         default: false
+      test_cases:
+        required: false
+        type: string
+        default: ''
     outputs:
       run:
         description: "Whether nightly tests should run"
@@ -73,6 +77,7 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
+            const workflowDispatchTestCases = '${{ inputs.test_cases }}'.trim();
 
             function parseNightlyComment(body) {
               if (!body) return null;
@@ -93,14 +98,27 @@ jobs:
 
             core.setOutput('ref', getRef());
 
-            // 1. schedule / workflow_dispatch: run all tests with pre-built image
-            if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
+            // 1. workflow_dispatch: use input test_cases
+            if (eventName === 'workflow_dispatch' && workflowDispatchTestCases) {
+              core.setOutput('run', 'true');
+              // Convert comma-separated list to the filter format
+              if (workflowDispatchTestCases === 'all') {
+                core.setOutput('filter', 'all');
+              } else {
+                const filter = ',' + workflowDispatchTestCases.split(',').map(s => s.trim()).join(',') + ',';
+                core.setOutput('filter', filter);
+              }
+              return;
+            }
+
+            // 2. schedule: run all tests with pre-built image
+            if (eventName === 'schedule') {
               core.setOutput('run', 'true');
               core.setOutput('filter', 'all');
               return;
             }
 
-            // 2. pull_request (labeled / synchronize)
+            // 3. pull_request (labeled / synchronize)
             if (eventName === 'pull_request') {
               const labels = context.payload.pull_request.labels.map(l => l.name);
               if (!labels.includes('nightly-test')) {
