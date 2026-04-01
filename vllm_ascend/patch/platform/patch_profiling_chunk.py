@@ -40,6 +40,7 @@ _original_update_from_output = None
 # Helper: record execution timing
 # ---------------------------------------------------------------------------
 
+
 def _record_execution_timing(scheduler, scheduler_output, model_output):
     """Record execution timing for online model refinement.
 
@@ -58,23 +59,17 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
     elapsed_time = elapsed_time_ms / 1000.0
 
     try:
-        total_tokens = getattr(
-            scheduler_output, "total_num_scheduled_tokens", 0
-        )
+        total_tokens = getattr(scheduler_output, "total_num_scheduled_tokens", 0)
         if total_tokens <= 0:
             return
 
-        num_scheduled_tokens = getattr(
-            scheduler_output, "num_scheduled_tokens", {}
-        )
+        num_scheduled_tokens = getattr(scheduler_output, "num_scheduled_tokens", {})
         request_chunks = []
 
         total_hist_tokens = 0
         new_reqs = getattr(scheduler_output, "scheduled_new_reqs", [])
         for req in new_reqs:
-            req_id = getattr(req, "request_id", None) or getattr(
-                req, "req_id", None
-            )
+            req_id = getattr(req, "request_id", None) or getattr(req, "req_id", None)
             if req_id and req_id in num_scheduled_tokens:
                 chunk_size = num_scheduled_tokens[req_id]
                 hist_seq_len = getattr(req, "num_computed_tokens", 0)
@@ -82,22 +77,14 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
                 if chunk_size > 0:
                     request_chunks.append((chunk_size, hist_seq_len))
 
-        cached_reqs = getattr(
-            scheduler_output, "scheduled_cached_reqs", None
-        )
+        cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
         if cached_reqs is not None:
             req_ids = getattr(cached_reqs, "req_ids", [])
-            computed_tokens_list = getattr(
-                cached_reqs, "num_computed_tokens", []
-            )
+            computed_tokens_list = getattr(cached_reqs, "num_computed_tokens", [])
             for i, req_id in enumerate(req_ids):
                 if req_id in num_scheduled_tokens:
                     chunk_size = num_scheduled_tokens[req_id]
-                    hist_seq_len = (
-                        computed_tokens_list[i]
-                        if i < len(computed_tokens_list)
-                        else 0
-                    )
+                    hist_seq_len = computed_tokens_list[i] if i < len(computed_tokens_list) else 0
                     total_hist_tokens += hist_seq_len
                     if chunk_size > 0:
                         request_chunks.append((chunk_size, hist_seq_len))
@@ -111,9 +98,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
             request_chunks = [(total_tokens, 0)]
 
         if not profiling_mgr.predictor.history_fitted:
-            profiling_mgr.record_batch_execution_time(
-                request_chunks, elapsed_time
-            )
+            profiling_mgr.record_batch_execution_time(request_chunks, elapsed_time)
 
     except (AttributeError, TypeError) as e:
         logger.debug("Failed to record execution timing: %s", e)
@@ -122,6 +107,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
 # ---------------------------------------------------------------------------
 # Helper: wrap scheduler.update_from_output for timing
 # ---------------------------------------------------------------------------
+
 
 def _ensure_update_from_output_wrapped(scheduler):
     """Wrap scheduler.update_from_output to record execution timing."""
@@ -136,9 +122,7 @@ def _ensure_update_from_output_wrapped(scheduler):
 
     def _wrapped_update_from_output(self, scheduler_output, model_output):
         _record_execution_timing(self, scheduler_output, model_output)
-        return _original_update_from_output(
-            self, scheduler_output, model_output
-        )
+        return _original_update_from_output(self, scheduler_output, model_output)
 
     cls.update_from_output = _wrapped_update_from_output
 
@@ -146,6 +130,7 @@ def _ensure_update_from_output_wrapped(scheduler):
 # ---------------------------------------------------------------------------
 # Core: apply EngineCore.__init__ patches (idempotent)
 # ---------------------------------------------------------------------------
+
 
 def _apply_profiling_patches():
     """Patch ``EngineCore.__init__`` to trigger profiling and timing hooks.

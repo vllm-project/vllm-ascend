@@ -453,15 +453,9 @@ class ProfilingChunkConfig:
 
     def _validate(self):
         if not (0 < self.smooth_factor <= 1.0):
-            raise ValueError(
-                f"profiling_chunk_config.smooth_factor must be in (0, 1], "
-                f"got {self.smooth_factor}"
-            )
+            raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
         if self.min_chunk <= 0:
-            raise ValueError(
-                f"profiling_chunk_config.min_chunk must be positive, "
-                f"got {self.min_chunk}"
-            )
+            raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
 
 
 class EplbConfig:

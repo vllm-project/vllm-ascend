@@ -29,10 +29,9 @@ The approach:
 
 import math
 import time
-from typing import Callable, List, Optional
+from collections.abc import Callable
 
 import numpy as np
-
 from vllm.logger import logger
 
 
@@ -56,14 +55,14 @@ class ChunkSizePredictor:
         self.linear_chunk_b: float = 0.0
         self.constant_chunk_c: float = 0.0
 
-        self.target_latency: Optional[float] = None
+        self.target_latency: float | None = None
         self.is_ready: bool = False
         self.with_history_ready: bool = False
         self.smooth_factor = smooth_factor
         self.min_chunk = min_chunk
         self.history_fitted = False
 
-    def fit(self, seq_lens: List[int], latencies: List[float]) -> bool:
+    def fit(self, seq_lens: list[int], latencies: list[float]) -> bool:
         """Fit quadratic coefficients f(l) = al^2 + bl + c from data points.
 
         Returns:
@@ -91,15 +90,11 @@ class ChunkSizePredictor:
             return False
 
         if fitted_a < 0:
-            logger.warning(
-                "Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a
-            )
+            logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
             fitted_a = 1e-9
 
         if fitted_b < 0:
-            logger.warning(
-                "Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b
-            )
+            logger.warning("Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b)
             fitted_b = 0.0
 
         self.quadratic_coeff_a = fitted_a
@@ -136,9 +131,7 @@ class ChunkSizePredictor:
         input_x = chunked_data_array[:, :-1]
 
         try:
-            params, _, _, _ = np.linalg.lstsq(
-                input_x, execute_time, rcond=None
-            )
+            params, _, _, _ = np.linalg.lstsq(input_x, execute_time, rcond=None)
             fitted_a = float(params[0])
             fitted_b = float(params[1])
             fitted_c = float(params[2])
@@ -147,15 +140,11 @@ class ChunkSizePredictor:
             return False
 
         if fitted_a < 0:
-            logger.warning(
-                "Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a
-            )
+            logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
             fitted_a = 1e-9
 
         if fitted_b < 0:
-            logger.warning(
-                "Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b
-            )
+            logger.warning("Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b)
             fitted_b = 0.0
 
         self.quadratic_chunk_a = fitted_a
@@ -172,12 +161,9 @@ class ChunkSizePredictor:
 
     def set_target_latency(self, base_chunk_size: int, elapsed_time: float = 0.0) -> None:
         """Set target latency based on base chunk size."""
+
         def f(seq_lens: float) -> float:
-            return (
-                self.quadratic_coeff_a * seq_lens * seq_lens
-                + self.linear_coeff_b * seq_lens
-                + self.constant_coeff_c
-            )
+            return self.quadratic_coeff_a * seq_lens * seq_lens + self.linear_coeff_b * seq_lens + self.constant_coeff_c
 
         if elapsed_time > 0:
             self.target_latency = elapsed_time
@@ -198,8 +184,8 @@ class ChunkSizePredictor:
         base_chunk_size: int,
         page_size: int,
         context_len: int,
-        max_chunk_size: Optional[int] = None,
-    ) -> Optional[int]:
+        max_chunk_size: int | None = None,
+    ) -> int | None:
         """Predict next chunk size x such that f(L+x) - f(L) = target_latency."""
         if not self.is_ready or self.target_latency is None:
             return None
@@ -244,8 +230,8 @@ class ChunkSizePredictor:
         base_chunk_size: int,
         page_size: int,
         context_len: int,
-        max_chunk_size: Optional[int] = None,
-    ) -> Optional[int]:
+        max_chunk_size: int | None = None,
+    ) -> int | None:
         """Predict next chunk size x using the history-aware model
         f(C,H) = a*C(C+H) + b*C + c*H."""
         if not self.is_ready or self.target_latency is None:
@@ -260,11 +246,7 @@ class ChunkSizePredictor:
         # a*C^2 + (a*H + b)*C + c*H - T = 0
         A = self.quadratic_chunk_a
         B = self.quadratic_chunk_a * history_len + self.linear_chunk_b
-        C = (
-            self.linear_chunk_b * history_len
-            + self.constant_chunk_c
-            - self.target_latency
-        )
+        C = self.linear_chunk_b * history_len + self.constant_chunk_c - self.target_latency
 
         discriminant = B * B - 4 * A * C
         if discriminant < 0:
@@ -276,9 +258,7 @@ class ChunkSizePredictor:
         if x <= 0:
             return None
 
-        logger.debug(
-            "[ProfilingChunk] History-aware raw prediction: %.1f", x
-        )
+        logger.debug("[ProfilingChunk] History-aware raw prediction: %.1f", x)
         smoothed = base_chunk_size + self.smooth_factor * (x - base_chunk_size)
         chunk_size = max(int(smoothed), self.min_chunk)
 
@@ -307,7 +287,7 @@ class ProfilingChunkManager:
         base_chunk_size: int,
         page_size: int,
         context_len: int,
-        max_prefill_tokens: Optional[int] = None,
+        max_prefill_tokens: int | None = None,
         smooth_factor: float = 0.8,
         min_chunk: int = 4096,
     ):
@@ -317,9 +297,7 @@ class ProfilingChunkManager:
         self.max_prefill_tokens = max_prefill_tokens
         self.chunked_fit_data: list = []
 
-        self.predictor = ChunkSizePredictor(
-            smooth_factor=smooth_factor, min_chunk=min_chunk
-        )
+        self.predictor = ChunkSizePredictor(smooth_factor=smooth_factor, min_chunk=min_chunk)
         self._profiling_done = False
 
     @property
@@ -351,14 +329,11 @@ class ProfilingChunkManager:
             num_samples,
         )
 
-        seq_lens: List[int] = []
-        latencies: List[float] = []
+        seq_lens: list[int] = []
+        latencies: list[float] = []
 
         for i in range(num_samples):
-            chunk_size = int(
-                self.base_chunk_size * 1.25
-                - i * (self.base_chunk_size * 1.25 / num_samples)
-            )
+            chunk_size = int(self.base_chunk_size * 1.25 - i * (self.base_chunk_size * 1.25 / num_samples))
             if chunk_size <= 0:
                 break
 
@@ -385,8 +360,7 @@ class ProfilingChunkManager:
             return False
 
         logger.info(
-            "[ProfilingChunk] Collected %d samples. "
-            "Latency range: [%.2f, %.2f] ms",
+            "[ProfilingChunk] Collected %d samples. Latency range: [%.2f, %.2f] ms",
             len(seq_lens),
             min(latencies),
             max(latencies),
@@ -400,7 +374,7 @@ class ProfilingChunkManager:
         self._profiling_done = True
         return True
 
-    def predict_chunk_size(self, history_len: int) -> Optional[int]:
+    def predict_chunk_size(self, history_len: int) -> int | None:
         """Predict optimal chunk size for given history length."""
         if not self.is_ready:
             return None
@@ -417,9 +391,7 @@ class ProfilingChunkManager:
             max_chunk_size=self.max_prefill_tokens,
         )
 
-    def record_batch_execution_time(
-        self, request_chunks: list, elapsed_time: float
-    ) -> bool:
+    def record_batch_execution_time(self, request_chunks: list, elapsed_time: float) -> bool:
         """Record batch execution time for online model refinement.
 
         Accumulates (x1, x2, x3, time_ms) data points and re-fits the
