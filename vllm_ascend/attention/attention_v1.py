@@ -25,6 +25,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -175,10 +176,15 @@ class AscendMetadata:
     seq_lens: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
+    # actual query length for each request, not cumulative length 
+    actual_query_lens_list: list[int] = None  # type: ignore
+    actual_query_lens: torch.Tensor = None
 
     query_start_loc: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
     max_query_len: int | None = None
+    # Maximum KV length upper bound selected during metadata build.
+    max_seq_len: int | None = None
 
     # ********************** KV Cache Related Properties ********************* #
     # Block addresses per sequence (Seq id -> list of physical block).
@@ -276,20 +282,22 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
             common_attn_metadata, decode_threshold=self.decode_threshold
         )
 
         block_table = common_attn_metadata.block_table_tensor
-        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
         # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
         if isinstance(self.kv_cache_spec, CrossAttentionSpec):
             seq_lens = common_attn_metadata.seq_lens
-            slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
+            slot_mapping = common_attn_metadata.slot_mapping
         attn_state = common_attn_metadata.attn_state
 
         # Get attn_mask and swa_mask from singleton AttentionMaskBuilder
@@ -302,17 +310,15 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 self.model_config.dtype, self.model_config.hf_text_config.sliding_window
             )
 
-        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
-
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
-            seq_lens_list=seq_lens.tolist(),
+            seq_lens_list=seq_lens_cpu.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
+            max_seq_len=common_attn_metadata.max_seq_len,
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
@@ -324,23 +330,15 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             model_runner_type=self.model_config.runner_type,
         )
         if hasattr(common_attn_metadata, "kvcomp_metadata"):
-            real_batch_size = attn_metadata.seq_lens.shape[0]
-            seq_lens_for_hamming = attn_metadata.seq_lens[:real_batch_size].to(device=self.device, non_blocking=True) # attn_metadata.seq_lens_device
-            max_seq_len_for_hamming = torch.max(attn_metadata.seq_lens).item() # 这里会有同步
             attn_metadata.kvcomp_metadata = common_attn_metadata.kvcomp_metadata
-            attn_metadata.actual_seq_lengths_q_device = recover_request_lengths(query_start_loc)
-            attn_metadata.kvcomp_metadata.seq_lens_for_hamming = seq_lens_for_hamming
-            attn_metadata.kvcomp_metadata.max_seq_len_for_hamming = max_seq_len_for_hamming
-
-            kvcomp_metadata = attn_metadata.kvcomp_metadata
-            kvcomp_config = attn_metadata.kvcomp_metadata.kvcomp_config
-            remainder = attn_metadata.seq_lens % kvcomp_config.chunk_size
-            top_k_for_hamming_cpu = kvcomp_metadata.topk_for_hamming_full_cpu[:real_batch_size]
-            attn_metadata.kvcomp_metadata.hamming_output_seq_lens = torch.where(
-                remainder == 0,\
-                kvcomp_config.chunk_size * top_k_for_hamming_cpu,\
-                kvcomp_config.chunk_size * (top_k_for_hamming_cpu - 1) + remainder
-            )
+            attn_metadata.actual_query_lens = recover_request_lengths(query_start_loc).to(torch.int32)
+            actual_query_lens_cpu = recover_request_lengths(query_start_loc_cpu).to(torch.int32)
+            if (attn_state == AscendAttentionState.DecodeOnly and actual_query_lens_cpu.numel() > num_actual_tokens):
+                # FULL_DECODE_ONLY capture pads decode requests to a fixed batch size.
+                # KVComp must see those padded tail requests as length 0 on both CPU and device.
+                actual_query_lens_cpu = actual_query_lens_cpu.clone()
+                actual_query_lens_cpu[num_actual_tokens:] = 0
+            attn_metadata.actual_query_lens_list = actual_query_lens_cpu.tolist()
         return attn_metadata
 
     def build_for_graph_capture(
@@ -512,12 +510,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                     if forward_context.is_draft_model:
                         draft_step = attn_count // num_layers
-                        seq_lens = attn_metadata[draft_step][key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                        runtime_attn_metadata = attn_metadata[draft_step][key]
                         attn_count = attn_count + 1
                     else:
-                        seq_lens = attn_metadata[key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        runtime_attn_metadata = attn_metadata[key]
+
+                    # if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
+                    seq_lens = runtime_attn_metadata.seq_lens_list
+                    actual_seq_lengths_q = runtime_attn_metadata.actual_seq_lengths_q
+                    if (getattr(runtime_attn_metadata, "kvcomp_metadata", None) is not None and runtime_attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
+                        layer_index = extract_layer_index(key, 1)
+                        kvcomp_config = runtime_attn_metadata.kvcomp_metadata.kvcomp_config
+                        if layer_index not in kvcomp_config.vllm_hash_attention_rollback_layers:
+                            batch_size = len(runtime_attn_metadata.seq_lens_list)
+                            # Replay must rebuild FIA KV lengths with the same zero-tail rule
+                            # used by KVComp, otherwise graph replay sees different metadata.
+                            seq_lens_cpu = torch.tensor(runtime_attn_metadata.seq_lens_list[:batch_size], dtype=torch.int32)
+                            top_k_for_hamming_cpu = runtime_attn_metadata.kvcomp_metadata.topk_for_hamming_full_cpu[:batch_size].clone()
+                            if runtime_attn_metadata.num_actual_tokens < batch_size:
+                                seq_lens_cpu[runtime_attn_metadata.num_actual_tokens:] = 0
+                                top_k_for_hamming_cpu[runtime_attn_metadata.num_actual_tokens:] = 0
+                            remainder = seq_lens_cpu % kvcomp_config.chunk_size
+                            seq_lens = torch.where(
+                                remainder == 0,
+                                kvcomp_config.chunk_size * top_k_for_hamming_cpu,
+                                kvcomp_config.chunk_size * (top_k_for_hamming_cpu - 1) + remainder,
+                            )
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
@@ -784,7 +802,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                    block_table: torch.Tensor,
                                    actual_seq_lengths_kv: list[int]):
 
-        if not self.enable_kvcomp or attn_metadata.kvcomp_metadata.hashk_caches[self.layerIndex] == None:
+        if not self.enable_kvcomp or attn_metadata.kvcomp_metadata.hashk_caches[self.layerIndex] is None:
             return block_table, actual_seq_lengths_kv
         # logger.info("=== self.enable_kvcomp =======")
         # assert 0 is not 0
@@ -794,39 +812,100 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if (kvcomp_config.vllm_hash_attention_skip_layers[self.layerIndex] and 
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
-            return kvcomp_metadata.hamming_output, kvcomp_metadata.hamming_output_seq_lens
+            return kvcomp_metadata.hamming_output, kvcomp_metadata.seq_lens_for_hamming
         else: # padding, 指定 batch size
             sink = 1
             recent =4
             hash_encoder = kvcomp_metadata.hash_encoder
-            hashk = hash_encoder.compute_hash(key)
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            key_for_kvcomp = key[:num_actual_tokens]
+            hashk = hash_encoder.compute_hash(key_for_kvcomp)
+            # query_lens_list = [query_len for query_len in attn_metadata.actual_query_lens_list if query_len > 0]
+            # if len(query_lens_list) <= 1:
+            #     hashk_op = hashk.transpose(0,1).reshape(-1, hashk.shape[-1]).contiguous()
+            # else:
+            #     hashk_chunks: list[torch.Tensor] = []
+            #     token_offset = 0
+            #     for query_len in query_lens_list:
+            #         next_token_offset = token_offset + query_len
+            #         # ReshapeAndCacheBnsd consumes per-request BNSD chunks plus request lengths.
+            #         # Flattening across the whole batch breaks multi-request decode replay.
+            #         hashk_chunks.append(hashk[token_offset:next_token_offset].permute(1, 0, 2).reshape(-1, hashk.shape[-1]))
+            #         token_offset = next_token_offset
+            #     hashk_op = torch.cat(hashk_chunks, dim=0).contiguous()
             hashk_op = hashk.transpose(0,1).reshape(-1, hashk.shape[-1]).contiguous()
             
             hashk_cache_op = kvcomp_metadata.hashk_caches[self.layerIndex]
-            slot_mapping_op = attn_metadata.slot_mapping
-
+            slot_mapping_op = attn_metadata.slot_mapping[:num_actual_tokens].contiguous()
+            actual_query_lens = attn_metadata.actual_query_lens
+            # 每个 query 起始 loc，最后一个元素只是总长度，不是某个 query 的起点，所以 [:-1]
+            query_start_locs = attn_metadata.query_start_loc[:-1].to(torch.int64)
+            # A negative slot at a request start means this decode request is graph padding.
+            # Feed length 0 for those requests so both custom KVComp ops ignore them.
+            valid_query_mask = attn_metadata.slot_mapping[query_start_locs] >= 0
+            seq_lens_for_reshape = torch.where(valid_query_mask, actual_query_lens, torch.zeros_like(actual_query_lens),).contiguous()
+            
+            if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
+                logger.info(f"attn_state={attn_metadata.attn_state.name}")
+                logger.info(f"num_actual_tokens={num_actual_tokens}")
+                # logger.info(f"valid_query_mask={valid_query_mask}")
+                logger.info(f"slot_mapping.shape={attn_metadata.slot_mapping.shape}, slot_mapping_op.shape={slot_mapping_op.shape}")
+                logger.info(f"query_start_loc.shape={attn_metadata.query_start_loc.shape}, actual_query_lens.shape={actual_query_lens.shape}")
+                logger.info(f"query_start_locs.shape={query_start_locs.shape}, valid_query_mask.shape={valid_query_mask.shape}")
+                
             torch.ops._C_ascend.npu_reshape_and_cache_bnsd(
                 hashk_op,
                 hashk_cache_op,
                 slot_mapping_op,
-                attn_metadata.actual_seq_lengths_q_device, # attn_metadata.query_lens_device
+                seq_lens_for_reshape,
                 hashk_cache_op
             )
+            if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
+                logger.info(f"npu_reshape_and_cache_bnsd ok")
             if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+                if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
+                    logger.info(f"not DecodeOnly, jump Hamming")
                 return block_table, actual_seq_lengths_kv
 
+            if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
+                logger.info(f"is DecodeOnly, goto Hamming")
+
+            # 运行时真实 batch
             real_batch_size = attn_metadata.seq_lens.shape[0] # 这里是不会padding的。。。
-            seq_lens_for_hamming = kvcomp_metadata.seq_lens_for_hamming
-            max_seq_len_for_hamming = kvcomp_metadata.max_seq_len_for_hamming
-            
-            # max_seq_len_for_hamming = torch.tensor(max_seq_len_for_hamming, dtype=torch.int32)
-            chunk_sizes_for_hamming = kvcomp_metadata.chunk_sizes_for_hamming_full[:real_batch_size]# chunk_sizes_full
+            seq_lens_for_hamming_base = attn_metadata.seq_lens[:real_batch_size]
+            top_k_for_hamming_base = kvcomp_metadata.topk_for_hamming_full[:real_batch_size]
+            seq_lens_for_hamming = torch.where(valid_query_mask[:real_batch_size], seq_lens_for_hamming_base, torch.zeros_like(seq_lens_for_hamming_base),)
+            top_k_for_hamming = torch.where(valid_query_mask[:real_batch_size], top_k_for_hamming_base, torch.zeros_like(top_k_for_hamming_base),)
+            # Hamming and FIA replay must agree on which requests are real.
+            # Zero-tail the padded decode requests here so replay metadata stays self-consistent.
+            runtime_seq_lens_list = attn_metadata.seq_lens_list[:real_batch_size]
+            if attn_metadata.num_actual_tokens < real_batch_size:
+                runtime_seq_lens_list = (runtime_seq_lens_list[:attn_metadata.num_actual_tokens] + [0] * (real_batch_size - attn_metadata.num_actual_tokens))
+            runtime_max_seq_len_for_hamming = max(runtime_seq_lens_list) if runtime_seq_lens_list else 0
+            # Keep the capture-time upper bound when it exists so the graph attributes
+            # used by HammingDistTopK stay stable between capture and replay.
+            max_seq_len_for_hamming = (attn_metadata.max_seq_len if attn_metadata.max_seq_len is not None else runtime_max_seq_len_for_hamming)
+            chunk_sizes_for_hamming = kvcomp_metadata.chunk_sizes_for_hamming_full[:real_batch_size]
             block_tables_for_hamming = attn_metadata.block_tables[:real_batch_size]
-            top_k_for_hamming = kvcomp_metadata.topk_for_hamming_full[:real_batch_size]
-            top_k_for_hamming_cpu = kvcomp_metadata.topk_for_hamming_full_cpu[:real_batch_size]
+            top_k_for_hamming_cpu = kvcomp_metadata.topk_for_hamming_full_cpu[:real_batch_size].clone()
+            if attn_metadata.num_actual_tokens < real_batch_size:
+                top_k_for_hamming_cpu[attn_metadata.num_actual_tokens:] = 0
+
+            runtime_seq_lens_cpu = torch.tensor(runtime_seq_lens_list, dtype=torch.int32)
+            remainder = runtime_seq_lens_cpu % kvcomp_config.chunk_size
+            new_seq_lens = torch.where(
+                remainder == 0,
+                kvcomp_config.chunk_size * top_k_for_hamming_cpu,
+                kvcomp_config.chunk_size * (top_k_for_hamming_cpu - 1) + remainder,
+            )
+            new_seq_lens_list = new_seq_lens.tolist()
 
             hashq = hash_encoder.compute_hash(query[:real_batch_size])
-            hashq = hashq.unsqueeze(2).contiguous()    
+            hashq = hashq.unsqueeze(2).contiguous()
+            # indices = kvcomp_metadata.hamming_output[:real_batch_size]
+            if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
+                logger.info(f"real_batch_size={real_batch_size}")
+                logger.info(f"len(seq_lens_list)={len(attn_metadata.seq_lens_list)}, len(runtime_seq_lens_list)={len(runtime_seq_lens_list)}")
             new_block_table = torch.ops._C_ascend.npu_hamming_dist_top_k(
                 hashq,
                 hashk_cache_op,
@@ -844,7 +923,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             new_block_table = new_block_table.squeeze(1).contiguous()
             kvcomp_metadata.hamming_output = new_block_table
-        return new_block_table, kvcomp_metadata.hamming_output_seq_lens
+            kvcomp_metadata.seq_lens_for_hamming = new_seq_lens_list
+
+        return new_block_table, new_seq_lens_list
 
     def forward_fused_infer_attention(
         self,
