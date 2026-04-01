@@ -1363,7 +1363,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks
 In this chapter, we recommend best practices in prefill-decode disaggregation scenario with 1P1D architecture using 4 Atlas 800 A3 (64G × 16):
 
 - Low-latency: We recommend setting `dp4 tp8` on prefill nodes and `dp4 tp8` on decode nodes for low latency situation.
-- High-throughput: `dp4 tp8` on prefill nodes and `dp8 tp4` on decode nodes is recommended for high throughput situation. 
+- High-throughput: `dp4 tp8` on prefill nodes and `dp8 tp4` on decode nodes is recommended for high throughput situation.
 
 **Notice:**
 `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
