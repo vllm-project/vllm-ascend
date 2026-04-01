@@ -101,9 +101,22 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 num_reqs = max(req_indices) + 1 if len(req_indices) > 0 else 1
                 self.setup_block_table_data(block_table, num_reqs=num_reqs)
 
-                block_table.compute_slot_mapping(req_indices, positions)
+                # Build query_start_loc [num_reqs + 1] from req_indices.
+                # query_start_loc holds the cumulative token count per request,
+                # e.g. req_indices=[0,0,1,1] -> query_start_loc=[0,2,4].
+                num_tokens = len(positions)
+                counts = np.bincount(req_indices, minlength=num_reqs)
+                query_start_loc_np = np.concatenate([[0], np.cumsum(counts)]).astype(np.int32)
+                query_start_loc = torch.from_numpy(query_start_loc_np)
 
-                actual_result = block_table.slot_mapping.np[: len(positions)]
+                # positions must be a torch int64 tensor to match the
+                # _compute_slot_mapping_kernel's positions_ptr type.
+                positions_tensor = torch.from_numpy(positions.astype(np.int64))
+
+                block_table.compute_slot_mapping(num_reqs, query_start_loc, positions_tensor)
+
+                actual_result = block_table.slot_mapping.np[:num_tokens]
+
                 np.testing.assert_array_equal(
                     actual_result,
                     expected_result,
