@@ -257,6 +257,18 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     logger.info("Benchmark results saved to %s", output_path)
     print(f"Benchmark results saved to {output_path}")
 
+    # Also save to PVC mounted directory for persistence after pod termination
+    # PVC is mounted at /root/.cache, and LOG_PREFIX points to a subdirectory there
+    # We save benchmark results under LOG_PREFIX/benchmark_results for easy retrieval
+    log_prefix = os.environ.get("LOG_PREFIX", "/root/.cache/ascend-logs")
+    pvc_benchmark_dir = os.path.join(log_prefix, "benchmark_results")
+    os.makedirs(pvc_benchmark_dir, exist_ok=True)
+    pvc_output_path = os.path.join(pvc_benchmark_dir, f"{safe_name}.json")
+    with open(pvc_output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+    logger.info("Benchmark results also saved to PVC at %s", pvc_output_path)
+    print(f"Benchmark results also saved to PVC at {pvc_output_path}")
+
 
 @pytest.mark.asyncio
 async def test_multi_node() -> None:
