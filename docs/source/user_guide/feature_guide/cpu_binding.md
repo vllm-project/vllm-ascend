@@ -69,7 +69,7 @@ sudo dnf install -y util-linux numactl procps-ng
 
 For best results, if you run inside a docker container, which `systemctl` is likely unavailable, stop `irqbalance` service on the host manually before starting vLLM. Also make sure the container has the necessary permissions to write to `/proc/irq/*/smp_affinity` for IRQ binding:
 
-- **Stop `irqbalance` service**:
+- **Stop `irqbalance` service**: 
 
     For example, on Ubuntu system, you can run the following command to stop irqbalance:
     
