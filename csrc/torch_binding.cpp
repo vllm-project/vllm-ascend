@@ -105,35 +105,43 @@ void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
     return;
 }
 
-inline bool is_device_pointer(const void* ptr) {
-    aclrtMemAttr mem_type = ACL_DDR_MEM; 
-    aclError ret = aclrtPointerGetAttr(
-        &mem_type, ACL_POINTER_ATTR_MEMORY_TYPE, const_cast<void*>(ptr));
-    if (ret != ACL_SUCCESS) {
-        return false;
-    }
-    return (mem_type == ACL_HBM_MEM);
-}
+// inline bool is_device_pointer(const void* ptr) {
+//     aclrtMemAttr mem_type = ACL_DDR_MEM; 
+//     aclError ret = aclrtPointerGetAttr(
+//         &mem_type, ACL_POINTER_ATTR_MEMORY_TYPE, const_cast<void*>(ptr));
+//     if (ret != ACL_SUCCESS) {
+//         return false;
+//     }
+//     return (mem_type == ACL_HBM_MEM);
+// }
 
-inline aclrtMemcpyKind determine_memcpy_kind(const void* src, const void* dst) {
-    bool src_on_device = is_device_pointer(src);
-    bool dst_on_device = is_device_pointer(dst);
+// inline aclrtMemcpyKind determine_memcpy_kind(const void* src, const void* dst) {
+//     bool src_on_device = is_device_pointer(src);
+//     bool dst_on_device = is_device_pointer(dst);
 
-    if (src_on_device && dst_on_device) {
-        return ACL_MEMCPY_DEVICE_TO_DEVICE;
-    } else if (src_on_device && !dst_on_device) {
-        return ACL_MEMCPY_DEVICE_TO_HOST;
-    } else if (!src_on_device && dst_on_device) {
-        return ACL_MEMCPY_HOST_TO_DEVICE;
-    }
-    TORCH_CHECK(false, "swap_blocks_batch: invalid device combination, "
-                "both src and dst appear to be on Host");
-    return ACL_MEMCPY_HOST_TO_DEVICE;  // unreachable, suppress warning
-}
+//     if (src_on_device && dst_on_device) {
+//         return ACL_MEMCPY_DEVICE_TO_DEVICE;
+//     } else if (src_on_device && !dst_on_device) {
+//         return ACL_MEMCPY_DEVICE_TO_HOST;
+//     } else if (!src_on_device && dst_on_device) {
+//         return ACL_MEMCPY_HOST_TO_DEVICE;
+//     }
+//     TORCH_CHECK(false, "swap_blocks_batch: invalid device combination, "
+//                 "both src and dst appear to be on Host");
+//     return ACL_MEMCPY_HOST_TO_DEVICE;  // unreachable, suppress warning
+// }
 
 void swap_blocks_batch(const torch::Tensor& src_ptrs,
                        const torch::Tensor& dst_ptrs,
-                       const torch::Tensor& sizes) {
+                       const torch::Tensor& sizes,
+                       int64_t direction) {
+
+    TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
+    TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
+    TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
+    TORCH_CHECK(src_ptrs.dtype() == torch::kInt64, "src_ptrs must be int64");
+    TORCH_CHECK(dst_ptrs.dtype() == torch::kInt64, "dst_ptrs must be int64");
+    TORCH_CHECK(sizes.dtype() == torch::kInt64, "sizes must be int64");
 
     const int64_t n = src_ptrs.size(0);
     TORCH_CHECK(dst_ptrs.size(0) == n, "dst_ptrs length must match src_ptrs");
@@ -147,9 +155,35 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-    aclrtMemcpyKind memcpy_kind = determine_memcpy_kind(
-        reinterpret_cast<const void*>(src_data[0]),
-        reinterpret_cast<const void*>(dst_data[0]));
+    torch::Device src_device = src_ptrs.device();
+    torch::Device dst_device = dst_ptrs.device();
+    aclrtMemcpyKind memcpy_kind;
+    switch (direction) {
+        case 0:
+            memcpy_kind = ACL_MEMCPY_HOST_TO_DEVICE;
+            break;
+        case 1:
+            memcpy_kind = ACL_MEMCPY_DEVICE_TO_HOST;
+            break;
+        case 2:
+            memcpy_kind = ACL_MEMCPY_DEVICE_TO_DEVICE;
+            break;
+        default:
+            TORCH_CHECK(false,
+                        "swap_blocks_batch: invalid direction ", direction,
+                        " (expected 0=H2D, 1=D2H, 2=D2D)");
+    }
+    // if ((!src_device.is_cpu()) && (!dst_device.is_cpu())) {
+    //     TORCH_CHECK(src_device.index() == dst_device.index(),
+    //                 "src and dst must be on the same npu");
+    //     memcpy_kind = ACL_MEMCPY_DEVICE_TO_DEVICE;
+    // } else if ((!src_device.is_cpu()) && dst_device.is_cpu()) {
+    //     memcpy_kind = ACL_MEMCPY_DEVICE_TO_HOST;
+    // } else if (src_device.is_cpu() && (!dst_device.is_cpu())) {
+    //     memcpy_kind = ACL_MEMCPY_HOST_TO_DEVICE;
+    // } else {
+    //     TORCH_CHECK(false, "Invalid device combination, src tensor device: ", src_device, ", dst tensor device: ", dst_device);
+    // }
 
     // =========================================================================
     // 路径 1: aclrtMemcpyBatchAsync (CANN 8.5+, 试验特性)
@@ -878,7 +912,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 
-    ops.def("swap_blocks_batch(Tensor! x, Tensor! y, Tensor z) -> ()");    
+    ops.def("swap_blocks_batch(Tensor! x, Tensor! y, Tensor z, int direction) -> ()");    
     ops.impl("swap_blocks_batch", torch::kPrivateUse1, &vllm_ascend::swap_blocks_batch);
 
     ops.def(

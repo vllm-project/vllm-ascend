@@ -1,10 +1,12 @@
 import numpy as np
 import torch
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
+
+logger = init_logger(__name__)
 
 
 def expand_block_ids(
@@ -93,18 +95,32 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
                     ),
                 )
             )
-    
-        # Pre-compute base pointers and block sizes for batch copies.
-        self._src_base_ptrs = np.array(
-            [t.data_ptr() for t in self.src_tensors], dtype=np.int64
-        )
-        self._dst_base_ptrs = np.array(
-            [t.data_ptr() for t in self.dst_tensors], dtype=np.int64
-        )
-        self._block_size_in_bytes_arr = np.array(
-            self.tensor_block_size_in_bytes, dtype=np.int64
-        )
 
+        # Pre-compute base pointers and block sizes for batch copies.
+        # In vllm-ascend, each layer's KV cache is stored as a tuple
+        # (key_cache, value_cache), so we flatten them into individual
+        # sub-tensors for batching: [layer0_key, layer0_value,
+        # layer1_key, layer1_value, ...].
+        npu_base_ptrs = []
+        cpu_base_ptrs = []
+        block_sizes_in_bytes = []
+
+        for npu_tensor, cpu_tensor in zip(self.npu_tensors, self.cpu_tensors):
+            for kv_idx in range(2):  # 0=key, 1=value
+                npu_t = npu_tensor[kv_idx]
+                cpu_t = cpu_tensor[kv_idx]
+                npu_base_ptrs.append(npu_t.data_ptr())
+                cpu_base_ptrs.append(cpu_t.data_ptr())
+                # block size in bytes = stride of dim 0 (elements) * element size
+                block_sizes_in_bytes.append(
+                    npu_t.stride(0) * npu_t.element_size()
+                )
+
+        self._npu_base_ptrs = np.array(npu_base_ptrs, dtype=np.int64)
+        self._cpu_base_ptrs = np.array(cpu_base_ptrs, dtype=np.int64)
+        self._block_size_in_bytes_arr = np.array(
+            block_sizes_in_bytes, dtype=np.int64
+        )
 
     def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
         logger.info("start transfer_async...")
@@ -112,16 +128,16 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         if isinstance(src_spec, CPULoadStoreSpec):
             assert isinstance(dst_spec, GPULoadStoreSpec)
             stream = self.h2d_stream
-            src_tensors = self.cpu_tensors
-            dst_tensors = self.npu_tensors
+            src_base_ptrs = self._cpu_base_ptrs
+            dst_base_ptrs = self._npu_base_ptrs
             src_block_size_factor = self.block_size_factor
             dst_block_size_factor = 1
         else:
             assert isinstance(src_spec, GPULoadStoreSpec)
             assert isinstance(dst_spec, CPULoadStoreSpec)
             stream = self.d2h_stream
-            src_tensors = self.npu_tensors
-            dst_tensors = self.cpu_tensors
+            src_base_ptrs = self._npu_base_ptrs
+            dst_base_ptrs = self._cpu_base_ptrs
             src_block_size_factor = 1
             dst_block_size_factor = self.block_size_factor
 
@@ -135,16 +151,22 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
         assert src_sub_block_count == dst_blocks.size * dst_block_size_factor - dst_sub_blocks_to_skip
 
-        # src_to_dst = np.empty((src_sub_block_count, 2), dtype=np.int64)
-        src_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
-        dst_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
+        # Expand block IDs into sub-block IDs
+        src_block_ids = np.empty(src_sub_block_count, dtype=np.int64)
+        dst_block_ids = np.empty(src_sub_block_count, dtype=np.int64)
         expand_block_ids(src_blocks, src_block_size_factor, src_block_ids)
-        expand_block_ids(dst_blocks, self.dst_block_size_factor, dst_block_ids)
+        expand_block_ids(
+            dst_blocks,
+            dst_block_size_factor,
+            dst_block_ids,
+            skip_count=dst_sub_blocks_to_skip,
+        )
 
-        # Build flat pointer arrays for all tensors × all block pairs.
-        num_pairs = dst_sub_block_count
-        num_tensors = len(self.src_tensors)
-        total = num_pairs * num_tensors
+        # Build flat pointer arrays for all sub-tensors × all block pairs.
+        # sub-tensors = [layer0_key, layer0_value, layer1_key, layer1_value, ...]
+        num_pairs = src_sub_block_count
+        num_sub_tensors = len(self._block_size_in_bytes_arr)
+        total = num_pairs * num_sub_tensors
 
         all_src = np.empty(total, dtype=np.int64)
         all_dst = np.empty(total, dtype=np.int64)
@@ -153,8 +175,8 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
             start = t_idx * num_pairs
             end = start + num_pairs
-            all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
-            all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
+            all_src[start:end] = src_base_ptrs[t_idx] + src_block_ids * bsz
+            all_dst[start:end] = dst_base_ptrs[t_idx] + dst_block_ids * bsz
             all_sizes[start:end] = bsz
 
         batch_src = torch.from_numpy(all_src)
@@ -163,10 +185,10 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
         event = self.events_pool.pop() if self.events_pool else torch.npu.Event()
         with torch.npu.stream(stream):
-
-            torch.ops._C_ascend.swap_blocks_batch(src_key_cache, dst_key_cache, src_to_dst_tensor)
-            torch.ops._C_ascend.swap_blocks_batch(src_value_cache, dst_value_cache, src_to_dst_tensor)
-            
+            if total > 0:
+                torch.ops._C_ascend.swap_blocks_batch(
+                    batch_src, batch_dst, batch_sizes, 0 if isinstance(src_spec, CPULoadStoreSpec) else 1
+                )
             event.record(stream)
 
         self.transfer_events[job_id] = event
@@ -176,21 +198,11 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        finished_job_ids = []
         for job_id, event in self.transfer_events.items():
             if event.query():
-                results.append(
-                    TransferResult(
-                        job_id=job_id,
-                        success=True,
-                        transfer_size=None,
-                        transfer_time=None,
-                        transfer_type=None,
-                    )
-                )
-                finished_job_ids.append(job_id)
+                results.append((job_id, True))
                 self.events_pool.append(event)
-        for job_id in finished_job_ids:
+        for job_id, _ in results:
             del self.transfer_events[job_id]
         return results
 
