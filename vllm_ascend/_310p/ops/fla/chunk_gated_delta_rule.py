@@ -104,8 +104,8 @@ def _torch_chunk_gated_delta_rule_chunked(
     """
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
-        query = F.normalize(query, p=2, dim=-1).to(query.dtype)
-        key = F.normalize(key, p=2, dim=-1).to(key.dtype)
+        query = F.normalize(query, p=2, dim=-1, eps=1e-6).to(query.dtype)
+        key = F.normalize(key, p=2, dim=-1, eps=1e-6).to(key.dtype)
 
     query, key, value, beta, g = [
         x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
