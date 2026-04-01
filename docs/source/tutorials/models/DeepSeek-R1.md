@@ -258,10 +258,10 @@ Here are two accuracy evaluation methods.
 
 2. After execution, you can get the result, here is the result of `DeepSeek-R1-W8A8` in `vllm-ascend:0.11.0rc2` for reference only.
 
-| dataset | version | metric | mode | vllm-api-general-chat |
-|----- | ----- | ----- | ----- | -----|
-| aime2024dataset | - | accuracy | gen | 80.00 |
-| gpqadataset | - | accuracy | gen | 72.22 |
+    | dataset | version | metric | mode | vllm-api-general-chat |
+    |----- | ----- | ----- | ----- | -----|
+    | aime2024dataset | - | accuracy | gen | 80.00 |
+    | gpqadataset | - | accuracy | gen | 72.22 |
 
 ### Using Language Model Evaluation Harness
 
@@ -271,13 +271,13 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 
 2. Run `lm_eval` to execute the accuracy evaluation.
 
-```shell
-lm_eval \
-  --model local-completions \
-  --model_args model=path/DeepSeek-R1-W8A8,base_url=http://<node0_ip>:<port>/v1/completions,tokenized_requests=False,trust_remote_code=True \
-  --tasks gsm8k \
-  --output_path ./
-```
+    ```shell
+    lm_eval \
+      --model local-completions \
+      --model_args model=path/DeepSeek-R1-W8A8,base_url=http://<node0_ip>:<port>/v1/completions,tokenized_requests=False,trust_remote_code=True \
+      --tasks gsm8k \
+      --output_path ./
+    ```
 
 3. After execution, you can get the result.
 
@@ -291,7 +291,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `DeepSeek-R1-W8A8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
