@@ -329,7 +329,7 @@ jobs:
   clear-pre-logs:
     needs: [multi-node-tests]
     runs-on: linux-aarch64-a2b3-0
-    if: always() 
+    if: github.event_name == 'schedule' && needs.multi-node-tests.result != 'skipped'
     steps:
       - name: Clear pre-logs on pvc
         run: |
