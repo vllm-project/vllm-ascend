@@ -84,6 +84,7 @@ jobs:
     name: Export global env vars as job outputs
     needs: parse-trigger
     runs-on: ubuntu-latest
+    needs: parse-trigger
     outputs:
       image: ${{ steps.export.outputs.image }}
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
