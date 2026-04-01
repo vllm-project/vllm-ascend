@@ -25,7 +25,7 @@ ENV SOC_VERSION=$SOC_VERSION \
     OMP_NUM_THREADS=1
 
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel jemalloc && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc && \
     rm -rf /var/cache/yum
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
