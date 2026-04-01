@@ -136,8 +136,10 @@ class AscendConfig:
             bool(additional_config.get("enable_async_exponential", False)) and not vllm_is_batch_invariant()
         )
 
-        use_sparse = model_config is not None and hasattr(model_config, "hf_text_config") and hasattr(
-            model_config.hf_text_config, "index_topk"
+        use_sparse = (
+            model_config is not None
+            and hasattr(model_config, "hf_text_config")
+            and hasattr(model_config.hf_text_config, "index_topk")
         )
 
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
@@ -163,7 +165,9 @@ class AscendConfig:
         )
 
         self.enable_sp_by_pass = (
-            model_config is not None and not model_config.enforce_eager and vllm_config.compilation_config.pass_config.enable_sp
+            model_config is not None
+            and not model_config.enforce_eager
+            and vllm_config.compilation_config.pass_config.enable_sp
         )
 
         # Enable dispatch/combine op inter-node communication by ROCE
