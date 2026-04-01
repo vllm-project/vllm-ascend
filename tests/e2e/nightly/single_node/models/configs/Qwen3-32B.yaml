@@ -29,15 +29,15 @@ test_cases:
       - "--additional-config"
       - '{"enable_weight_nz_layout":true}'
     benchmarks:
-      # acc:
-      #   case_type: accuracy
-      #   dataset_path: vllm-ascend/gsm8k-lite
-      #   request_conf: vllm_api_general_chat
-      #   dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-      #   max_out_len: 32768
-      #   batch_size: 32
-      #   baseline: 95
-      #   threshold: 5
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 32768
+        batch_size: 32
+        baseline: 95
+        threshold: 5
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs400

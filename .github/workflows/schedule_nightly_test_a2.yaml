@@ -85,7 +85,7 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2b3-0
     outputs:
       image: ${{ steps.export.outputs.image }}
       cann_image: ${{ steps.export.outputs.cann_image }}
@@ -345,7 +345,7 @@ jobs:
       needs.parse-trigger.result == 'success' &&
       (needs.single-node-tests.result != 'skipped' ||
        needs.multi-node-tests.result != 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2b3-0
     steps:
       - name: Merge all benchmark result artifacts
         uses: actions/upload-artifact/merge@v4

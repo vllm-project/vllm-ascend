@@ -248,14 +248,14 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
         "environment": _filter_environment(config.envs),
     }
 
-    os.makedirs("benchmark_results", exist_ok=True)
-    job_name = os.environ.get("BENCHMARK_JOB_NAME") or config.test_name
-    safe_name = job_name.replace("/", "_").replace(" ", "_")
-    output_path = os.path.join("benchmark_results", f"{safe_name}.json")
-    with open(output_path, "w", encoding="utf-8") as f:
+    job_name = os.environ.get("BENCHMARK_JOB_NAME")
+    pvc_benchmark_dir = os.path.join("/root/.cache/benchmark_results", job_name)
+    os.makedirs(pvc_benchmark_dir, exist_ok=True)
+    pvc_output_path = os.path.join(pvc_benchmark_dir, f"{job_name}.json")
+    with open(pvc_output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
-    logger.info("Benchmark results saved to %s", output_path)
-    print(f"Benchmark results saved to {output_path}")
+    logger.info("Benchmark results saved to PVC at %s", pvc_output_path)
+    print(f"Benchmark results saved to PVC at {pvc_output_path}")
 
 
 @pytest.mark.asyncio
