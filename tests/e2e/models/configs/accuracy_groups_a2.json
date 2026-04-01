@@ -47,7 +47,13 @@
       "os": "linux-aarch64-a2b3-1",
       "model_list": [
         "gemma-3-4b-it",
-        "internlm3-8b-instruct",
+        "internlm3-8b-instruct"
+      ]
+    },
+    {
+      "name": "pr-accuracy-group-2",
+      "os": "linux-aarch64-a2b3-2",
+      "model_list": [
         "Qwen3-ASR-1.7B"
       ]
     }
