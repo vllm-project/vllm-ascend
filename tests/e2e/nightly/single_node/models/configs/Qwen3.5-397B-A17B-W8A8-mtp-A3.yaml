@@ -13,6 +13,8 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd:
       - "--tensor-parallel-size"
       - "16"
@@ -61,5 +63,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 20
         request_rate: 0
-        baseline: 1
+        baseline: 768.6894
         threshold: 0.97
