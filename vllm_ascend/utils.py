@@ -465,6 +465,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
     CP_ADDITIONAL_STREAM_NUM = 100
+    # MTP decode paths can still consume extra streams beyond the layer-based
+    # estimate, so keep a conservative fixed buffer here.
+    MTP_ADDITIONAL_RESOURCE_BUFFER = 24
 
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
@@ -493,6 +496,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # which store layer count in num_nextn_predict_layers or
         # mtp_num_hidden_layers (for Qwen3.5) instead of num_hidden_layers.
         resources_per_graph += draft.get_total_num_hidden_layers() + 1
+        if spec.method == "mtp":
+            resources_per_graph += MTP_ADDITIONAL_RESOURCE_BUFFER
 
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(
