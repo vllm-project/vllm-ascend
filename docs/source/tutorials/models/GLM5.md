@@ -1226,45 +1226,45 @@ Once the preparation is done, you can start the server with the following comman
 
 1. Prefill node 0
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
+    ```
 
 2. Prefill node 1
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
+    ```
 
 3. Decode node 0
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
+    ```
 
 4. Decode node 1
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
+    ```
 
 5. Decode node 2
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 8 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 8 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
+    ```
 
 6. Decode node 3
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 16 --tp-size 4 --dp-size-local 4 --dp-rank-start 12 --dp-address $node_d0_ip --dp-rpc-port 10523 --vllm-start-port 6721
+    ```
 
 ### Request Forwarding
 
@@ -1356,6 +1356,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
+<<<<<<< glm5_document
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 ## Best Practices
@@ -1383,3 +1384,6 @@ In this chapter, we recommend best practices in prefill-decode disaggregation sc
   --reasoning-parser glm45 \
   --enable-auto-tool-choice \
   ```
+=======
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+>>>>>>> main
