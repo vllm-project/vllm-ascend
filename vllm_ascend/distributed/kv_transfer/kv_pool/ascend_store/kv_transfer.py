@@ -406,10 +406,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
         suc = self.m_store.get(key_list_c, addr_list_c, size_list_c)
         self.request_queue.task_done()
-        if suc is not False:
-            self.get_event.set()
-        else:
+        if suc is False:
             logger.warning(
                 f"[KV-GET-RESCUED] get() failed, skipping get_event.set() to prevent engine crash. "
                 f"layer_id={req_meta.layer_id}, req_id={req_meta.req_id}"
             )
+        else:
+            # compat: non-Mooncake backends may return None
+            self.get_event.set()
