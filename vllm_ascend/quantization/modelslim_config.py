@@ -28,9 +28,11 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, Optional
 
+import regex as re
 import torch
 from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.logger import logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -38,66 +40,12 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, calc_split_factor
 
 from .methods import get_scheme_class
 
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
-
-logger = init_logger(__name__)
-
-# key: model_type
-# value: orig_to_new_prefix
-QUANT_MODEL_PREFIX_MAPPINGS: dict[str, dict[str, str]] = {
-    "qwen3_vl_moe": {
-        "visual.": "model.visual.",
-        "language_model.lm_head.": "lm_head.",
-        "language_model.model.": "model.language_model.",
-    },
-    "qwen3_vl_text": {
-        "visual.": "model.visual.",
-        "language_model.lm_head.": "lm_head.",
-        "language_model.model.": "model.language_model.",
-    },
-    "kimi_k25": {
-        "mm_projector.linear_1": "mm_projector.proj.0",
-        "mm_projector.linear_2": "mm_projector.proj.2",
-    },
-    "qwen3_omni_moe": {
-        "language_model.lm_head.": "thinker.lm_head.",
-        "language_model.model.": "thinker.model.",
-        "visual.": "thinker.visual.",
-    },
-    "qwen2_5_omni": {
-        "language_model.lm_head.": "thinker.lm_head.",
-        "language_model.model.": "thinker.model.",
-        "visual.": "thinker.visual.",
-    },
-    "qwen2_5_omni_text": {
-        "language_model.": "thinker.",
-    },
-    "glm4v_moe": {
-        "visual.": "model.visual.",
-        "language_model.lm_head.": "lm_head.",
-        "language_model.model.": "model.language_model.",
-    },
-    "glm4v_moe_text": {
-        "visual.": "model.visual.",
-        "language_model.lm_head.": "lm_head.",
-        "language_model.model.": "model.language_model.",
-    },
-    "qwen3_5": {
-        "visual.": "model.visual.",
-        "language_model.lm_head.": "lm_head.",
-        "language_model.model.": "model.language_model.",
-    },
-    "qwen3_5_moe": {
-        "visual.": "model.visual.",
-        "language_model.lm_head.": "lm_head.",
-        "language_model.model.": "model.language_model.",
-    },
-}
 
 # key: model_type
 # value: dict of fused module name -> list of original module names
@@ -310,19 +258,6 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
     return packed_modules_model_mapping.get(model_type, {})
 
 
-def get_prefix_mapping(model_type: str) -> dict[str, str]:
-    """Get prefix mapping for a model type.
-
-    Args:
-        model_type: The model type string (e.g., "qwen3_vl_moe").
-
-    Returns:
-        Dictionary mapping original prefixes to new prefixes.
-        Returns empty dict if model_type is not found.
-    """
-    return QUANT_MODEL_PREFIX_MAPPINGS.get(model_type, {})
-
-
 def get_linear_quant_type(
     quant_description: dict[str, Any], prefix: str, packed_modules_mapping: dict[str, Any]
 ) -> str | None:
@@ -380,6 +315,8 @@ def get_quant_type_for_layer(
     # Attention
     if layer_type == "attention" and "fa_quant_type" in quant_description:
         return quant_description["fa_quant_type"]
+    if layer_type == "attention" and "indexer_quant_type" in quant_description:
+        return quant_description["indexer_quant_type"]
     # Linear / MoE
     return get_linear_quant_type(quant_description, prefix, packed_modules_mapping)
 
@@ -427,17 +364,11 @@ class AscendModelSlimConfig(QuantizationConfig):
     def __init__(self, quant_config: dict[str, Any] | None = None):
         super().__init__()
         self.quant_description = quant_config if quant_config is not None else {}
-        # TODO(whx): remove this adaptation after adding "shared_head"
-        # to prefix of DeepSeekShareHead in vLLM.
-        extra_quant_dict = {}
-        for k in self.quant_description:
-            if "shared_head" in k:
-                new_k = k.replace(".shared_head.", ".")
-                extra_quant_dict[new_k] = self.quant_description[k]
-            if "weight_packed" in k:
-                new_k = k.replace("weight_packed", "weight")
-                extra_quant_dict[new_k] = self.quant_description[k]
-        self.quant_description.update(extra_quant_dict)
+        self._apply_extra_quant_adaptations()
+        self.model_type: str | None = None
+        self.hf_to_vllm_mapper: WeightsMapper | None = None
+        self._mapper_applied = False
+        self._add_kvcache_quant_metadata()
 
     def __repr__(self) -> str:
         return "AscendModelSlimConfig:\n" + super().__repr__()
@@ -475,12 +406,46 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return ASCEND_QUANTIZATION_METHOD
         return None
 
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        """Apply the vLLM model-specific mapper to this quantization config.
+
+        This method is called by vLLM to apply the model-specific weight mapper
+        to the quantization configuration. It directly uses the forward mapping
+        (HF -> vLLM) to transform keys in quant_description from HF format to
+        vLLM format.
+
+        Args:
+            hf_to_vllm_mapper: The WeightsMapper instance provided by vLLM
+                that contains model-specific prefix mappings (HF to vLLM).
+        """
+        if self._mapper_applied and self.hf_to_vllm_mapper is hf_to_vllm_mapper:
+            return
+
+        self.hf_to_vllm_mapper = hf_to_vllm_mapper
+        self._mapper_applied = True
+
+        if self.quant_description:
+            self.quant_description = hf_to_vllm_mapper.apply_dict(self.quant_description)
+            self._add_kvcache_quant_metadata()
+            logger.info("Applied hf_to_vllm_mapper to quant_description keys")
+
+    def get_cache_scale(self, name: str) -> str | None:
+        """Map checkpoint C8 KV scale/offset names to vLLM parameter names."""
+        if self.quant_description.get("kv_cache_type") != "C8":
+            return None
+        _C8_SCALE_MAPPING = {
+            "k_proj.kv_cache_scale": "attn.k_cache_scale",
+            "k_proj.kv_cache_offset": "attn.k_cache_offset",
+            "v_proj.kv_cache_scale": "attn.v_cache_scale",
+            "v_proj.kv_cache_offset": "attn.v_cache_offset",
+        }
+        for src_suffix, dst_suffix in _C8_SCALE_MAPPING.items():
+            if name.endswith(src_suffix):
+                return name[: -len(src_suffix)] + dst_suffix
+        return None
+
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
-        # TODO (Levi-JQ): will be removed when QuantizationConfig.apply_vllm_mapper is implemented
-        prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
-        if prefix_mapping:
-            hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix=prefix_mapping)
-            return hf_to_vllm_mapper._map_name(prefix)
+        self.model_type = model_type
         return prefix
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -509,11 +474,6 @@ class AscendModelSlimConfig(QuantizationConfig):
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
-        from vllm.model_executor.layers.attention import Attention
-
-        if model_type != "kimi_k2":
-            if prefix.startswith("language_model"):
-                prefix = prefix.split(".", 1)[-1]
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
@@ -522,13 +482,15 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             return AscendLinearMethod(scheme)
-        elif (
-            isinstance(layer, Attention)
-            and "fa_quant_type" in self.quant_description
-            and self.quant_description["fa_quant_type"] is not None
+        elif isinstance(layer, AttentionLayerBase) and (
+            self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)
         ):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
             return AscendKVCacheMethod(scheme)
+        elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
+            from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
+
+            return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
@@ -573,6 +535,46 @@ class AscendModelSlimConfig(QuantizationConfig):
         assert is_skipped is not None
         return is_skipped
 
+    def is_fa_quant_layer(self, prefix):
+        if self.enable_fa_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.kvcache_quant_layers:
+                return True
+        return False
+
+    def is_indexer_quant_layer(self, prefix):
+        if self.enable_indexer_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
+                return True
+        return False
+
+    def enabling_fa_quant(self, vllm_config, layer_name) -> bool:
+        is_decode_instance = (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.kv_transfer_config.is_kv_consumer
+            and not vllm_config.kv_transfer_config.is_kv_producer
+        )
+        return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
+
+    def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
+        if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
+            ori_dtype = model_config.dtype
+            quant_dtype = torch.int8
+            # For MLA models like deepseek, we only quantify K cache to ensure accuracy
+            if model_config.use_mla:
+                return quant_dtype, ori_dtype
+            else:
+                return quant_dtype, quant_dtype
+        return cache_dtype, cache_dtype
+
+    def get_kv_quant_split_factor(self, layer_name, kv_head_dim_list):
+        if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
+            k_quant_head_dim = kv_head_dim_list[0]
+            v_quant_head_dim = kv_head_dim_list[1] * 2
+            kv_head_dim_list = [k_quant_head_dim, v_quant_head_dim]
+        return calc_split_factor(kv_head_dim_list)
+
     def maybe_update_config(self, model_name: str, revision: str | None = None) -> None:
         """Load the ModelSlim quantization config from model directory.
 
@@ -606,6 +608,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             with open(config_path) as f:
                 self.quant_description = json.load(f)
             self._apply_extra_quant_adaptations()
+            self._add_kvcache_quant_metadata()
             return
 
         # Collect diagnostic info for the error message
@@ -676,5 +679,17 @@ class AscendModelSlimConfig(QuantizationConfig):
                 extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
 
-    def get_scaled_act_names(self) -> list[str]:
-        return []
+    def _add_kvcache_quant_metadata(self):
+        fa_quant_type = self.quant_description.get("fa_quant_type", "")
+        self.enable_fa_quant = fa_quant_type != ""
+        self.kvcache_quant_layers = []
+        indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
+        self.enable_indexer_quant = indexer_quant_type != ""
+        self.indexer_quant_layers = []
+        if self.enable_fa_quant or self.enable_indexer_quant:
+            for key in self.quant_description:
+                _id = "".join(re.findall(r"\.(\d+)\.", key))
+                if "fa_k.scale" in key:
+                    self.kvcache_quant_layers.append(int(_id))
+                if "indexer.quant_type" in key:
+                    self.indexer_quant_layers.append(int(_id))

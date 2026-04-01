@@ -25,7 +25,8 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
-from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.quantization.quant_type import QuantType
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -93,13 +94,17 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         final_hidden_states = moe_comm_method.fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
+            fused_experts_input=build_fused_experts_input(
+                hidden_states=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                quant_type=QuantType.NONE,
+                dynamic_eplb=False,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            ),
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
@@ -218,9 +223,13 @@ class AscendFusedMoE310(FusedMoE):
         assert self.quant_method is not None
         assert self.routed_scaling_factor == 1.0, "routed_scaling_factor != 1.0 is not supported."
 
-        hidden_states, router_logits, _, context_metadata = _EXTRA_CTX.moe_comm_method.prepare(
+        prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states, router_logits=router_logits, quant_type=self.quant_type
         )
+        hidden_states = prepare_output.hidden_states
+        router_logits = prepare_output.router_logits
+        pertoken_scale = prepare_output.pertoken_scale
+        padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
 
         # Matrix multiply.
         fused_experts_results: FusedExpertsResult = self.quant_method.apply(
@@ -238,12 +247,13 @@ class AscendFusedMoE310(FusedMoE):
             global_num_experts=self.global_num_experts,
             expert_map=self.local_expert_map,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
+            pertoken_scale=pertoken_scale,
         )
 
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
-            context_metadata=context_metadata,
+            padded_hidden_states_shape=padded_hidden_states_shape,
         )
 
         return routed_out
@@ -264,6 +274,14 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
         self._gate = gate
+        # Recreate runner after shared_experts/gate are set so custom op dispatch
+        # goes through moe_forward_shared.
+        self.runner = self._init_runner()
+
+    @property
+    def is_internal_router(self) -> bool:
+        # 310P Ascend path expects router logits from the model forward path.
+        return False
 
     def forward(
         self,
@@ -288,9 +306,7 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
     def _forward_shared_experts(self, hidden_states: torch.Tensor):
         if self._shared_experts is None:
             return None
-        part1_out = self._shared_experts_part1(hidden_states)
-        shared_out = self._shared_experts_part2(hidden_states, part1_out)
-        return shared_out
+        return self._shared_experts(hidden_states)
 
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor

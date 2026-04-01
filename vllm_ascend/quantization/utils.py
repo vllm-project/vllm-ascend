@@ -19,11 +19,9 @@ import json
 from pathlib import Path
 
 from vllm import envs
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
-
-logger = init_logger(__name__)
 
 
 def get_model_file(
@@ -199,3 +197,12 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     from vllm.config import VllmConfig as _VllmConfig
 
     vllm_config.quant_config = _VllmConfig._get_quantization_config(model_config, vllm_config.load_config)
+
+
+def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
+        if layer_name is not None:
+            return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
+        else:
+            return True
+    return False

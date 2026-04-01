@@ -25,8 +25,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen3-Moe                     | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | 256k || [Qwen3-235B-A22B](../../tutorials/models/Qwen3-235B-A22B.md) |
 | Qwen3-Next                    | 🔵        |                                                                      | ✅ | A2/A3 | ✅ |||||| ✅ ||| ✅ || ✅ | ✅ ||| [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |
 | Qwen2.5                       | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ |||| ✅ ||| ✅ |||||| [Qwen2.5-7B](../../tutorials/models/Qwen2.5-7B.md) |
-| GLM-4.x                       | 🔵        |                                                                      || A2/A3 |✅|✅|✅||✅|✅|✅|||✅||✅|✅|128k||[GLM-4.x](../../tutorials/models/GLM4.x.md)|
+| GLM-4.x                       | 🔵        |                                                                      || A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|198k||[GLM-4.x](../../tutorials/models/GLM4.x.md)|
 | Kimi-K2-Thinking              | 🔵        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
+| DeepseekOCR2                  | ✅        |                                                                      | ✅ | A2/A3 ||✅||||✅|||||||||| [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
 
 #### Extended Compatible Models
 

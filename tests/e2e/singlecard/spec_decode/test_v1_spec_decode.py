@@ -534,3 +534,32 @@ def test_parallel_drafting_acceptance(
         print(f"golden: {golden}")
 
     assert match
+
+
+@pytest.mark.parametrize("method", MODELS.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [3])
+def test_eagle3_fia_pad_under_max_concurrency(
+    method: str,
+    num_speculative_tokens: int,
+):
+    main_model_name = MODELS[method]["main"]
+    spec_model_name = MODELS[method]["spec"]
+    prompts = [
+        "Hello, I am",
+    ]
+    speculative_config = {
+        "method": method,
+        "num_speculative_tokens": num_speculative_tokens,
+        "model": spec_model_name,
+    }
+    max_num_tokens = 1 + num_speculative_tokens
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY",cudagraph_capture_sizes=[max_num_tokens])
+    with VllmRunner(
+        main_model_name,
+        max_model_len=2048,
+        tensor_parallel_size=1,
+        speculative_config=speculative_config,
+        max_num_batched_tokens=max_num_tokens,
+        compilation_config=compilation_config,
+    ) as llm:
+        _ = llm.generate_greedy(prompts, max_tokens=10)
