@@ -126,10 +126,8 @@ Notes:
 
 ```{code-block} bash
 export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_BUFFSIZE=1024
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
@@ -137,26 +135,27 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
+
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-vllm serve /path/to/weight/MiniMax-M2.5-w8a8-QuaRot
-    --served-model-name "MiniMax-M2.5"
-    --host 0.0.0.0
-    --port 8000
-    --trust-remote-code
-    --quantization ascend
-    --async-scheduling
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-    --additional-config '{"enable_cpu_binding":true}'
-    --tensor-parallel-size 4
-    --data-parallel-size 4
-    --enable-expert-parallel
-    --max-num-seqs 48
-    --max-model-len 40690
-    --max-num-batched-tokens 16384
-    --gpu-memory-utilization 0.85
+vllm serve /path/to/weight/MiniMax-M2.5-w8a8-QuaRot \
+    --served-model-name "MiniMax-M2.5" \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --trust-remote-code \
+    --quantization ascend \
+    --async-scheduling \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true}' \
+    --tensor-parallel-size 4 \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --max-num-seqs 48 \
+    --max-model-len 40690 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.85 \
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
 ```
 
@@ -166,15 +165,15 @@ Remarks:
 - If you mainly rely on the reasoning semantics of `/v1/responses`, it is recommended to use `--reasoning-parser minimax_m2` instead.
 - To receive a better performance on long-context like 128k or 64k, we recommand to do changes as shown bellow, and you can remove `export VLLM_ASCEND_BALANCE_SCHEDULING=1`.
 ```
-    --tensor-parallel-size 8
-    --data-parallel-size 1
-    --decode-context-parallel-size 1
-    --prefill-context-parallel-size 2
-    --cp-kv-cache-interleave-size 128
-    --max-num-seqs 16
-    --max-model-len 138000
-    --max-num-batched-tokens 65536
-    --gpu-memory-utilization 0.85
+    --tensor-parallel-size 8 \
+    --data-parallel-size 1 \
+    --decode-context-parallel-size 1 \
+    --prefill-context-parallel-size 2 \
+    --cp-kv-cache-interleave-size 128 \
+    --max-num-seqs 16 \
+    --max-model-len 138000 \
+    --max-num-batched-tokens 65536 \
+    --gpu-memory-utilization 0.85 \
     --speculative_config '{"enforce_eager": true, "method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
 ```
 - If you will to test with `curl` command, you can add following commands addition to start up command above.
@@ -385,16 +384,15 @@ curl http://{PrimaryNodeIP}:20004/v1/chat/completions \
 
 #### Results
 
-**Baseline** (`4k/1k@bs=16`)
+**Baseline** (`3.5k/1k@bs=217`)
 
 | Metric | Result |
 | --- | --- |
-| Success/Failure | `16/0` |
-| Mean TTFT | `616.20 ms` |
-| Mean TPOT | `31.92 ms` |
-| Mean ITL | `31.92 ms` |
-| Output tok/s | `492.39` |
-| Total tok/s | `2461.95` |
+| Success/Failure | `217/0` |
+| Mean TTFT | `10316.56 ms` |
+| Mean TPOT | `34.28 ms` |
+| Output tok/s | `4803.81` |
+| Total tok/s | `16096.59` |
 
 **Long-context reference** (`190k/1k@bs=4`)
 
