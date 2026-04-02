@@ -144,7 +144,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             self.maybe_eager_context = _maybe_eager_context(vllm_config)
 
         self.token_indices_to_sample = torch.zeros(
-            self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32, device=device
+            self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.long, device=device
         )
         slot_mapping_lens = self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs
         self.slot_mapping_group = [
