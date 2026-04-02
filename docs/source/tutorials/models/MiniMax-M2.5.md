@@ -148,9 +148,9 @@ vllm serve /path/to/weight/MiniMax-M2.5-w8a8-QuaRot \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_cpu_binding":true}' \
+    --enable-expert-parallel \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
-    --enable-expert-parallel \
     --max-num-seqs 48 \
     --max-model-len 40690 \
     --max-num-batched-tokens 16384 \
