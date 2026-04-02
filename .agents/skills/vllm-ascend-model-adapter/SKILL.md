@@ -100,6 +100,50 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 - Keep weight mapping explicit and auditable.
 - Avoid unrelated refactors.
 
+### 6.5) Intermediate NPU unit-test gate (before full serve)
+
+Run targeted unit tests on NPU for any new operators (from Step 3) and framework changes (from Step 4) **before** launching the full serve pipeline. This catches NPU-specific failures in seconds rather than minutes.
+
+#### What to test
+
+- **New operators**: for each new Torch/Triton operator introduced by the model, write a minimal standalone test that constructs a representative input tensor and asserts output shape and dtype are correct on NPU.
+- **Framework changes**: for each vLLM framework module touched (scheduler, attention backend, sampler, weight loader, worker), write a unit test that exercises the changed code path on NPU with a small synthetic input.
+
+#### Test structure
+
+```python
+# example skeleton — adapt per operator/module
+import torch
+import torch_npu  # ensures NPU backend is initialized
+
+def test_<operator_or_module>():
+    # construct minimal representative input on NPU
+    x = torch.randn(<shape>, dtype=torch.bfloat16, device="npu")
+    # invoke the operator or changed module path
+    out = <operator_or_function>(x, ...)
+    # assert correctness: shape, dtype, no exception, optionally a numeric check
+    assert out.shape == <expected_shape>
+    assert out.dtype == torch.bfloat16
+    assert not torch.isnan(out).any()
+
+if __name__ == "__main__":
+    test_<operator_or_module>()
+    print("PASS")
+```
+
+Place tests under `/tmp/npu_unit_tests/` (ephemeral; not committed).
+
+#### Retry and early-exit policy
+
+- Run each test. If it **passes**: proceed to Step 7.
+- If it **fails**: attempt a fix and re-run. This counts as **attempt 1**.
+- If it **fails again**: attempt a second fix and re-run. This counts as **attempt 2**.
+- If it **still fails after 2 attempts**: **early exit** — do not proceed to serve validation. File a GitHub issue documenting:
+    - which operator or module test failed,
+    - the observed failure mode (error message + stack trace),
+    - both fix attempts and why they did not resolve the issue,
+    - recommended path forward.
+
 ### 7) Two-stage validation on Ascend (direct run)
 
 #### Stage A: dummy fast gate (recommended first)

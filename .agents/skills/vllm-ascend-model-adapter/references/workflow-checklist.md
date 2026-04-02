@@ -171,6 +171,28 @@ python -m py_compile \
   "$VLLM_SRC"/vllm/transformers_utils/processors/<new_model>.py 2>/dev/null || true
 ```
 
+## 6.5) Intermediate NPU unit-test gate
+
+For each new operator (Step 5) and changed framework module (Step 6), write and run a minimal NPU unit test **before** launching `vllm serve`.
+
+```bash
+mkdir -p /tmp/npu_unit_tests
+
+# run all unit tests written for this adaptation
+python /tmp/npu_unit_tests/test_<operator_or_module>.py
+```
+
+Retry policy (per test):
+
+| Attempt | Action |
+| --- | --- |
+| Test passes | Proceed to Stage A serve |
+| Fails (attempt 1) | Fix and re-run |
+| Fails (attempt 2) | Fix and re-run |
+| Fails after 2 attempts | **Early exit** — file GitHub issue; skip serve |
+
+GitHub issue must include: failing test name, error + stack trace, both fix attempts, recommended path forward.
+
 ## 7) Two-stage serve templates (direct run, default `:8000`)
 
 ### Stage A: dummy fast gate (first try)
