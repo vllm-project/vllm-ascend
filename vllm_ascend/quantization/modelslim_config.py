@@ -470,6 +470,10 @@ class AscendModelSlimConfig(QuantizationConfig):
                     parts = parts[: exp_idx + 1]
                     prefix = ".".join(parts)
 
+        # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
+        if model_type in ["qwen3_vl"] and prefix == "lm_head":
+            prefix = "language_model.lm_head"
+
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
         prefix = self.quant_prefix_mapper(model_type, prefix)
@@ -678,9 +682,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 new_k = k.replace("weight_packed", "weight")
                 extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
-
-    def get_scaled_act_names(self) -> list[str]:
-        return []
 
     def _add_kvcache_quant_metadata(self):
         fa_quant_type = self.quant_description.get("fa_quant_type", "")

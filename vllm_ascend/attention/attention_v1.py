@@ -95,6 +95,7 @@ class AscendAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_type: str = "",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -868,34 +869,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         _: torch.Tensor,
     ) -> torch.Tensor:
-        assert attn_metadata is not None
-
-        if attn_metadata.causal:
-            # use sparse_mode 3 in causal scenario
-            return torch_npu.npu_fusion_attention(
-                query=query,
-                key=key,
-                value=value,
-                head_num=self.num_heads,
-                input_layout="TND",
-                scale=self.scale,
-                sparse_mode=3,
-                atten_mask=attn_metadata.attn_mask,
-                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
-                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
-            )[0]
-        else:
-            # use default sparse_mode 0 in normal scenario, which means no mask works on it
-            return torch_npu.npu_fusion_attention(
-                query=query,
-                key=key,
-                value=value,
-                head_num=self.num_heads,
-                input_layout="TND",
-                scale=self.scale,
-                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
-                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
-            )[0]
+        # use default sparse_mode 0 in normal scenario, which means no mask works on it
+        return torch_npu.npu_fusion_attention(
+            query=query,
+            key=key,
+            value=value,
+            head_num=self.num_heads,
+            input_layout="TND",
+            scale=self.scale,
+            actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+            actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+        )[0]
 
     def reshape_and_cache(
         self,
@@ -986,7 +970,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query, key, value, kv_cache, attn_metadata, output
             )
         # pooling model branch
-        if attn_metadata.model_runner_type == "pooling":
+        if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
