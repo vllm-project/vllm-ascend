@@ -99,7 +99,7 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            has_initial_state_spec = [1]*(spec_query_start_loc.shape[0] - 1)
+            has_initial_state_spec = [1] * (spec_query_start_loc.shape[0] - 1)
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_spec,
                 conv_weights,
