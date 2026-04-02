@@ -1,8 +1,8 @@
 import torch
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.model_executor.models.qwen3 import Qwen3Attention
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeAttention
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
-from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
