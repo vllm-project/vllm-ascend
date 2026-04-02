@@ -335,7 +335,8 @@ class NPUModelRunner(GPUModelRunner):
             )
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
-            self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
+            self.positions = torch.zeros(
+                self.max_num_tokens, dtype=torch.int64, device=self.device)
 
         self._set_up_drafter()
 
@@ -675,7 +676,10 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
             cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
-            positions_np = self.positions.np[:total_num_scheduled_tokens]
+            positions_np = (
+                self.input_batch.num_computed_tokens_cpu[req_indices]
+                + self.query_pos.np[: cu_num_tokens[-1]]
+            )
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
                 position_pcp[:total_num_scheduled_tokens],
