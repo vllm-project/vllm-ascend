@@ -55,33 +55,9 @@ permissions:
   contents: read
 
 jobs:
-  validate_inputs:
-    name: Validate Dispatch Inputs
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    runs-on: linux-aarch64-a2b3-0
-    steps:
-      - name: Validate tag and branch are mutually exclusive
-        run: |
-          tag="${{ inputs.tag }}"
-          branch="${{ inputs.branch }}"
-          [[ "$tag" == "none" ]] && tag=""
-          [[ "$branch" == "none" ]] && branch=""
-          if [[ -n "$tag" && -n "$branch" ]]; then
-            echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
-            exit 1
-          fi
-          if [[ -z "$tag" && -z "$branch" ]]; then
-            echo "Error: Either 'tag' or 'branch' must be specified."
-            exit 1
-          fi
-
   image_build:
     name: Image Build and Push
-    needs: [validate_inputs]
-    if: >-
-      ${{ (needs.validate_inputs.result == 'success' || needs.validate_inputs.result == 'skipped')
-          && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build'))
-          && github.event_name != 'schedule' }}
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build')) && github.event_name != 'schedule' }}
     strategy:
       matrix:
         build_meta:
