@@ -28,6 +28,11 @@ SYNC_OPTION_RE = re.compile(r"^:([A-Za-z0-9_-]+):\s*(.*)\s*$")
 EXPORT_ENV_LINE_RE = re.compile(r'^export\s+([A-Za-z_][A-Za-z0-9_]*)=(?|"([^"]*)"|\'([^\']*)\'|(.*?))(?:\s+#.*)?$')
 
 
+# ============================================================================
+# Core Data Types
+# ============================================================================
+
+
 class LintFailure(RuntimeError):
     """Raised when a sync block cannot be linted successfully."""
 
@@ -113,6 +118,11 @@ class CmdCompareData:
         return [f"model={self.model}", *[parameter.as_entry() for parameter in self.parameters]]
 
 
+# ============================================================================
+# Diagnostics and Reporting
+# ============================================================================
+
+
 def should_use_color(stream: Any) -> bool:
     if os.getenv("NO_COLOR") is not None:
         return False
@@ -179,48 +189,9 @@ def merge_diagnostics_by_block(diagnostics: Iterable[Diagnostic]) -> list[Diagno
     ]
 
 
-def normalize_scalar_value(value: Any) -> str:
-    normalized = str(value).strip()
-    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {"'", '"'}:
-        return normalized[1:-1]
-    return normalized
-
-
-def strip_comment_lines(content: str) -> str:
-    return "\n".join(line for line in content.splitlines() if not line.strip().startswith("#"))
-
-
-def compare_entry_sets(doc_entries: list[str], yaml_entries: list[str], *, label: str) -> list[str]:
-    doc_counter = Counter(doc_entries)
-    yaml_counter = Counter(yaml_entries)
-    missing = sorted((yaml_counter - doc_counter).elements())
-    extra = sorted((doc_counter - yaml_counter).elements())
-    differences: list[str] = []
-    if extra:
-        differences.append(f"Doc has extra {label}:\n" + "\n".join(extra))
-    if missing:
-        differences.append(f"Yaml has extra {label}:\n" + "\n".join(missing))
-    return differences
-
-
-def load_exclude_patterns(repo_root: Path) -> set[str]:
-    pyproject_path = repo_root / "pyproject.toml"
-    if not pyproject_path.exists():
-        return set()
-
-    config = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-    patterns = config.get("tool", {}).get("check_docs_yaml_sync", {}).get("exclude", [])
-    if not isinstance(patterns, list) or not all(isinstance(pattern, str) for pattern in patterns):
-        raise LintFailure("[tool.check_docs_yaml_sync].exclude must be a list of strings")
-    return set(patterns)
-
-
-def is_excluded_doc(doc_path: Path, repo_root: Path, exclude_patterns: set[str]) -> bool:
-    try:
-        relative_path = doc_path.resolve().relative_to(repo_root.resolve()).as_posix()
-    except ValueError:
-        return False
-    return relative_path in exclude_patterns
+# ============================================================================
+# Markdown Block Extraction
+# ============================================================================
 
 
 class MarkdownBlockExtractor:
@@ -304,6 +275,11 @@ class MarkdownBlockExtractor:
             )
 
         return ExtractionResult(tuple(blocks), tuple(diagnostics))
+
+
+# ============================================================================
+# Loading YAML and Locating configuration
+# ============================================================================
 
 
 class YamlDocumentLoader:
@@ -412,8 +388,20 @@ class YamlTargetResolver:
         return current
 
 
+# ============================================================================
+# Module B/C: Env Conversion
+# ============================================================================
+
+
 class DocEnvConverter:
     """Module B: convert env exports in docs into compare data."""
+
+    @staticmethod
+    def _normalize_env_value(value: Any) -> str:
+        normalized = str(value).strip()
+        if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {"'", '"'}:
+            return normalized[1:-1]
+        return normalized
 
     def convert(self, block: SyncBlock) -> EnvCompareData:
         assignments: list[EnvAssignment] = []
@@ -427,7 +415,7 @@ class DocEnvConverter:
             assignments.append(
                 EnvAssignment(
                     name=match.group(1),
-                    value=normalize_scalar_value(match.group(2)),
+                    value=self._normalize_env_value(match.group(2)),
                 )
             )
 
@@ -457,15 +445,20 @@ class YamlEnvConverter:
                 f"got {type(resolved).__name__}"
             )
 
-        return EnvCompareData(
-            tuple(
+        assignments: list[EnvAssignment] = []
+        for key, value in resolved.items():
+            assignments.append(
                 EnvAssignment(
                     name=str(key),
-                    value=normalize_scalar_value(value),
+                    value=DocEnvConverter._normalize_env_value(value),
                 )
-                for key, value in resolved.items()
             )
-        )
+        return EnvCompareData(tuple(assignments))
+
+
+# ============================================================================
+# Module D/E: Command Conversion
+# ============================================================================
 
 
 class VllmServeCommandParser:
@@ -473,7 +466,10 @@ class VllmServeCommandParser:
 
     def parse_text(self, content: str, *, source: str) -> CmdCompareData:
         try:
-            tokens = shlex.split(strip_comment_lines(content).replace("\\\n", " "), posix=True)
+            content_without_comment_lines = "\n".join(
+                line for line in content.splitlines() if not line.strip().startswith("#")
+            )
+            tokens = shlex.split(content_without_comment_lines.replace("\\\n", " "), posix=True)
         except ValueError as exc:
             raise LintFailure(f"failed to parse {source}: {exc}") from exc
         return self.parse_tokens(tokens, source=source)
@@ -558,6 +554,24 @@ class YamlCmdConverter:
         return self.parser.parse_tokens(tokens, source=f"yaml targets '{block.sync_target}'")
 
 
+# ============================================================================
+# Module F: Data Comparison
+# ============================================================================
+
+
+def compare_entry_sets(doc_entries: list[str], yaml_entries: list[str], *, label: str) -> list[str]:
+    doc_counter = Counter(doc_entries)
+    yaml_counter = Counter(yaml_entries)
+    missing = sorted((yaml_counter - doc_counter).elements())
+    extra = sorted((doc_counter - yaml_counter).elements())
+    differences: list[str] = []
+    if extra:
+        differences.append(f"Doc has extra {label}:\n" + "\n".join(extra))
+    if missing:
+        differences.append(f"Yaml has extra {label}:\n" + "\n".join(missing))
+    return differences
+
+
 class DataComparator(Protocol):
     def compare(self, doc_data: Any, yaml_data: Any) -> list[str]:
         """Compare two standard compare-data objects."""
@@ -615,6 +629,31 @@ class SyncHandlerRegistry:
 
     def supported_classes(self) -> list[str]:
         return sorted(self.handlers)
+
+
+# ============================================================================
+# Orchestration and Scheduling
+# ============================================================================
+
+
+def load_exclude_patterns(repo_root: Path) -> set[str]:
+    pyproject_path = repo_root / "pyproject.toml"
+    if not pyproject_path.exists():
+        return set()
+
+    config = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    patterns = config.get("tool", {}).get("check_docs_yaml_sync", {}).get("exclude", [])
+    if not isinstance(patterns, list) or not all(isinstance(pattern, str) for pattern in patterns):
+        raise LintFailure("[tool.check_docs_yaml_sync].exclude must be a list of strings")
+    return set(patterns)
+
+
+def is_excluded_doc(doc_path: Path, repo_root: Path, exclude_patterns: set[str]) -> bool:
+    try:
+        relative_path = doc_path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return False
+    return relative_path in exclude_patterns
 
 
 @dataclass
@@ -692,6 +731,11 @@ class SyncLinter:
             )
             for message in handler.lint(block)
         ]
+
+
+# ============================================================================
+# CLI Entry
+# ============================================================================
 
 
 def resolve_input_path(path_text: str) -> Path:
