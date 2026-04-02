@@ -60,7 +60,7 @@ def find_missing_init_dirs(src_dir):
             capture_output=True,
             text=True,
         )
-        tracked_files = {f for f in result.stdout.split('\0') if f}
+        tracked_files = {f for f in result.stdout.split("\0") if f}
     except (subprocess.CalledProcessError, FileNotFoundError):
         tracked_files = None
 
