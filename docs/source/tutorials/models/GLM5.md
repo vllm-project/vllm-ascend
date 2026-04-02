@@ -154,7 +154,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --seed 1024 \
 --served-model-name glm-5 \
 --max-num-seqs 8 \
---max-model-len 66600 \
+--max-model-len 200000 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
@@ -563,7 +563,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --served-model-name glm-5 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 65536 \
+--max-model-len 200000 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
@@ -615,7 +615,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --served-model-name glm-5 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 65536 \
+--max-model-len 200000 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
