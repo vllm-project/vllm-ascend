@@ -283,7 +283,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
-            --max-num-batched-tokens 32550 \
+            --max-num-batched-tokens 32560 \
             --trust-remote-code \
             --max-num-seqs 64 \
             --gpu-memory-utilization 0.82 \
@@ -359,7 +359,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name dsv3 \
             --max-model-len 68000 \
-            --max-num-batched-tokens 32550 \
+            --max-num-batched-tokens 32560 \
             --trust-remote-code \
             --max-num-seqs 64 \
             --gpu-memory-utilization 0.82 \
