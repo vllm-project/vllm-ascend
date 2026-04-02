@@ -1726,8 +1726,11 @@ class NPUModelRunner(GPUModelRunner):
                     # tokens on the CPU, so they are run after bookkeeping.
                     propose_draft_token_ids(valid_sampled_token_ids)
 
-            if has_kv_transfer_group():
-                get_kv_transfer_group().clear_connector_metadata()
+            # vLLM v0.18 defers KV connector finalization during target-model
+            # forward when speculative decoding is enabled. Finalize here after
+            # draft model runs so KV pool save/put can complete.
+            if self.speculative_config is not None:
+                self.finalize_kv_connector()
 
         if self.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
@@ -1853,11 +1856,11 @@ class NPUModelRunner(GPUModelRunner):
                 # Mask out the sampled tokens that should not be sampled.
                 for i in discard_sampled_tokens_req_indices:
                     valid_sampled_token_ids[int(i)].clear()
-
                 if logprobs_tensors is not None:
                     logprobs_lists = logprobs_tensors.tolists()
             else:
                 # Includes spec decode tokens.
+                # parse_output returns (list[list[int]], LogprobsLists | None)
                 valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
@@ -1914,9 +1917,10 @@ class NPUModelRunner(GPUModelRunner):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        # logprobs_lists is already set above: either from
-        # logprobs_tensors.tolists() (no spec decode) or from
-        # RejectionSampler.parse_output() (with spec decode).
+        # logprobs_lists is already set above:
+        # - max_gen_len == 1: logprobs_tensors.tolists() (no cu_num_tokens)
+        # - max_gen_len > 1: from RejectionSampler.parse_output() (filtered
+        #   with cu_num_generated_tokens already set)
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
