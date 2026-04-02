@@ -23,7 +23,7 @@ on:
       image_push_target:
         required: true
         type: string
-        description: "Target image to build, e.g., py3.11-cuda12.4-ubuntu22.04"
+        description: "Target image to build"
       image_build_ref:
         required: false
         type: string
@@ -76,7 +76,7 @@ jobs:
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}" \
             --build-arg GITEE_USERNAME="${GITEE_USERNAME}" \
             --build-arg GITEE_TOKEN="${GITEE_TOKEN}" \
-            -t "$IMAGE" .
+            -t ${{ inputs.image_push_target }} .
 
       - name: Push image to SWR
         if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
