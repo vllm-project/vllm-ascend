@@ -96,6 +96,7 @@ class LlamaXliteModel(XliteModel):
                 f"launched."
             )
             logger.warning("Resetting block size to 128 for xlite compatibility.")
+            vllm_config.cache_config.block_size = 128
             config.block_size = 128
 
         vision_config = getattr(vllm_config.model_config.hf_config, "vision_config", None)
