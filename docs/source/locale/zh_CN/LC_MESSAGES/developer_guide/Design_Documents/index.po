@@ -22,8 +22,8 @@ msgstr ""
 
 #: ../../developer_guide/Design_Documents/index.md:1
 #: ../../developer_guide/Design_Documents/index.md:5
-msgid "Feature Guide"
-msgstr "功能指南"
+msgid "Design Documents"
+msgstr "设计文档"
 
 #: ../../developer_guide/Design_Documents/index.md:3
 msgid ""
