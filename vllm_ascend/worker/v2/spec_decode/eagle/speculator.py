@@ -22,6 +22,7 @@ from typing import Any
 import torch
 import vllm
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
@@ -43,6 +44,8 @@ class AscendEagleSpeculator(EagleSpeculator):
     def propose(
         self,
         input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
         # num_layers x [num_tokens, hidden_size]
@@ -59,6 +62,10 @@ class AscendEagleSpeculator(EagleSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        num_tokens_across_dp: torch.Tensor | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
         because npu attention metadata needs more information,
@@ -71,6 +78,8 @@ class AscendEagleSpeculator(EagleSpeculator):
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
+                attn_metadata,
+                slot_mappings,
                 last_hidden_states,
                 aux_hidden_states,
                 num_sampled,
@@ -79,14 +88,20 @@ class AscendEagleSpeculator(EagleSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
+                num_tokens_across_dp,
+                dummy_run,
+                skip_attn_for_dummy_run,
+                mm_inputs,
             )
 
     def generate_draft(
         self,
         num_reqs: int,
+        num_tokens_padded: int,
         attn_metadata: dict[str, Any],
         slot_mappings: dict[str, torch.Tensor],
-        num_tokens_across_dp,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ):
         """Override GPU EagleSpeculator.generate_draft for Ascend NPUs, because
         attn_metadata is created in super propose method, it does not have some
@@ -96,9 +111,11 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         return super().generate_draft(
             num_reqs,
+            num_tokens_padded,
             attn_metadata,
             slot_mappings,
             num_tokens_across_dp,
+            cudagraph_runtime_mode,
         )
 
     @torch.inference_mode()
@@ -108,6 +125,8 @@ class AscendEagleSpeculator(EagleSpeculator):
         attn_metadata: dict[str, Any],
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Override GPU EagleSpeculator.run_model for Ascend NPUs, because
         in decode phase, we need to update seq_lens_cpu in attn_metadata after
@@ -118,6 +137,8 @@ class AscendEagleSpeculator(EagleSpeculator):
             attn_metadata,
             slot_mappings,
             num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
         )
 
         # attn_metadata is None in profile_run and dummy_run.
@@ -133,6 +154,9 @@ class AscendEagleSpeculator(EagleSpeculator):
         attn_metadata: dict[str, Any],
     ):
         """Update attention metadata for decode phase on Ascend NPUs."""
+        if attn_metadata is None:
+            return
+
         attn_state = AscendAttentionState.DecodeOnly
         seq_lens_cpu = self._get_seq_lens_cpu()
         # attn_metadata is build in vllm's super class.
@@ -151,9 +175,9 @@ class AscendEagleSpeculator(EagleSpeculator):
 @contextmanager
 def build_attn_metadata_wrapper():
     """Context manager to override attention metadata building for Ascend NPUs."""
-    original_func = vllm.v1.worker.gpu.spec_decode.eagle.build_attn_metadata
+    original_func = vllm.v1.worker.gpu.spec_decode.eagle.speculator.build_attn_metadata
     try:
-        vllm.v1.worker.gpu.spec_decode.eagle.build_attn_metadata = build_attn_metadata
+        vllm.v1.worker.gpu.spec_decode.eagle.speculator.build_attn_metadata = build_attn_metadata
         yield
     finally:
-        vllm.v1.worker.gpu.spec_decode.eagle.build_attn_metadata = original_func
+        vllm.v1.worker.gpu.spec_decode.eagle.speculator.build_attn_metadata = original_func

@@ -54,7 +54,6 @@ def test_qwen3_dense_eager_mode(
         runner.model.generate(prompts, sampling_params)
 
 
-@pytest.mark.skip(reason="eagle function isn't adapted to the newest main commit.")
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
