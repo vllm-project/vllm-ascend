@@ -773,6 +773,10 @@ class SpecDecodeBaseProposer(EagleProposer):
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
+            # When the graph is compiled to aclgraph (run_eagerly disabled),
+            # make_graph_return_tuple wraps the output as a tuple. Unwrap it.
+            if isinstance(last_hidden_states, tuple) and len(last_hidden_states) == 1:
+                last_hidden_states = last_hidden_states[0]
             hidden_states = last_hidden_states
         else:
             last_hidden_states, hidden_states = ret_hidden_states
@@ -916,6 +920,10 @@ class SpecDecodeBaseProposer(EagleProposer):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
+                # When the graph is compiled to aclgraph (run_eagerly disabled),
+                # make_graph_return_tuple wraps the output as a tuple. Unwrap it.
+                if isinstance(last_hidden_states, tuple) and len(last_hidden_states) == 1:
+                    last_hidden_states = last_hidden_states[0]
                 hidden_states = last_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
