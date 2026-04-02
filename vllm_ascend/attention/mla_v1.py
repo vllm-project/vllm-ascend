@@ -435,7 +435,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
-        self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        self.seq_lens = None
+        if common_attn_metadata.seq_lens_cpu is not None:
+            self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        else:
+            self.seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
         self.graph_pad_size = common_attn_metadata.graph_pad_size
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_PREFILL)

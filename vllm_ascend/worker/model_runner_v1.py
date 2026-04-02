@@ -675,7 +675,7 @@ class NPUModelRunner(GPUModelRunner):
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-            cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+            cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
             positions_np = (
                 self.input_batch.num_computed_tokens_cpu[req_indices]
                 + self.query_pos.np[: cu_num_tokens[-1]]

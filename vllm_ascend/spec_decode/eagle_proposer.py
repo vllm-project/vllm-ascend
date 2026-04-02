@@ -384,7 +384,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
                 # This is used to hold a position.
                 slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
-                positions=self.runner.positions.gpu,
+                positions=self.runner.positions,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
                 max_seq_len=0,
@@ -1192,8 +1192,10 @@ class SpecDecodeBaseProposer(EagleProposer):
         # in the merged graph, it does not affect position 1
         # FIXME(lilinsiman)
         common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
-        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
-        common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
+        if common_attn_metadata.seq_lens_cpu is not None:
+            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+        if common_attn_metadata.num_computed_tokens_cpu is not None:
+            common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
         common_attn_metadata.positions = common_attn_metadata.positions.clone()
 
         # NOTE(woosuk): We should handle the case where the draft model
