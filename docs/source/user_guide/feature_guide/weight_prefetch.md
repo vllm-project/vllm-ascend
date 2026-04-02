@@ -35,39 +35,39 @@ Notes:
 
 1) For MoE model:
 
-```shell
-    --additional-config \
-    '{
-        "weight_prefetch_config": {
-            "enabled": true,
-            "prefetch_ratio": {
-                "attn": {
-                    "qkv": 1.0,
-                    "o": 1.0
-                },
-                "moe": {
-                    "gate_up": 0.8
+    ```shell
+        --additional-config \
+        '{
+            "weight_prefetch_config": {
+                "enabled": true,
+                "prefetch_ratio": {
+                    "attn": {
+                        "qkv": 1.0,
+                        "o": 1.0
+                    },
+                    "moe": {
+                        "gate_up": 0.8
+                    }
                 }
             }
-        }
-    }'
-```
+        }'
+    ```
 
 2) For dense model:
 
-Following is the default configuration that can get a good performance for `--max-num-seqs` is 72 for Qwen3-32B-W8A8
+    Following is the default configuration that can get a good performance for `--max-num-seqs` is 72 for Qwen3-32B-W8A8
 
-```shell
-    --additional-config \
-    '{
-        "weight_prefetch_config": {
-            "enabled": true,
-            "prefetch_ratio": {
-                "mlp": {
-                    "gate_up": 1.0,
-                    "down": 1.0
+    ```shell
+        --additional-config \
+        '{
+            "weight_prefetch_config": {
+                "enabled": true,
+                "prefetch_ratio": {
+                    "mlp": {
+                        "gate_up": 1.0,
+                        "down": 1.0
+                    }
                 }
             }
-        }
-    }'
-```
+        }'
+    ```
