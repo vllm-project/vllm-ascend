@@ -699,12 +699,7 @@ class NPUModelRunner(GPUModelRunner):
         cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
         arange = self.query_pos.np[:total_num_scheduled_tokens]
 
-        # Handle both CpuGpuBuffer (.np property) and plain Tensor compatibility
-        if hasattr(self.positions, 'np'):
-            positions_np = self.positions.np[:total_num_scheduled_tokens]
-        else:
-            # Plain tensor - need a CPU numpy buffer for computation
-            positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
+        positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices], arange, out=positions_np)
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
@@ -740,11 +735,7 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
             cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
-            # Handle both CpuGpuBuffer (.np property) and plain Tensor compatibility
-            if hasattr(self.positions, 'np'):
-                positions_np = self.positions.np[:total_num_scheduled_tokens]
-            else:
-                positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
+            positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
                 position_pcp[:total_num_scheduled_tokens],
@@ -766,12 +757,7 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        input_ids_cpu = (
-            self.input_ids.cpu
-            if hasattr(self.input_ids, 'cpu')
-            and isinstance(self.input_ids.cpu, torch.Tensor)
-            else self.input_ids.cpu()
-        )
+        input_ids_cpu = self.input_ids.cpu
         torch.index_select(
             self.input_batch.token_ids_cpu_tensor.flatten(),
             0,
@@ -780,12 +766,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
-            is_token_ids_cpu = (
-                self.is_token_ids.cpu
-                if hasattr(self.is_token_ids, 'cpu')
-                and isinstance(self.is_token_ids.cpu, torch.Tensor)
-                else self.is_token_ids.cpu()
-            )
+            is_token_ids_cpu = self.is_token_ids.cpu
             torch.index_select(
                 is_token_ids, 0, token_indices_tensor, out=is_token_ids_cpu[:total_num_scheduled_tokens]
             )
@@ -866,22 +847,11 @@ class NPUModelRunner(GPUModelRunner):
                 self.gdn_query_start_loc[num_reqs + 1 :].fill_(cu_num_tokens[-1])
             self._safe_copy_to_gpu(self.gdn_query_start_loc)
 
-        # Handle both CpuGpuBuffer (.np property) and plain Tensor compatibility
-        if hasattr(self.seq_lens, 'np'):
-            self.seq_lens.np[:num_reqs] = self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
-        else:
-            # Plain tensor - convert to tensor and assign
-            computed_tokens_tensor = torch.from_numpy(
-                self.input_batch.num_computed_tokens_cpu[:num_reqs]
-            ).to(self.seq_lens.dtype)
-            self.seq_lens[:num_reqs] = computed_tokens_tensor + num_scheduled_tokens
-
-        if hasattr(self.seq_lens, 'np'):
-            # CpuGpuBuffer - .cpu is a property
-            self.seq_lens.cpu[num_reqs:].fill_(0)
-        else:
-            # Plain tensor on GPU - fill directly on the tensor
-            self.seq_lens[num_reqs:].fill_(0)
+        computed_tokens_tensor = torch.from_numpy(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        ).to(self.seq_lens.dtype)
+        self.seq_lens[:num_reqs] = computed_tokens_tensor + num_scheduled_tokens
+        self.seq_lens[num_reqs:].fill_(0)
 
         self._safe_copy_to_gpu(self.seq_lens)
 
@@ -947,14 +917,10 @@ class NPUModelRunner(GPUModelRunner):
                 )
         else:
             # Common case (1D positions)
-            if hasattr(self.positions, 'copy_to_gpu'):
-                self.positions.copy_to_gpu(total_num_scheduled_tokens)
-            else:
-                # Plain tensor: copy from CPU numpy buffer to GPU
-                self.positions[:total_num_scheduled_tokens].copy_(
-                    self._positions_cpu_buf[:total_num_scheduled_tokens],
-                    non_blocking=True,
-                )
+            self.positions[:total_num_scheduled_tokens].copy_(
+                self._positions_cpu_buf[:total_num_scheduled_tokens],
+                non_blocking=True,
+            )
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
@@ -972,11 +938,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             discard_requests_mask = original_seq_lens_np < num_tokens_np
         else:
-            # Handle both CpuGpuBuffer and plain Tensor
-            if hasattr(self.seq_lens, 'np'):
-                discard_requests_mask = self.seq_lens.np[:num_reqs] < num_tokens_np
-            else:
-                discard_requests_mask = self.seq_lens.cpu().numpy()[:num_reqs] < num_tokens_np
+            discard_requests_mask = self.seq_lens.cpu().numpy()[:num_reqs] < num_tokens_np
 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
@@ -2249,10 +2211,7 @@ class NPUModelRunner(GPUModelRunner):
             # window size when capturing to make sure the correct kernel is selected.
             max_seq_len = self.max_model_len
         else:
-            if hasattr(self.seq_lens, 'np'):
-                max_seq_len = self.seq_lens.np[:num_reqs].max().item()
-            else:
-                max_seq_len = self.seq_lens.cpu()[:num_reqs].max().item()
+            max_seq_len = self.seq_lens.cpu()[:num_reqs].max().item()
         if use_spec_decode and self.need_accepted_tokens:
             if hasattr(self.num_accepted_tokens, 'np'):
                 self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
@@ -2332,21 +2291,11 @@ class NPUModelRunner(GPUModelRunner):
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
 
-        # Handle both CpuGpuBuffer and plain Tensor for CPU access
-        query_start_loc_cpu = (
-            self.query_start_loc.cpu
-            if hasattr(self.query_start_loc, 'cpu')
-            and isinstance(self.query_start_loc.cpu, torch.Tensor)
-            else self.query_start_loc.cpu()
-        )
-        seq_lens_cpu = (
-            self.seq_lens.cpu
-            if hasattr(self.seq_lens, 'cpu')
-            and isinstance(self.seq_lens.cpu, torch.Tensor)
-            else self.seq_lens.cpu()
-        )
-        query_start_loc_gpu = self._get_buffer_gpu(self.query_start_loc)
-        seq_lens_gpu = self._get_buffer_gpu(self.seq_lens)
+        # query_start_loc is CpuGpuBuffer, seq_lens is plain GPU tensor
+        query_start_loc_cpu = self.query_start_loc.cpu
+        seq_lens_cpu = self.seq_lens.cpu()
+        query_start_loc_gpu = self.query_start_loc.gpu
+        seq_lens_gpu = self.seq_lens
 
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu[: num_reqs_padded + 1],
@@ -2656,16 +2605,12 @@ class NPUModelRunner(GPUModelRunner):
                     if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
                     else max_query_len
                 )  # type: ignore[assignment]
-            if hasattr(self.seq_lens, 'np'):
-                self.seq_lens.np[:num_reqs_padded] = seq_lens
-                self.seq_lens.np[num_reqs_padded:] = 0
-            else:
-                self.seq_lens[:num_reqs_padded] = torch.tensor(
-                    seq_lens,
-                    dtype=self.seq_lens.dtype,
-                    device=self.seq_lens.device,
-                )
-                self.seq_lens[num_reqs_padded:] = 0
+            self.seq_lens[:num_reqs_padded] = torch.tensor(
+                seq_lens,
+                dtype=self.seq_lens.dtype,
+                device=self.seq_lens.device,
+            )
+            self.seq_lens[num_reqs_padded:] = 0
             self._safe_copy_to_gpu(self.seq_lens)
 
             cum_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
