@@ -716,104 +716,96 @@ def rejection_random_sample_block_verify_pytorch(
     draft_token_ids,  # [num_tokens]
     draft_probs,  # [num_tokens, vocab_size] or None
     target_probs,  # [num_tokens, vocab_size]
-    bonus_token_ids,  # [batch_size]
+    bonus_token_ids,  # [batch_size, 1]
     recovered_token_ids,  # [num_tokens]
     uniform_probs,  # [num_tokens]
     is_greedy,  # [batch_size]
     max_spec_len,
     vocab_size,
+    sampling_generators=None,
     IS_NGRAM=False,
 ):
-
+    _ = sampling_generators
+    _ = vocab_size
     batch_size = output_token_ids.shape[0]
     device = output_token_ids.device
 
-    zero_cpu = torch.tensor([0], pin_memory=True)
-    zero_device = zero_cpu.to(device, non_blocking=True)
-
-    cu_start = torch.cat([zero_device, cu_num_draft_tokens[:-1]])
+    zero = torch.tensor([0], pin_memory=True).to(device, non_blocking=True)
+    cu_start = torch.cat([zero, cu_num_draft_tokens[:-1]])
     cu_end = cu_num_draft_tokens
     num_draft_per_batch = (cu_end - cu_start)[:, None]
-    i_indices_cpu = torch.arange(1, max_spec_len + 1, pin_memory=True)
-    i_indices = i_indices_cpu.to(device, non_blocking=True)[None, :]
-    valid_mask = i_indices <= num_draft_per_batch
-    global_token_indices = cu_start[:, None] + (i_indices - 1)
-    global_token_indices = global_token_indices.clamp(
-        0, draft_token_ids.shape[0] - 1)
-    draft_tokens = draft_token_ids[global_token_indices]
+    gamma = num_draft_per_batch.squeeze(1).to(torch.long)
 
-    if IS_NGRAM:
-        ones_cpu = torch.ones(1, pin_memory=True, dtype=torch.float32)
-        draft_token_probs = ones_cpu.to(
-            device, non_blocking=True).expand_as(draft_tokens)
-    else:
-        flat_indices = global_token_indices.flatten()
-        flat_draft_tokens = draft_tokens.flatten()
-        flat_draft_probs = draft_probs[flat_indices, flat_draft_tokens]
-        draft_token_probs = flat_draft_probs.view(batch_size, max_spec_len)
+    i_indices = torch.arange(1, max_spec_len + 1, pin_memory=True).to(device, non_blocking=True)[None, :]
+    valid_mask = i_indices <= num_draft_per_batch
+
+    global_token_indices = (cu_start[:, None] + i_indices - 1).clamp(0, draft_token_ids.shape[0] - 1)
+    draft_tokens = draft_token_ids[global_token_indices]
 
     flat_indices = global_token_indices.flatten()
     flat_draft_tokens = draft_tokens.flatten()
-    flat_target_probs = target_probs[flat_indices, flat_draft_tokens]
-    target_token_probs = flat_target_probs.view(batch_size, max_spec_len)
+
+    if IS_NGRAM:
+        draft_token_probs = torch.ones(1, pin_memory=True, dtype=torch.float32).to(
+            device, non_blocking=True).expand_as(draft_tokens)
+    else:
+        draft_token_probs = draft_probs[flat_indices, flat_draft_tokens].view(batch_size, max_spec_len)
+
+    target_token_probs = target_probs[flat_indices, flat_draft_tokens].view(batch_size, max_spec_len)
     uniform_token_probs = uniform_probs[global_token_indices]
     recovered_tokens = recovered_token_ids[global_token_indices]
 
-    ratio = target_token_probs / draft_token_probs.clamp(min=1e-10)
-    ratio = torch.where(draft_token_probs > 0, ratio, torch.zeros_like(ratio))
+    ratio = torch.where(
+        draft_token_probs > 0,
+        target_token_probs / draft_token_probs.clamp(min=1e-10),
+        torch.zeros_like(draft_token_probs),
+    )
 
     p_prefix = torch.ones(batch_size, max_spec_len + 1, device=device, dtype=torch.float32)
-    for i in range(max_spec_len):
-        p_prefix[:, i + 1] = (p_prefix[:, i] * ratio[:, i]).clamp(max=1.0)
+    for k in range(max_spec_len):
+        p_prefix[:, k + 1] = (p_prefix[:, k] * ratio[:, k]).clamp(max=1.0)
 
-
+    p_grid = p_prefix[:, 1:]
     h_block = torch.zeros(batch_size, max_spec_len, device=device, dtype=torch.float32)
-    p_i = p_prefix[:, 1:]
-    intermediate_mask = (i_indices + 1) < num_draft_per_batch
+    intermediate_mask = i_indices < num_draft_per_batch
 
-    zero_idx = torch.zeros_like(i_indices)
     if torch.any(intermediate_mask):
-        next_token_indices = cu_start[:, None] + i_indices
-        safe_next_token_indices = torch.where(intermediate_mask, next_token_indices, zero_idx)
-        safe_next_token_indices = safe_next_token_indices.clamp(0, draft_token_ids.shape[0] - 1)
-        next_draft_tokens = draft_token_ids[safe_next_token_indices]
-
         residual_mass = torch.zeros(batch_size, max_spec_len, device=device, dtype=torch.float32)
         if IS_NGRAM:
-            residual_values = p_i * (1.0 - target_probs[safe_next_token_indices, next_draft_tokens])
-            residual_mass = torch.where(intermediate_mask, residual_values, residual_mass)
+            residual_mass = torch.where(
+                intermediate_mask,
+                p_grid * (1.0 - target_token_probs),
+                residual_mass,
+            )
         else:
             flat_intermediate_mask = intermediate_mask.flatten()
-            flat_current_token_indices = global_token_indices.flatten()[flat_intermediate_mask]
-            flat_p_i = p_i.flatten()[flat_intermediate_mask]
+            flat_current_token_indices = flat_indices[flat_intermediate_mask]
+            flat_p_grid = p_grid.flatten()[flat_intermediate_mask]
             flat_residual_mass = torch.clamp(
-                flat_p_i[:, None] * target_probs[flat_current_token_indices]
-                 - draft_probs[flat_current_token_indices],
+                flat_p_grid[:, None] * target_probs[flat_current_token_indices]
+                - draft_probs[flat_current_token_indices],
                 min=0.0,
             ).sum(dim=-1)
             residual_mass[intermediate_mask] = flat_residual_mass
 
-        denom = residual_mass + (1.0 - p_i)
+        denom = residual_mass + (1.0 - p_grid)
         h_block = torch.where(
             intermediate_mask,
             torch.where(denom > 0, residual_mass / denom, torch.zeros_like(denom)),
             h_block,
         )
 
-    last_i = (num_draft_per_batch.squeeze(1) - 1).clamp(min=0).to(torch.long)
-    gamma = num_draft_per_batch.squeeze(1).to(torch.long)
-    h_block[torch.arange(batch_size, device=device), last_i] = \
-        p_prefix[torch.arange(batch_size, device=device), gamma]
+    batch_indices = torch.arange(batch_size, device=device)
+    h_block[batch_indices, (gamma - 1).clamp(min=0)] = \
+        p_prefix[batch_indices, gamma.clamp(max=max_spec_len)]
 
-    accepted_mask = valid_mask & (uniform_token_probs.to(torch.float32) <= h_block)
     non_greedy_mask = (~is_greedy)[:, None]
-    accepted_mask = accepted_mask & non_greedy_mask
+    accepted_mask = valid_mask & (uniform_token_probs.to(torch.float32) <= h_block) & non_greedy_mask
 
-    i_indices_long = i_indices.to(torch.long)
     last_accept_i = torch.where(
         accepted_mask,
-        i_indices_long,
-        torch.zeros_like(i_indices_long),
+        i_indices.to(torch.long),
+        torch.zeros_like(i_indices, dtype=torch.long),
     ).max(dim=1).values
 
     accept_mask = (i_indices <= last_accept_i[:, None]) & valid_mask & non_greedy_mask
@@ -824,29 +816,30 @@ def rejection_random_sample_block_verify_pytorch(
     output_token_ids[:, :max_spec_len] = torch.where(
         reject_mask, recovered_tokens, output_token_ids[:, :max_spec_len])
 
-    bonus_mask = (last_accept_i[:, None] >= num_draft_per_batch) & non_greedy_mask
-    all_positions_cpu = torch.arange(max_spec_len + 1, pin_memory=True)
-    all_positions = all_positions_cpu.to(device, non_blocking=True)[None, :]
-    bonus_pos_match = (all_positions == num_draft_per_batch)
-    bonus_mask = bonus_mask & bonus_pos_match
-    bonus_values_expanded = bonus_token_ids.view(-1, 1).expand(-1, max_spec_len + 1)
-    output_token_ids[:] = torch.where(bonus_mask, bonus_values_expanded, output_token_ids)
+    all_positions = torch.arange(max_spec_len + 1, pin_memory=True).to(device, non_blocking=True)[None, :]
+    bonus_mask = (
+        (last_accept_i[:, None] >= num_draft_per_batch)
+        & non_greedy_mask
+        & (all_positions == num_draft_per_batch)
+    )
+    output_token_ids[:] = torch.where(
+        bonus_mask,
+        bonus_token_ids.expand(-1, max_spec_len + 1).to(output_token_ids.dtype),
+        output_token_ids,
+    )
 
 
-def sample_recovered_tokens_block_verify_pytorch(
+def sample_recovered_tokens_blockwise_pytorch(
     output_token_ids,  # [num_tokens]
     cu_num_draft_tokens,  # [batch_size]
     draft_token_ids,  # [num_tokens]
     draft_probs,  # [num_tokens, vocab_size] or None
     target_probs,  # [num_tokens, vocab_size]
-    q,
+    q,  # [batch_size, vocab_size]
     vocab_size,
     IS_NGRAM=False,
 ):
-    """
-    Samples recovered tokens using the block verify residual distribution introduced in
-    Sun, Ziteng, et al. "Block verification accelerates speculative decoding." (2024).
-    """
+    _ = vocab_size
     device = output_token_ids.device
     num_tokens = output_token_ids.shape[0]
     batch_size = cu_num_draft_tokens.shape[0]
@@ -861,66 +854,52 @@ def sample_recovered_tokens_block_verify_pytorch(
     cu_end = cu_num_draft_tokens
 
     token_indices = torch.arange(num_tokens, device=device)
-
     in_range_mask = (token_indices[:, None] >= cu_start[None, :]) & (
         token_indices[:, None] < cu_end[None, :])
-
     token_to_batch = torch.argmax(in_range_mask.int(), dim=1)
-    has_match = in_range_mask.any(dim=1)
-    token_to_batch = torch.where(has_match, token_to_batch, 0)
-
+    token_to_batch = torch.where(in_range_mask.any(dim=1), token_to_batch, torch.zeros_like(token_to_batch))
     pos_in_seq = token_indices - cu_start[token_to_batch]
+
     max_spec_len = int((cu_end - cu_start).max().item())
 
     if IS_NGRAM:
-        draft_token_scalar_probs = torch.ones(num_tokens, device=device,
-                                              dtype=torch.float32)
+        draft_token_scalar_probs = torch.ones(num_tokens, device=device, dtype=torch.float32)
     else:
-        draft_token_scalar_probs = draft_probs[
-            token_indices, draft_token_ids]
+        draft_token_scalar_probs = draft_probs[token_indices, draft_token_ids]
 
-    target_token_scalar_probs = target_probs[
-        token_indices, draft_token_ids]
+    target_token_scalar_probs = target_probs[token_indices, draft_token_ids]
 
-    safe_draft = draft_token_scalar_probs.clamp(min=1e-10)
-    per_token_ratio = target_token_scalar_probs / safe_draft
     per_token_ratio = torch.where(
         draft_token_scalar_probs > 0,
-        per_token_ratio,
-        torch.zeros_like(per_token_ratio),
+        target_token_scalar_probs / draft_token_scalar_probs.clamp(min=1e-10),
+        torch.zeros_like(target_token_scalar_probs),
     )
 
-    ratio_grid = torch.ones(batch_size, max_spec_len, device=device,
-                            dtype=torch.float32)
+    ratio_grid = torch.ones(batch_size, max_spec_len, device=device, dtype=torch.float32)
     ratio_grid[token_to_batch, pos_in_seq] = per_token_ratio
 
-    p_prefix = torch.ones(batch_size, max_spec_len + 1, device=device,
-                          dtype=torch.float32)
-    for i in range(max_spec_len):
-        p_prefix[:, i + 1] = (p_prefix[:, i] * ratio_grid[:, i]).clamp(max=1.0)
+    p_prefix = torch.ones(batch_size, max_spec_len + 1, device=device, dtype=torch.float32)
+    for k in range(max_spec_len):
+        p_prefix[:, k + 1] = (p_prefix[:, k] * ratio_grid[:, k]).clamp(max=1.0)
 
-    p_i = p_prefix[token_to_batch, pos_in_seq + 1]  # [num_tokens]
-    p_i_expanded = p_i[:, None]                 # [num_tokens, 1]
+    p_i = p_prefix[token_to_batch, pos_in_seq]
+    p_i_expanded = p_i[:, None]
 
     if IS_NGRAM:
         modified_target = target_probs.clone()
         modified_target[token_indices, draft_token_ids] = 0.0
-        residual = torch.clamp(
-            p_i_expanded * modified_target,
-            min=0.0,
-        )
+        residual = torch.clamp(p_i_expanded * modified_target, min=0.0)
     else:
-        residual = torch.clamp(
-            p_i_expanded * target_probs - draft_probs,
-            min=0.0,
-        )
+        residual = torch.clamp(p_i_expanded * target_probs - draft_probs, min=0.0)
 
     q_values = q[token_to_batch]
     epsilon = 1e-10
     q_values_safe = torch.where(q_values == 0, epsilon, q_values)
     q_values_safe = torch.where(torch.isinf(q_values), epsilon, q_values_safe)
-    prob_over_q = residual / q_values_safe
     prob_over_q = torch.where(
-        (q_values == 0) | torch.isinf(q_values), -1e10, prob_over_q)
+        (q_values == 0) | torch.isinf(q_values),
+        torch.full_like(residual, -1e10),
+        residual / q_values_safe,
+    )
 
     output_token_ids[:] = torch.argmax(prob_over_q, dim=1)
