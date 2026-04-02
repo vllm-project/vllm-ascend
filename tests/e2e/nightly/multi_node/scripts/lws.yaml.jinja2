@@ -20,6 +20,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: LOG_PREFIX
+                value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -67,7 +69,7 @@ spec:
             sizeLimit: 15Gi
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: nv-action-vllm-benchmarks-v2
+            claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
@@ -80,6 +82,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: LOG_PREFIX
+                value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -120,7 +124,7 @@ spec:
             sizeLimit: 15Gi
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: nv-action-vllm-benchmarks-v2
+            claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
