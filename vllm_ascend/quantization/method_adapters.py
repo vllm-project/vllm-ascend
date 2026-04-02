@@ -212,7 +212,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         **extra_weight_attrs,
     ) -> None:
         # Merge quant_method's weight_attrs into extra_weight_attrs
-        quant_weight_attrs = getattr(self.quant_method, 'weight_attrs', {})
+        quant_weight_attrs = getattr(self.quant_method, "weight_attrs", {})
         extra_weight_attrs = {**quant_weight_attrs, **extra_weight_attrs}
 
         weight_param = self.quant_method.get_weight(
