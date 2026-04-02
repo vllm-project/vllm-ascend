@@ -112,4 +112,5 @@ testing
 multi_node_test
 nightly_ci_test
 e2e_ci_test
+doc_writing
 :::

@@ -268,9 +268,8 @@ class MarkdownBlockExtractor:
                 make_diagnostic(
                     doc_path,
                     1,
-                    "Markdown files should link model test cases. "
-                    "If not, please add the file to the exclude list in pyproject.toml::"
-                    "[tool.check_docs_yaml_sync].",
+                    "Markdown files should link model test cases. For details, please refer to "
+                    "docs/source/developer_guide/contribution/doc_writing.md",
                 )
             )
 
