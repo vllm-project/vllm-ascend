@@ -27,6 +27,7 @@ from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import maybe_trans_nz
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -41,9 +42,11 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
         # Fused gate_up_proj (column parallel)
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
+        w13_data = maybe_trans_nz(w13_data)
         layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
         # down_proj (row parallel)
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
+        w2_data = maybe_trans_nz(w2_data)
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
     def apply(
