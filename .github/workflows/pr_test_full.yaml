@@ -40,7 +40,7 @@ jobs:
   cancel_prev_jobs:
     name: Cancel previous runs
     if: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2b3-0
     steps:
       - uses: actions/github-script@v8
         with:
