@@ -214,7 +214,6 @@ class TestAscendW4A16AWQFusedMoEMethod(TestBase):
 
         self.assertIn("w13_qweight", result)
         self.assertIn("w2_qweight", result)
-        self.assertTrue(result["_is_transposed"])
         self.assertEqual(result["w13_qweight"].shape, (num_experts, hidden, 2 * intermediate // 8))
         self.assertEqual(result["w2_qweight"].shape, (num_experts, intermediate, hidden // 8))
         self.assertEqual(result["w13_qweight"].dtype, torch.int32)

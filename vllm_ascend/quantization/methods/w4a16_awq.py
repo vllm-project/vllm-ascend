@@ -139,6 +139,7 @@ class AscendW4A16AWQFusedMoEMethod(AscendMoEScheme):
     """FusedMoE method for Ascend W4A16 AWQ quantization."""
 
     quant_type: QuantType = QuantType.W4A16_AWQ
+    weight_attrs: dict = {"is_transposed": True}
 
     def __init__(self, quant_config: "AWQConfig"):
         self.quant_config = quant_config
@@ -174,7 +175,6 @@ class AscendW4A16AWQFusedMoEMethod(AscendMoEScheme):
             hidden_sizes // self.pack_factor,
             dtype=torch.int32,
         )
-        param_dict["_is_transposed"] = True
         return param_dict
 
     def get_dynamic_quant_param(
@@ -218,7 +218,6 @@ class AscendW4A16AWQFusedMoEMethod(AscendMoEScheme):
             hidden_sizes // self.pack_factor,
             dtype=torch.int32,
         )
-        param_dict["_is_transposed"] = True
         return param_dict
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -303,7 +302,8 @@ class AscendW4A16AWQFusedMoEMethod(AscendMoEScheme):
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )
-
+        
+        topk_ids = topk_ids.to(torch.int32)
         topk_weights = topk_weights.to(x.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
