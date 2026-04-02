@@ -9,6 +9,12 @@ This document provides a unified deployment guide for `MiniMax-M2.5` on vLLM Asc
 - **A3 single-node** deployment (Atlas 800 A3)
 - **A2 dual-node** deployment (2× Atlas 800I A2)
 
+## Supported Features
+
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+
 ## Environment Preparation
 
 ### Model Weights
