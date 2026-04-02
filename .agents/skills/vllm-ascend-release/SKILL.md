@@ -22,6 +22,43 @@ Use this skill when:
 - Access to Ascend NPU hardware for functional testing (or CI infrastructure)
 - Python environment with `uv` for running scripts
 
+### Verify GitHub CLI Installation
+
+Before starting the release process, verify that `gh` CLI is installed and authenticated:
+
+```bash
+# Check if gh is installed
+gh --version
+
+# If not installed, install gh CLI:
+# Ubuntu/Debian
+apt install gh -y
+
+# macOS
+brew install gh
+
+# OpenEuler
+yum install gh -y
+
+# Check authentication status
+gh auth status
+
+# If not authenticated, login with:
+gh auth login
+```
+
+Expected output for `gh auth status`:
+```
+github.com
+  ✓ Logged in to github.com account <username> (keyring)
+  - Active account: true
+  - Git operations protocol: https
+  - Token: gho_****
+  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
+```
+
+**Required scopes**: `repo` (for creating issues, PRs, releases) and `workflow` (for triggering CI workflows).
+
 ## Workflow Overview
 
 ```
