@@ -558,7 +558,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, num_reqs_padded
             )
-            common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens.gpu, num_reqs_padded)
+            common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
             common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                 self.runner.optimistic_seq_lens_cpu, num_reqs_padded
             )
