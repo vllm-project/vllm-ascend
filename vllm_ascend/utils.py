@@ -1281,3 +1281,19 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+# TODO: Temporarily use enable_skip_li to enable skipping lightning indexer for first 2048 token of ds32.
+@lru_cache(maxsize=1)
+def enable_lightning_indexer_skip() -> bool:
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    has_index_topk = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+        vllm_config.model_config.hf_text_config, "index_topk"
+    )
+    return bool(
+        has_index_topk
+        and vllm_config.additional_config.get("enable_lightning_indexer_skip", True)
+        and vllm_config.model_config.enforce_eager
+    )

@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -337,3 +338,134 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)
+
+
+def to_numpy(x):
+    if isinstance(x, torch.Tensor):
+        return x.cpu().numpy()
+    return x
+
+
+def get_li_skip_indices(num_comptuted_tokens, query_lens):
+    num_comptuted_tokens = to_numpy(num_comptuted_tokens).astype(np.int32)
+    query_lens = to_numpy(query_lens).astype(np.int32)
+    skip_threhold = 2048
+
+    # calculate num of tokens need skip for each request
+    num_comptuted_tokens = num_comptuted_tokens[: len(query_lens)]
+    num_skip_tokens = np.maximum(skip_threhold - num_comptuted_tokens, 0)
+    skip_query_lens = np.minimum(num_skip_tokens, query_lens)
+    # if no request is skipped, return None
+    if np.sum(skip_query_lens) == 0:
+        return None, None, None, None, None
+
+    # calculate query lens for non-skip part
+    no_skip_query_lens = np.maximum(query_lens - skip_query_lens, 0)
+    num_of_non_skip_tokens = int(np.sum(no_skip_query_lens))
+
+    # mask the block table need copy
+    li_skipped_mask = query_lens - no_skip_query_lens > 0
+
+    # (1) combine no-skip and skip part query lens
+    # (2) put skip part at the end
+    # (3) for skip-part, only select request with len > 0
+    # (4) cumsum of query len
+    li_cum_query_lens = np.cumsum(np.concatenate([no_skip_query_lens, skip_query_lens[skip_query_lens != 0]]))
+
+    # (1) for no-skip part of a request:
+    #  seq_len  = skip_query_len + no_skip_query_len + num_computed_tokens
+    #           = query_len + num_computed_tokens
+    # (2) for skip part of a request:
+    #  seq_len = skip_query_len + num_computed_tokens
+    # (3) for skip-part, only select request with len > 0
+    # (4) combine skip and no-skip parts as seq_lens
+
+    li_seq_lens = np.concatenate(
+        [
+            query_lens + num_comptuted_tokens,
+            skip_query_lens[skip_query_lens != 0] + num_comptuted_tokens[skip_query_lens != 0],
+        ]
+    )
+
+    # calculate li skip reorder indices
+    q_cal_part_indices = np.array([], dtype=np.int32)
+    q_skip_indices = np.array([], dtype=np.int32)
+
+    seq_offset = np.cumsum(np.insert(query_lens[:-1], 0, 0))
+
+    for req_idx in range(len(query_lens)):
+        full_indices = np.arange(query_lens[req_idx])
+
+        keep_indices = full_indices[full_indices >= num_skip_tokens[req_idx]] + seq_offset[req_idx]
+        skip_indices = full_indices[full_indices < num_skip_tokens[req_idx]] + seq_offset[req_idx]
+
+        q_cal_part_indices = np.concatenate([q_cal_part_indices, keep_indices])
+        q_skip_indices = np.concatenate([q_skip_indices, skip_indices])
+
+    indices = np.concatenate([q_cal_part_indices, q_skip_indices]).astype(np.int32)
+
+    return (indices, li_cum_query_lens, li_seq_lens, li_skipped_mask, num_of_non_skip_tokens)
+
+
+def get_index_of_skipped_queries_numpy(actual_seq_lengths_query, actual_seq_lengths_key, num_actual_seqs, sparse_count):
+    actual_seq_lengths_query = to_numpy(actual_seq_lengths_query)
+    actual_seq_lengths_key = to_numpy(actual_seq_lengths_key)
+    num_actual_seqs = to_numpy(num_actual_seqs)
+
+    # 2. calculate each seq's length
+    actual_query_lens = np.diff(actual_seq_lengths_query, prepend=0)
+
+    # 3. get skipped sequences
+    skipped_q_lens = actual_query_lens[num_actual_seqs:]
+    skipped_k_total_lens = actual_seq_lengths_key[num_actual_seqs:]
+
+    num_tokens: int = np.sum(skipped_q_lens)
+    if num_tokens == 0:
+        return np.full((0, 1, sparse_count), -1, dtype=np.int32)
+
+    # 4. generate token ids in each sequence (0, 1, 2...)
+    # e.g. for seq_lens = [2, 3], generate [0, 1, 0, 1, 2]
+    repeat_offsets = np.cumsum(np.concatenate(([0], skipped_q_lens[:-1])))
+    token_within_seq_idx = np.arange(num_tokens) - np.repeat(repeat_offsets, skipped_q_lens)
+
+    # 5. calculate each token's key length
+    # logic：base_k (total_k - q_len) + token_id + 1
+    base_k_lens = skipped_k_total_lens - skipped_q_lens
+    repeated_base_k_lens = np.repeat(base_k_lens, skipped_q_lens)
+    curr_key_lengths = repeated_base_k_lens + token_within_seq_idx + 1  # shape: (num_tokens,)
+
+    # 6. generate Top-K indices matrices
+    # base indexing [0, 1, 2, ..., sparse_count-1]
+    col_indices = np.arange(sparse_count, dtype=np.int32)
+
+    # generate mask (num_tokens, 1) < (sparse_count)
+    mask = col_indices < curr_key_lengths[:, np.newaxis]
+
+    # generate Top-K indices matrices
+    res = np.where(mask, col_indices, -1)
+
+    # 7. adjust shape (num_tokens, 1, sparse_count)
+    top_k_indices_of_skipped_queries = res[:, np.newaxis, :].astype(np.int32)
+
+    return top_k_indices_of_skipped_queries
+
+
+def maybe_pad_and_reorder_inputs(input_ids, positions, reorder_indices):
+    input_ids_reorder = torch.index_select(input_ids, 0, reorder_indices)
+    positions_reorder = torch.index_select(positions, 0, reorder_indices)
+
+    input_actual_length = input_ids_reorder.size(0)
+    input_ids_reorder_pad = torch.zeros_like(input_ids)
+    input_ids_reorder_pad[:input_actual_length] = input_ids_reorder
+
+    positions_reorder_pad = torch.zeros_like(input_ids)
+    positions_reorder_pad[:input_actual_length] = positions_reorder
+
+    input_ids = input_ids_reorder_pad
+    positions = positions_reorder_pad
+
+    return input_ids_reorder_pad, positions_reorder_pad
+
+
+def hidden_states_reorder(hidden_states, reorder_indices):
+    return torch.index_select(hidden_states, 0, reorder_indices.to(torch.float32).argsort().to(torch.int32))

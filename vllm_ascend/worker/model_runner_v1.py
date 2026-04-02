@@ -92,7 +92,12 @@ from vllm.v1.worker.utils import AttentionGroup
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    hidden_states_reorder,
+    maybe_pad_and_reorder_inputs,
+    using_paged_attention,
+)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -1281,7 +1286,6 @@ class NPUModelRunner(GPUModelRunner):
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
-
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
                     or (enable_sp() and not self.model_config.use_mla)
@@ -1387,9 +1391,24 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            key = "model.layers.0.self_attn.attn"
+            li_reorder_indices = None
+            if isinstance(attn_metadata, dict):
+                attn = attn_metadata.get(key)
+                if attn is not None:
+                    li_reorder_indices = getattr(attn, "li_reorder_indices", None)
+
+            li_skip = li_reorder_indices is not None
+            if li_skip:
+                input_ids, positions = maybe_pad_and_reorder_inputs(
+                    input_ids, positions, li_reorder_indices
+                )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            if li_skip:
+                hidden_states = hidden_states_reorder(
+                    hidden_states, li_reorder_indices)
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
