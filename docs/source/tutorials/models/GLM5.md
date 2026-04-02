@@ -4,7 +4,7 @@
 
 [GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targeting at complex systems engineering and long-horizon agentic tasks.
 
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`.
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and the version of transformers need to be upgraded to 5.2.0
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
