@@ -35,28 +35,30 @@ def _copy_to_default_format(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def _random_sample_310p(
-    logits: torch.Tensor,
+    probs: torch.Tensor,
     generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
-    uniforms_cpu = torch.empty(
-        (logits.shape[0], 1),
-        device="cpu",
-        dtype=torch.float32,
+    uniform_rows = []
+    row_shape = (probs.shape[1],)
+    for i in range(probs.shape[0]):
+        generator = generators.get(i)
+        uniform_rows.append(
+            torch.rand(
+                row_shape,
+                device=probs.device,
+                dtype=probs.dtype,
+                generator=generator,
+            )
+        )
+    uniforms = torch.stack(uniform_rows, dim=0)
+    min_uniform = torch.tensor(
+        torch.finfo(uniforms.dtype).tiny,
+        device=uniforms.device,
+        dtype=uniforms.dtype,
     )
-    if len(generators) != logits.shape[0]:
-        uniforms_cpu.uniform_()
-    for i, generator in generators.items():
-        cpu_generator = torch.Generator(device="cpu")
-        cpu_generator.set_state(generator.get_state())
-        uniforms_cpu[i].uniform_(generator=cpu_generator)
-        generator.set_state(cpu_generator.get_state())
-
-    logits_cpu = logits.to("cpu", dtype=torch.float32)
-    probs_cpu = logits_cpu.softmax(dim=-1, dtype=torch.float32)
-    cdf_cpu = probs_cpu.cumsum(dim=-1)
-    cdf_cpu[:, -1] = 1.0
-    sampled = torch.searchsorted(cdf_cpu, uniforms_cpu, right=False)
-    return sampled.to(torch.int64).view(-1)
+    q = -torch.log(torch.maximum(uniforms, min_uniform))
+    sampled_scores = torch.div(probs, q)
+    return torch.topk(sampled_scores, k=1, dim=-1).indices.view(-1)
 
 
 class AscendTopKTopPSampler310(AscendTopKTopPSampler):
@@ -72,8 +74,9 @@ class AscendTopKTopPSampler310(AscendTopKTopPSampler):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        sampled = _random_sample_310p(logits, generators)
-        return sampled.to(device=logits.device, non_blocking=True), logits_to_return
+        probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
+        sampled = _random_sample_310p(probs, generators)
+        return sampled, logits_to_return
 
 
 class AscendSampler310(AscendSampler):
@@ -109,7 +112,7 @@ class AscendSampler310(AscendSampler):
             dtype=logits.dtype,
             non_blocking=True,
         )
-        return logits.mul_(inv_temp.unsqueeze(dim=1))
+        return logits * inv_temp.unsqueeze(dim=1)
 
     def do_async_exponential(self, b_s, head_dim, generators):
         return

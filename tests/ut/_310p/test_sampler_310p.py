@@ -24,14 +24,15 @@ def _clone_cpu_generator(generator: torch.Generator) -> torch.Generator:
     return cloned
 
 
-def test_random_sample_310p_matches_cpu_reference_and_advances_generators():
-    logits = torch.tensor(
+def test_random_sample_310p_matches_reference_and_advances_generators():
+    probs = torch.tensor(
         [
-            [1.0, 0.5, -0.5, -1.0],
-            [0.1, 0.2, 0.3, 0.4],
+            [0.50, 0.25, 0.15, 0.10],
+            [0.10, 0.20, 0.30, 0.40],
         ],
         dtype=torch.float32,
     )
+    original_probs = probs.clone()
     generators = {
         0: torch.Generator(device="cpu").manual_seed(7),
         1: torch.Generator(device="cpu").manual_seed(11),
@@ -41,19 +42,28 @@ def test_random_sample_310p_matches_cpu_reference_and_advances_generators():
         for idx, generator in generators.items()
     }
 
-    expected_uniforms = torch.empty((logits.shape[0], 1), dtype=torch.float32)
-    for idx, generator in expected_generators.items():
-        expected_uniforms[idx].uniform_(generator=generator)
+    expected_uniforms = torch.stack(
+        [
+            torch.rand(
+                (probs.shape[1],),
+                dtype=probs.dtype,
+                generator=expected_generators[idx],
+            )
+            for idx in range(probs.shape[0])
+        ],
+        dim=0,
+    )
+    min_uniform = torch.tensor(
+        torch.finfo(expected_uniforms.dtype).tiny,
+        dtype=expected_uniforms.dtype,
+    )
+    expected_q = -torch.log(torch.maximum(expected_uniforms, min_uniform))
+    expected = torch.topk(torch.div(probs, expected_q), k=1, dim=-1).indices.view(-1)
 
-    expected_cdf = logits.softmax(dim=-1, dtype=torch.float32).cumsum(dim=-1)
-    expected_cdf[:, -1] = 1.0
-    expected = torch.searchsorted(
-        expected_cdf, expected_uniforms, right=False
-    ).to(torch.int64).view(-1)
-
-    sampled = _random_sample_310p(logits, generators)
+    sampled = _random_sample_310p(probs, generators)
 
     assert torch.equal(sampled, expected)
+    assert torch.equal(probs, original_probs)
     for idx, generator in generators.items():
         assert torch.equal(
             generator.get_state(),
@@ -61,15 +71,60 @@ def test_random_sample_310p_matches_cpu_reference_and_advances_generators():
         )
 
 
+def test_random_sample_310p_handles_partial_generators_like_upstream():
+    probs = torch.tensor(
+        [
+            [0.60, 0.20, 0.10, 0.10],
+            [0.10, 0.30, 0.40, 0.20],
+        ],
+        dtype=torch.float32,
+    )
+    generators = {
+        1: torch.Generator(device="cpu").manual_seed(23),
+    }
+    expected_generator = _clone_cpu_generator(generators[1])
+
+    expected_uniform_rows = []
+    for idx in range(probs.shape[0]):
+        if idx == 1:
+            expected_uniform_rows.append(
+                torch.rand(
+                    (probs.shape[1],),
+                    dtype=probs.dtype,
+                    generator=expected_generator,
+                )
+            )
+        else:
+            expected_uniform_rows.append(
+                torch.rand(
+                    (probs.shape[1],),
+                    dtype=probs.dtype,
+                )
+            )
+    expected_uniforms = torch.stack(expected_uniform_rows, dim=0)
+    min_uniform = torch.tensor(
+        torch.finfo(expected_uniforms.dtype).tiny,
+        dtype=expected_uniforms.dtype,
+    )
+    expected_q = -torch.log(torch.maximum(expected_uniforms, min_uniform))
+    expected = torch.topk(torch.div(probs, expected_q), k=1, dim=-1).indices.view(-1)
+
+    sampled = _random_sample_310p(probs, generators)
+
+    assert torch.equal(sampled, expected)
+    assert torch.equal(generators[1].get_state(), expected_generator.get_state())
+
+
 def test_apply_temperature_310p_uses_safe_cpu_reciprocal():
     logits = torch.tensor(
         [[2.0, 4.0], [1.5, 3.0]],
         dtype=torch.float16,
     )
+    original_logits = logits.clone()
     temperature = torch.tensor([0.0, 0.5], dtype=torch.float32)
 
     out = AscendSampler310.apply_temperature(
-        logits.clone(),
+        logits,
         temperature,
         all_random=False,
     )
@@ -79,6 +134,7 @@ def test_apply_temperature_310p_uses_safe_cpu_reciprocal():
         dtype=torch.float16,
     )
     assert torch.equal(out, expected)
+    assert torch.equal(logits, original_logits)
 
 
 def test_sample_310p_materializes_logits_before_sampling():
