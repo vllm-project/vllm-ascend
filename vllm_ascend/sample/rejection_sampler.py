@@ -356,7 +356,7 @@ def sample_recovered_tokens(
             multibuffer=False,
         )
     elif use_block_verify:
-        sample_recovered_tokens_block_verify_pytorch(
+        sample_recovered_tokens_blockwise_pytorch(
             recovered_token_ids,
             cu_num_draft_tokens,
             draft_token_ids,
