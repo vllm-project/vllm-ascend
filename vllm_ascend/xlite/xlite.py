@@ -89,15 +89,6 @@ class LlamaXliteModel(XliteModel):
         config.max_batch_size = max_batch_size
         config.max_seq_len = max_seq_len
         config.block_size = vllm_config.cache_config.block_size
-        if config.block_size > 128:
-            logger.warning(
-                f"Current block size is {config.block_size}, which is larger than the maximum supported block size of "
-                f"128. Your vLLM server will likely crash when processing requests, even if it may be successfully "
-                f"launched."
-            )
-            logger.warning("Resetting block size to 128 for xlite compatibility.")
-            vllm_config.cache_config.block_size = 128
-            config.block_size = 128
 
         vision_config = getattr(vllm_config.model_config.hf_config, "vision_config", None)
         rope_parameters = getattr(hf_config, "rope_parameters", {})
