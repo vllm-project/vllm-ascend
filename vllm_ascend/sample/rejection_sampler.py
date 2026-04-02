@@ -769,7 +769,7 @@ def rejection_random_sample_block_verify_pytorch(
 
     h_block = torch.zeros(batch_size, max_spec_len, device=device, dtype=torch.float32)
     p_i = p_prefix[:, 1:]
-    intermediate_mask = (pos_indices + 1) < num_draft_per_batch
+    intermediate_mask = (i_indices + 1) < num_draft_per_batch
 
     zero_idx = torch.zeros_like(i_indices)
     if torch.any(intermediate_mask):
