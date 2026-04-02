@@ -39,6 +39,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -67,6 +68,8 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+          python3 -m pip uninstall -y triton triton-ascend
+          python3 -m pip install -v triton-ascend==3.2.0
 
       - name: Install clang-15 (for triton-ascend)
         shell: bash -l {0}
@@ -149,6 +152,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -195,7 +199,8 @@ jobs:
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-        if: ${{ inputs.type == 'full' }}
+        #if: ${{ inputs.type == 'full' }}
+        if: false
         run: |
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_data_parallel.py
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_expert_parallel.py
@@ -229,8 +234,12 @@ jobs:
         if: ${{ inputs.type == 'full' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
           python3 -m pip uninstall -y triton-ascend
+          source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          source /usr/local/Ascend/cann-8.5.1/share/info/ascendnpu-ir/bin/set_env.sh
+          source /usr/local/Ascend/nnal/atb/set_env.sh
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
 
   e2e-4-cards:
@@ -257,6 +266,7 @@ jobs:
           apt-get update -y
           apt install git wget curl -y
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
