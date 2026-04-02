@@ -215,6 +215,10 @@ class TestAscendRejectionSampler(TestBase):
         assert output_token_ids[0].item() == 0
         assert output_token_ids[1].item() == 1
 
+    @patch('torch.arange', new=mock_pin_memory(torch.arange))
+    @patch('torch.ones', new=mock_pin_memory(torch.ones))
+    @patch('torch.full', new=mock_pin_memory(torch.full))
+    @patch('torch.tensor', new=mock_pin_memory(torch.tensor))
     def test_rejection_random_sample_block_verify_pytorch(self):
         """Test random rejection sampling for block verify: accept based on uniform probability"""
         batch_size = 2
