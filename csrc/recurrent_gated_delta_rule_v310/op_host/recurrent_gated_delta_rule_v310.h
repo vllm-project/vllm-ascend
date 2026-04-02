@@ -7,8 +7,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef PTA_NPU_OP_API_COMMON_INC_LEVEL0_OP_RECURRENT_GETED_DELTA_RULE_V310
-#define PTA_NPU_OP_API_COMMON_INC_LEVEL0_OP_RECURRENT_GETED_DELTA_RULE_V310
+#ifndef PTA_NPU_OP_API_COMMON_INC_LEVEL0_OP_RECURRENT_GATED_DELTA_RULE_V310
+#define PTA_NPU_OP_API_COMMON_INC_LEVEL0_OP_RECURRENT_GATED_DELTA_RULE_V310
 
 #include "opdev/op_executor.h"
 #include "opdev/make_op_executor.h"
@@ -20,4 +20,4 @@ const aclTensor *RecurrentGatedDeltaRuleV310(const aclTensor *query, const aclTe
                                              const aclTensor *numAcceptedTokens, float scaleValue, aclOpExecutor *executor);
 }
 
-#endif // PTA_NPU_OP_API_COMMON_INC_LEVEL0_OP_RECURRENT_GETED_DELTA_RULE_V310
+#endif // PTA_NPU_OP_API_COMMON_INC_LEVEL0_OP_RECURRENT_GATED_DELTA_RULE_V310

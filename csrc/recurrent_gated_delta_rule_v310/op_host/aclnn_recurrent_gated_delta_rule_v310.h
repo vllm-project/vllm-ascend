@@ -7,8 +7,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef OP_API_ACLNN_RECURRENT_GETED_DELTA_RULE_V310_H
-#define OP_API_ACLNN_RECURRENT_GETED_DELTA_RULE_V310_H
+#ifndef OP_API_ACLNN_RECURRENT_GATED_DELTA_RULE_V310_H
+#define OP_API_ACLNN_RECURRENT_GATED_DELTA_RULE_V310_H
 
 #include "aclnn/aclnn_base.h"
 
@@ -56,4 +56,4 @@ __attribute__((visibility("default"))) aclnnStatus aclnnRecurrentGatedDeltaRuleV
 }
 #endif
 
-#endif // OP_API_ACLNN_RECURRENT_GETED_DELTA_RULE_V310_H
+#endif // OP_API_ACLNN_RECURRENT_GATED_DELTA_RULE_V310_H

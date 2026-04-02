@@ -11,8 +11,8 @@
  * \file recurrent_gated_delta_rule_tiling_v310.h
  * \brief
  */
-#ifndef __OP_HOST_RECURRENT_GETED_DELTA_RULE_V310_TILING_H__
-#define __OP_HOST_RECURRENT_GETED_DELTA_RULE_V310_TILING_H__
+#ifndef __OP_HOST_RECURRENT_GATED_DELTA_RULE_V310_TILING_H__
+#define __OP_HOST_RECURRENT_GATED_DELTA_RULE_V310_TILING_H__
 
 #include "register/tilingdata_base.h"
 #include "tiling/platform/platform_ascendc.h"
@@ -135,4 +135,4 @@ protected:
 };
 
 } // namespace optiling
-#endif // __OP_HOST_RECURRENT_GETED_DELTA_RULE_V310_TILING_H__
+#endif // __OP_HOST_RECURRENT_GATED_DELTA_RULE_V310_TILING_H__

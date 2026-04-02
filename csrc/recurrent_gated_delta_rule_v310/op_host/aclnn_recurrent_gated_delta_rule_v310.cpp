@@ -55,7 +55,7 @@ struct RecurrentGatedDeltaRuleV310Params {
     const aclTensor *gk {nullptr};
     const aclTensor *num_accepted_tokens {nullptr};
     // attrs
-    float scale {1.0f};
+    float scaleValue {1.0f};
     //output
     const aclTensor *out {nullptr};
 };
