@@ -129,15 +129,15 @@ static aclnnStatus PreProcess(RecurrentGatedDeltaRuleV310Params &params)
 }
 } // namespace
 
-aclnnStatus aclnnRecurrentGatedDeltaRuleGetWorkspaceSize(const aclTensor *query, const aclTensor *key,
-                                                         const aclTensor *value, const aclTensor *beta,
-                                                         aclTensor *stateRef, const aclTensor *actualSeqLengths,
-                                                         const aclTensor *ssmStateIndices, const aclTensor *g,
-                                                         const aclTensor *gk, const aclTensor *numAcceptedTokens,
-                                                         float scaleValue, aclTensor *out, uint64_t *workspaceSize,
-                                                         aclOpExecutor **executor)
+aclnnStatus aclnnRecurrentGatedDeltaRuleV310GetWorkspaceSize(const aclTensor *query, const aclTensor *key,
+                                                             const aclTensor *value, const aclTensor *beta,
+                                                             aclTensor *stateRef, const aclTensor *actualSeqLengths,
+                                                             const aclTensor *ssmStateIndices, const aclTensor *g,
+                                                             const aclTensor *gk, const aclTensor *numAcceptedTokens,
+                                                             float scaleValue, aclTensor *out, uint64_t *workspaceSize,
+                                                             aclOpExecutor **executor)
 {
-    L2_DFX_PHASE_1(aclnnRecurrentGatedDeltaRule,
+    L2_DFX_PHASE_1(aclnnRecurrentGatedDeltaRuleV310,
                    DFX_IN(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk,
                           numAcceptedTokens, scaleValue),
                    DFX_OUT(out, stateRef));
