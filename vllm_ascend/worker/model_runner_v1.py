@@ -779,10 +779,18 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
             self.gdn_query_start_loc.copy_to_gpu()
 
-        computed_tokens_tensor = torch.from_numpy(
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        ).to(self.seq_lens.dtype)
-        self.seq_lens[:num_reqs] = computed_tokens_tensor + num_scheduled_tokens
+        self.num_computed_tokens[:num_reqs].copy_(
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+            non_blocking=True,
+        )
+
+        self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
+        self.num_scheduled_tokens.copy_to_gpu(num_reqs)
+        num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
+
+        self.seq_lens[:num_reqs] = (
+            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+        )
         self.seq_lens[num_reqs:].fill_(0)
 
         # Compute optimistic seq_lens on CPU (assumes all draft tokens from
