@@ -248,7 +248,7 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
         "environment": _filter_environment(config.envs),
     }
 
-    job_name = os.environ.get("BENCHMARK_JOB_NAME")
+    job_name = os.environ.get("BENCHMARK_JOB_NAME", "")
     pvc_benchmark_dir = os.path.join("/root/.cache/benchmark_results", job_name)
     os.makedirs(pvc_benchmark_dir, exist_ok=True)
     pvc_output_path = os.path.join(pvc_benchmark_dir, f"{job_name}.json")

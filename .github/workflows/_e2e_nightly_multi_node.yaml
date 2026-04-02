@@ -359,7 +359,6 @@ jobs:
 
           tar -czf /tmp/ascend-logs.tar.gz -C /tmp collected-logs
 
-
       - name: Upload Ascend logs
         if: always()
         uses: actions/upload-artifact@v7
