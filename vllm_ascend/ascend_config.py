@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -158,7 +158,11 @@ class AscendConfig:
             and use_sparse
             and get_ascend_device_type() != AscendDeviceType.A5
         )
-
+        quant_config = getattr(vllm_config, "quant_config", None)
+        self._sparse_c8_layer_ids, self._sparse_c8_layer_names = self._parse_sparse_c8_layers_from_quant_config(
+            quant_config
+        )
+        self._sparse_c8_layer_filter_enabled = self._has_sparse_c8_layer_config(quant_config)
         self.enable_sp_by_pass = (
             vllm_config.model_config is not None
             and not vllm_config.model_config.enforce_eager
@@ -175,6 +179,55 @@ class AscendConfig:
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
                 raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
+
+    @staticmethod
+    def _has_sparse_c8_layer_config(quant_config: Any) -> bool:
+        quant_description = getattr(quant_config, "quant_description", None)
+        if not isinstance(quant_description, dict):
+            return False
+        return any(isinstance(key, str) and key.endswith(".indexer.quant_type") for key in quant_description)
+
+    @classmethod
+    def _parse_sparse_c8_layers_from_quant_config(cls, quant_config: Any) -> tuple[set[int], set[str]]:
+        quant_description = getattr(quant_config, "quant_description", None)
+        if not isinstance(quant_description, dict):
+            return set(), set()
+
+        layer_ids: set[int] = set()
+        layer_names: set[str] = set()
+        suffix = ".indexer.quant_type"
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        for key, value in quant_description.items():
+            if not isinstance(key, str) or not key.endswith(suffix):
+                continue
+            if value != "INT8_DYNAMIC":
+                continue
+            layer_name = key[: -len(suffix)].rstrip(".")
+            if not layer_name:
+                continue
+            layer_names.add(layer_name)
+            layer_ids.update({extract_layer_index(layer_name)})
+        return layer_ids, layer_names
+
+    def is_sparse_c8_layer(self, layer_name: str | None) -> bool:
+        if not self.enable_sparse_c8:
+            return False
+        if not self._sparse_c8_layer_filter_enabled:
+            return True
+        if layer_name is None:
+            return False
+
+        normalized_layer_name = layer_name.rstrip(".")
+        if any(
+            normalized_layer_name == candidate or normalized_layer_name.startswith(f"{candidate}.")
+            for candidate in self._sparse_c8_layer_names
+        ):
+            return True
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        layer_ids = {extract_layer_index(normalized_layer_name)}
+        return any(layer_id in self._sparse_c8_layer_ids for layer_id in layer_ids)
 
     @staticmethod
     def _get_compile_ranges(compilation_config):
