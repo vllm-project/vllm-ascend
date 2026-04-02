@@ -779,14 +779,24 @@ class PCPManager:
             # Same as block_table, we flatten decode seq_lens to query_lens,
             # and keep prefill seq_lens unchanged.
             for decode_idx in range(self.decode_threshold):
-                num_computed_tokens_of_pcp_dcp[self.decode_threshold - 1 - decode_idx :: self.decode_threshold] = (
-                    self._get_cp_local_seq_lens(
-                        torch.tensor(context_lens) - decode_idx,
-                        self.pcp_world_size,
-                        self.dcp_world_size,
-                        self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+                if self.num_dycp_reqs > 0:
+                    num_computed_tokens_of_pcp_dcp[self.decode_threshold - 1 - decode_idx :: self.decode_threshold] = (
+                        self._get_cp_local_seq_lens(
+                            torch.tensor(context_lens) - decode_idx,
+                            self.pcp_world_size,
+                            self.dcp_world_size,
+                            self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+                        )
+                    )[:self.num_dycp_reqs]
+                else:
+                    num_computed_tokens_of_pcp_dcp[self.decode_threshold - 1 - decode_idx :: self.decode_threshold] = (
+                        self._get_cp_local_seq_lens(
+                            torch.tensor(context_lens) - decode_idx,
+                            self.pcp_world_size,
+                            self.dcp_world_size,
+                            self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+                        )
                     )
-                )
             if self.decode_threshold > 1:
                 num_computed_tokens_of_pcp_dcp_list = []
                 if self.num_decode_reqs:

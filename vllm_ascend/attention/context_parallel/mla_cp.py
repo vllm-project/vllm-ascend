@@ -944,14 +944,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
         # Update out&lse
-        # if self.dycp_size > 1 and num_dycp_reqs > 0:
-        #     attn_output[:num_dycp_reqs] = _npu_update_dycp_attn_with_mask(num_dycp_reqs, attn_output, softmax_lse)
-        #     return self._v_up_proj(attn_output)
-        dycp_group = get_dycp_group()
-        attn_output = _npu_update_dycp_attn_with_mask(attn_metadata.dycp_mask, attn_output, softmax_lse, dycp_group)
-        # TODO(XIAOCHEN): support dcp
-        # attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
-        # attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
+        if self.dycp_size > 1 and num_dycp_reqs > 0:
+            attn_output[:num_dycp_reqs] = _npu_update_dycp_attn(num_dycp_reqs, attn_output, softmax_lse)
+            return self._v_up_proj(attn_output)
+        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
+        attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
 
     def _out_lse_reshape(self, attn_out: torch.Tensor, attn_lse: torch.Tensor) -> torch.Tensor:
@@ -1230,5 +1227,5 @@ def split_prefill_metadata(
         cos=dp_cos,
         pcp_metadata=None,  # DP 不需要
     )
-
-    return dycp_prefill, dp_prefill    
+    
+    return dycp_prefill, dp_prefill
