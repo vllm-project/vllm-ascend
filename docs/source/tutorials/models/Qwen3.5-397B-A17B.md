@@ -108,7 +108,7 @@ sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export VLLM_ASCEND_ENBALE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 --host 0.0.0.0 \
