@@ -623,28 +623,16 @@ class NPUModelRunner(GPUModelRunner):
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
-            if hasattr(self.query_start_loc, 'np'):
-                last_loc = self.query_start_loc.np[num_reqs]
-                self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
-                    self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
-                )
-            else:
-                last_loc = self.query_start_loc.cpu()[num_reqs].item()
-                self.query_start_loc[num_reqs + 1 : num_reqs_padded + 1] = (
-                    torch.from_numpy(
-                        self.arange_np[1 : num_reqs_padded + 1 - num_reqs]
-                    ).to(self.query_start_loc.dtype)
-                    * self.uniform_decode_query_len + last_loc
-                ).to(self.query_start_loc.device)
+            last_loc = self.query_start_loc.np[num_reqs]
+            self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
+                self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
+            )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
             assert num_reqs == num_reqs_padded
 
             # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
-            if hasattr(self.query_start_loc, 'np'):
-                self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
-            else:
-                self.query_start_loc[num_reqs_padded + 1] = num_tokens_padded
+            self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
         self._safe_copy_to_gpu(self.query_start_loc)
@@ -805,9 +793,6 @@ class NPUModelRunner(GPUModelRunner):
                 if actual_num_sched > 0:
                     inputs_embeds_cpu = (
                         self.inputs_embeds.cpu
-                        if hasattr(self.inputs_embeds, 'cpu')
-                        and isinstance(self.inputs_embeds.cpu, torch.Tensor)
-                        else self.inputs_embeds.cpu()
                     )
                     inputs_embeds_cpu[output_idx : output_idx + actual_num_sched].copy_(
                         req_embeds[start_pos:actual_end]
@@ -815,45 +800,25 @@ class NPUModelRunner(GPUModelRunner):
 
                 output_idx += num_sched
 
-        # Handle both CpuGpuBuffer and plain Tensor
-        if hasattr(self.query_start_loc, 'np'):
-            self.query_start_loc.np[0] = 0
-            self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
-        else:
-            self.query_start_loc[0] = 0
-            self.query_start_loc[1 : num_reqs + 1] = (
-                torch.from_numpy(cu_num_tokens)
-                .to(self.query_start_loc.dtype)
-                .to(self.query_start_loc.device)
-            )
-        self._safe_copy_to_gpu(self.query_start_loc)
+        self.query_start_loc.np[0] = 0
+        self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+        self.query_start_loc.copy_to_gpu()
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
         # gdn_query_start_loc is an unpadded version of query_start_loc.
         # TODO delete it if fia's check is removed.
         if self._has_gdn:
-            if hasattr(self.gdn_query_start_loc, 'np'):
-                self.gdn_query_start_loc.np[0] = 0
-                self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
-                self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-            else:
-                self.gdn_query_start_loc[0] = 0
-                self.gdn_query_start_loc[1 : num_reqs + 1] = (
-                    torch.from_numpy(cu_num_tokens)
-                    .to(self.gdn_query_start_loc.dtype)
-                    .to(self.gdn_query_start_loc.device)
-                )
-                self.gdn_query_start_loc[num_reqs + 1 :].fill_(cu_num_tokens[-1])
-            self._safe_copy_to_gpu(self.gdn_query_start_loc)
+            self.gdn_query_start_loc.np[0] = 0
+            self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+            self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
+            self.gdn_query_start_loc.copy_to_gpu()
 
         computed_tokens_tensor = torch.from_numpy(
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
         ).to(self.seq_lens.dtype)
         self.seq_lens[:num_reqs] = computed_tokens_tensor + num_scheduled_tokens
         self.seq_lens[num_reqs:].fill_(0)
-
-        self._safe_copy_to_gpu(self.seq_lens)
 
         # Compute optimistic seq_lens on CPU (assumes all draft tokens from
         # previous iteration accepted). Used by _pool() and discard logic.
@@ -865,11 +830,7 @@ class NPUModelRunner(GPUModelRunner):
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
-        if hasattr(self.query_start_loc, 'gpu'):
-            self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
-        else:
-            # Plain tensor - already on device
-            self.query_start_loc[num_reqs + 1 :].fill_(-1)
+        self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         # Build prev_positions mapping for async scheduling input_ids handling.
         self._compute_prev_positions(num_reqs)
@@ -881,40 +842,17 @@ class NPUModelRunner(GPUModelRunner):
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self._calc_mrope_positions(scheduler_output)
-            if hasattr(self.mrope_positions, 'gpu'):
-                self.mrope_positions.gpu.copy_(
-                    self.mrope_positions.cpu,
-                    non_blocking=True,
-                )
-            else:
-                # Plain tensor - already on GPU, no-op or move from CPU if needed
-                mrope_positions_cpu = (
-                    self.mrope_positions.cpu
-                    if hasattr(self.mrope_positions, 'cpu')
-                    and isinstance(self.mrope_positions.cpu, torch.Tensor)
-                    else self.mrope_positions.cpu()
-                )
-                self.mrope_positions.copy_(mrope_positions_cpu, non_blocking=True)
+            self.mrope_positions.gpu.copy_(
+                self.mrope_positions.cpu,
+                non_blocking=True,
+            )
         elif self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            xdrope_cpu = (
-                self.xdrope_positions.cpu
-                if hasattr(self.xdrope_positions, 'cpu')
-                and isinstance(self.xdrope_positions.cpu, torch.Tensor)
-                else self.xdrope_positions.cpu()
+            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
+                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
+                non_blocking=True,
             )
-            if hasattr(self.xdrope_positions, 'gpu'):
-                self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                    xdrope_cpu[:, :total_num_scheduled_tokens],
-                    non_blocking=True,
-                )
-            else:
-                # Plain tensor - already on GPU, copy from CPU version
-                self.xdrope_positions[:, :total_num_scheduled_tokens].copy_(
-                    xdrope_cpu[:, :total_num_scheduled_tokens],
-                    non_blocking=True,
-                )
         else:
             # Common case (1D positions)
             self.positions[:total_num_scheduled_tokens].copy_(
@@ -942,15 +880,8 @@ class NPUModelRunner(GPUModelRunner):
 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
-        # Handle both CpuGpuBuffer and plain Tensor
-        if hasattr(self.discard_request_indices, 'np'):
-            self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
-        else:
-            self.discard_request_indices[: self.num_discarded_requests] = (
-                torch.from_numpy(discard_request_indices)
-                .to(self.discard_request_indices.dtype)
-            )
-        self._safe_copy_to_gpu(self.discard_request_indices, self.num_discarded_requests)
+        self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
+        self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
@@ -998,17 +929,9 @@ class NPUModelRunner(GPUModelRunner):
             num_sampled_tokens = num_draft_tokens + 1
 
             # For DECODE only cuda graph of some attention backends (e.g., GDN).
-            if hasattr(self.num_decode_draft_tokens, 'np'):
-                self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
-                self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
-            else:
-                self.num_decode_draft_tokens[:num_reqs] = (
-                    torch.from_numpy(num_decode_draft_tokens)
-                    .to(self.num_decode_draft_tokens.dtype)
-                    .to(self.num_decode_draft_tokens.device)
-                )
-                self.num_decode_draft_tokens[num_reqs:].fill_(-1)
-            self._safe_copy_to_gpu(self.num_decode_draft_tokens)
+            self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
+            self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
+            self.num_decode_draft_tokens.copy_to_gpu()
         # save logits_indices for pcp spec decode usage
         self.logits_indices = logits_indices
 
@@ -1459,10 +1382,7 @@ class NPUModelRunner(GPUModelRunner):
                     if enable_sp() and num_tokens_padded == num_tokens_unpadded:
                         if num_reqs_padded > old_num_reqs_padded:
                             num_reqs_padded = old_num_reqs_padded
-                            if hasattr(self.query_start_loc, 'np'):
-                                self.query_start_loc.np[num_reqs_padded + 1] = 0
-                            else:
-                                self.query_start_loc[num_reqs_padded + 1] = 0
+                            self.query_start_loc.np[num_reqs_padded + 1] = 0
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
@@ -1842,13 +1762,7 @@ class NPUModelRunner(GPUModelRunner):
         list[int],
     ]:
         # TODO: implement PR 28597 from vllm
-        if hasattr(self.discard_request_indices, 'np'):
-            discard_sampled_tokens_req_indices = self.discard_request_indices.np[: self.num_discarded_requests]
-        else:
-            discard_sampled_tokens_req_indices = (
-                self.discard_request_indices.cpu().numpy()
-                [: self.num_discarded_requests]
-            )
+        discard_sampled_tokens_req_indices = self.discard_request_indices.np[: self.num_discarded_requests]
         for i in discard_sampled_tokens_req_indices:
             gen = self.input_batch.generators.get(int(i))
             if gen is not None:
@@ -2213,19 +2127,9 @@ class NPUModelRunner(GPUModelRunner):
         else:
             max_seq_len = self.seq_lens.cpu()[:num_reqs].max().item()
         if use_spec_decode and self.need_accepted_tokens:
-            if hasattr(self.num_accepted_tokens, 'np'):
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                self.num_accepted_tokens.np[num_reqs:].fill(1)
-            else:
-                self.num_accepted_tokens[:num_reqs] = (
-                    torch.from_numpy(
-                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                    )
-                    .to(self.num_accepted_tokens.dtype)
-                    .to(self.num_accepted_tokens.device)
-                )
-                self.num_accepted_tokens[num_reqs:].fill_(1)
-            self._safe_copy_to_gpu(self.num_accepted_tokens)
+            self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
@@ -2314,7 +2218,7 @@ class NPUModelRunner(GPUModelRunner):
             causal=True,
             num_input_tokens=num_tokens_padded,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
-            positions=self._get_buffer_gpu(self.positions),
+            positions=self.positions,
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
@@ -2342,11 +2246,6 @@ class NPUModelRunner(GPUModelRunner):
                 patch_torch_npu_argsort()
                 num_decode_draft_tokens_cpu = (
                     self.num_decode_draft_tokens.cpu
-                    if hasattr(self.num_decode_draft_tokens, 'cpu')
-                    and isinstance(
-                        self.num_decode_draft_tokens.cpu, torch.Tensor
-                    )
-                    else self.num_decode_draft_tokens.cpu()
                 )
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self._get_buffer_gpu(self.num_accepted_tokens)[:num_reqs_padded],
@@ -2399,16 +2298,8 @@ class NPUModelRunner(GPUModelRunner):
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
                 if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
-                    gdn_query_start_loc_cpu = (
-                        self.gdn_query_start_loc.cpu
-                        if hasattr(self.gdn_query_start_loc, 'cpu')
-                        and isinstance(
-                            self.gdn_query_start_loc.cpu, torch.Tensor
-                        )
-                        else self.gdn_query_start_loc.cpu()
-                    )
-                    cm.query_start_loc_cpu = gdn_query_start_loc_cpu[: num_reqs_padded + 1]
-                    cm.query_start_loc = self._get_buffer_gpu(self.gdn_query_start_loc)[: num_reqs_padded + 1]
+                    cm.query_start_loc_cpu = self.gdn_query_start_loc.cpu[: num_reqs_padded + 1]
+                    cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
 
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(kv_cache_gid)
@@ -2611,18 +2502,10 @@ class NPUModelRunner(GPUModelRunner):
                 device=self.seq_lens.device,
             )
             self.seq_lens[num_reqs_padded:] = 0
-            self._safe_copy_to_gpu(self.seq_lens)
 
             cum_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
-            if hasattr(self.query_start_loc, 'np'):
-                self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-            else:
-                self.query_start_loc[1 : num_reqs_padded + 1] = (
-                    torch.from_numpy(cum_num_tokens)
-                    .to(self.query_start_loc.dtype)
-                    .to(self.query_start_loc.device)
-                )
-            self._safe_copy_to_gpu(self.query_start_loc)
+            self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
+            self.query_start_loc.copy_to_gpu()
             num_reqs_padded = self._pad_query_start_loc_for_fia(
                 num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
             )
