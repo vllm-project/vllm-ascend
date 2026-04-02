@@ -47,19 +47,12 @@ protected:
     {
         return true;
     }
-    // 1、获取平台信息比如CoreNum、UB/L1/L0C资源大小
     ge::graphStatus GetPlatformInfo() override;
-    // 2、获取INPUT/OUTPUT/ATTR信息
     ge::graphStatus GetShapeAttrsInfo() override;
-    // 3、计算数据切分TilingData
     ge::graphStatus DoOpTiling() override;
-    // 4、计算高阶API的TilingData
     ge::graphStatus DoLibApiTiling() override;
-    // 5、计算TilingKey
     uint64_t GetTilingKey() const override;
-    // 6、计算Workspace 大小
     ge::graphStatus GetWorkspaceSize() override;
-    // 7、保存Tiling数据
     ge::graphStatus PostTiling() override;
 
 protected:

@@ -17,22 +17,22 @@ extern "C" {
 #endif
 
 /**
- * @brief RecurrentGatedDeltaRuleV310 的第一段接口，根据具体的计算流程，计算workspace大小。
- * @param [in] query: 数据类型支持：float16。
- * @param [in] key: 数据类型支持：float16。
- * @param [in] value: 数据类型支持：float16。
- * @param [in] beta: 数据类型支持：float16。
- * @param [in] state: 数据类型支持：float16。
- * @param [in] actualSeqLengths: 数据类型支持：int32。
- * @param [in] ssmStateIndices: 数据类型支持：int32。
- * @param [in] g: 数据类型支持：float32。
- * @param [in] gk: 数据类型支持：float32。
- * @param [in] numAcceptedTokens: 数据类型支持：int32。
- * @param [in] scaleValue: 数据类型支持：float32。
- * @param [out] out: 数据类型支持：float16。
- * @param [out] 返回需要在npu device侧申请的workspace大小。
- * @param [out] executor: 返回op执行器，包含了算子计算流程。
- * @return aclnnStatus: 返回状态码
+ * @brief Calculate RecurrentGatedDeltaRuleV310 workspace
+ * @param [in] query: float16
+ * @param [in] key: float16
+ * @param [in] value: float16
+ * @param [in] beta: float16
+ * @param [in] state: float16
+ * @param [in] actualSeqLengths: int32
+ * @param [in] ssmStateIndices: int32
+ * @param [in] g: float32
+ * @param [in] gk: float32
+ * @param [in] numAcceptedTokens: int32
+ * @param [in] scaleValue: float32
+ * @param [out] out: float16
+ * @param [out] workspaceSize: workspace size
+ * @param [out] executor: op executor
+ * @return aclnnStatus
  */
 __attribute__((visibility("default"))) aclnnStatus aclnnRecurrentGatedDeltaRuleV310GetWorkspaceSize(
     const aclTensor *query, const aclTensor *key, const aclTensor *value, const aclTensor *beta, aclTensor *stateRef,
@@ -42,12 +42,11 @@ __attribute__((visibility("default"))) aclnnStatus aclnnRecurrentGatedDeltaRuleV
 
 /**
  * @brief 
- * @param [in] workspace: 在npu device侧申请的workspace内存起址。
- * @param [in] workspace_size: 在npu
- * device侧申请的workspace大小，由第一段接口aclnnRecurrentGatedDeltaRuleGetWorkspaceSize获取。
- * @param [in] executor: op执行器，包含了算子计算流程。
- * @param [in] stream: acl stream流。
- * @return aclnnStatus: 返回状态码
+ * @param [in] workspace: addr of workspace
+ * @param [in] workspace_size: workspace size
+ * @param [in] executor: op executor
+ * @param [in] stream: acl stream
+ * @return aclnnStatus
  */
 __attribute__((visibility("default"))) aclnnStatus aclnnRecurrentGatedDeltaRuleV310(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
                                                    aclrtStream stream);
