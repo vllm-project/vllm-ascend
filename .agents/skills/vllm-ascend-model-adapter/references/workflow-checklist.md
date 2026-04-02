@@ -2,14 +2,14 @@
 
 ## 0) Environment prerequisites
 
-Set these once per session. Defaults match the official vllm-ascend Docker image.
+Set these once per session using the values confirmed at the Entry Points step.
 
 ```bash
-# --- configurable paths (adjust if your layout differs) ---
-VLLM_SRC=/vllm-workspace/vllm              # vLLM source root
-VLLM_ASCEND_SRC=/vllm-workspace/vllm-ascend # vllm-ascend source root
-WORK_DIR=/workspace                         # directory to run vllm serve from
-MODEL_ROOT=/models                          # parent directory of model checkpoints
+# --- set to values confirmed with user at entry ---
+VLLM_SRC=<user-specified vLLM source root>          # default: /vllm-workspace/vllm
+VLLM_ASCEND_SRC=<user-specified vllm-ascend root>   # default: /vllm-workspace/vllm-ascend
+WORK_DIR=/workspace                                  # directory to run vllm serve from
+MODEL_ROOT=<parent dir of MODEL_PATH>                # derived from user-specified checkpoint path
 ```
 
 Expected environment:

@@ -20,9 +20,7 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 ## Hard constraints
 
 - Never upgrade `transformers`.
-- Primary implementation roots are fixed by Dockerfile:
-    - `/vllm-workspace/vllm`
-    - `/vllm-workspace/vllm-ascend`
+- Primary implementation roots are user-specified at entry (see Entry Points above). Defaults are `/vllm-workspace/vllm` and `/vllm-workspace/vllm-ascend` if the user does not specify otherwise.
 - Start `vllm serve` from `/workspace` with direct command by default.
 - Default API port is `8000` unless user explicitly asks otherwise.
 - Feature-first default: try best to validate ACLGraph / EP / flashcomm1 / multimodal out-of-box. MTP is validated only when the checkpoint explicitly supports it (inferred from config + weight keys in Step 2).
@@ -36,17 +34,38 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 - **Dummy-first is encouraged for speed, but dummy is NOT fully equivalent to real weights.**
 - **Never sign off adaptation using dummy-only evidence; real-weight gate is mandatory.**
 
+## Entry points
+
+When this skill is invoked, **ask the user for the following inputs before doing anything else**. Do not assume defaults silently — collect and confirm each value explicitly.
+
+| # | Input | Ask the user | Default if omitted |
+|---|-------|-------------|-------------------|
+| 1 | **Model checkpoint path** | "What is the local path to the model checkpoint? (e.g. `/models/Qwen3-8B`)" | `/models/<model-name>` — must be confirmed |
+| 2 | **Served model name** | "What name should the model be served under? (used as `--served-model-name` and in docs)" | Basename of the checkpoint path |
+| 3 | **Tensor parallel size** | "How many NPUs should be used for tensor parallelism? (TP size)" | `8` for A2, `16` for A3 — confirm after NPU check |
+| 4 | **vLLM source root** | "What is the path to the vLLM source root? (e.g. `/vllm-workspace/vllm`)" | `/vllm-workspace/vllm` |
+| 5 | **vllm-ascend source root** | "What is the path to the vllm-ascend source root? (e.g. `/vllm-workspace/vllm-ascend`)" | `/vllm-workspace/vllm-ascend` |
+
+Once the user provides these values, bind them as session variables and echo them back for confirmation before proceeding:
+
+```
+Model checkpoint    : <user-provided path>
+Served model name   : <user-provided name>
+TP size             : <user-provided or defaulted value>
+vLLM source root    : <user-provided or defaulted path>
+vllm-ascend source  : <user-provided or defaulted path>
+```
+
+Only proceed to the execution playbook after the user confirms (or accepts) these values.
+
+---
+
 ## Execution playbook
 
 ### 1) Collect context
 
 - **Run NPU environment sanity check first** (see `references/workflow-checklist.md` §0.5). Verify NPU devices are visible, `torch_npu` is importable, NPU tensor creation works, and available NPU count ≥ required TP size. If any check fails, stop and resolve before proceeding.
-- Confirm model path (default `/models/<model-name>`; if environment differs, confirm with user explicitly).
-- Confirm implementation roots (`/vllm-workspace/vllm`, `/vllm-workspace/vllm-ascend`).
-- Confirm delivery root (the current git repo where the final commit is expected).
-- Confirm runtime import path points to `/vllm-workspace/*` install.
-- Use default expected feature set: ACLGraph + EP + flashcomm1 + multimodal (if model has VL capability). MTP is validated only if the checkpoint explicitly supports it (determined in Step 2).
-- User requirements extend this baseline, not replace it.
+- Model path, served model name, TP size, and implementation roots are already confirmed via the Entry Points above — use those values throughout.
 
 ### 2) Analyze model first
 
