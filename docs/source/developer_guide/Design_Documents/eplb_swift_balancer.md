@@ -100,28 +100,28 @@ If you want to add a new eplb policy to vllm_ascend, you must follow these steps
 1. Inherit the `EplbPolicy` abstract class of `policy_abstract.py`  and override the `rebalance_experts` interface, ensuring consistent input parameters `current_expert_table`, `expert_workload` and return types `newplacement`.
 For example:
 
-```python
-class RandomLoadBalance(EplbPolicy):
+    ```python
+    class RandomLoadBalance(EplbPolicy):
 
-    def __init__(self, config: DynamicConfig):
-        super().__init__(config)
+        def __init__(self, config: DynamicConfig):
+            super().__init__(config)
 
-    def rebalance_experts(self, current_expert_table, expert_workload):
-        new_table = copy.deepcopy(current_expert_table)
-        num_layers = len(current_expert_table)
+        def rebalance_experts(self, current_expert_table, expert_workload):
+            new_table = copy.deepcopy(current_expert_table)
+            num_layers = len(current_expert_table)
 
-        for i in range(num_layers):
-            # randomly choose two card
-            # indices = random.sample(range(num_card), 2)
-            indices = [3, 1]
+            for i in range(num_layers):
+                # randomly choose two card
+                # indices = random.sample(range(num_card), 2)
+                indices = [3, 1]
 
-            # swap redundant experts
-            expert_id_to_exchange = new_table[i][indices[0]][-1].clone()
-            new_table[i][indices[0]][-1] = new_table[i][indices[1]][-1]
-            new_table[i][indices[1]][-1] = expert_id_to_exchange
+                # swap redundant experts
+                expert_id_to_exchange = new_table[i][indices[0]][-1].clone()
+                new_table[i][indices[0]][-1] = new_table[i][indices[1]][-1]
+                new_table[i][indices[1]][-1] = expert_id_to_exchange
 
-        return 1, [-i for i in range(num_layers)], new_table
-```
+            return 1, [-i for i in range(num_layers)], new_table
+    ```
 
 2. To add a new EPLB algorithm, include the policy type and its corresponding implementation class in the `PolicyFactory` of `policy_factory.py`.
 
