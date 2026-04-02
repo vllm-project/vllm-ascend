@@ -55,20 +55,22 @@ def find_missing_init_dirs(src_dir):
 
     try:
         result = subprocess.run(
-            ["git", "ls-files", src_dir],
+            ["git", "ls-files", "-z", src_dir],
             check=True,
             capture_output=True,
             text=True,
         )
-        tracked_files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        tracked_files = {f for f in result.stdout.split('\0') if f}
     except (subprocess.CalledProcessError, FileNotFoundError):
-        tracked_files = []
+        tracked_files = None
 
-    if tracked_files:
-        candidate_dirs = {os.path.dirname(path) for path in tracked_files if path.endswith(".py")}
+    if tracked_files is not None:
+        candidate_dirs = {os.path.dirname(f) for f in tracked_files if f.endswith(".py")}
         for dirpath in candidate_dirs:
-            if not check_init_file_in_package(dirpath):
+            init_path = f"{dirpath}/__init__.py" if dirpath else "__init__.py"
+            if init_path not in tracked_files:
                 missing_init.add(dirpath)
+
     else:
         for dirpath, _, _ in os.walk(src_dir):
             if not check_init_file_in_package(dirpath):
