@@ -99,7 +99,7 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            has_initial_state = [1] * spec_query_start_loc.shape[0]
+            has_initial_state_spec = [1] * spec_query_start_loc.shape[0]
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_spec,
                 conv_weights,
@@ -107,7 +107,7 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 conv_states=conv_state,
                 query_start_loc=to_int64_tuple(spec_query_start_loc),
                 cache_indices=to_int64_tuple(spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes]),
-                initial_state_mode=has_initial_state,
+                initial_state_mode=has_initial_state_spec,
                 num_accepted_tokens=to_int64_tuple(num_accepted_tokens),
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
@@ -131,7 +131,7 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     run_mode=0,
                 )
         elif attn_metadata.num_decodes > 0:
-            has_initial_state = [1]*(spec_query_start_loc.shape[0]-1)
+            has_initial_state_decode = [1]*(spec_query_start_loc.shape[0]-1)
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_spec,
                 conv_weights,
@@ -139,7 +139,7 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 conv_states=conv_state,
                 query_start_loc=to_int64_tuple(spec_query_start_loc),
                 cache_indices=to_int64_tuple(spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes]),
-                initial_state_mode=has_initial_state,
+                initial_state_mode=has_initial_state_decode,
                 num_accepted_tokens=to_int64_tuple(num_accepted_tokens),
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
