@@ -324,29 +324,112 @@ python scripts/update_checklist_section.py \
 
 ## Phase 6: Release Notes
 
-### 6.1 Invoke Release Note Skill
+This phase handles the complete release notes writing process, from fetching commits to producing the final release notes.
 
-This phase invokes the existing `vllm-ascend-release-note-writer` skill:
+### 6.1 Fetch Commits
 
-```
-/release-note --base-tag ${LAST_VERSION} --head-tag ${NEW_VERSION}
-```
-
-Or manually:
+Fetch all commits between the previous and current version:
 
 ```bash
-cd .agents/skills/vllm-ascend-release-note-writer
+# Create output directory
+mkdir -p output/${VERSION}
 
-# Fetch commits
-uv run python scripts/fetch_commits-optimize.py \
+# Fetch commits with contributor statistics
+uv run python scripts/fetch_commits.py \
+  --owner vllm-project \
+  --repo vllm-ascend \
   --base-tag ${LAST_VERSION} \
   --head-tag ${NEW_VERSION} \
-  --output output/${VERSION}/0-current-raw-commits.md
-
-# Follow the release-note-writer SKILL.md workflow
+  --stats \
+  --output output/${VERSION}/0-current-raw-commits.md \
+  --stats-output output/${VERSION}/0-contributor-stats.md
 ```
 
-### 6.2 Create Release Notes PR
+The script outputs:
+- `0-current-raw-commits.md`: Raw commit list for analysis
+- `0-contributor-stats.md`: Contributor statistics including new contributors
+
+### 6.2 Analyze Commits
+
+Create a CSV file to analyze each commit:
+
+```bash
+# Create analysis workspace
+touch output/${VERSION}/1-commit-analysis-draft.csv
+```
+
+The CSV should have headers:
+| Column | Description |
+|--------|-------------|
+| `title` | Commit title |
+| `pr number` | PR number |
+| `user facing impact/summary` | What users should know |
+| `category` | Highlights/Features/Performance/etc. |
+| `decision` | include/exclude/merge |
+| `reason` | Why this decision |
+
+### 6.3 Draft Release Notes
+
+Create the initial draft following the category order:
+
+```markdown
+## v${VERSION} - ${DATE}
+
+This is the first release candidate of v${VERSION} for vLLM Ascend.
+Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+
+### Highlights
+(Top 3-5 most impactful changes)
+
+### Features
+(New functionality)
+
+### Hardware and Operator Support
+(New hardware/operators)
+
+### Performance
+(Performance improvements)
+
+### Dependencies
+(Version upgrades)
+
+### Deprecation & Breaking Changes
+(Breaking changes)
+
+### Documentation
+(Doc updates)
+
+### Others
+(Bug fixes, misc)
+
+### Known Issue
+(Known limitations)
+```
+
+Save drafts to:
+- `output/${VERSION}/2-highlights-note-draft.md` - Initial draft
+- `output/${VERSION}/3-highlights-note-edit.md` - Reviewed/edited version
+
+### 6.4 Release Notes Writing Guidelines
+
+**Inclusion Criteria:**
+- User experience improvements (CLI, error messages)
+- Core features (PD Disaggregation, KVCache, Graph mode, CP/SP, quantization)
+- Breaking changes and deprecations (always include)
+- Significant infrastructure changes
+- Major dependency updates (CANN/torch_npu/triton-ascend)
+- Hardware compatibility expansions (310P, A2, A3)
+
+**Writing Tips:**
+- Focus on what users should know, not internal details
+- Look up PR descriptions when uncertain: `gh pr view <number> --repo vllm-project/vllm-ascend`
+- Group related changes together
+- Include PR links: `[#12345](https://github.com/vllm-project/vllm-ascend/pull/12345)`
+
+**Reference:**
+- See `references/ref-past-release-notes-highlight.md` for style examples
+
+### 6.5 Create Release Notes PR
 
 After release notes are finalized:
 
@@ -575,6 +658,26 @@ vLLM Ascend 0.16.0rc1版本发布🎉 此版本是针对vLLM v0.16.0系列版本
 
 ## Script Reference
 
+### scripts/fetch_commits.py
+
+Fetches all commits between two tags and generates contributor statistics.
+
+**Arguments:**
+- `--owner`: Repository owner (default: vllm-project)
+- `--repo`: Repository name (default: vllm-ascend)
+- `--base-tag`: Base tag (older version, e.g., v0.14.0)
+- `--head-tag`: Head tag (newer version, e.g., v0.15.0rc1)
+- `--output`: Output file for commits (default: 0-current-raw-commits.md)
+- `--stats`: Generate contributor statistics
+- `--stats-output`: Output file for statistics (default: 0-contributor-stats.md)
+- `--sort`: Sort mode (chronological/alphabetical/reverse)
+- `--include-date`: Include commit date in output
+- `--token`: GitHub token (or use GITHUB_TOKEN env var)
+
+**Output:**
+- Commit list in markdown format with PR links
+- Contributor statistics including new contributors
+
 ### scripts/generate_checklist.py
 
 Generates the release checklist issue body from template.
@@ -676,6 +779,14 @@ The feedback collection issue template.
 ### references/version-files.yaml
 
 List of files that need version updates and their update patterns.
+
+### references/ref-past-release-notes-highlight.md
+
+Past release notes examples for style and category reference. Use this as a guide when writing new release notes to maintain consistency in:
+- Section ordering and naming
+- Writing style and tone
+- Level of detail for different categories
+- How to describe features, bug fixes, and breaking changes
 
 ## Error Handling
 
