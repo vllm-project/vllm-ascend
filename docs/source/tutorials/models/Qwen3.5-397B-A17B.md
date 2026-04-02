@@ -284,7 +284,7 @@ unset http_proxy
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxx"
-local_ip="141.xx.xx.1"
+local_ip="xxx"
 
 # [Optional] jemalloc
 # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
@@ -360,7 +360,7 @@ unset http_proxy
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxx"
-local_ip="141.xx.xx.2"
+local_ip="xxx"
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
 
@@ -440,7 +440,7 @@ unset http_proxy
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxx"
-local_ip="141.xx.xx.3"
+local_ip="xxx"
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
 
@@ -515,6 +515,7 @@ The parameters are explained as follows:
 - `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
 - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+- `no-enable-prefix-caching`: The prefix-cache feature is enabled by default. You can use the `--no-enable-prefix-caching` parameter to disable this feature. Notice: for Prefill-Decode disaggregation feature, known issuse on D node: [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944)
 
 7. Run the `proxy.sh` script on the prefill master node
 
