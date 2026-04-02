@@ -145,7 +145,7 @@ jobs:
           pip list | grep vllm || echo "No vllm packages found."
 
           echo "VLLM_VERSION=$(pip show vllm | grep ^Version | awk '{print $2}')" >> $GITHUB_ENV
-          echo "VLLM_ASCEND_VERSION=$(pip show vllm-ascend | grep ^Version | awk '{print $2}')" >> $GITHUB_ENV
+          echo "VLLM_ASCEND_VERSION=$(cd vllm-ascend && git rev-parse HEAD)" >> $GITHUB_ENV
 
           echo ""
           echo "============================"
