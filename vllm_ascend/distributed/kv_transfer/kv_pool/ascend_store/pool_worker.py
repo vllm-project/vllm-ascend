@@ -159,45 +159,47 @@ class KVPoolWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
-        first_kv_cache = first_kv_cache_tuple[0]
+        # Normalize to tuple format for unified handling (single cache or multiple caches)
+        first_kv_cache_tuple = (first_kv_cache_tuple,) if not isinstance(first_kv_cache_tuple, (list, tuple)) else first_kv_cache_tuple
+        self.num_blocks = []    # Number of total blocks for each cache tensor (shape[0])
+        self.block_len = []     # Byte size of a single block for each cache tensor
+        # Calculate block count and single block bytes for each cache in the tuple
+        for cache in first_kv_cache_tuple:
+            num_block = cache.shape[0]
+            block_bytes = cache.element_size() * math.prod(cache.shape[1:])
+            self.num_blocks.append(num_block)
+            self.block_len.append(block_bytes)
 
-        self.num_blocks = first_kv_cache.shape[0]
-        logger.info("num_blocks: %s", self.num_blocks)
-        block_rank = 3
-        self.block_len = []
-        if self.use_mla or self.use_sparse:
-            for i in range(len(first_kv_cache_tuple)):
-                block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
-                logger.info("block_shape: %s", block_shape)
-                self.block_len.append(first_kv_cache[i].element_size() * math.prod(block_shape))
-        else:
-            # [num_block, block_size, num_head, hidden_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
-            logger.info("block_shape: %s", block_shape)
-            self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
+            logger.info(
+                "Cache[%d] num_blocks: %d, single_block_bytes: %d, shape: %s",
+                len(self.num_blocks) - 1,
+                num_block, block_bytes,
+                cache.shape
+            )
 
         logger.info(
-            "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
+            "Registering KV_Caches. use_mla: %s, use_sparse: %s",
             self.use_mla,
-            self.use_sparse,
-            first_kv_cache.shape,
+            self.use_sparse
         )
 
         self.kv_caches = kv_caches
         self.kv_caches_base_addr = []
-        ptrs = []
-        lengths = []
-        length = len(self.block_len)
-        for cache_or_caches in kv_caches.values():
-            # Normalize to always be a list of caches
-            for i, cache in enumerate(cache_or_caches, 0):
-                base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len[i % length]
-                self.kv_caches_base_addr.append(base_addr)
-                ptrs.append(base_addr)
-                lengths.append(region_len)
+        cache_ptrs = []
+        cache_sizes = []  # Total bytes for each individual cache tensor
 
-        self.m_store.register_buffer(ptrs, lengths)
+        for cache_tuple in kv_caches.values():
+            cache_tuple = (cache_tuple,) if not isinstance(cache_tuple, (list, tuple)) else cache_tuple
+            # Process each cache tensor (K, V, DSA_K, DSA_K_SCALE, etc.)
+            for cache_idx, cache in enumerate(cache_tuple):
+                base_addr = cache.data_ptr()
+                # Total bytes for this cache = num_blocks * bytes per block
+                total_bytes = self.num_blocks[cache_idx] * self.block_len[cache_idx]
+                self.kv_caches_base_addr.append(base_addr)
+                cache_ptrs.append(base_addr)
+                cache_sizes.append(total_bytes)
+
+        self.m_store.register_buffer(cache_ptrs, cache_sizes)
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
 
