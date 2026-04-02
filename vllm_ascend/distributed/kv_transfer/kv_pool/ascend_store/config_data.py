@@ -130,7 +130,7 @@ class ChunkedTokenDatabase:
         size_list = []
         length = len(self.block_len)
         for i in range(length):
-            addr = self.kv_caches_base_addr[layer_id * length] + block_id * self.block_len[i]
+            addr = self.kv_caches_base_addr[layer_id * length + i] + block_id * self.block_len[i]
             size = int(self.block_len[i] / self.block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
