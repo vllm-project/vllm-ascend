@@ -230,7 +230,7 @@ bool RecurrentGatedDeltaRuleV310Tiling::CheckDimEqual(const gert::Shape a, const
 bool RecurrentGatedDeltaRuleV310Tiling::CheckDim(const gert::Shape shape, const size_t dim, const std::string &dimDesc)
 {
     if (shape.GetDimNum() != dim) {
-        OP_LOGE(context_->GetNodeName(), "The number of dimensons of %s should be %zu, but it is %zu",
+        OP_LOGE(context_->GetNodeName(), "The number of dimensions of %s should be %zu, but it is %zu",
                 dimDesc.c_str(), dim, shape.GetDimNum());
         return false;
     }

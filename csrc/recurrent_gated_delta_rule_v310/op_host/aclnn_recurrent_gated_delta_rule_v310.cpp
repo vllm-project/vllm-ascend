@@ -42,7 +42,7 @@ constexpr size_t BETA_DIM_NUM = 2;
 constexpr size_t STATE_DIM_NUM = 4;
 
 struct RecurrentGatedDeltaRuleV310Params {
-    // madatory
+    // mandatory
     const aclTensor *query {nullptr};
     const aclTensor *key {nullptr};
     const aclTensor *value {nullptr};
@@ -111,7 +111,7 @@ static inline bool CheckDtypeVaild(const RecurrentGatedDeltaRuleV310Params &para
 static aclnnStatus CheckParams(RecurrentGatedDeltaRuleV310Params &params)
 {
     CHECK_RET(CheckDtypeVaild(params), ACLNN_ERR_PARAM_INVALID);
-    OP_LOGD("RecurrentGatedDeltaRuleV310 check params sucess.");
+    OP_LOGD("RecurrentGatedDeltaRuleV310 check params success.");
     return ACLNN_SUCCESS;
 }
 
