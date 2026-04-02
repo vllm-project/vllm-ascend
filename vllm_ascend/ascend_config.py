@@ -400,8 +400,9 @@ class XliteGraphConfig:
                     "Please set pipeline_parallel_size to 1."
                 )
             if vllm_config.cache_config.block_size != 128:
-                raise RuntimeError(
-                    "Xlite graph mode is only compatible with block_size of 128. Please set block_size to 128."
+                logger.warning(
+                    f"Current cache block size is {vllm_config.cache_config.block_size}, which may not be optimal or "
+                    f"compatible with xlite graph mode. The recommended block size for xlite graph mode is 128."
                 )
 
 
