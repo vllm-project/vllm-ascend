@@ -694,11 +694,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
-                if isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 2:
-                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-                elif isinstance(kv_cache, torch.Tensor) and kv_cache.dim() > 0 and kv_cache.shape[0] == 1:
-                    self.key_cache, self.value_cache = kv_cache[0][0], kv_cache[0][1]
-                elif isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2:
+                if (
+                    isinstance(kv_cache, torch.Tensor)
+                    and kv_cache.dim() > 0
+                    and kv_cache.shape[0] == 2
+                    or isinstance(kv_cache, (list, tuple))
+                    and len(kv_cache) >= 2
+                ):
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
             if self.key_cache is None:
