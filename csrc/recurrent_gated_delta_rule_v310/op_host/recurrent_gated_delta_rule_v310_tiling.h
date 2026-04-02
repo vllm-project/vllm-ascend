@@ -131,7 +131,7 @@ protected:
     RecurrentGatedDeltaRuleV310TilingData tilingData_;
     RecurrentGatedDeltaRuleV310Info inputParams_;
     UbCalcContext ubCalcCtx_;
-    ge::DataType inputDtype_{ge::DT_BF16};
+    ge::DataType inputDtype_{ge::DT_FLOAT16};
 };
 
 } // namespace optiling

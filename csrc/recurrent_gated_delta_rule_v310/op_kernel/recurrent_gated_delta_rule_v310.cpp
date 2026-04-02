@@ -23,7 +23,7 @@ recurrent_gated_delta_rule_v310(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_AD
                                 GM_ADDR ssmStateIndices, GM_ADDR g, GM_ADDR gk, GM_ADDR numAcceptedTokens, GM_ADDR out,
                                 GM_ADDR stateOut, GM_ADDR workspaceGM, GM_ADDR tilingGM)
 {
-    REGISTER_TILING_DEFAULT(RecurrentGatedDeltaRuleTilingData);
+    REGISTER_TILING_DEFAULT(RecurrentGatedDeltaRuleV310TilingData);
     GET_TILING_DATA(tilingData, tilingGM);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     RGDRInitParams initParams{query, key, value, g, gk, beta, state, cuSeqlens,

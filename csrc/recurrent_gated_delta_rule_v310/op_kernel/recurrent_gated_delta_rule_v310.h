@@ -167,7 +167,7 @@ struct RGDRInitParams {
 template <typename inType, typename outType>
 class RGDR {
 public:
-    __aicore__ inline RGDR(const RecurrentGatedDeltaRuleTilingData *tilingData)
+    __aicore__ inline RGDR(const RecurrentGatedDeltaRuleV310TilingData *tilingData)
     {
         B_ = tilingData->b;
         T_ = tilingData->t;

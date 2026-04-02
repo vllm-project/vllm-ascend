@@ -44,13 +44,13 @@ const aclTensor *RecurrentGatedDeltaRuleV310(const aclTensor *query, const aclTe
 
     // infershape
     auto ret = INFER_SHAPE(
-        RecurrentGatedDeltaRule,
+        RecurrentGatedDeltaRuleV310,
         OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens),
         OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue));
     OP_CHECK_INFERSHAPE(ret != ACLNN_SUCCESS, return nullptr, "RecurrentGatedDeltaRuleV310 InferShape failed.");
 
     ret = ADD_TO_LAUNCHER_LIST_AICORE(
-        RecurrentGatedDeltaRule,
+        RecurrentGatedDeltaRuleV310,
         OP_INPUT(query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, g, gk, numAcceptedTokens),
         OP_OUTPUT(out, stateRef), OP_ATTR(scaleValue));
     OP_CHECK_ADD_TO_LAUNCHER_LIST_AICORE(ret != ACLNN_SUCCESS, return nullptr,

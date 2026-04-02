@@ -174,9 +174,8 @@ ge::graphStatus RecurrentGatedDeltaRuleV310Tiling::AnalyzeDtype()
     auto queryDtype = context_->GetInputDesc(QUERY_INDEX)->GetDataType();
     auto keyDtype = context_->GetInputDesc(KEY_INDEX)->GetDataType();
     auto valueDtype = context_->GetInputDesc(VALUE_INDEX)->GetDataType();
-    OP_CHECK_IF((queryDtype != ge::DT_BF16 && queryDtype != ge::DT_FLOAT16) ||
-                    keyDtype != queryDtype || valueDtype != queryDtype,
-                OP_LOGE(context_->GetNodeName(), "query/key/value dtype should be bfloat16 or float16 and consistent"),
+    OP_CHECK_IF(queryDtype != ge::DT_FLOAT16 || keyDtype != queryDtype || valueDtype != queryDtype,
+                OP_LOGE(context_->GetNodeName(), "query/key/value dtype should be float16 and consistent"),
                 return ge::GRAPH_FAILED);
     inputDtype_ = queryDtype;
 

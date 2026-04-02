@@ -16,7 +16,7 @@
 
 namespace RecurrentGatedDeltaRuleV310 {
 #pragma pack(push, 8)
-struct alignas(8) RecurrentGatedDeltaRuleTilingData { // alignas(8)确保8字节对齐
+struct alignas(8) RecurrentGatedDeltaRuleV310TilingData { // alignas(8)确保8字节对齐
     uint32_t vectorCoreNum;
     uint32_t ubCalSize;
     uint32_t ubRestBytes;
