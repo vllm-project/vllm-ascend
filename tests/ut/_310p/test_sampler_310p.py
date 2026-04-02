@@ -197,6 +197,17 @@ def test_sample_310p_skips_materialize_for_all_greedy_requests():
     assert out == expected
 
 
+def test_apply_penalties_310p_is_explicit_noop():
+    logits = torch.randn(2, 4, dtype=torch.float32)
+    original_logits = logits.clone()
+    sampling_metadata = SimpleNamespace(no_penalties=False)
+
+    out = AscendSampler310.apply_penalties(logits, sampling_metadata, [[1], [2]])
+
+    assert out is logits
+    assert torch.equal(out, original_logits)
+
+
 def test_model_runner_310_installs_sampler_and_rebuilds_rejection_sampler():
     def fake_super_init(self, *args, **kwargs):
         self.rejection_sampler = object()

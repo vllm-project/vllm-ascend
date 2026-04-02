@@ -84,6 +84,15 @@ class AscendSampler310(AscendSampler):
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler310(logprobs_mode=logprobs_mode)
 
+    @staticmethod
+    def apply_penalties(
+        logits: torch.Tensor,
+        sampling_metadata,
+        output_token_ids: list[list[int]],
+    ) -> torch.Tensor:
+        # Keep 310P off the penalty path while narrowing the Add-kernel fault.
+        return logits
+
     def sample(
         self,
         logits: torch.Tensor,
