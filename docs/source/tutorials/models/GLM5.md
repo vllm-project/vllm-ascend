@@ -741,7 +741,7 @@ Before you start, please
     ```
 
 2. prepare the script `run_dp_template.sh` on each node.
-    
+
     To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj"]` needs to be added to `--additional_config` on each prefill node.
     1. Prefill node 0
 
@@ -810,8 +810,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -891,8 +891,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -973,8 +973,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -1054,8 +1054,8 @@ Before you start, please
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
-                                 "dp_size": 4,
-                                 "tp_size": 8
+                                 "dp_size": 2,
+                                 "tp_size": 16
                          },
                          "decode": {
                                  "dp_size": 16,
@@ -1135,8 +1135,8 @@ Before you start, please
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
-                                 "dp_size": 4,
-                                 "tp_size": 8
+                                 "dp_size": 2,
+                                 "tp_size": 16
                          },
                          "decode": {
                                  "dp_size": 16,
@@ -1216,8 +1216,8 @@ Before you start, please
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
-                                 "dp_size": 4,
-                                 "tp_size": 8
+                                 "dp_size": 2,
+                                 "tp_size": 16
                          },
                          "decode": {
                                  "dp_size": 16,
@@ -1233,14 +1233,14 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
+    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
     ```
 
 2. Prefill node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
+    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
     ```
 
 3. Decode node 0
@@ -1288,8 +1288,8 @@ python load_balance_proxy_server_example.py \
        $node_p1_ip \
        $node_p1_ip \
     --prefiller-ports \
-       6700 6701 \
-       6700 6701 \
+       6700 \
+       6700 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
