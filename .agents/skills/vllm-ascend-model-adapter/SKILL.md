@@ -40,6 +40,7 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 
 ### 1) Collect context
 
+- **Run NPU environment sanity check first** (see `references/workflow-checklist.md` §0.5). Verify NPU devices are visible, `torch_npu` is importable, NPU tensor creation works, and available NPU count ≥ required TP size. If any check fails, stop and resolve before proceeding.
 - Confirm model path (default `/models/<model-name>`; if environment differs, confirm with user explicitly).
 - Confirm implementation roots (`/vllm-workspace/vllm`, `/vllm-workspace/vllm-ascend`).
 - Confirm delivery root (the current git repo where the final commit is expected).

@@ -18,6 +18,41 @@ Expected environment:
 - Software: official vllm-ascend Docker image (see `./Dockerfile` for full contents)
 - TP=16 typical for A3 (16-NPU), TP=8 typical for A2 (8-NPU)
 
+## 0.5) NPU environment sanity check
+
+Run once at session start before any other work. If any check fails, stop and resolve the environment issue first.
+
+```bash
+# 1. NPU device visibility
+npu-smi info
+
+# 2. torch_npu importable and NPU tensor creation works
+python - <<'PY'
+import torch
+import torch_npu
+n = torch.npu.device_count()
+assert n > 0, f"No NPU devices found (device_count={n})"
+x = torch.tensor([1.0], dtype=torch.bfloat16).npu()
+assert x.device.type == "npu"
+print(f"OK: {n} NPU(s) visible, tensor creation passed")
+PY
+
+# 3. available NPU count vs required TP size
+python - <<'PY'
+import torch_npu, torch
+n = torch.npu.device_count()
+tp = int("${TP_SIZE:-8}")   # set TP_SIZE in env or adjust manually
+assert n >= tp, f"Need {tp} NPUs for TP={tp}, only {n} available"
+print(f"OK: {n} NPUs >= TP={tp}")
+PY
+
+# 4. CANN / driver version (informational, not blocking)
+npu-smi info -t board -i 0 2>/dev/null | grep -i "cann\|driver\|firmware" || true
+python -c "import torch_npu; print('torch_npu version:', torch_npu.__version__)"
+```
+
+If any assertion above fails: **stop here**, resolve the environment issue, then restart the checklist from Step 0.
+
 ## 1) Fast triage commands
 
 ```bash
