@@ -12,10 +12,9 @@ on:
         type: string
         default: linux-aarch64-a3-0
       image:
-        required: false
+        required: true
         type: string
-        description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11"
+        description: pre-build image used for test, different images should be passed according different hardware, such as a2/a3.
       config_file_path:
         required: true
         type: string

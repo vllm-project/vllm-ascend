@@ -20,15 +20,20 @@ name: 'Nightly image build'
 on:
   workflow_call:
     inputs:
-      target:
+      image_push_target:
         required: true
         type: string
-        description: "Build target: 'a2' or 'a3'"
-      vllm_ascend_branch:
+        description: "Target image to build, e.g., py3.11-cuda12.4-ubuntu22.04"
+      image_build_ref:
         required: false
         type: string
         default: 'main'
         description: "Branch/ref to checkout"
+      soc_version:
+        required: false
+        type: string
+        default: 'a3'
+        description: "Soc version, e.g., a2/a3"
     secrets:
       HW_USERNAME:
         required: false
@@ -39,13 +44,13 @@ on:
 
 jobs:
   build:
-    name: Build nightly-${{ inputs.target }} image
+    name: Build nightly-${{ inputs.image_build_ref }} image
     runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ inputs.vllm_ascend_branch }}
+          ref: ${{ inputs.image_build_ref }}
 
       - name: Login to Huawei Cloud SWR
         id: login-swr
@@ -56,18 +61,15 @@ jobs:
         run: |
           echo "$HW_TOKEN" | docker login -u "$HW_USERNAME" --password-stdin swr.cn-southwest-2.myhuaweicloud.com
 
-      - name: Build nightly-${{ inputs.target }} image
+      - name: Build nightly-${{ inputs.image_push_target }} image
         env:
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG="${BRANCH_TAG//\//-}"
-          IMAGE="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${BRANCH_TAG}-${{ inputs.target }}"
           docker build \
             --network host \
             --platform linux/arm64 \
-            -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }} \
+            -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.soc_version }} \
             --build-arg CANN_VERSION="8.5.1" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
@@ -79,6 +81,4 @@ jobs:
       - name: Push image to SWR
         if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
-          BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG="${BRANCH_TAG//\//-}"
-          docker push swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${BRANCH_TAG}-${{ inputs.target }}
+          docker push ${{ inputs.image_push_target }}
