@@ -455,6 +455,10 @@ class AscendModelSlimConfig(QuantizationConfig):
                     parts = parts[: exp_idx + 1]
                     prefix = ".".join(parts)
 
+        # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
+        if model_type in ["qwen3_vl"] and prefix == "lm_head":
+            prefix = "language_model.lm_head"
+
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
         prefix = self.quant_prefix_mapper(model_type, prefix)
