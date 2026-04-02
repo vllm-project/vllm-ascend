@@ -3122,7 +3122,10 @@ class NPUModelRunner(GPUModelRunner):
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             if self.eplb_enable:
-                self.vllm_config.parallel_config.enable_eplb = True
+                def mock_pass(param1, param2):
+                    return
+                from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+                DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model)
