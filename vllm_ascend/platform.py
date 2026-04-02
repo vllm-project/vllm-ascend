@@ -793,9 +793,8 @@ class NPUPlatform(Platform):
             # Ascend does not implement the GPU-side num_computed_tokens
             # correction (update_num_computed_tokens_for_batch_change) required
             # for async spec decode, which causes accuracy divergence.
-            if (
-                vllm_config.speculative_config is not None
-                and getattr(vllm_config.scheduler_config, "async_scheduling", False)
+            if vllm_config.speculative_config is not None and getattr(
+                vllm_config.scheduler_config, "async_scheduling", False
             ):
                 logger.warning(
                     "Async scheduling with speculative decoding is not yet "
