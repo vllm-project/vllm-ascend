@@ -73,6 +73,15 @@ class VllmEplbAdaptor:
                 if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                     self.expert_weight_names.append("fused_w1_scale_list")
                     self.expert_weight_names.append("fused_w2_scale_list")
+            elif quant_type == QuantType.W4A8:
+                self.expert_weight_names = [
+                    "w13_weight_list",
+                    "w2_weight_list",
+                    "w13_weight_scale_list",
+                    "w2_weight_scale_list",
+                    "w13_scale_bias_list",
+                    "w2_scale_bias_list",
+                ]
             else:
                 raise ValueError(f"EPLB not support {quant_type}")
         else:

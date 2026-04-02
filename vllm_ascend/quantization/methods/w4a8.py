@@ -379,14 +379,29 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         topk_weights = topk_weights.to(x.dtype)
 
+        if self.dynamic_eplb:
+            w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
+            w1_scale = layer.w13_weight_scale_list
+            w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
+            w2_scale = layer.w2_weight_scale_list
+            w1_scale_bias = layer.w13_scale_bias_list
+            w2_scale_bias = layer.w2_scale_bias_list
+        else:
+            w1 = [layer.w13_weight]
+            w1_scale = [layer.w13_weight_scale]
+            w2 = [layer.w2_weight]
+            w2_scale = [layer.w2_weight_scale]
+            w1_scale_bias = [layer.w13_scale_bias] if hasattr(layer, "w13_scale_bias") else None
+            w2_scale_bias = [layer.w2_scale_bias] if hasattr(layer, "w2_scale_bias") else None
+
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=[layer.w13_weight],
-                w2=[layer.w2_weight],
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -396,10 +411,10 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 log2phy=log2phy,
                 pertoken_scale=pertoken_scale,
                 activation=activation,
-                w1_scale=[layer.w13_weight_scale],
-                w2_scale=[layer.w2_weight_scale],
-                w1_scale_bias=layer.w13_scale_bias if hasattr(layer, "w13_scale_bias") else None,
-                w2_scale_bias=layer.w2_scale_bias if hasattr(layer, "w2_scale_bias") else None,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
             )
         )
 
@@ -536,5 +551,28 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-        layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
-        layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+
+        if self.dynamic_eplb:
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            layer.w13_weight_scale_list = [weight.clone() for weight in layer.w13_weight_scale.data.unbind(dim=0)]
+            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
+            layer.w13_scale_bias_list = (
+                [weight.clone() for weight in layer.w13_scale_bias.data.unbind(dim=0)]
+                if hasattr(layer, "w13_scale_bias")
+                else None
+            )
+            layer.w2_scale_bias_list = (
+                [weight.clone() for weight in layer.w2_scale_bias.data.unbind(dim=0)]
+                if hasattr(layer, "w2_scale_bias")
+                else None
+            )
+            del layer.w13_weight
+            del layer.w2_weight
+            del layer.w13_weight_scale
+            del layer.w2_weight_scale
+            del layer.w13_scale_bias
+            del layer.w2_scale_bias
+        else:
+            layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
+            layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
