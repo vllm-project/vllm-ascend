@@ -62,13 +62,6 @@ concurrency:
   group: ascend-nightly-${{ github.ref }}-a3
   cancel-in-progress: true
 
-env:
-  # Single source of truth for all shared variables across jobs.
-  # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
-  # so these values are exported as job outputs via the `setup-vars` job below.
-  IMAGE_REGISTRY: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
-  ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
-
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
@@ -85,29 +78,29 @@ jobs:
     needs: parse-trigger
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.export.outputs.image }}
-      ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
+      image: ${{ steps.vars.outputs.image }}
+      ascend_log_prefix: ${{ steps.vars.outputs.ascend_log_prefix }}
+      image_build_ref: ${{ steps.vars.outputs.image_build_ref }}
     steps:
-      - id: export
+      - name: Set variables
+        id: vars
         run: |
           {
-            echo "image=${{ env.IMAGE_REGISTRY }}"
-            echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-          } >> $GITHUB_OUTPUT
+            echo "image=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3"
+            echo "ascend_log_prefix=/root/.cache/ascend-logs"
+            echo "image_build_ref=releases/v0.18.0"
+          } >> "$GITHUB_OUTPUT"
 
   build-image:
     name: Build nightly-a3 image
+    needs: [setup-vars, parse-trigger]
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    strategy:
-      matrix:
-        vllm_ascend_branch: >-
-          ${{ github.event_name == 'workflow_dispatch' 
-              && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
-              || fromJSON('["main", "releases/v0.18.0"]') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
-      target: a3
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      image_push_target: ${{ needs.setup-vars.outputs.image }}
+      # This ref is only used by pull_request-triggered workflow, and it won't cause any issue for other triggers
+      image_build_ref: ${{ needs.setup-vars.outputs.image_build_ref }}
+      soc_version: 'a3'
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -169,7 +162,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ matrix.vllm_ascend_branch }}-a3'
+      image: ${{ needs.setup-vars.outputs.image }}
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
@@ -271,7 +264,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ matrix.vllm_ascend_branch }}-a3'
+      image: ${{ needs.setup-vars.outputs.image }}
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
@@ -286,10 +279,10 @@ jobs:
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
-    needs: [multi-node-tests]
+    needs: [setup-vars, multi-node-tests]
     if: github.event_name == 'schedule' && needs.multi-node-tests.result != 'skipped'
     steps:
       - name: Clear pre-logs on pvc
         run: |
           # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+          rm -rf "${{ needs.setup-vars.outputs.ascend_log_prefix }}"/* || true
