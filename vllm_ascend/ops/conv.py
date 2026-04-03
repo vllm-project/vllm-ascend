@@ -23,10 +23,10 @@ from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 class AscendConv2dLayer(Conv2dLayer):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         # Use aclnn BatchMatMulV2 for better performance on Ascend NPU.
-        return self._forward_conv(x)
+        return self.forward_native(x)
 
 
 class AscendConv3dLayer(Conv3dLayer):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         # Use aclnn BatchMatMulV2 for better performance on Ascend NPU.
-        return self._forward_conv(x)
+        return self.forward_native(x)
