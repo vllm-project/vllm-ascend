@@ -24,15 +24,23 @@ bool IsRegbaseSocVersion(const gert::TilingParseContext* context);
 
 bool IsRegbaseSocVersion(const gert::TilingContext* context);
 
-static const gert::Shape g_vec_1_shape = {1};
-
-const gert::Shape &EnsureNotScalar(const gert::Shape &inShape)
-{
-    if (inShape.IsScalar()) {
-        return g_vec_1_shape;
-    }
-    return inShape;
-}
+const gert::Shape& EnsureNotScalar(const gert::Shape& inShape);
 } // namespace OpTiling
+
+template <typename T>
+T CeilAlign(T a, T b)
+{
+    return (a + b - 1) / b * b;
+}
+
+template <typename T>
+T CeilDiv(T a, T b)
+{
+    if (b == 0) {
+        return a;
+    }
+    return (a + b - 1) / b;
+}
+
 } // namespace Transformer
 } // namespace Ops
