@@ -424,6 +424,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
+        self.layer_name = kwargs.get("layer_name")
 
         # indexer param
         self.n_head: int = self.indexer.n_head  # 64
@@ -440,7 +441,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.use_torch_npu_lightning_indexer = True
 
         # dsa c8
-        self.use_sparse_c8_indexer = ascend_config.enable_sparse_c8
+        self.use_sparse_c8_indexer = ascend_config.is_sparse_c8_layer(self.layer_name)
         if self.use_sparse_c8_indexer:
             self.c8_k_cache_dtype = torch.int8
             self.c8_k_scale_cache_dtype = torch.float16
@@ -468,6 +469,19 @@ class AscendSFAImpl(MLAAttentionImpl):
                             "skipping sharding configuration"
                         )
                 register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+        draft_attn_metadatas=None,
+    ):
+        # sfa does not need to update graph params
+        pass
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.

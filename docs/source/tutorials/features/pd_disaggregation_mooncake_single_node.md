@@ -12,48 +12,48 @@ Using the Qwen2.5-VL-7B-Instruct model as an example, use vllm-ascend v0.11.0rc1
 
 1. Single Node Verification:
 
-Execute the following commands in sequence. The results must all be `success` and the status must be `UP`:
+    Execute the following commands in sequence. The results must all be `success` and the status must be `UP`:
 
-```bash
-# Check the remote switch ports
-for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
-# Get the link status of the Ethernet ports (UP or DOWN)
-for i in {0..7}; do hccn_tool -i $i -link -g ; done
-# Check the network health status
-for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
-# View the network detected IP configuration
-for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
-# View gateway configuration
-for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
-```
+    ```bash
+    # Check the remote switch ports
+    for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+    # Get the link status of the Ethernet ports (UP or DOWN)
+    for i in {0..7}; do hccn_tool -i $i -link -g ; done
+    # Check the network health status
+    for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
+    # View the network detected IP configuration
+    for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
+    # View gateway configuration
+    for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+    ```
 
 2. Check NPU HCCN Configuration:
 
-Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+    Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
-```bash
-cat /etc/hccn.conf
-```
+    ```bash
+    cat /etc/hccn.conf
+    ```
 
 3. Get NPU IP Addresses
 
-```bash
-for i in {0..7}; do hccn_tool -i $i -ip -g;done
-```
+    ```bash
+    for i in {0..7}; do hccn_tool -i $i -ip -g;done
+    ```
 
 4. Cross-Node PING Test
 
-```bash
-# Execute on the target node (replace 'x.x.x.x' with actual npu ip address).
-for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
-```
+    ```bash
+    # Execute on the target node (replace 'x.x.x.x' with actual npu ip address).
+    for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+    ```
 
 5. Check NPU TLS Configuration
 
-```bash
-# The tls settings should be consistent across all nodes
-for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
-```
+    ```bash
+    # The tls settings should be consistent across all nodes
+    for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
+    ```
 
 ## Run with Docker
 
