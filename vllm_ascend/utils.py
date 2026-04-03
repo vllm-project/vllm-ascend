@@ -1119,11 +1119,7 @@ def refresh_block_size(vllm_config):
 
     ascend_config = get_ascend_config()
     if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
-        logger.warning(
-            f"Current block size {cache_config.block_size} is larger than the maximum supported block size of 128. "
-            f"Your vLLM server will likely crash when processing requests, even after a successful launch."
-        )
-        logger.warning("Resetting block size to 128 for xlite compatibility.")
+        logger.warning("Setting block size to 128 for xlite compatibility.")
         cache_config.block_size = 128
 
 
