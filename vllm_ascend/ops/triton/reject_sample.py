@@ -261,15 +261,11 @@ def sample_recovered_tokens_kernel(
         for prev_pos in range(pos):
             prev_token_idx = start_idx + prev_pos
             prev_draft_token_id = tl.load(draft_token_ids_ptr + prev_token_idx)
-            prev_target_prob = tl.load(
-                target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id
-            )
+            prev_target_prob = tl.load(target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
             if NO_DRAFT_PROBS:
                 prev_draft_prob = 1.0
             else:
-                prev_draft_prob = tl.load(
-                    draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id
-                )
+                prev_draft_prob = tl.load(draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
             if prev_draft_prob > 0:
                 prefix_prob = min(prefix_prob * prev_target_prob / prev_draft_prob, 1.0)
             else:
@@ -298,9 +294,7 @@ def sample_recovered_tokens_kernel(
             else:
                 prob = tl.maximum(target_prob - draft_prob, 0.0)
 
-        q = tl.load(
-            q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
-        )
+        q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf"))
         new_p = prob / q
         recovered_id = tl.argmax(new_p, axis=-1)
         max_p = get_element(new_p, (recovered_id,))
@@ -430,9 +424,7 @@ def rejection_random_sample_block_verify_kernel(
                     next_token_idx = token_idx + 1
                     if NO_DRAFT_PROBS:
                         next_draft_token_id = tl.load(draft_token_ids_ptr + next_token_idx)
-                        next_target_prob = tl.load(
-                            target_probs_ptr + next_token_idx * vocab_size + next_draft_token_id
-                        )
+                        next_target_prob = tl.load(target_probs_ptr + next_token_idx * vocab_size + next_draft_token_id)
                         residual_mass = prefix_prob * (1.0 - next_target_prob)
                     else:
                         residual_mass = 0.0

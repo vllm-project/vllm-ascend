@@ -746,8 +746,9 @@ def rejection_random_sample_block_verify_pytorch(
     flat_draft_tokens = draft_tokens.flatten()
 
     if IS_NGRAM:
-        draft_token_probs = torch.ones(1, pin_memory=True, dtype=torch.float32).to(
-            device, non_blocking=True).expand_as(draft_tokens)
+        draft_token_probs = (
+            torch.ones(1, pin_memory=True, dtype=torch.float32).to(device, non_blocking=True).expand_as(draft_tokens)
+        )
     else:
         draft_token_probs = draft_probs[flat_indices, flat_draft_tokens].view(batch_size, max_spec_len)
 
@@ -796,31 +797,30 @@ def rejection_random_sample_block_verify_pytorch(
         )
 
     batch_indices = torch.arange(batch_size, device=device)
-    h_block[batch_indices, (gamma - 1).clamp(min=0)] = \
-        p_prefix[batch_indices, gamma.clamp(max=max_spec_len)]
+    h_block[batch_indices, (gamma - 1).clamp(min=0)] = p_prefix[batch_indices, gamma.clamp(max=max_spec_len)]
 
     non_greedy_mask = (~is_greedy)[:, None]
     accepted_mask = valid_mask & (uniform_token_probs.to(torch.float32) <= h_block) & non_greedy_mask
 
-    last_accept_i = torch.where(
-        accepted_mask,
-        i_indices.to(torch.long),
-        torch.zeros_like(i_indices, dtype=torch.long),
-    ).max(dim=1).values
+    last_accept_i = (
+        torch.where(
+            accepted_mask,
+            i_indices.to(torch.long),
+            torch.zeros_like(i_indices, dtype=torch.long),
+        )
+        .max(dim=1)
+        .values
+    )
 
     accept_mask = (i_indices <= last_accept_i[:, None]) & valid_mask & non_greedy_mask
-    output_token_ids[:, :max_spec_len] = torch.where(
-        accept_mask, draft_tokens, output_token_ids[:, :max_spec_len])
+    output_token_ids[:, :max_spec_len] = torch.where(accept_mask, draft_tokens, output_token_ids[:, :max_spec_len])
 
     reject_mask = (i_indices == last_accept_i[:, None] + 1) & valid_mask & non_greedy_mask
-    output_token_ids[:, :max_spec_len] = torch.where(
-        reject_mask, recovered_tokens, output_token_ids[:, :max_spec_len])
+    output_token_ids[:, :max_spec_len] = torch.where(reject_mask, recovered_tokens, output_token_ids[:, :max_spec_len])
 
     all_positions = torch.arange(max_spec_len + 1, pin_memory=True).to(device, non_blocking=True)[None, :]
     bonus_mask = (
-        (last_accept_i[:, None] >= num_draft_per_batch)
-        & non_greedy_mask
-        & (all_positions == num_draft_per_batch)
+        (last_accept_i[:, None] >= num_draft_per_batch) & non_greedy_mask & (all_positions == num_draft_per_batch)
     )
     output_token_ids[:] = torch.where(
         bonus_mask,
@@ -847,15 +847,16 @@ def sample_recovered_tokens_blockwise_pytorch(
     if num_tokens == 0:
         return
 
-    cu_start = torch.cat([
-        torch.tensor([0], pin_memory=True).to(device, non_blocking=True),
-        cu_num_draft_tokens[:-1],
-    ])
+    cu_start = torch.cat(
+        [
+            torch.tensor([0], pin_memory=True).to(device, non_blocking=True),
+            cu_num_draft_tokens[:-1],
+        ]
+    )
     cu_end = cu_num_draft_tokens
 
     token_indices = torch.arange(num_tokens, device=device)
-    in_range_mask = (token_indices[:, None] >= cu_start[None, :]) & (
-        token_indices[:, None] < cu_end[None, :])
+    in_range_mask = (token_indices[:, None] >= cu_start[None, :]) & (token_indices[:, None] < cu_end[None, :])
     token_to_batch = torch.argmax(in_range_mask.int(), dim=1)
     token_to_batch = torch.where(in_range_mask.any(dim=1), token_to_batch, torch.zeros_like(token_to_batch))
     pos_in_seq = token_indices - cu_start[token_to_batch]
