@@ -124,16 +124,44 @@ class ChunkedTokenDatabase:
             size_list.append(size)
         return addr_list, size_list, block_id
 
+    def prepare_block_info(self, start: int, end: int, block_ids: list[int]) -> tuple[int, list[int]]:
+        block_id = block_ids[start // self.block_size]
+        size_list = []
+        for i in range(len(self.block_len)):
+            size = int(self.block_len[i] / self.block_size * (end - start))
+            size_list.append(size)
+        return block_id, size_list
+
+    def prepare_addr_from_block_id(self, block_id: int, layer_id: int) -> list[int]:
+        length = len(self.block_len)
+        base_offset = layer_id * length
+        return [
+            self.kv_caches_base_addr[base_offset + i] + block_id * self.block_len[i]
+            for i in range(length)
+        ]
+
+    def prepare_addrs_from_block_ids(self, block_ids: list[int], layer_id: int) -> list[int]:
+        length = len(self.block_len)
+        base_offset = layer_id * length
+        return [
+            self.kv_caches_base_addr[base_offset + i] + block_id * self.block_len[i]
+            for block_id in block_ids
+            for i in range(length)
+        ]
+
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         block_id = block_ids[start // self.block_size]
-        addr_list = []
-        size_list = []
         length = len(self.block_len)
-        for i in range(length):
-            addr = self.kv_caches_base_addr[layer_id * length + i] + block_id * self.block_len[i]
-            size = int(self.block_len[i] / self.block_size * (end - start))
-            addr_list.append(addr)
-            size_list.append(size)
+        base_offset = layer_id * length
+        token_count = end - start
+        addr_list = [
+            self.kv_caches_base_addr[base_offset + i] + block_id * self.block_len[i]
+            for i in range(length)
+        ]
+        size_list = [
+            int(self.block_len[i] / self.block_size * token_count)
+            for i in range(length)
+        ]
         return addr_list, size_list
 
     def process_tokens(
@@ -240,6 +268,18 @@ class RequestTracker:
     # NOTE: This field will only be used when you enable kv-event
     token_ids: list[int] | None = None
 
+    key_gva_mapping: dict[str, int | None] | None = None
+
+    block_keys_by_layer: list[list[str]] | None = None
+
+    starts: list[int] | None = None
+    ends: list[int] | None = None
+
+    block_ids_per_chunk: list[int] | None = None
+    sizes_per_chunk: list[list[int]] | None = None
+
+    processed_block_count: int = 0
+
     @staticmethod
     def from_new_request(
         new_request: "NewRequestData",
@@ -310,6 +350,17 @@ class ReqMeta:
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
     token_ids: list[int] | None = None
     original_block_size: int | None = None
+
+    key_gva_mapping: dict[str, int | None] | None = None
+    block_keys_by_layer: list[list[str]] | None = None
+
+    starts: list[int] | None = None
+    ends: list[int] | None = None
+
+    block_ids_per_chunk: list[int] | None = None
+    sizes_per_chunk: list[list[int]] | None = None
+
+    processed_block_count: int = 0
 
     @staticmethod
     def from_request_tracker(
@@ -404,10 +455,14 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 @dataclass
 class LasyerMultiBlockReqMeta:
     req_id: str
-    keys: list[LayerPoolKey]
+    keys: list[str]
     starts: list[int]
     ends: list[int]
     block_ids: list[int]
     layer_id: int
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
+    key_gva_mapping: dict[str, int | None] | None = None
+    addr_list: list[int] | None = None
+    size_list: list[int] | None = None
+    gvas_list: list[int] | None = None
