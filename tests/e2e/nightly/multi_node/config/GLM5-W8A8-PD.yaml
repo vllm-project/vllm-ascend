@@ -71,7 +71,7 @@ deployment:
                             "dp_size": 8,
                             "tp_size": 4
                     }
-                }
+              }
           }'
 
 
@@ -154,15 +154,15 @@ deployment:
           "kv_port": "30100",
           "engine_id": "1",
           "kv_connector_extra_config": {
-                      "use_ascend_direct": true,
-                      "prefill": {
-                              "dp_size": 4,
-                              "tp_size": 8
-                      },
-                      "decode": {
-                              "dp_size": 8,
-                              "tp_size": 4
-                      }
+                    "use_ascend_direct": true,
+                    "prefill": {
+                            "dp_size": 4,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+                    }
               }
           }'
 
@@ -201,15 +201,15 @@ deployment:
           "kv_port": "30100",
           "engine_id": "1",
           "kv_connector_extra_config": {
-                      "use_ascend_direct": true,
-                      "prefill": {
-                              "dp_size": 4,
-                              "tp_size": 8
-                      },
-                      "decode": {
-                              "dp_size": 8,
-                              "tp_size": 4
-                      }
+                    "use_ascend_direct": true,
+                    "prefill": {
+                            "dp_size": 4,
+                            "tp_size": 8
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+                    }
               }
           }'
 benchmarks:
