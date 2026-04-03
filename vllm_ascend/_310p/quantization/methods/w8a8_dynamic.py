@@ -191,7 +191,6 @@ class AscendW8A8DynamicLinearMethod310(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-
         # NOTE(310P):
         # - There is an accuracy issue currently, which is expected to be fixed in the next version.
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
