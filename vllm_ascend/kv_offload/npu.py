@@ -5,6 +5,7 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
+from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
@@ -29,6 +30,8 @@ class NPUOffloadingSpec(OffloadingSpec):
         # worker-side
         self._handler: OffloadingHandler | None = None
 
+        self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
             kv_events_config = self.vllm_config.kv_events_config
@@ -36,10 +39,15 @@ class NPUOffloadingSpec(OffloadingSpec):
             assert len(self.gpu_block_size) == 1
             gpu_block_size = self.gpu_block_size[0]
             offloaded_block_size = gpu_block_size * self.block_size_factor
-            self._manager = LRUOffloadingManager(
-                CPUBackend(block_size=offloaded_block_size, num_blocks=self.num_cpu_blocks),
-                enable_events=enable_events,
-            )
+            backend = CPUBackend(block_size=offloaded_block_size, num_blocks=self.num_cpu_blocks)
+
+            if self.eviction_policy == "lru":
+                self._manager = LRUOffloadingManager(backend=backend, enable_events=enable_events)
+            elif self.eviction_policy == "arc":
+                self._manager = ARCOffloadingManager(backend=backend, enable_events=enable_events)
+            else:
+                raise ValueError(f"Unknown eviction policy: {self.eviction_policy}. Supported policies: lru, arc")
+
         return self._manager
 
     def get_handlers(
