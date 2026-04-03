@@ -1,0 +1,63 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  OMP_NUM_THREADS: "1"
+  OMP_PROC_BIND: "false"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--quantization"
+  - "ascend"
+  - "--no-enable-prefix-caching"
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--tensor-parallel-size"
+  - "2"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "20000"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--async-scheduling"
+
+_benchmarks: &benchmarks
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/textvqa-lite
+    request_conf: vllm_api_stream_chat
+    dataset_conf: textvqa/textvqa_gen_base64
+    max_out_len: 2048
+    batch_size: 128
+    baseline: 80
+    temperature: 0
+    top_k: -1
+    top_p: 1
+    repetition_penalty: 1
+    threshold: 5
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3-VL-32B-Instruct-W8A8"
+    model: "Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-QuaRot"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation_config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,12,16,20,24,32,48,64,68,72,76,80,128]}'
+    benchmarks:
+      <<: *benchmarks
