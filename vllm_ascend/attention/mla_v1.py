@@ -50,7 +50,7 @@ from vllm_ascend.ops.layer_shard_linear import (
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, weak_ref_tensors
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, weak_ref_tensors, get_ascend_device_type, AscendDeviceType
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -738,6 +738,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
+        if self.fa_quant_layer:
+            self.dtype = torch.float8_e4m3fn if get_ascend_device_type == AscendDeviceType.A5 else torch.int8
+        else:
+            self.vllm_config.model_config.dtype
         self.dtype = torch.int8 if self.fa_quant_layer else self.vllm_config.model_config.dtype
         self.layer_sharding_kwargs = []
         for layer_name in get_ascend_config().layer_sharding or []:
@@ -949,30 +953,35 @@ class AscendMLAImpl(MLAAttentionImpl):
                 post_process_after_loading_for_shard_weight_series(layer)
 
     def _process_weights_for_fused_fa_quant(self):
-        self.gamma1 = self.q_a_layernorm.weight.data  # type: ignore[union-attr]
-        self.gamma2 = self.kv_a_layernorm.weight.data  # type: ignore[union-attr]
+        if get_ascend_device_type == AscendDeviceType.A5:
+            layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
+            self.fa_kscale = layer.fa_kscale
+            self.fa_vscale = layer.fa_vscale
+        else:
+            self.gamma1 = self.q_a_layernorm.weight.data  # type: ignore[union-attr]
+            self.gamma2 = self.kv_a_layernorm.weight.data  # type: ignore[union-attr]
 
-        wu_q = self.q_proj.weight.data
+            wu_q = self.q_proj.weight.data
 
-        self.wu_q = wu_q
+            self.wu_q = wu_q
 
-        q_a_proj_fa3 = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()  # type: ignore[union-attr]
+            q_a_proj_fa3 = self.fused_qkv_a_proj.weight.data[..., : self.q_lora_rank].contiguous()  # type: ignore[union-attr]
 
-        self.wd_q = q_a_proj_fa3
+            self.wd_q = q_a_proj_fa3
 
-        kv_a_proj_fa3 = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
+            kv_a_proj_fa3 = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
 
-        self.wd_kv = kv_a_proj_fa3
+            self.wd_kv = kv_a_proj_fa3
 
-        self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
-        q_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[: self.q_lora_rank].contiguous()  # type: ignore[union-attr]
-        self.dequant_scale_w_dq = q_a_proj_deq_scl.view(1, -1).to(torch.float)
-        kv_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
-        self.dequant_scale_w_dkv_kr = kv_a_proj_deq_scl.view(1, -1).to(torch.float)
+            self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
+            q_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[: self.q_lora_rank].contiguous()  # type: ignore[union-attr]
+            self.dequant_scale_w_dq = q_a_proj_deq_scl.view(1, -1).to(torch.float)
+            kv_a_proj_deq_scl = self.fused_qkv_a_proj.weight_scale[self.q_lora_rank :].contiguous()  # type: ignore[union-attr]
+            self.dequant_scale_w_dkv_kr = kv_a_proj_deq_scl.view(1, -1).to(torch.float)
 
-        layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
-        self.quant_kscale = layer.quant_kscale
-        self.fak_descale_float = layer.fak_descale_float
+            layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
+            self.quant_kscale = layer.quant_kscale
+            self.fak_descale_float = layer.fak_descale_float
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         assert self.fused_qkv_a_proj is not None
@@ -1245,6 +1254,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             slots.to(torch.int64),
             kv_cache[1],
             kv_cache[0],
+            c_kv_scale = self.fa_kscale,
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
             cache_mode=cache_mode,
         )
@@ -1273,6 +1283,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             slots.to(torch.int64),
             kv_cache[1],
             kv_cache[0],
+            c_kv_scale = self.fa_kscale,
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
             cache_mode=cache_mode,
             is_output_kv=True,
@@ -1307,7 +1318,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer:
+        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
@@ -1352,7 +1363,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
-        elif self.fa_quant_layer:
+        elif self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
             attn_mask = None
             input_layout = "BSND_NBSD"
             q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
@@ -1379,30 +1390,55 @@ class AscendMLAImpl(MLAAttentionImpl):
             sparse_mode = 0
             attn_mask = None
 
-        common_kwargs = {
-            "query_rope": q_pe,
-            "key_rope": k_pe,
-            "num_query_heads": self.num_heads,
-            "num_key_value_heads": self.num_kv_heads,
-            "input_layout": input_layout,
-            "atten_mask": attn_mask,
-            "sparse_mode": sparse_mode,
-            "softmax_scale": self.scale,
-            "block_table": decode_meta.block_table,
-            "block_size": block_size,
-            "actual_seq_qlen": actual_seq_lengths,
-            "actual_seq_kvlen": decode_meta.seq_lens_list,
-        }
-        if self.fa_quant_layer:
-            extra_fa_args = {
-                "query_quant_mode": 3,
-                "key_quant_mode": 0,
-                "value_quant_mode": 0,
-                "dequant_scale_query": dequant_scale_q_nope,
-                "dequant_scale_key": self.fak_descale_float,
-                "dequant_scale_value": self.fak_descale_float,
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            q_nope, pertoken_scale = torch_npu.npu_dynamic_quant(q_nope,dst_type=torch.float8_e4m3fn)
+            q_pe = (q_pe / pertoken_scale.unsqueeze(-1) / self.fa_kscale).to(torch.bfloat16)
+            common_kwargs_v2 = {
+                'query_rope': q_pe,
+                'key_rope': k_pe,
+                'num_query_heads': self.num_heads,
+                'num_key_value_heads': self.num_kv_heads,
+                'input_layout': input_layout, ## check this
+                'atten_mask': None,
+                'sparse_mode': sparse_mode,
+                'softmax_scale': self.scale,
+                'query_quant_mode': 3,
+                'key_quant_mode': 0,
+                'value_quant_mode': 0,
+                'dequant_scale_query': pertoken_scale,
+                'dequant_scale_key': self.fa_kscale,
+                'dequant_scale_value': self.fa_kscale, ## check this
+                'block_table': decode_meta.block_table,
+                'block_size': block_size,
+                'actual_seq_qlen': actual_seq_lengths,
+                "actual_seq_kvlen": decode_meta.seq_lens_list,
+                "return_softmax_lse": True
+                }
+        else:
+            common_kwargs = {
+                "query_rope": q_pe,
+                "key_rope": k_pe,
+                "num_query_heads": self.num_heads,
+                "num_key_value_heads": self.num_kv_heads,
+                "input_layout": input_layout,
+                "atten_mask": attn_mask,
+                "sparse_mode": sparse_mode,
+                "softmax_scale": self.scale,
+                "block_table": decode_meta.block_table,
+                "block_size": block_size,
+                "actual_seq_qlen": actual_seq_lengths,
+                "actual_seq_kvlen": decode_meta.seq_lens_list,
             }
-            common_kwargs.update(extra_fa_args)
+            if self.fa_quant_layer:
+                extra_fa_args = {
+                    "query_quant_mode": 3,
+                    "key_quant_mode": 0,
+                    "value_quant_mode": 0,
+                    "dequant_scale_query": dequant_scale_q_nope,
+                    "dequant_scale_key": self.fak_descale_float,
+                    "dequant_scale_value": self.fak_descale_float,
+                }
+                common_kwargs.update(extra_fa_args)
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
@@ -1462,7 +1498,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
+            if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                q_nope, k_nope, k_nope, **common_kwargs_v2)
+            else:
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
 
         return self._v_up_proj(attn_output)
 

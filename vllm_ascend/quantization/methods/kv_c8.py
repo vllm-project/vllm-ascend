@@ -1,6 +1,7 @@
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm_ascend.utils import get_ascend_device_type, AscendDeviceType
 
 from .base import AscendAttentionScheme
 from .registry import register_scheme
@@ -54,16 +55,60 @@ class AscendFAQuantAttentionMethod:
             weight_param.weight_loader = _fa_quant_weight_loader
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        fa_k_scale = torch.squeeze(layer.fa_k.scale).unsqueeze(0)
-        layer.fak_descale_float = torch.nn.Parameter(fa_k_scale.to(torch.float), requires_grad=False)
-        layer.fak_descale = torch.nn.Parameter(fa_k_scale, requires_grad=False)
-        layer.fak_descale_reciprocal = 1.0 / torch.nn.Parameter(fa_k_scale, requires_grad=False)
-        fa_k_offset = torch.squeeze(layer.fa_k.offset).unsqueeze(0)
-        layer.fak_offset = torch.nn.Parameter(fa_k_offset.to(layer.fak_descale.dtype), requires_grad=False)
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            fa_qscale = layer.fa_q.scale
+            fa_kscale = layer.fa_k.scale
+            fa_vscale = layer.fa_v.scale
+            
+            layer.fa_qscale = 1.0 / torch.nn.Parameter(layer.fa_q.scale,
+                                                    requires_grad=False)
+            layer.fa_qscale = layer.fa_qscale.transpose(-2, -1).contiguous().unsqueeze(0)
+            layer.quant_qscale = torch.nn.Parameter(layer.fa_q.scale,
+                                                    requires_grad=False)
 
-        repeated_quant_kscale = fa_k_scale.repeat(self.kv_lora_rank)
-        layer.quant_kscale = repeated_quant_kscale.view(1, self.kv_lora_rank)
-        layer.quant_kscale = 1.0 / torch.nn.Parameter(layer.quant_kscale.to(torch.float), requires_grad=False)
+            repeated_fa_kscale = torch.squeeze(layer.fa_k.scale).unsqueeze(0)
+            layer.fa_kscale = torch.nn.Parameter(repeated_fa_kscale.to(torch.float),
+                                                requires_grad=False)
+            layer.quant_kscale = torch.nn.Parameter(repeated_fa_kscale.to(torch.bfloat16),
+                                                requires_grad=False)
+            repeated_fa_kscale_perdim = repeated_fa_kscale.repeat(512)
+            layer.quant_kscale_perdim = torch.nn.Parameter(repeated_fa_kscale_perdim.to(torch.float),
+                                                requires_grad=False)
+
+            repeated_fa_vscale = torch.squeeze(layer.fa_v.scale).unsqueeze(0)
+            layer.fa_vscale = torch.nn.Parameter(repeated_fa_vscale.to(torch.float),
+                                                requires_grad=False)
+            repeated_fa_vscale_perdim = repeated_fa_vscale.repeat(64)
+            layer.quant_vscale_perdim = torch.nn.Parameter(repeated_fa_vscale_perdim.to(torch.float),
+                                                requires_grad=False)
+
+            if fa_kscale.shape[0] <= 0:
+                raise ValueError(
+                    "Expected size of fa_kscale in dimension 0 should be greater than 0"
+                    f"but got {fa_kscale.shape[0]}.")
+            gqa_size = fa_qscale.shape[0] // fa_kscale.shape[0]
+            fa3_k_scale, fa3_v_scale = fa_kscale.repeat(1, gqa_size).view(
+                -1, 1), fa_vscale.repeat(1, gqa_size).view(-1, 1)
+            layer.qk_scale = torch.nn.Parameter(torch.squeeze(
+                fa_qscale * fa3_k_scale).to(torch.float),
+                                                requires_grad=False)
+            layer.fa3_k_scale = torch.nn.Parameter(
+                torch.squeeze(fa3_k_scale).contiguous().to(torch.float),
+                requires_grad=False)
+            layer.fa3_v_scale = torch.nn.Parameter(
+                torch.squeeze(fa3_v_scale).contiguous().to(torch.float),
+                requires_grad=False)
+        else:
+            fa_k_scale = torch.squeeze(layer.fa_k.scale).unsqueeze(0)
+            layer.fak_descale_float = torch.nn.Parameter(fa_k_scale.to(torch.float), requires_grad=False)
+            layer.fak_descale = torch.nn.Parameter(fa_k_scale, requires_grad=False)
+            layer.fak_descale_reciprocal = 1.0 / torch.nn.Parameter(fa_k_scale, requires_grad=False)
+            fa_k_offset = torch.squeeze(layer.fa_k.offset).unsqueeze(0)
+            layer.fak_offset = torch.nn.Parameter(fa_k_offset.to(layer.fak_descale.dtype), requires_grad=False)
+
+            repeated_quant_kscale = fa_k_scale.repeat(self.kv_lora_rank)
+            layer.quant_kscale = repeated_quant_kscale.view(1, self.kv_lora_rank)
+            layer.quant_kscale = 1.0 / torch.nn.Parameter(layer.quant_kscale.to(torch.float), requires_grad=False)
 
 
 @register_scheme("INT8_DYNAMIC", "attention")
