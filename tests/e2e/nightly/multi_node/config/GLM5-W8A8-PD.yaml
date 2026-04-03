@@ -195,7 +195,7 @@ deployment:
           --enable-auto-tool-choice \
           --tool-call-parser glm47 \
           --reasoning-parser glm45 \
-          --kv-transfer-config \
+          --kv-transfer-config 
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30100",
