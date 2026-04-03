@@ -335,6 +335,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             return
         key_list = []
         addr_list = []
+        gvas_list = []
         size_list = []
         layer_id = req_metas[0].layer_id
         key_list_remove = []
@@ -358,19 +359,20 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 keys_str.append(key.to_string())
             # print(f"save look for repeat block {key_list}")
             skip_block_num = 0
-            if 'last' in keys_str[-1] and self.m_store.store.is_exist(keys_str[-1]) == 1:
-                key_list_remove.append(keys_str[-1])
-                if len(keys_str[:-1]) > 0:
-                    skip_block_num = self.lookup(keys_str[:-1])
-            else:
-                if len(keys_str) > 0:
-                    skip_block_num = self.lookup(keys_str)
-            # TODO check this
-            if skip_block_num == len(keys_str):
-                if is_last_chunk and layer_id == self.final_layer_id:
-                    self.set_finished_request(req_meta.req_id)
-                self.dec_stored_request(req_meta.req_id)
-                continue
+            # if 'last' in keys_str[-1] and self.m_store.store.is_exist(keys_str[-1]) == 1:
+            #     key_list_remove.append(keys_str[-1])
+            #     if len(keys_str[:-1]) > 0:
+            #         skip_block_num = self.lookup(keys_str[:-1])
+            # else:
+            #     if len(keys_str) > 0:
+            #         skip_block_num = self.lookup(keys_str)
+            # # TODO check this
+            # if skip_block_num == len(keys_str):
+            #     if is_last_chunk and layer_id == self.final_layer_id:
+            #         self.set_finished_request(req_meta.req_id)
+            #     self.dec_stored_request(req_meta.req_id)
+            #     continue
+
             starts = starts[skip_block_num:]
             ends = ends[skip_block_num:]
             key_list.extend(keys_str[skip_block_num:])
@@ -378,21 +380,26 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             for index, key in enumerate(keys_str[skip_block_num:]):
                 addr, size = self.token_database.prepare_value_layer(
                     starts[index], ends[index], req_meta.block_ids, layer_id)
-                addr_list.append(addr)
-                size_list.append(size)
+                addr_list.extend(addr)
+                size_list.extend(size)
+                gvas_list.extend([req_meta.key_gva_mapping[key], req_meta.key_gva_mapping[key] + size[0]])
+
             if layer_id == self.final_layer_id and is_last_chunk:
                 self.set_finished_request(req_meta.req_id)
             self.dec_stored_request(req_meta.req_id)
         self.sync_save_events[layer_id].synchronize()
 
-        if len(key_list_remove) > 0:
-            # for i in range(0, len(key_list_remove), self.max_batch):
-            #     self.m_store.store.remove_batch(key_list_remove[i:i + self.max_batch])
-            for key in key_list_remove:
-                self.m_store.store.remove(key)
+        # if len(key_list_remove) > 0:
+        #     # for i in range(0, len(key_list_remove), self.max_batch):
+        #     #     self.m_store.store.remove_batch(key_list_remove[i:i + self.max_batch])
+        #     for key in key_list_remove:
+        #         self.m_store.store.remove(key)
         if len(key_list) > 0:
-            for i in range(0, len(key_list), self.max_batch):
-                self.m_store.put(key_list[i:i + self.max_batch], addr_list[i:i + self.max_batch], size_list[i:i + self.max_batch])
+            res = self.m_store.store.batch_copy(gvas_list, addr_list, size_list, 0)
+            if res!=0:
+                logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>> res send {res}")
+            # for i in range(0, len(key_list), self.max_batch):
+            #     self.m_store.put(key_list[i:i + self.max_batch], addr_list[i:i + self.max_batch], size_list[i:i + self.max_batch])
         # wait for KV transfer (PD)
         if self.layer_transfer_finished_events is not None:
             is_finish = self.layer_transfer_finished_events[layer_id].wait(timeout=10)  # try---cache
@@ -448,6 +455,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             return
 
         addr_list = []
+        gvas_list = []
         size_list = []
         key_list = []
         layer_id = req_metas[0].layer_id
@@ -457,8 +465,17 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     req_meta.starts[index], req_meta.ends[index],
                     req_meta.block_ids, req_meta.layer_id)
                 key_list.append(key.to_string())
-                addr_list.append(addr)
-                size_list.append(size)
+                # gvas_list.append([req_meta.key_gva_mapping[key.to_string()], req_meta.key_gva_mapping[key.to_string()] + size[0]])
+                # addr_list.append(addr)
+                # size_list.append(size)
+                gvas_list.extend([req_meta.key_gva_mapping[key.to_string()], req_meta.key_gva_mapping[key.to_string()] + size[0]])
+                addr_list.extend(addr)
+                size_list.extend(size)
+
+        gvas_list_c = gvas_list[self.tp_rank %
+                              len(gvas_list):] + gvas_list[:self.tp_rank %
+                                                         len(gvas_list)]
+
         key_list_c = key_list[self.tp_rank %
                               len(key_list):] + key_list[:self.tp_rank %
                                                          len(key_list)]
@@ -469,9 +486,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                                 len(size_list):] + size_list[:self.tp_rank %
                                                              len(size_list)]
         if len(key_list_c) > 0:
+            res = self.m_store.store.batch_copy(gvas_list_c, addr_list_c, size_list_c, 1)
+            if res!=0:
+                logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>> res recev {res}")
             # backend has the limitation of length, max batch size is 512
-            for i in range(0, len(key_list_c), self.max_batch):
-                self.m_store.get(key_list_c[i:i + self.max_batch], addr_list_c[i:i + self.max_batch], size_list_c[i:i + self.max_batch])
+            # for i in range(0, len(key_list_c), self.max_batch):
+            #     self.m_store.get(key_list_c[i:i + self.max_batch], addr_list_c[i:i + self.max_batch], size_list_c[i:i + self.max_batch])
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
         self.layer_load_finished_events[layer_id].set()
         req_metas.clear()

@@ -86,7 +86,9 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.sended_but_unfinished_reqs: set[str] = set()
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise)
+            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+            logger.info(f"==========================> page_size_bytes {page_size_bytes}")
+            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, page_size_bytes=page_size_bytes)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
