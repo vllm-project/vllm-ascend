@@ -1164,9 +1164,10 @@ class SpecDecodeBaseProposer(EagleProposer):
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     common_attn_metadata.seq_lens_cpu, input_batch_size
                 )
-                common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
-                    common_attn_metadata.num_computed_tokens_cpu, input_batch_size
-                )
+                if common_attn_metadata.num_computed_tokens_cpu is not None:
+                    common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
+                        common_attn_metadata.num_computed_tokens_cpu, input_batch_size
+                    )
                 common_attn_metadata.query_start_loc = self.arange[: input_batch_size + 1]
                 common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
                     self.token_arange_np[: input_batch_size + 1]
