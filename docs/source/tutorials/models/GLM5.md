@@ -4,7 +4,7 @@
 
 [GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targeting at complex systems engineering and long-horizon agentic tasks.
 
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and the version of transformers need to be upgraded to 5.2.0.
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`. In `vllm-ascend:v0.17.0rc1` and `vllm-ascend:v0.18.0rc1` , the version of transformers need to be upgraded to 5.2.0.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -154,7 +154,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --seed 1024 \
 --served-model-name glm-5 \
 --max-num-seqs 8 \
---max-model-len 66600 \
+--max-model-len 200000 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
@@ -563,7 +563,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --served-model-name glm-5 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 65536 \
+--max-model-len 200000 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
@@ -615,7 +615,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --served-model-name glm-5 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 65536 \
+--max-model-len 200000 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
@@ -742,6 +742,7 @@ Before you start, please
 
 2. prepare the script `run_dp_template.sh` on each node.
 
+    To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj"]` needs to be added to `--additional_config` on each prefill node.
     1. Prefill node 0
 
         ```shell
@@ -789,10 +790,12 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
+            --async-scheduling \
+            --enable-chunked-prefill \
             --quantization ascend \
             --gpu-memory-utilization 0.95 \
             --enforce-eager \
@@ -807,8 +810,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -868,10 +871,12 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 131072 \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
             --max-num-batched-tokens 4096 \
             --trust-remote-code \
             --max-num-seqs 64 \
+            --async-scheduling \
+            --enable-chunked-prefill \
             --gpu-memory-utilization 0.95 \
             --quantization ascend \
             --enforce-eager \
@@ -886,8 +891,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -951,7 +956,7 @@ Before you start, please
             --max-model-len 200000 \
             --max-num-batched-tokens 32 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+            --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
             --trust-remote-code \
             --max-num-seqs 8 \
             --gpu-memory-utilization 0.92 \
@@ -968,8 +973,8 @@ Before you start, please
             "kv_connector_extra_config": {
                         "use_ascend_direct": true,
                         "prefill": {
-                                "dp_size": 4,
-                                "tp_size": 8
+                                "dp_size": 2,
+                                "tp_size": 16
                         },
                         "decode": {
                                 "dp_size": 16,
@@ -1032,7 +1037,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1049,8 +1054,8 @@ Before you start, please
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
-                                 "dp_size": 4,
-                                 "tp_size": 8
+                                 "dp_size": 2,
+                                 "tp_size": 16
                          },
                          "decode": {
                                  "dp_size": 16,
@@ -1113,7 +1118,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1130,8 +1135,8 @@ Before you start, please
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
-                                 "dp_size": 4,
-                                 "tp_size": 8
+                                 "dp_size": 2,
+                                 "tp_size": 16
                          },
                          "decode": {
                                  "dp_size": 16,
@@ -1194,7 +1199,7 @@ Before you start, please
              --max-model-len 200000 \
              --max-num-batched-tokens 32 \
              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
+             --additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
              --trust-remote-code \
              --max-num-seqs 8 \
              --gpu-memory-utilization 0.92 \
@@ -1211,8 +1216,8 @@ Before you start, please
              "kv_connector_extra_config": {
                          "use_ascend_direct": true,
                          "prefill": {
-                                 "dp_size": 4,
-                                 "tp_size": 8
+                                 "dp_size": 2,
+                                 "tp_size": 16
                          },
                          "decode": {
                                  "dp_size": 16,
@@ -1228,14 +1233,14 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
+    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
     ```
 
 2. Prefill node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
+    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
     ```
 
 3. Decode node 0
@@ -1283,8 +1288,8 @@ python load_balance_proxy_server_example.py \
        $node_p1_ip \
        $node_p1_ip \
     --prefiller-ports \
-       6700 6701 \
-       6700 6701 \
+       6700 \
+       6700 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
