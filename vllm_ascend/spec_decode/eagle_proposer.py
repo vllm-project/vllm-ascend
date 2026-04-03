@@ -562,9 +562,10 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                 self.runner.optimistic_seq_lens_cpu, num_reqs_padded
             )
-            common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
-                common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
-            )
+            if common_attn_metadata.num_computed_tokens_cpu is not None:
+                common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
+                    common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
+                )
         else:
             num_reqs_padded = common_attn_metadata.num_reqs
 
