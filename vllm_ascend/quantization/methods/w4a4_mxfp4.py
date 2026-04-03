@@ -54,7 +54,7 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
-        params_dict = {"weight": torch.empty(output_size, input_size // 2, dtype=torch.float8_e4m3fn)}
+        params_dict = {"weight": torch.empty(output_size, input_size // 2, dtype=torch.uint8)}
         return params_dict
 
     def get_pergroup_param(
@@ -142,10 +142,10 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
     ) -> dict[str, Any]:
         param_dict = {}
         param_dict["w13_weight"] = torch.empty(
-            num_experts, 2 * intermediate_size_per_partition, hidden_sizes // 2, dtype=torch.float8_e4m3fn
+            num_experts, 2 * intermediate_size_per_partition, hidden_sizes // 2, dtype=torch.uint8
         )
         param_dict["w2_weight"] = torch.empty(
-            num_experts, hidden_sizes, intermediate_size_per_partition // 2, dtype=torch.float8_e4m3fn
+            num_experts, hidden_sizes, intermediate_size_per_partition // 2, dtype=torch.uint8
         )
         return param_dict
 
