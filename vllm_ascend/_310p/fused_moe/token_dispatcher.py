@@ -60,7 +60,7 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
             last_expert_idx = self.num_experts_local
 
         assert hidden_states.shape[-1] % 16 == 0, (
-            f"The last dim of hidden_states {hidden_states.shape(-1)} should be aligned with 16."
+            f"The last dim of hidden_states {hidden_states.shape[-1]} should be aligned with 16."
         )
         sorted_hidden_states, expanded_row_idx, expert_tokens, _ = torch_npu.npu_moe_init_routing_v2(
             hidden_states,
