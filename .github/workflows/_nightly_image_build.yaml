@@ -24,6 +24,11 @@ on:
         required: true
         type: string
         description: "Build target: 'a2' or 'a3'"
+      vllm_ascend_branch:
+        required: false
+        type: string
+        default: 'main'
+        description: "Branch/ref to checkout"
     secrets:
       HW_USERNAME:
         required: false
@@ -40,7 +45,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: releases/v0.18.0
+          ref: ${{ inputs.vllm_ascend_branch }}
 
       - name: Login to Huawei Cloud SWR
         id: login-swr
@@ -56,7 +61,9 @@ jobs:
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          IMAGE="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ inputs.target }}"
+          BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
+          BRANCH_TAG="${BRANCH_TAG//\//-}"
+          IMAGE="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
           docker build \
             --network host \
             --platform linux/arm64 \
@@ -64,6 +71,7 @@ jobs:
             --build-arg CANN_VERSION="8.5.1" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
+            --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}" \
             --build-arg GITEE_USERNAME="${GITEE_USERNAME}" \
             --build-arg GITEE_TOKEN="${GITEE_TOKEN}" \
             -t "$IMAGE" .
@@ -71,4 +79,6 @@ jobs:
       - name: Push image to SWR
         if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
-          docker push swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-${{ inputs.target }}
+          BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
+          BRANCH_TAG="${BRANCH_TAG//\//-}"
+          docker push swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${BRANCH_TAG}-${{ inputs.target }}

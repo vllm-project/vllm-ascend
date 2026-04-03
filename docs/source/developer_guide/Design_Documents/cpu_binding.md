@@ -2,7 +2,7 @@
 
 ## Overview
 
-CPU binding pins vLLM Ascend worker processes and key threads to specific CPU cores to reduce CPU–NPU cross‑NUMA traffic and stabilize latency under multi‑process workloads. It is designed for ARM servers running Ascend NPUs and is automatically executed during worker initialization when enabled.
+CPU binding pins vLLM Ascend worker processes and key threads to specific CPU cores to reduce CPU–NPU cross‑NUMA traffic and stabilize latency under multi‑process workloads. It is designed for ARM servers running Ascend NPUs and is executed after worker warmup completes when enabled.
 
 ## Background
 
@@ -28,7 +28,7 @@ On multi‑socket ARM systems, the OS scheduler may place vLLM threads on CPUs f
 
 ### Execution flow (simplified)
 
-1. **Feature entry**: worker initialization calls `bind_cpus(local_rank)` when `enable_cpu_binding` is true.
+1. **Feature entry**: `compile_or_warm_up_model()` calls `bind_cpus(local_rank)` after warmup, graph capture, and ATB warmup when `enable_cpu_binding` is true.
 2. **CPU architecture gate**: If the CPU is not ARM, binding is skipped with a log.
 3. **Collect device info**:
    - Map logical NPU IDs from `npu‑smi info -m`.
@@ -201,7 +201,7 @@ To resolve, either reduce total_npus or enlarge the cpuset so that each NPU has 
 - Logs show the selected binding mode and the allocation plan, for example:
     - `[cpu_bind_mode] mode=global_slice rank=0 visible_npus=[...]`
     - `The CPU allocation plan is as follows: ...`
-- You can verify affinity via taskset or /proc/<pid>/status after startup.
+- You can verify affinity via taskset or `/proc/<pid>/status` after startup.
 
 ## Limitations & Notes
 
@@ -223,6 +223,6 @@ Use the standard vLLM logging configuration to enable debug logs. The binding pr
 ## References
 
 - CPU binding implementation: vllm_ascend/cpu_binding.py (`DeviceInfo`, `CpuAlloc`, `bind_cpus`)
-- Worker integration: vllm_ascend/worker/worker.py (`NPUWorker._init_device`)
+- Worker integration: vllm_ascend/worker/worker.py (`NPUWorker.compile_or_warm_up_model`)
 - Additional config option: docs/source/user_guide/configuration/additional_config.md (`enable_cpu_binding`)
 - Tests: tests/ut/device_allocator/test_cpu_binding.py
