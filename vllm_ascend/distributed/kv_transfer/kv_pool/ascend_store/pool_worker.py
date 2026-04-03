@@ -162,8 +162,9 @@ class KVPoolWorker:
         self.layer_save_tasks = [[] for i in range(self.num_layers)]
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
-        # TODO 记录每个请求当前decode数量，可以使用这个decode标识每个last block,之前的block 是否有必要删除？
-        self.seq_last_block_id = {}
+
+        self._request_addr_tracker: dict[str, dict[int, dict]] = {}
+
         import os
         self.num_reuse_layers = 3   # TODO 当作参数，配置方法？
         # self.num_reuse_layers = 30   # TODO 当作参数，配置方法？
@@ -282,7 +283,6 @@ class KVPoolWorker:
         self.current_layer = 0
         for request in metadata.requests:
             if self.use_layerwise:
-                self.seq_last_block_id[request.req_id] = self.seq_last_block_id.get(request.req_id, -1) + 1
                 self.process_layer_data(request)
             else:
                 load_spec = request.load_spec
@@ -335,66 +335,133 @@ class KVPoolWorker:
 
         :return: A generator that yields either None (for store) or a tensor (for retrieve).
         """
-        token_len = request.token_len_chunk
-        starts, ends, keys = [], [], []
-        # Process tokens only once, building both 'starts', 'ends', and 'keys' in one loop
-        for start, end, key in self.token_database.process_tokens(
-                token_len, request.block_hashes, req_id=f"{request.req_id}"
-                                                        # f"_{self.seq_last_block_id[request.req_id]}"
-        ):
-            keys_multi_layer = key.split_layers(self.num_layers)
-            starts.append(start)
-            ends.append(end)
-            keys.append(keys_multi_layer)  # [block_num, layer_num]
-        # Only process further if keys are present
-        if keys:
-            keys = [list(row) for row in zip(*keys)]
-            for layer_id, keys_multi_chunk in enumerate(keys):
-                if layer_id in self.independent_layers:
-                    continue
-                # save
-                can_save = request.can_save
-                if can_save is not None and can_save:
-                    req_meta = LasyerMultiBlockReqMeta(
-                        request.req_id, keys_multi_chunk, starts, ends,
-                        request.block_ids, layer_id, request.is_last_chunk
+        if request.block_keys_by_layer is not None and request.starts is not None and request.ends is not None:
+            starts = request.starts
+            ends = request.ends
+            keys_by_layer = request.block_keys_by_layer
+        else:
+            token_len = request.token_len_chunk
+            starts, ends, keys = [], [], []
+            for start, end, key in self.token_database.process_tokens(
+                    token_len, request.block_hashes, req_id=f"{request.req_id}"):
+                keys_multi_layer = key.split_layers(self.num_layers)
+                starts.append(start)
+                ends.append(end)
+                keys.append([k.to_string() for k in keys_multi_layer])
+            if keys:
+                keys_by_layer = [list(row) for row in zip(*keys)]
+            else:
+                keys_by_layer = []
+
+        for layer_id, keys_multi_chunk in enumerate(keys_by_layer):
+            if layer_id in self.independent_layers:
+                continue
+
+            if request.req_id not in self._request_addr_tracker:
+                self._request_addr_tracker[request.req_id] = {}
+            if layer_id not in self._request_addr_tracker[request.req_id]:
+                self._request_addr_tracker[request.req_id][layer_id] = {
+                    'processed_count': 0,
+                    'addr_list': [],
+                    'size_list': [],
+                    'gvas_list': [],
+                }
+
+            layer_tracker = self._request_addr_tracker[request.req_id][layer_id]
+            processed_count = layer_tracker['processed_count']
+            new_block_count = len(keys_multi_chunk) - processed_count
+
+            can_save = request.can_save
+            if can_save is not None and can_save:
+                if new_block_count > 0:
+                    new_keys = keys_multi_chunk[processed_count:]
+                    new_starts = starts[processed_count:]
+                    new_ends = ends[processed_count:]
+
+                    for idx, key in enumerate(new_keys):
+                        addr, size = self.token_database.prepare_value_layer(
+                            new_starts[idx], new_ends[idx], request.block_ids, layer_id)
+                        layer_tracker['addr_list'].extend(addr)
+                        layer_tracker['size_list'].extend(size)
+                        gva = request.key_gva_mapping[key] if request.key_gva_mapping else None
+                        if gva is not None:
+                            layer_tracker['gvas_list'].extend([gva, gva + size[0]])
+
+                    layer_tracker['processed_count'] = len(keys_multi_chunk)
+
+                req_meta = LasyerMultiBlockReqMeta(
+                    request.req_id, keys_multi_chunk, starts, ends,
+                    request.block_ids, layer_id, request.is_last_chunk
+                )
+                req_meta.key_gva_mapping = request.key_gva_mapping
+                req_meta.addr_list = layer_tracker['addr_list'].copy()
+                req_meta.size_list = layer_tracker['size_list'].copy()
+                req_meta.gvas_list = layer_tracker['gvas_list'].copy()
+                self.layer_save_tasks[layer_id].append(req_meta)
+
+            load_spec = request.load_spec
+            if load_spec is not None and load_spec.can_load:
+                token_len = load_spec.kvpool_cached_tokens
+                num_saved_blocks = token_len // self.block_size
+                if token_len % self.block_size == 0:
+                    load_keys = keys_multi_chunk[:num_saved_blocks]
+                    load_starts = starts[:num_saved_blocks]
+                    load_ends = ends[:num_saved_blocks]
+                else:
+                    last_block_key = (
+                        f"{self.metadata.model_name}"
+                        f"@pcp{self.metadata.pcp_rank}@dcp{self.metadata.dcp_rank}"
+                        f"@head_or_tp_rank:{self.metadata.head_or_tp_rank}"
+                        f"@{request.req_id}_lastblock@{layer_id}"
                     )
-                    req_meta.key_gva_mapping = request.key_gva_mapping
-                    self.layer_save_tasks[layer_id].append(req_meta)
+                    load_keys = keys_multi_chunk[:num_saved_blocks] + [last_block_key]
+                    load_starts = starts
+                    load_ends = ends
 
-                # load
-                load_spec = request.load_spec
-                if load_spec is not None and load_spec.can_load:  # load =0
-                    token_len = load_spec.kvpool_cached_tokens
-                    num_saved_blocks = token_len // self.block_size
-                    if token_len % self.block_size == 0:
-                        req_meta = LasyerMultiBlockReqMeta(
-                            request.req_id, keys_multi_chunk[:num_saved_blocks], starts[:num_saved_blocks],
-                            ends[:num_saved_blocks],
-                            request.block_ids, layer_id
-                        )
-                    else:
-                        req_meta = LasyerMultiBlockReqMeta(
-                            request.req_id, keys_multi_chunk[:num_saved_blocks] +
-                                            [PoolKey(self.metadata,
-                                                     f"{request.req_id}"
-                                                     # f"_{self.seq_last_block_id[request.req_id] - 1}"
-                                                     f"_lastblock"
-                                                     ).split_layers(self.num_layers)[layer_id]], starts, ends,
-                            request.block_ids, layer_id
-                        )
-                    req_meta.key_gva_mapping = request.key_gva_mapping
-                    self.layer_load_tasks[layer_id].append(req_meta)
+                load_tracker_key = f"{request.req_id}_load"
+                if load_tracker_key not in self._request_addr_tracker:
+                    self._request_addr_tracker[load_tracker_key] = {}
+                if layer_id not in self._request_addr_tracker[load_tracker_key]:
+                    self._request_addr_tracker[load_tracker_key][layer_id] = {
+                        'processed_count': 0,
+                        'addr_list': [],
+                        'size_list': [],
+                        'gvas_list': [],
+                    }
 
-            # Create the mask for this layer
-            # ret_mask = torch.zeros(token_len, dtype=torch.bool, device="cpu")
+                load_tracker = self._request_addr_tracker[load_tracker_key][layer_id]
+                load_processed_count = load_tracker['processed_count']
+                new_load_count = len(load_keys) - load_processed_count
 
-            # Set the mask based on starts and ends in the current layer
-            # for start, end in zip(starts, ends):
-            #     ret_mask[start:end] = True
-            # retrieved_tokens = torch.sum(ret_mask)
-            # logger.debug(f"Retrieved {retrieved_tokens} out of {token_len} tokens")
-            # Add layer loading task to the queue for retrieval
+                if new_load_count > 0:
+                    new_load_keys = load_keys[load_processed_count:]
+                    new_load_starts = load_starts[load_processed_count:] if load_processed_count < len(load_starts) else load_starts
+                    new_load_ends = load_ends[load_processed_count:] if load_processed_count < len(load_ends) else load_ends
+
+                    for idx, key in enumerate(new_load_keys):
+                        start_idx = min(idx, len(new_load_starts) - 1) if new_load_starts else 0
+                        end_idx = min(idx, len(new_load_ends) - 1) if new_load_ends else 0
+                        addr, size = self.token_database.prepare_value_layer(
+                            new_load_starts[start_idx] if new_load_starts else 0,
+                            new_load_ends[end_idx] if new_load_ends else self.block_size,
+                            request.block_ids, layer_id)
+                        load_tracker['addr_list'].extend(addr)
+                        load_tracker['size_list'].extend(size)
+                        gva = request.key_gva_mapping[key] if request.key_gva_mapping else None
+                        if gva is not None:
+                            load_tracker['gvas_list'].extend([gva, gva + size[0]])
+
+                    load_tracker['processed_count'] = len(load_keys)
+
+                req_meta = LasyerMultiBlockReqMeta(
+                    request.req_id, load_keys, load_starts, load_ends,
+                    request.block_ids, layer_id
+                )
+                req_meta.key_gva_mapping = request.key_gva_mapping
+                req_meta.addr_list = load_tracker['addr_list'].copy()
+                req_meta.size_list = load_tracker['size_list'].copy()
+                req_meta.gvas_list = load_tracker['gvas_list'].copy()
+                self.layer_load_tasks[layer_id].append(req_meta)
 
     def wait_for_layer_load(self) -> None:
         is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=5)  #try---cache
@@ -479,9 +546,6 @@ class KVPoolWorker:
             len(done_recving),
             self.tp_rank,
         )
-        # TODO 可以在这里进行异步删除操作
-        for req_id in finished_req_ids:
-            self.seq_last_block_id.pop(req_id)
         return done_sending, done_recving
 
     def get_and_clear_finished_requests(self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
@@ -504,6 +568,11 @@ class KVPoolWorker:
                 self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
                     req_id
                 )
+                if req_id in self._request_addr_tracker:
+                    del self._request_addr_tracker[req_id]
+                load_tracker_key = f"{req_id}_load"
+                if load_tracker_key in self._request_addr_tracker:
+                    del self._request_addr_tracker[load_tracker_key]
 
         for req_id in finished_req_ids:
             req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
@@ -514,6 +583,11 @@ class KVPoolWorker:
                 self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
                     req_id
                 )
+                if req_id in self._request_addr_tracker:
+                    del self._request_addr_tracker[req_id]
+                load_tracker_key = f"{req_id}_load"
+                if load_tracker_key in self._request_addr_tracker:
+                    del self._request_addr_tracker[load_tracker_key]
             elif req_remain_jobs is not None:
                 self.finished_store_req.add(req_id)
 

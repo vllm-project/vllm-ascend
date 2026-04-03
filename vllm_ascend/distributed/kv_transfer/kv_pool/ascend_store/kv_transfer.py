@@ -377,12 +377,11 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             ends = ends[skip_block_num:]
             key_list.extend(keys_str[skip_block_num:])
 
-            for index, key in enumerate(keys_str[skip_block_num:]):
-                addr, size = self.token_database.prepare_value_layer(
-                    starts[index], ends[index], req_meta.block_ids, layer_id)
-                addr_list.extend(addr)
-                size_list.extend(size)
-                gvas_list.extend([req_meta.key_gva_mapping[key], req_meta.key_gva_mapping[key] + size[0]])
+            if req_meta.addr_list is not None and req_meta.size_list is not None:
+                addr_list.extend(req_meta.addr_list)
+                size_list.extend(req_meta.size_list)
+            if req_meta.gvas_list is not None:
+                gvas_list.extend(req_meta.gvas_list)
 
             if layer_id == self.final_layer_id and is_last_chunk:
                 self.set_finished_request(req_meta.req_id)
@@ -457,28 +456,18 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         addr_list = []
         gvas_list = []
         size_list = []
-        key_list = []
         layer_id = req_metas[0].layer_id
         for req_meta in req_metas:
-            for index, key in enumerate(req_meta.keys):
-                addr, size = self.token_database.prepare_value_layer(
-                    req_meta.starts[index], req_meta.ends[index],
-                    req_meta.block_ids, req_meta.layer_id)
-                key_list.append(key.to_string())
-                # gvas_list.append([req_meta.key_gva_mapping[key.to_string()], req_meta.key_gva_mapping[key.to_string()] + size[0]])
-                # addr_list.append(addr)
-                # size_list.append(size)
-                gvas_list.extend([req_meta.key_gva_mapping[key.to_string()], req_meta.key_gva_mapping[key.to_string()] + size[0]])
-                addr_list.extend(addr)
-                size_list.extend(size)
+            if req_meta.addr_list is not None and req_meta.size_list is not None:
+                addr_list.extend(req_meta.addr_list)
+                size_list.extend(req_meta.size_list)
+            if req_meta.gvas_list is not None:
+                gvas_list.extend(req_meta.gvas_list)
 
         gvas_list_c = gvas_list[self.tp_rank %
                               len(gvas_list):] + gvas_list[:self.tp_rank %
                                                          len(gvas_list)]
 
-        key_list_c = key_list[self.tp_rank %
-                              len(key_list):] + key_list[:self.tp_rank %
-                                                         len(key_list)]
         addr_list_c = addr_list[self.tp_rank %
                                 len(addr_list):] + addr_list[:self.tp_rank %
                                                              len(addr_list)]
