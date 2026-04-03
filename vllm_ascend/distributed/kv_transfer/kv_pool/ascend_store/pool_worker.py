@@ -236,6 +236,7 @@ class KVPoolWorker:
                     self.layer_save_finished_events,
                     self.sync_save_events,
                     self.enable_kv_events,
+                    self.layer_transfer_finished_events
                 )
                 self.kv_send_thread.start()
             ready_event = threading.Event()
@@ -276,26 +277,25 @@ class KVPoolWorker:
                 ready_event.wait()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
-        logger.info(f'>>>>>>>>>>>>>> TP {self.tp_rank} start load kv ')
+        if len(metadata.requests) == 0:
+            return
         self.current_layer = 0
-        self.layerwise_retrievers = []
-        # logger.info(f"===================> start_load_kv {metadata.requests} {len(metadata.requests)}")
         for request in metadata.requests:
-            # load_spec = request.load_spec
-            # if load_spec is None or not load_spec.can_load:  # load =0
-            #     continue
-            # token_len = request.token_len_chunk
-            # if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
-            #     load_spec.kvpool_cached_tokens == token_len - 1
-            # ):
-            #     token_len = request.load_spec.kvpool_cached_tokens + 1
-            # else:
-            #     token_len = request.load_spec.kvpool_cached_tokens
-            # request.load_spec.token_len = token_len
             if self.use_layerwise:
                 self.seq_last_block_id[request.req_id] = self.seq_last_block_id.get(request.req_id, -1) + 1
                 self.process_layer_data(request)
             else:
+                load_spec = request.load_spec
+                if load_spec is None or not load_spec.can_load:  # load =0
+                    continue
+                token_len = request.token_len_chunk
+                if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
+                    load_spec.kvpool_cached_tokens == token_len - 1
+                ):
+                    token_len = request.load_spec.kvpool_cached_tokens + 1
+                else:
+                    token_len = request.load_spec.kvpool_cached_tokens
+                request.load_spec.token_len = token_len
                 if self.load_async:
                     self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                         request,
@@ -322,8 +322,6 @@ class KVPoolWorker:
                     self.m_store.get(key_list_c, addr_list_c, size_list_c)
         # TODO 这里的请求释放可能有问题
         # logger.info(f">>>>>>>>>>>> metadata.requests {len(metadata.requests)} metadata.unfinished_request_ids {metadata.unfinished_request_ids}")
-        if len(metadata.requests) == 0:
-            return
         if self.use_layerwise and metadata.unfinished_request_ids:
             for layer_id in self.offload_start_ids:
                 layer_load_task = self.layer_load_tasks[layer_id]
@@ -364,7 +362,6 @@ class KVPoolWorker:
 
                 # load
                 load_spec = request.load_spec
-                # print(f"=======> load_spec {load_spec}")
                 if load_spec is not None and load_spec.can_load:  # load =0
                     token_len = load_spec.kvpool_cached_tokens
                     num_saved_blocks = token_len // self.block_size
@@ -384,7 +381,6 @@ class KVPoolWorker:
                                                      ).split_layers(self.num_layers)[layer_id]], starts, ends,
                             request.block_ids, layer_id
                         )
-                    # print(f"=======> add load task {layer_id}")
                     self.layer_load_tasks[layer_id].append(req_meta)
 
             # Create the mask for this layer
@@ -398,22 +394,12 @@ class KVPoolWorker:
             # Add layer loading task to the queue for retrieval
 
     def wait_for_layer_load(self) -> None:
-        is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)  #try---cache
+        is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=5)  #try---cache
         if not is_finish:
             logger.info(f"Layerwise {self.current_layer} load failed")
-        logger.info(f'>>>>>>>>>>>>>> TP {self.tp_rank} layer {self.current_layer} layer_load_finished_events clear ')
         self.layer_load_finished_events[self.current_layer].clear()
 
-        # for layerwise_retriever in self.layerwise_retrievers:
-        #     ret_token_mask = next(layerwise_retriever)
-        #     if self.current_layer == self.num_layers - 1:
-        #         assert ret_token_mask is not None
-        #         num_retrieved_tokens = ret_token_mask.sum().item()
-        #         logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
-
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
-        # if self.tp_rank == 0:
-        #     logger.info(f"=====================> save_kv_layer {self.current_layer}")
         # skip independent layers
         if len(self.layer_save_tasks[self.current_layer]) == 0:
             self.current_layer = self.current_layer + 1
@@ -422,15 +408,12 @@ class KVPoolWorker:
         if self.current_layer != self.layers_need_to_save[-1]:
             # add current layer save task
             self.sync_save_events[self.current_layer].record()
-            # logger.info(f'>>>>>>>>>>>>>> TP {self.tp_rank} layer {self.current_layer} save_kv_layer ')
             self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
             # add load task, in both prefill and decode stages
             # 1. wait for save, and clear save event
             # 2. start load, for prefill layer_load_tasks is None, skip load in the recv thread.
             # 3. set layer_load_finished_events (both prefill & decode)
             if self.current_layer < self.num_layers - self.num_reuse_layers:
-                # logger.info(f'>>>>>>>>>>>>>> TP {self.tp_rank} wait for save {self.current_layer} and start load {self.layer_next_map[self.current_layer]} save_kv_layer ')
-                # logger.info(f"=====================> save_kv_layer {self.current_layer} and load {self.layer_next_map[self.current_layer]}")
                 self.kv_recv_thread.add_request(
                     (self.current_layer, self.layer_load_tasks[self.layer_next_map[self.current_layer]], self.layer_next_map[self.current_layer]))
         else:
@@ -469,61 +452,6 @@ class KVPoolWorker:
                 request,
             )
 
-    def store_layer(
-        self,
-        request: ReqMeta,
-        current_event: torch.npu.Event | None,
-    ) -> Generator[None, None, None]:
-        """
-        Store the KV cache in a layerwise manner.
-
-        :param torch.Tensor tokens: The tokens of the corresponding KV caches.
-
-        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
-            have the same length as tokens. And the mask should ALWAYS be like
-            FFFFFTTTTTTT, where True means the tokens needs to be matched.
-
-        :param **kwargs: The additional arguments for the storage backend which
-            will be passed into the gpu_connector.
-
-        return: A generator that yields None. In the first iteration, the
-            generator allocates the memory objects for all layers and moves
-            the KV cache of the first layer from GPU to CPU. In the next
-            iterations, it moves the KV cache of layer i from GPU to the memory
-            objects (on CPU) and puts the memory objects of layer i-1 to the
-            storage backends. In the last iteration, it puts the memory objects
-            of the last layer to the storage backends.
-        """
-        starts = []
-        ends = []
-        keys = []
-        for start, end, key in self.token_database.process_tokens(request.token_len_chunk, request.block_hashes):
-            keys_multi_layer = key.split_layers(self.num_layers)
-            starts.append(start)
-            ends.append(end)
-            keys.append(keys_multi_layer)  # [block_num,layer_num]
-
-        if keys:
-            keys = [list(row) for row in zip(*keys)]  # [layer_num,block_num]
-            for layer_id, keys_multi_chunk in enumerate(keys):
-                req_meta = LasyerMultiBlockReqMeta(
-                    request.req_id,
-                    keys_multi_chunk,
-                    starts,
-                    ends,
-                    request.block_ids,
-                    layer_id,
-                    request.is_last_chunk,
-                    current_event,
-                )
-                self.kv_send_thread.add_request(  # type: ignore[union-attr, call-arg]
-                    req_meta
-                )  # type: ignore[union-attr, call-arg, arg-type]
-                yield
-        else:
-            for layer_id in range(self.num_layers):
-                yield
-
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         done_sending = (
             # TODO 这里需要优化，可能需要使用 self.get_and_clear_finished_requests
@@ -548,6 +476,9 @@ class KVPoolWorker:
             len(done_recving),
             self.tp_rank,
         )
+        # TODO 可以在这里进行异步删除操作
+        for req_id in finished_req_ids:
+            self.seq_last_block_id.pop(req_id)
         return done_sending, done_recving
 
     def get_and_clear_finished_requests(self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
@@ -619,7 +550,7 @@ class KVPoolWorker:
             # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return 0
+            return start
         return end
 
     def lookup_scheduler(
@@ -676,7 +607,7 @@ class KVPoolWorker:
         # all tokens where found, return the maximal end
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
-            return 0
+            return start
         return end
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:

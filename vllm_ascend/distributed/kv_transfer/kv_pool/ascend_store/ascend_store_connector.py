@@ -92,7 +92,7 @@ class AscendStoreConnector(KVConnectorBase_V1):
                 vllm_config,
                 self.use_layerwise,
             )
-
+            self.connector_worker.layer_transfer_finished_events = vllm_config.layer_transfer_finished_events
             assert self.connector_worker is not None
             if vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config, self.use_layerwise)

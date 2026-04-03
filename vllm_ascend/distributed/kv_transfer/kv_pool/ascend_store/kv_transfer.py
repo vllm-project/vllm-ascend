@@ -43,6 +43,7 @@ class KVTransferThread(threading.Thread):
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
         self.finished_requests: set[str] = set()
+        self.max_batch = 512
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
 
@@ -295,6 +296,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         layer_save_finished_events: List[threading.Event()],
         sync_save_events: List[torch.npu.Event()],
         enable_kv_event: bool = False,
+        layer_transfer_finished_events = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreLayerSendingThread"
@@ -304,8 +306,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.enable_kv_event = enable_kv_event
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
-        self.max_batch = 512
         self.stored_requests = defaultdict[str, int](int)
+        self.layer_transfer_finished_events = layer_transfer_finished_events
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -337,9 +339,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         layer_id = req_metas[0].layer_id
         key_list_remove = []
         for req_meta in req_metas:
-            req_id = req_meta.req_id
-            # if req_id not in self.stored_requests:
-            #     self.request_queue.task_done()
             starts = req_meta.starts
             ends = req_meta.ends
             keys = req_meta.keys
@@ -394,7 +393,12 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         if len(key_list) > 0:
             for i in range(0, len(key_list), self.max_batch):
                 self.m_store.put(key_list[i:i + self.max_batch], addr_list[i:i + self.max_batch], size_list[i:i + self.max_batch])
-
+        # wait for KV transfer (PD)
+        if self.layer_transfer_finished_events is not None:
+            is_finish = self.layer_transfer_finished_events[layer_id].wait(timeout=10)  # try---cache
+            if not is_finish:
+                logger.info(f"Layerwise {layer_id} transfer failed")
+            self.layer_transfer_finished_events[layer_id].clear()
         assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
         self.layer_save_finished_events[layer_id].set()
         req_metas.clear()
@@ -421,7 +425,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.get_event = get_event
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
-        self.max_batch = 512
 
     def add_request(  # type: ignore[override]
         self, req_meta: LasyerMultiBlockReqMeta

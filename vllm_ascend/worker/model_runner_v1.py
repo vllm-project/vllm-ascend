@@ -2820,18 +2820,49 @@ class NPUModelRunner(GPUModelRunner):
                                 dsa_k_scale_tensor, alignment
                             )[:dsa_k_scale_tensor_size]
 
+                    # 12 25
+                    REUSE = 3
+
+                    model_config = self.vllm_config.model_config
+                    parallel_config = self.vllm_config.parallel_config
+                    num_layers = model_config.get_num_layers(parallel_config)
+                    reuse_kvcache_layers = [REUSE + i for i in range(27)]
+                    # REUSE = 20
+                    # reuse_kvcache_layers = [REUSE + i for i in range(11, 30)]
+                    # REUSE = 30
+                    # reuse_kvcache_layers = [REUSE + i for i in range(61 - REUSE)]
+                    # REUSE = 20
+                    # reuse_kvcache_layers = [REUSE + i for i in range(10, 61 - REUSE)]
+                    # REUSE = 13
+                    # reuse_kvcache_layers = [REUSE + i for i in range(REUSE)]
+                    # reuse_kvcache_layers = [25]
+                    import os
+                    enable_kvcache_offload = False
+                    if int(os.environ['KV_OFFLOAD']) == 1:
+                        enable_kvcache_offload = True
                     for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the attn kvcache for all shared layers
-                        if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            if self.use_sparse:
-                                if self.use_sparse_c8_indexer:
-                                    kv_cache_raw_tensors[layer_name_inner] = (
-                                        k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
-                                    )
-                                else:
-                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor)
+                        # shared the kvcache between the self_attn specs in the same group
+                        if ("attn" in layer_name_inner and "linear_attn" not in layer_name_inner):
+                            # TODO 复用
+                            if enable_kvcache_offload and (int(layer_name_inner.split('.')[2]) in reuse_kvcache_layers):
+                                print(f"==============> {layer_name_inner} reuse the KV Cache of {'model.layers.' + str(int(layer_name_inner.split('.')[2])-REUSE) + '.self_attn.attn'}")
+                                del k_tensor
+                                del v_tensor
+                                kv_cache_raw_tensors[layer_name_inner] = kv_cache_raw_tensors['model.layers.' + str(int(layer_name_inner.split('.')[2])-REUSE) + '.self_attn.attn']
+                                # TODO 需要判断什么时候加载
                             else:
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
+                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor) if \
+                                    not self.use_sparse else (k_tensor, v_tensor, dsa_k_cache_tensor)
+                        # if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                        #     if self.use_sparse:
+                        #         if self.use_sparse_c8_indexer:
+                        #             kv_cache_raw_tensors[layer_name_inner] = (
+                        #                 k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor
+                        #             )
+                        #         else:
+                        #             kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor)
+                        #     else:
+                        #         kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
