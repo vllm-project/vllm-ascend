@@ -1310,7 +1310,7 @@ class NPUModelRunner(GPUModelRunner):
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
                             self.query_start_loc.np[num_reqs_padded] = num_tokens_padded
-                            self.query_start_loc.copy_to_gpu()
+                            self.query_start_loc.gpu[num_reqs_padded] = num_tokens_padded
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
