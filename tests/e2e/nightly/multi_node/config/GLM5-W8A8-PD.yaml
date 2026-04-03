@@ -71,7 +71,7 @@ deployment:
                             "dp_size": 8,
                             "tp_size": 4
                     }
-                }
+              }
           }'
 
 
