@@ -236,10 +236,10 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
-          python3 -m pip uninstall -y triton-ascend
-          source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          source /usr/local/Ascend/cann-8.5.1/share/info/ascendnpu-ir/bin/set_env.sh
-          source /usr/local/Ascend/nnal/atb/set_env.sh
+          # python3 -m pip uninstall -y triton-ascend
+          # source /usr/local/Ascend/ascend-toolkit/set_env.sh
+          # source /usr/local/Ascend/cann-8.5.1/share/info/ascendnpu-ir/bin/set_env.sh
+          # source /usr/local/Ascend/nnal/atb/set_env.sh
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
 
   e2e-4-cards:
