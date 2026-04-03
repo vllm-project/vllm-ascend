@@ -1309,7 +1309,6 @@ class NPUModelRunner(GPUModelRunner):
                         else:
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
-                            num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded] = num_tokens_padded
                             self.query_start_loc.copy_to_gpu()
 
