@@ -339,8 +339,9 @@ class KVPoolWorker:
         starts, ends, keys = [], [], []
         # Process tokens only once, building both 'starts', 'ends', and 'keys' in one loop
         for start, end, key in self.token_database.process_tokens(
-                token_len, request.block_hashes, req_id=f"{request.req_id}_"
-                                                        f"{self.seq_last_block_id[request.req_id]}"):
+                token_len, request.block_hashes, req_id=f"{request.req_id}"
+                                                        # f"_{self.seq_last_block_id[request.req_id]}"
+        ):
             keys_multi_layer = key.split_layers(self.num_layers)
             starts.append(start)
             ends.append(end)
@@ -358,6 +359,7 @@ class KVPoolWorker:
                         request.req_id, keys_multi_chunk, starts, ends,
                         request.block_ids, layer_id, request.is_last_chunk
                     )
+                    req_meta.key_gva_mapping = request.key_gva_mapping
                     self.layer_save_tasks[layer_id].append(req_meta)
 
                 # load
@@ -375,12 +377,13 @@ class KVPoolWorker:
                         req_meta = LasyerMultiBlockReqMeta(
                             request.req_id, keys_multi_chunk[:num_saved_blocks] +
                                             [PoolKey(self.metadata,
-                                                     f"{request.req_id}_"
-                                                     f"{self.seq_last_block_id[request.req_id] - 1}"
+                                                     f"{request.req_id}"
+                                                     # f"_{self.seq_last_block_id[request.req_id] - 1}"
                                                      f"_lastblock"
                                                      ).split_layers(self.num_layers)[layer_id]], starts, ends,
                             request.block_ids, layer_id
                         )
+                    req_meta.key_gva_mapping = request.key_gva_mapping
                     self.layer_load_tasks[layer_id].append(req_meta)
 
             # Create the mask for this layer
