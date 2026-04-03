@@ -849,7 +849,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             discard_requests_mask = original_seq_lens_np < num_tokens_np
         else:
-            discard_requests_mask = self.seq_lens.cpu().numpy()[:num_reqs] < num_tokens_np
+            discard_requests_mask = self.optimistic_seq_lens_cpu.numpy()[:num_reqs] < num_tokens_np
 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
@@ -2084,7 +2084,7 @@ class NPUModelRunner(GPUModelRunner):
             # window size when capturing to make sure the correct kernel is selected.
             max_seq_len = self.max_model_len
         else:
-            max_seq_len = self.seq_lens.cpu()[:num_reqs].max().item()
+            max_seq_len = self.optimistic_seq_lens_cpu[:num_reqs].max().item()
         if use_spec_decode and self.need_accepted_tokens:
             self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             self.num_accepted_tokens.np[num_reqs:].fill(1)
@@ -2159,7 +2159,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens[:num_reqs_padded],
             # TODO
-            seq_lens_cpu=self.seq_lens.cpu()[:num_reqs_padded],
+            seq_lens_cpu=self.optimistic_seq_lens_cpu[:num_reqs_padded],
             # TODO
             num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs_padded],
             num_reqs=num_reqs_padded,
