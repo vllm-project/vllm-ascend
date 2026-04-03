@@ -120,13 +120,6 @@ class PyHcclCommunicator:
         with torch.npu.device(device):
             self.comm: hcclComm_t = self.hccl.hcclCommInitRank(self.world_size, self.unique_id, self.rank)
 
-            stream = current_stream()
-            # A small all_reduce for warmup.
-            data = torch.zeros(1, device=device)
-            self.all_reduce(data)
-            stream.synchronize()
-            del data
-
     def destroy(self):
         if self.available and not self.disabled:
             with torch.accelerator.device_index(self.device.index):

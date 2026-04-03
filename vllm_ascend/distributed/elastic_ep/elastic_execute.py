@@ -1,9 +1,12 @@
 import copy
 import gc
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch_npu
+from torch.distributed import P2POp
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import (
@@ -43,6 +46,53 @@ from vllm_ascend.distributed.parallel_state import (
 )
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
+
+
+def batch_transfer_weights(
+    model: nn.Module,
+    is_sender: bool,
+    peer_rank: int,
+    dp_group: StatelessGroupCoordinator,
+    expert_weights: Sequence[Iterable[torch.Tensor]],
+) -> None:
+    device_comm = dp_group.device_communicator
+    if device_comm is None:
+        raise ValueError("No device communicator found")
+
+    expert_weights_set = set()
+    for weight_group in expert_weights:
+        for weight in weight_group:
+            expert_weights_set.add(weight.data_ptr())
+
+    state_dict = model.state_dict()
+    all_params = []
+
+    for name, param in state_dict.items():
+        if name.endswith("expert_map"):
+            continue
+        if param.data_ptr() not in expert_weights_set:
+            all_params.append(param.data)
+
+    quant_weight_names = ["aclnn_input_scale", "aclnn_input_scale_reciprocal", "aclnn_input_offset"]
+    for module in model.modules():
+        for name in quant_weight_names:
+            if (param := getattr(module, name, None)) is not None:
+                all_params.append(param)
+
+    assert len(all_params) > 0
+    p2p_ops = []
+    for param in all_params:
+        op = object.__new__(P2POp)
+        if is_sender:
+            op.op = torch.distributed.isend
+            op.tensor = param
+        else:
+            op.op = torch.distributed.irecv
+            op.tensor = param
+        op.group_peer = peer_rank
+        p2p_ops.append(op)
+
+    device_comm.batch_isend_irecv(p2p_ops)
 
 
 def broadcast_expert_mapping(
@@ -113,6 +163,45 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
                 master_ip=reconfig_request.new_data_parallel_master_ip,
                 coord_store_port=reconfig_request.coord_store_port,
             )
+
+    def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
+        standby_dp_group = get_standby_dp_group()
+        assert standby_dp_group is not None
+        # Broadcast old_dp_size to all workers in standby group
+        if standby_dp_group.rank_in_group < old_dp_size:
+            old_dp_size_tensor = torch.tensor([old_dp_size], dtype=torch.int64, device="cpu")
+        else:
+            old_dp_size_tensor = torch.empty(1, dtype=torch.int64, device="cpu")
+        old_dp_size_tensor = standby_dp_group.tcp_store_group.broadcast(old_dp_size_tensor, 0)
+
+        num_new_workers = new_dp_size - old_dp_size
+        dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
+
+        # Sender-receiver pairing: the first new_workers % old_dp_size
+        # senders get (k+1) contiguous receivers, the rest get k
+        # receivers.
+        num_dst_per_sender = num_new_workers // old_dp_size
+        remainder = num_new_workers % old_dp_size
+
+        if dp_rank < remainder:
+            recv_begin = dp_rank * (num_dst_per_sender + 1)
+            recv_end = recv_begin + num_dst_per_sender + 1
+        else:
+            recv_begin = remainder * (num_dst_per_sender + 1) + (dp_rank - remainder) * num_dst_per_sender
+            recv_end = recv_begin + num_dst_per_sender
+
+        ranks_to_send = list(range(old_dp_size + recv_begin, old_dp_size + recv_end))
+
+        model = self.worker.model_runner.get_model()
+        for new_worker_rank in sorted(ranks_to_send):
+            batch_transfer_weights(
+                model=model,
+                is_sender=True,
+                peer_rank=new_worker_rank,
+                dp_group=standby_dp_group,
+                expert_weights=model.expert_weights,
+            )
+        torch.accelerator.synchronize()
 
     def broadcast_expert_mapping(self):
         standby_dp_group = get_standby_dp_group()
@@ -294,9 +383,9 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self._perform_eplb_reshuffle()
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
+        old_ep_size = get_ep_group().world_size
         parallel_config = self.worker.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
-        old_ep_size = parallel_config.data_parallel_size * tp_size
         new_ep_size = new_dp_size * tp_size
 
         self.worker.model_runner.shared_dict["scale"] = True
@@ -304,6 +393,38 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self.worker.model_runner.shared_dict["new_ep_size"] = new_ep_size
 
         self._perform_eplb_reshuffle()
+
+    def receive_weights(self) -> None:
+        dp_group = get_dp_group()
+        assert isinstance(dp_group, StatelessGroupCoordinator)
+        new_dp_size = dp_group.world_size
+        dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
+
+        # Receive old_dp_size broadcasted during transfer_weights
+        old_dp_size_tensor = torch.empty(1, dtype=torch.int64, device="cpu")
+        old_dp_size_tensor = dp_group.tcp_store_group.broadcast(old_dp_size_tensor, 0)
+        old_dp_size = int(old_dp_size_tensor[0].item())
+
+        # Calculate which existing worker will send to this new worker
+        num_new_workers = new_dp_size - old_dp_size
+        new_worker_idx = dp_rank - old_dp_size
+        num_dst_per_sender = num_new_workers // old_dp_size
+        remainder = num_new_workers % old_dp_size
+
+        if new_worker_idx < remainder * (num_dst_per_sender + 1):
+            sender_rank = new_worker_idx // (num_dst_per_sender + 1)
+        else:
+            sender_rank = remainder + (new_worker_idx - remainder * (num_dst_per_sender + 1)) // num_dst_per_sender
+
+        model = self.worker.model_runner.get_model()
+        batch_transfer_weights(
+            model=model,
+            is_sender=False,
+            peer_rank=sender_rank,
+            dp_group=dp_group,
+            expert_weights=model.expert_weights,
+        )
+        torch.accelerator.synchronize()
 
     def receive_expert_mapping(self) -> tuple[torch.Tensor, int, int]:
         dp_group = get_dp_group()
