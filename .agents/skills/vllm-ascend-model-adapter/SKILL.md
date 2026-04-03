@@ -36,27 +36,47 @@ Adapt Hugging Face or local models to run on `vllm-ascend` with minimal changes,
 
 ## Entry points
 
-When this skill is invoked, **ask the user for the following inputs before doing anything else**. Do not assume defaults silently — collect and confirm each value explicitly.
+When this skill is invoked, **use the `AskUserQuestion` tool to interactively collect the required inputs before doing anything else**. Ask all inputs in a single call so the user sees one consolidated form. Do not proceed until all values are confirmed.
 
-| # | Input | Ask the user | Default if omitted |
-|---|-------|-------------|-------------------|
-| 1 | **Model checkpoint path** | "What is the local path to the model checkpoint? (e.g. `/models/Qwen3-8B`)" | `/models/<model-name>` — must be confirmed |
-| 2 | **Served model name** | "What name should the model be served under? (used as `--served-model-name` and in docs)" | Basename of the checkpoint path |
-| 3 | **Tensor parallel size** | "How many NPUs should be used for tensor parallelism? (TP size)" | `8` for A2, `16` for A3 — confirm after NPU check |
-| 4 | **vLLM source root** | "What is the path to the vLLM source root? (e.g. `/vllm-workspace/vllm`)" | `/vllm-workspace/vllm` |
-| 5 | **vllm-ascend source root** | "What is the path to the vllm-ascend source root? (e.g. `/vllm-workspace/vllm-ascend`)" | `/vllm-workspace/vllm-ascend` |
+Call `AskUserQuestion` in **two rounds** (tool limit: max 4 questions per call, min 2 options each):
 
-Once the user provides these values, bind them as session variables and echo them back for confirmation before proceeding:
+**Round 1** (4 questions):
+1. **Model checkpoint path** — options: `/models/<model-name>` / `Other (specify)`
+2. **Served model name** — options: `Same as checkpoint basename` / `Other (specify)`
+3. **Tensor parallel size** — options: `8 (A2)`, `16 (A3)`, `Other (specify)`
+4. **Python environment activation command** — options: `conda activate vllm-ascend`, `source <venv>/bin/activate`, `Other (specify)`, `None (already active)`
+
+**Round 2** (2 questions):
+5. **vLLM source root** — options: `/vllm-workspace/vllm` / `Other (specify)`
+6. **vllm-ascend source root** — options: `/vllm-workspace/vllm-ascend` / `Other (specify)`
+
+**Round 3 (conditional)** — only triggered during the NPU sanity check (§0.5), not upfront:
+- **CANN toolkit `set_env.sh` path** — ask via `AskUserQuestion` only if not auto-detected under `/usr/local/Ascend`. Options: `/usr/local/Ascend/ascend-toolkit/set_env.sh` / `Other (specify)`.
+- **Additional env file (ATB/NNAL)** — after sourcing CANN, ask: "Is there an additional env file to source (e.g. ATB/NNAL `set_env.sh`)?" Options: `Yes (specify path in notes)` / `No`. Source if provided.
+
+After the user submits, echo the resolved values back in a confirmation block before starting the execution playbook:
 
 ```
-Model checkpoint    : <user-provided path>
-Served model name   : <user-provided name>
-TP size             : <user-provided or defaulted value>
-vLLM source root    : <user-provided or defaulted path>
-vllm-ascend source  : <user-provided or defaulted path>
+  Model checkpoint path  : <value>
+  Served model name      : <value>
+  Tensor parallel size   : <value>
+  vLLM source root       : <value>
+  vllm-ascend source root: <value>
+  Python env activate    : <value>
 ```
 
-Only proceed to the execution playbook after the user confirms (or accepts) these values.
+Then immediately run the activation command (if not `None`) and verify it succeeded before proceeding:
+
+```bash
+# activate the user-specified environment
+<activation command>
+
+# verify correct python is active
+which python
+python -c "import sys; print(sys.executable, sys.version)"
+```
+
+If activation fails, stop and report the error before continuing.
 
 ---
 

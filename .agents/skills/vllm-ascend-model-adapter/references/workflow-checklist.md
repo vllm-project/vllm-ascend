@@ -10,6 +10,15 @@ VLLM_SRC=<user-specified vLLM source root>          # default: /vllm-workspace/v
 VLLM_ASCEND_SRC=<user-specified vllm-ascend root>   # default: /vllm-workspace/vllm-ascend
 WORK_DIR=/workspace                                  # directory to run vllm serve from
 MODEL_ROOT=<parent dir of MODEL_PATH>                # derived from user-specified checkpoint path
+
+# activate user-specified Python environment (if provided)
+# e.g.: conda activate vllm-ascend
+#       source /path/to/venv/bin/activate
+<activation command>
+
+# verify correct Python is active
+which python
+python -c "import sys; print(sys.executable, sys.version)"
 ```
 
 Expected environment:
@@ -23,10 +32,40 @@ Expected environment:
 Run once at session start before any other work. If any check fails, stop and resolve the environment issue first.
 
 ```bash
-# 1. NPU device visibility
+# 1. Source CANN toolkit environment
+#    Auto-detect common install locations first:
+CANN_SET_ENV=""
+for candidate in \
+    /usr/local/Ascend/ascend-toolkit/set_env.sh \
+    /usr/local/Ascend/latest/ascend-toolkit/set_env.sh \
+    /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; do
+    if [ -f "$candidate" ]; then
+        CANN_SET_ENV="$candidate"
+        break
+    fi
+done
+
+if [ -n "$CANN_SET_ENV" ]; then
+    echo "Found CANN set_env.sh: $CANN_SET_ENV"
+    source "$CANN_SET_ENV"
+else
+    echo "CANN set_env.sh not found under /usr/local/Ascend."
+    echo "Please provide the full path to set_env.sh:"
+    # >>> Ask the user via AskUserQuestion for the CANN toolkit path,
+    #     then source the provided path. Stop if path is invalid or sourcing fails.
+fi
+
+# Some environments also require sourcing an additional ATB/NNAL env file
+# (e.g. /home/<user>/Ascend/nnal/atb/set_env.sh).
+# Ask the user if there is an additional env file to source:
+# >>> Use AskUserQuestion: "Is there an additional env file to source (e.g. ATB/NNAL set_env.sh)?"
+#     options: "Yes (specify path in notes)" / "No"
+# If yes, source the provided path before continuing.
+
+# 2. NPU device visibility
 npu-smi info
 
-# 2. torch_npu importable and NPU tensor creation works
+# 3. torch_npu importable and NPU tensor creation works
 python - <<'PY'
 import torch
 import torch_npu
@@ -37,7 +76,7 @@ assert x.device.type == "npu"
 print(f"OK: {n} NPU(s) visible, tensor creation passed")
 PY
 
-# 3. available NPU count vs required TP size
+# 4. available NPU count vs required TP size
 python - <<'PY'
 import torch_npu, torch
 n = torch.npu.device_count()
@@ -46,7 +85,7 @@ assert n >= tp, f"Need {tp} NPUs for TP={tp}, only {n} available"
 print(f"OK: {n} NPUs >= TP={tp}")
 PY
 
-# 4. CANN / driver version (informational, not blocking)
+# 5. CANN / driver version (informational, not blocking)
 npu-smi info -t board -i 0 2>/dev/null | grep -i "cann\|driver\|firmware" || true
 python -c "import torch_npu; print('torch_npu version:', torch_npu.__version__)"
 ```
