@@ -259,7 +259,7 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
-    from vllm_ascend.batch_invariant import vllm_is_batch_invariant
+    import vllm.envs as envs
 
     global _CUSTOM_OP_ENABLED
 
@@ -271,7 +271,7 @@ def enable_custom_op():
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
     # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    if vllm_is_batch_invariant() or get_ascend_device_type() == AscendDeviceType.A5:
+    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 

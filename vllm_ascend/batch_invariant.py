@@ -28,20 +28,6 @@ from vllm.triton_utils import HAS_TRITON
 torch_sum = torch.sum
 
 
-def vllm_is_batch_invariant() -> bool:
-    """Check if batch-invariant mode is enabled.
-
-    This is a compatibility wrapper for the vllm function that was removed
-    in recent upstream vLLM refactoring.
-    """
-    # Try to access from envs module, fall back to environment variable
-    if hasattr(envs, "VLLM_BATCH_INVARIANT"):
-        return bool(envs.VLLM_BATCH_INVARIANT)
-    else:
-        # Fallback to environment variable for older vLLM versions
-        return bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0")))
-
-
 if HAS_TRITON:
     from vllm_ascend.ops.triton.batch_invariant.matmul import (
         addmm_batch_invariant,
@@ -150,7 +136,7 @@ def init_batch_invariance():
     Call this function early in your application, or set VLLM_BATCH_INVARIANT=1
     environment variable to enable automatically.
     """
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         if HAS_TRITON or HAS_ASCENDC_BATCH_INVARIANT:
             logger.info(
                 "Enabling batch-invariant mode for vLLM on Ascend NPU.",
