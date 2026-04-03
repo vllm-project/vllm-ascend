@@ -221,9 +221,9 @@ def test_aclgraph_logprobs_bitwise_batch_invariance_bs1_vs_bsN(monkeypatch: pyte
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
-    from vllm_ascend.batch_invariant import vllm_is_batch_invariant
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
