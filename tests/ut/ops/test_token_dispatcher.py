@@ -39,6 +39,8 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEMxfpParams
 from vllm_ascend.quantization.quant_type import QuantType
 
+MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
+
 
 def build_token_dispatch_input_fixture(
     *,
@@ -54,7 +56,7 @@ def build_token_dispatch_input_fixture(
     act_quant_type: torch.dtype | None = None,
 ) -> MoETokenDispatchInput:
     mxfp_spec = None
-    if quant_type == QuantType.MXFP8:
+    if quant_type in (QuantType.MXFP8, QuantType.MXFP4):
         mxfp_spec = MoEMxfpParams(act_quant_type=act_quant_type)
     return MoETokenDispatchInput(
         hidden_states=hidden_states,
@@ -201,6 +203,67 @@ class TestTokenDispatcherWithMC2(TestBase):
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states,
                                                        combine_metadata)
         self.assertIn("tp_send_counts", kwargs)
+
+    def test_get_dispatch_mc2_kwargs_with_mxfp8_quant(self):
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+
+        self.dispatcher.a5_need_extra_args = True
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.MXFP8,
+            act_quant_type=torch.float8_e4m3fn,
+        )
+
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+        self.assertTrue(token_dispatch_input.quant.dispatch_with_quant)
+        self.assertEqual(kwargs["quant_mode"], 4)
+        self.assertEqual(kwargs["y_dtype"], torch.float8_e4m3fn)
+
+    def test_mxfp4_dispatch_keeps_quantization_in_mlp_path(self):
+        hidden_states = torch.randn(10, 128)
+        topk_weights = torch.randn(10, 1)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+
+        self.dispatcher.a5_need_extra_args = True
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            quant_type=QuantType.MXFP4,
+            act_quant_type=MXFP4_TEST_DTYPE,
+        )
+        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+
+        self.assertFalse(token_dispatch_input.quant.dispatch_with_quant)
+        self.assertEqual(kwargs["quant_mode"], 0)
+        self.assertNotIn("y_dtype", kwargs)
+
+        with patch(
+            "torch_npu.npu_moe_distribute_dispatch_v2",
+            return_value=(
+                torch.randn(10, 128),
+                torch.randn(10, 1),
+                torch.arange(10, dtype=torch.int32),
+                torch.tensor([10], dtype=torch.int64),
+                torch.tensor([10], dtype=torch.int64),
+                torch.tensor([10], dtype=torch.int64),
+                torch.randn(10, 1),
+            ),
+        ) as mock_dispatch:
+            output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        mock_dispatch.assert_called_once()
+        self.assertIsNone(output.dynamic_scale)
+        self.assertFalse(output.combine_metadata.dispatch_with_quant)
 
 
 class TestTokenDispatcherWithAllGather(TestBase):
