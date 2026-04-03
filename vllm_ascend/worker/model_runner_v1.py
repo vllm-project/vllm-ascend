@@ -877,10 +877,23 @@ class NPUModelRunner(GPUModelRunner):
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
-        self.positions[:total_num_scheduled_tokens] = (
-            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
-            + self.query_pos.gpu[:total_num_scheduled_tokens]
-        )
+        # fix prefix cache ci test
+        if self.pcp_size > 1:
+            # When PCP (Prefill Context Parallel) is enabled, positions use
+            # special PCP offsets (position_pcp) that are only computed on CPU.
+            # Copy the correctly-computed CPU positions to GPU instead of
+            # recomputing on GPU (which would miss the PCP offsets).
+            self.positions[:total_num_scheduled_tokens].copy_(
+                torch.from_numpy(
+                    positions_np[:total_num_scheduled_tokens]
+                ).to(self.device),
+                non_blocking=True,
+            )
+        else:
+            self.positions[:total_num_scheduled_tokens] = (
+                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+                + self.query_pos.gpu[:total_num_scheduled_tokens]
+            )
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
