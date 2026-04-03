@@ -19,10 +19,10 @@ import json
 from typing import Any
 
 import torch
-import torch.distributed as dist
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.quantization.methods.base import QuantType
 
 
@@ -35,8 +35,8 @@ class VllmEplbAdaptor:
         else:
             self.model = model
             self.config = model.config
-        self.rank_id = dist.get_rank()
-        self.world_size = dist.get_world_size()
+        self.rank_id = get_dynamic_eplb_group().rank_in_group
+        self.world_size = get_dynamic_eplb_group().world_size
         self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
         self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
 
@@ -131,7 +131,10 @@ class VllmEplbAdaptor:
                 json.dump(record, f, indent=4)
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
-        self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
+        if layer_id in self.expert_map_per_layer_cpu:
+            self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
+        else:
+            self.expert_map_per_layer_cpu[layer_id] = updated_expert_map.cpu()
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         for expert_tensor, buffer_tensor in zip(

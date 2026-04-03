@@ -95,7 +95,7 @@ class EplbWorker:
         new_expert_maps_clone = new_expert_maps.clone()
 
         if scale:
-            shape = list(new_expert_maps_clone.shape)
+            shape = list(new_expert_maps.shape)
             shape[1] = abs(old_ep_size - new_ep_size)
             if old_ep_size > new_ep_size:
                 # when scale down, ensure that the shutdown ranks do not own any experts
@@ -109,7 +109,7 @@ class EplbWorker:
                 self.old_expert_maps = torch.cat([self.old_expert_maps, new_rank_expert_maps], dim=1)
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
-        self.old_expert_maps = new_expert_maps
+        self.old_expert_maps = new_expert_maps_clone
         logger.debug("EPLB Process compute complete")
 
         packed_update_info = self.pack_update_info(update_info)

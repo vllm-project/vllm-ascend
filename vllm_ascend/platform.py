@@ -1004,27 +1004,27 @@ class NPUPlatform(Platform):
         timeout: timedelta,
     ) -> ProcessGroup:
         """
-        Initialize a stateless HCCL process group for CUDA devices.
+        Initialize a stateless HCCL process group for Ascend NPU.
         This method creates a ProcessGroup with the specified backend configuration,
-        typically used for GPU communication. It sets up the necessary backend
-        options and registers the backend with the process group.
+        typically used for NPU communication via HCCL. It sets up the necessary
+        backend options and registers the backend with the process group.
         Args:
-            backend: The distributed backend to use (e.g., 'hccl')
-            prefix_store: The prefix store for distributed coordination
-            group_rank: The rank of the current process within the group
-            group_size: The total number of processes in the group
-            timeout: Maximum time to wait for the operation to complete
-            **kwargs: Additional backend-specific options
-        warning:
-        Uses internal PyTorch API (torch._C._distributed_c10d.ProcessGroupHCCL)
-        which may change in future PyTorch versions. Compatibility should be
-        verified with each PyTorch upgrade.
+            backend: The distributed backend to use. Currently only 'hccl' is
+                supported for Ascend NPUs.
+            prefix_store: The prefix store for distributed coordination.
+            group_rank: The rank of the current process within the group.
+            group_size: The total number of processes in the group.
+            timeout: Maximum time to wait for the operation to complete.
+        Warning:
+            Uses internal PyTorch NPU API (torch_npu._C._distributed_c10d.ProcessGroupHCCL)
+            which may change in future PyTorch / torch_npu versions. Compatibility
+            should be verified with each upgrade.
         Compatibility Risk:
-        - High risk of breakage in PyTorch 2.4+
-        - No semantic versioning guarantees
-        - Requires testing with new PyTorch releases
+            - High risk of breakage in future PyTorch / torch_npu releases.
+            - No semantic versioning guarantees for internal APIs.
+            - Requires testing with new PyTorch / torch_npu releases.
         Returns:
-            A ProcessGroup object configured with the specified backend
+            A ProcessGroup object configured with the specified backend.
         """
 
         # INTERNAL API USAGE - COMPATIBILITY RISK

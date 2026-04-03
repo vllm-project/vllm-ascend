@@ -42,7 +42,6 @@ def init_ascend_model_parallel(
     assert torch.distributed.is_initialized()
     enable_elastic_ep = parallel_config.enable_elastic_ep
     world_size = torch.distributed.get_world_size()
-    backend = torch.distributed.get_backend(get_world_group().device_group)
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size

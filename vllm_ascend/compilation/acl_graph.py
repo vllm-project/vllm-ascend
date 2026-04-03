@@ -61,13 +61,13 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
-    all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
     graph_pool: ClassVar[tuple[int, int]] = current_platform.get_global_graph_pool()
 
     @classmethod
     def clear_all_graphs(cls) -> None:
         """Clear all graphs from all ACLGraphWrapper instances."""
-        for instance in list(cls.all_instances):
+        for instance in list(cls._all_instances):
             instance.clear_graphs()
         cls.graph_pool = (cls.graph_pool[0], cls.graph_pool[1] + 1)
 
@@ -102,6 +102,8 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+
+        ACLGraphWrapper._all_instances.add(self)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.

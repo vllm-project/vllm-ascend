@@ -145,8 +145,7 @@ class EplbUpdator:
         return moe_load
 
     def warm_up_eplb(self):
-        if self.shared_dict["expert_maps"] is None:
-            self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
+        self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
