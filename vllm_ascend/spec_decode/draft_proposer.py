@@ -12,6 +12,6 @@ class AscendDraftModelProposer(DraftModelProposer, AscendSpecDecodeBaseProposer)
         device: torch.device,
         runner=None,
     ):
-        DraftModelProposer.__init__(self, vllm_config, device, runner=runner)
-
         AscendSpecDecodeBaseProposer.__init__(self, vllm_config, device, False, runner=runner)
+        self._raise_if_vocab_size_mismatch()
+        self._raise_if_draft_tp_mismatch()

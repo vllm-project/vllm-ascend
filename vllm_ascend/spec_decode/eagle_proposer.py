@@ -90,6 +90,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
+
+        # Assign runner before it's used in the methods below
+        self.runner = runner
+
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
@@ -1681,6 +1685,4 @@ class AscendEagleProposer(EagleProposer, AscendSpecDecodeBaseProposer):
         device: torch.device,
         runner=None,
     ):
-        EagleProposer.__init__(self, vllm_config, device, runner=runner)
-
         AscendSpecDecodeBaseProposer.__init__(self, vllm_config, device, True, runner=runner)
