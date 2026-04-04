@@ -677,10 +677,7 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
             cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
-            positions_np = (
-                self.input_batch.num_computed_tokens_cpu[req_indices]
-                + self.query_pos.np[: cu_num_tokens[-1]]
-            )
+            positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
                 position_pcp[:total_num_scheduled_tokens],
@@ -785,6 +782,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
+
+        # Build prev_positions mapping for async scheduling input_ids handling.
+        self._compute_prev_positions(num_reqs)
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
