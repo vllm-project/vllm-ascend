@@ -16,8 +16,8 @@
 # from collections.abc import Iterable
 # mypy: ignore-errors
 
-
 import torch
+import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -26,9 +26,97 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
 from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
-from vllm_ascend._310p.ops.fla.fused_recurrent_gated_delta_rule import fused_recurrent_gated_delta_rule_pytorch
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.utils import enable_sp
+
+
+def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    return F.normalize(x, p=2, dim=-1, eps=eps).to(x.dtype)
+
+
+def _flatten_state_indices(
+    ssm_state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    total_tokens: int,
+) -> torch.Tensor:
+    if ssm_state_indices.ndim == 1:
+        return ssm_state_indices[:total_tokens].to(torch.int32).contiguous()
+
+    seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+    ssm_state_indices = ssm_state_indices[: seq_lens.shape[0]]
+    positions = torch.arange(
+        ssm_state_indices.shape[1],
+        device=ssm_state_indices.device,
+        dtype=seq_lens.dtype,
+    )
+    valid = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
+    return ssm_state_indices.masked_select(valid)[:total_tokens].to(torch.int32).contiguous()
+
+
+def _compact_state_for_recurrent_op(
+    state: torch.Tensor,
+    flat_state_indices: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    valid_mask = flat_state_indices >= 0
+    if not torch.any(valid_mask):
+        raise ValueError("No valid ssm_state_indices found for recurrent_gated_delta_rule_310.")
+
+    compact_indices, inverse = torch.unique(
+        flat_state_indices[valid_mask].to(torch.long),
+        sorted=True,
+        return_inverse=True,
+    )
+    compact_state = state.index_select(0, compact_indices).contiguous()
+    if compact_state.dtype != torch.float16:
+        compact_state = compact_state.to(torch.float16)
+
+    local_state_indices = flat_state_indices.clone()
+    local_state_indices[valid_mask] = inverse.to(local_state_indices.dtype)
+    return compact_state, local_state_indices, compact_indices
+
+
+def npu_recurrent_gated_delta_rule_310(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor | None,
+    beta: torch.Tensor,
+    state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = True,
+) -> torch.Tensor:
+    if use_qk_l2norm_in_kernel:
+        q = _l2norm(q)
+        k = _l2norm(k)
+
+    total_tokens = v.shape[1]
+    flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)
+    compact_state, local_state_indices, compact_indices = _compact_state_for_recurrent_op(
+        state,
+        flat_state_indices,
+    )
+    actual_seq_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32).contiguous()
+    accepted_tokens = None
+    if num_accepted_tokens is not None:
+        accepted_tokens = num_accepted_tokens[: actual_seq_lengths.shape[0]].to(torch.int32).contiguous()
+
+    out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule_310(
+        query=q.squeeze(0).contiguous(),
+        key=k.squeeze(0).contiguous(),
+        value=v.squeeze(0).contiguous(),
+        beta=beta.squeeze(0).contiguous(),
+        state=compact_state,
+        actual_seq_lengths=actual_seq_lengths,
+        ssm_state_indices=local_state_indices,
+        g=None if g is None else g.squeeze(0).contiguous(),
+        gk=None,
+        num_accepted_tokens=accepted_tokens,
+        scale_value=k.shape[-1] ** -0.5,
+    ).unsqueeze(0)
+    state.index_copy_(0, compact_indices, compact_state.to(state.dtype))
+    return out
 
 
 class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
@@ -41,11 +129,9 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
     ):
         # Core attention computation (called by custom op).
 
-        # NOTE: The processing logic of Qwen3_5GatedDeltaNet is the same as Qwen3NextGatedDeltaNet.
-        # However, because the ops `torch_npu.npu_recurrent_gated_delta_rule`
-        # currently does not support `ssm_state` inputs in float32 format,
-        # we temporarily retain the current _forward_core implementation.
-        # Once the ops supports float32 `ssm_state`, this patch should be removed.
+        # Qwen3.5 may keep float32 SSM cache rows, while the 310P recurrent
+        # fused op updates fp16 state in place. Compact touched rows, run the
+        # AscendC op, then write back only the updated rows.
 
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
@@ -154,23 +240,24 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
             # 2.1: Process the multi-query part
             if spec_sequence_masks is not None:
-                core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule_pytorch(
+                core_attn_out_spec = npu_recurrent_gated_delta_rule_310(
                     q=query_spec,
                     k=key_spec,
                     v=value_spec,
                     g=g_spec,
                     beta=beta_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
+                    state=ssm_state,
                     cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
                 )
             else:
-                core_attn_out_spec, last_recurrent_state = None, None
+                core_attn_out_spec = None
 
             # 2.2: Process the remaining part
+            # Keep prefill on the existing chunk fallback path; this branch only
+            # swaps recurrent decode/spec-decode to the AscendC fused op.
             if attn_metadata.num_prefills > 0:
                 initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
                 initial_state[~has_initial_state, ...] = 0
@@ -193,30 +280,28 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 # Init cache
                 ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
             elif attn_metadata.num_decodes > 0:
-                core_attn_out_non_spec, last_recurrent_state = fused_recurrent_gated_delta_rule_pytorch(
+                core_attn_out_non_spec = npu_recurrent_gated_delta_rule_310(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
                     g=g_non_spec,
                     beta=beta_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
+                    state=ssm_state,
                     cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
                 )
             else:
-                core_attn_out_non_spec, last_recurrent_state = None, None
+                core_attn_out_non_spec = None
 
         elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, _ = fused_recurrent_gated_delta_rule_pytorch(
+            core_attn_out_non_spec = npu_recurrent_gated_delta_rule_310(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
                 g=g,
                 beta=beta,
-                initial_state=ssm_state,
-                inplace_final_state=True,
+                state=ssm_state,
                 cu_seqlens=non_spec_query_start_loc,
                 ssm_state_indices=non_spec_state_indices_tensor,
                 use_qk_l2norm_in_kernel=True,
