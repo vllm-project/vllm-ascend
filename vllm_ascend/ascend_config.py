@@ -129,10 +129,10 @@ class AscendConfig:
         # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
         # which make batch_invariant mode not working.
         # so we disable async exponential when batch_invariant mode is enabled.
-        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+        import vllm.envs as envs
 
         self.enable_async_exponential = (
-            bool(additional_config.get("enable_async_exponential", False)) and not vllm_is_batch_invariant()
+            bool(additional_config.get("enable_async_exponential", False)) and not envs.VLLM_BATCH_INVARIANT
         )
 
         use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
@@ -400,8 +400,9 @@ class XliteGraphConfig:
                     "Please set pipeline_parallel_size to 1."
                 )
             if vllm_config.cache_config.block_size != 128:
-                raise RuntimeError(
-                    "Xlite graph mode is only compatible with block_size of 128. Please set block_size to 128."
+                logger.warning(
+                    f"Current cache block size is {vllm_config.cache_config.block_size}, which may not be optimal or "
+                    f"compatible with xlite graph mode. The recommended block size for xlite graph mode is 128."
                 )
 
 
