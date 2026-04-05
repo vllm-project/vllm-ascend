@@ -337,7 +337,15 @@ class NPUModelRunner(GPUModelRunner):
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
             self.positions = torch.zeros(
-                self.max_num_tokens, dtype=torch.int64, device=self.device)
+                max_buffer_num_tokens, dtype=torch.int64, device=self.device)
+
+        # Create a CPU numpy buffer for positions computation when
+        # self.positions is a plain tensor (non-CpuGpuBuffer case).
+        self._positions_cpu_buf = torch.zeros(
+            max_buffer_num_tokens, dtype=torch.int64,
+            pin_memory=self.pin_memory,
+        )
+        self._positions_np_buf = self._positions_cpu_buf.numpy()
 
         self._set_up_drafter()
 

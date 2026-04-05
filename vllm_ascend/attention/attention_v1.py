@@ -278,7 +278,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
-        seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+        if common_attn_metadata.seq_lens is not None:
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+        else:
+            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
