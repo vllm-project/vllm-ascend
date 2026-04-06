@@ -71,6 +71,8 @@ def test_causal_conv1d_310_decode_aclgraph_smoke():
     enable_custom_op()
 
     x, weight, bias, conv_states, cache_indices, initial_state_mode = _build_inputs()
+    x_initial = x.clone()
+    conv_states_initial = conv_states.clone()
     x_alt, _, _, conv_states_alt, _, _ = _build_inputs()
 
     eager_conv_states = conv_states.clone()
@@ -106,6 +108,13 @@ def test_causal_conv1d_310_decode_aclgraph_smoke():
             cache_indices,
             initial_state_mode,
         )
+    torch.npu.synchronize()
+
+    # The capture pass itself is not a reliable correctness checkpoint.
+    # Validate the graph path via replay after restoring the original inputs.
+    x.copy_(x_initial)
+    conv_states.copy_(conv_states_initial)
+    graph.replay()
     torch.npu.synchronize()
 
     torch.testing.assert_close(graph_out, eager_out, rtol=3e-3, atol=1e-2)
