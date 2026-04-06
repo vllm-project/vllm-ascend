@@ -54,12 +54,14 @@ def _build_inputs(
     seqlen: int = 1,
     total_entries: int = 40,
 ):
-    x = torch.randn(batch_size, seqlen, dim, device="npu", dtype=torch.float16).transpose(-1, -2).contiguous()
-    weight = torch.randn(dim, width, device="npu", dtype=torch.float16).transpose(-1, -2).contiguous()
+    # The 310P op expects:
+    #   x: (batch, seqlen, dim) or (cu_seqlen, dim)
+    #   weight: (width, dim)
+    #   conv_states: (cache_lines, state_len, dim)
+    x = torch.randn(batch_size, seqlen, dim, device="npu", dtype=torch.float16).contiguous()
+    weight = torch.randn(width, dim, device="npu", dtype=torch.float16).contiguous()
     bias = torch.randn(dim, device="npu", dtype=torch.float16)
-    conv_states = (
-        torch.randn(total_entries, width, dim, device="npu", dtype=torch.float16).transpose(-1, -2).contiguous()
-    )
+    conv_states = torch.randn(total_entries, width, dim, device="npu", dtype=torch.float16).contiguous()
     cache_indices = torch.randperm(total_entries, device="npu", dtype=torch.int32)[:batch_size]
     initial_state_mode = torch.ones(batch_size, device="npu", dtype=torch.int64)
     return x, weight, bias, conv_states, cache_indices, initial_state_mode
