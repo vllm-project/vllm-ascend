@@ -1,0 +1,38 @@
+# DeepSeek-VL2-Tiny 模型测试配置
+# 验证结论：模型无法直接运行，需要适配
+
+model:
+  id: "deepseek-ai/deepseek-vl2-tiny"
+  task: "image-to-text"
+
+test_cases:
+  - name: "模型加载测试"
+    description: "验证模型能否被 vLLM 正常加载"
+    input:
+      prompt: "Describe this image"
+    expected:
+      success: false
+      error_type: "No model architectures are specified"
+      error_message: "Value error, No model architectures are specified"
+
+  - name: "配置文件结构检查"
+    description: "验证模型 config.json 的特殊结构"
+    expected:
+      architectures_location: "language_config.architectures"
+      vllm_compatible: false
+      reason: "vLLM 只在顶层查找 architectures 字段"
+
+adaptation_notes: |
+  问题根因：
+  1. 模型架构信息在 language_config.architectures 中，不在顶层
+  2. 当前 vLLM 版本（0.11.0）只在顶层查找 architectures 字段
+  3. 需要修改 vLLM 的 ModelConfig 创建逻辑，支持嵌套字段查找
+
+  适配方案：
+  修改 vllm/engine/arg_utils.py 中的 create_model_config 方法，
+  当顶层找不到 architectures 时，检查 language_config.architectures
+
+  环境限制：
+  - 昇腾 NPU 需要 torch-npu，最高支持 PyTorch 2.9.0
+  - vLLM 0.18.0 需要 PyTorch 2.10.0，两者无法同时满足
+  - 适配需基于 vLLM 0.11.0 进行
