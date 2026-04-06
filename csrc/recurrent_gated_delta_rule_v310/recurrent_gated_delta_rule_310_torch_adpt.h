@@ -56,7 +56,9 @@ at::Tensor npu_recurrent_gated_delta_rule_310(
         state.scalar_type());
 
     // Keep the external cache in float32 while reusing the existing fp16
-    // kernel implementation for the recurrent update.
+    // kernel implementation for the recurrent update. Only rows referenced by
+    // ssm_state_indices are written back so untouched cache entries preserve
+    // their original fp32 values.
     at::Tensor state_fp16 = state.to(at::kHalf);
     EXEC_NPU_CMD(aclnnRecurrentGatedDeltaRuleV310,
                  query,
@@ -71,7 +73,9 @@ at::Tensor npu_recurrent_gated_delta_rule_310(
                  num_accepted_tokens,
                  scale_real,
                  output);
-    state.copy_(state_fp16);
+    at::Tensor touched_state_indices = ssm_state_indices.to(at::kLong).contiguous();
+    at::Tensor touched_state_values = state_fp16.index_select(0, touched_state_indices).to(state.scalar_type());
+    state.index_copy_(0, touched_state_indices, touched_state_values);
     return output;
 }
 
