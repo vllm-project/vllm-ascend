@@ -32,20 +32,46 @@ at::Tensor npu_recurrent_gated_delta_rule_310(
 {
     at::Tensor output = at::empty(value.sizes(), value.options());
     float scale_real = static_cast<float>(scale_value);
+
+    if (state.scalar_type() == at::kHalf) {
+        EXEC_NPU_CMD(aclnnRecurrentGatedDeltaRuleV310,
+                     query,
+                     key,
+                     value,
+                     beta,
+                     state,
+                     actual_seq_lengths,
+                     ssm_state_indices,
+                     g,
+                     gk,
+                     num_accepted_tokens,
+                     scale_real,
+                     output);
+        return output;
+    }
+
+    TORCH_CHECK(
+        state.scalar_type() == at::kFloat,
+        "npu_recurrent_gated_delta_rule_310 only supports float16 or float32 state, got ",
+        state.scalar_type());
+
+    // Keep the external cache in float32 while reusing the existing fp16
+    // kernel implementation for the recurrent update.
+    at::Tensor state_fp16 = state.to(at::kHalf);
     EXEC_NPU_CMD(aclnnRecurrentGatedDeltaRuleV310,
-                 query,                 
+                 query,
                  key,
-                 value,                  
-                 beta,             
-                 state,                     
+                 value,
+                 beta,
+                 state_fp16,
                  actual_seq_lengths,
-                 ssm_state_indices,  
-                 g,    
-                 gk,    
+                 ssm_state_indices,
+                 g,
+                 gk,
                  num_accepted_tokens,
                  scale_real,
-                 output
-                ); 
+                 output);
+    state.copy_(state_fp16);
     return output;
 }
 
