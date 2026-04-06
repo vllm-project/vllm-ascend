@@ -16,11 +16,8 @@ def validate_cmp(y_cal, y_ref, device="npu"):
     torch.testing.assert_close(y_ref, y_cal, rtol=3e-03, atol=1e-02, equal_nan=True)
 
 
-def to_int64_tuple(t):
-    t = t.to(torch.int64)
-    if t.dim() == 0:
-        return (t.item(),)
-    return tuple(t.tolist())
+def to_int64_tensor(t):
+    return t.to(torch.int64).contiguous()
 
 
 @pytest.mark.parametrize("has_initial_state", [False, True])
@@ -85,10 +82,10 @@ def test_ascend_causal_conv1d_310_fn(
         weight_origin,
         bias=bias,
         conv_states=conv_states_origin,
-        query_start_loc=to_int64_tuple(query_start_loc),
-        cache_indices=to_int64_tuple(cache_indices),
-        initial_state_mode=to_int64_tuple(has_initial_state_tensor),
-        num_accepted_tokens=[],
+        query_start_loc=to_int64_tensor(query_start_loc),
+        cache_indices=to_int64_tensor(cache_indices),
+        initial_state_mode=to_int64_tensor(has_initial_state_tensor),
+        num_accepted_tokens=None,
         activation_mode=activation_mode,
         pad_slot_id=PAD_SLOT_ID,
         run_mode=0,
@@ -137,10 +134,10 @@ def test_causal_conv1d_310_update(batch_size, dim, width, seqlen, has_bias, silu
         weight.transpose(-1, -2),
         bias=bias,
         conv_states=conv_states_origin,
-        query_start_loc=[],
-        cache_indices=to_int64_tuple(conv_state_indices),
-        initial_state_mode=to_int64_tuple(has_initial_state_tensor),
-        num_accepted_tokens=[],
+        query_start_loc=None,
+        cache_indices=to_int64_tensor(conv_state_indices),
+        initial_state_mode=to_int64_tensor(has_initial_state_tensor),
+        num_accepted_tokens=None,
         activation_mode=activation_mode,
         pad_slot_id=PAD_SLOT_ID,
         run_mode=1,

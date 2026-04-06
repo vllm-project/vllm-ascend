@@ -31,11 +31,10 @@ from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.utils import enable_sp
 
 
-def to_int64_tuple(t):
-    t = t.to(torch.int64)
-    if t.dim() == 0:
-        return (t.item(),)
-    return tuple(t.tolist())
+def _to_optional_int64_tensor(t: torch.Tensor | None) -> torch.Tensor | None:
+    if t is None:
+        return None
+    return t.to(torch.int64).contiguous()
 
 
 def _l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -185,16 +184,19 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            has_initial_state_spec = [1] * (spec_query_start_loc.shape[0] - 1)
+            spec_cache_indices = _to_optional_int64_tensor(
+                spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes]
+            )
+            has_initial_state_spec = torch.ones_like(spec_cache_indices, dtype=torch.int64)
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_spec,
                 conv_weights,
                 bias=self.conv1d.bias,
                 conv_states=conv_state,
-                query_start_loc=to_int64_tuple(spec_query_start_loc),
-                cache_indices=to_int64_tuple(spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes]),
+                query_start_loc=_to_optional_int64_tensor(spec_query_start_loc),
+                cache_indices=spec_cache_indices,
                 initial_state_mode=has_initial_state_spec,
-                num_accepted_tokens=to_int64_tuple(num_accepted_tokens),
+                num_accepted_tokens=_to_optional_int64_tensor(num_accepted_tokens),
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
                 run_mode=1,
@@ -208,25 +210,30 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                     conv_weights,
                     bias=self.conv1d.bias,
                     conv_states=conv_state,
-                    query_start_loc=to_int64_tuple(non_spec_query_start_loc),
-                    cache_indices=to_int64_tuple(non_spec_state_indices_tensor),
-                    initial_state_mode=to_int64_tuple(has_initial_state),
-                    num_accepted_tokens=[],
+                    query_start_loc=_to_optional_int64_tensor(non_spec_query_start_loc),
+                    cache_indices=_to_optional_int64_tensor(non_spec_state_indices_tensor),
+                    initial_state_mode=_to_optional_int64_tensor(has_initial_state),
+                    num_accepted_tokens=None,
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=0,
                 )
         elif attn_metadata.num_decodes > 0:
-            has_initial_state_decode = [1] * mixed_qkv_non_spec.shape[0]
+            decode_cache_indices = _to_optional_int64_tensor(
+                non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens]
+            )
+            has_initial_state_decode = torch.ones_like(
+                decode_cache_indices, dtype=torch.int64
+            )
             mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_non_spec,
                 conv_weights,
                 bias=self.conv1d.bias,
                 conv_states=conv_state,
-                query_start_loc=[],
-                cache_indices=to_int64_tuple(non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens]),
+                query_start_loc=None,
+                cache_indices=decode_cache_indices,
                 initial_state_mode=has_initial_state_decode,
-                num_accepted_tokens=[],
+                num_accepted_tokens=None,
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
                 run_mode=1,
