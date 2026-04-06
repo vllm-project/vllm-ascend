@@ -651,10 +651,29 @@ class NPUModelRunner(GPUModelRunner):
         cu_num_tokens = self._get_cumsum_and_arange(
             num_scheduled_tokens, self.query_pos.np
         )
-        positions_np = (
-            self.input_batch.num_computed_tokens_cpu[req_indices]
-            + self.query_pos.np[: cu_num_tokens[-1]]
+        positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
+        np.add(
+            self.input_batch.num_computed_tokens_cpu[req_indices],
+            self.query_pos.np[: cu_num_tokens[-1]],
+            out=positions_np,
         )
+
+        # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
+        # Use blocking .to(device) to ensure data lands on GPU before PCP
+        # modifies CPU position buffers. PCP and async spec decode are
+        # mutually exclusive, so the sync is acceptable.
+        if self.pcp_size > 1:
+            pre_pcp_positions = torch.from_numpy(
+                positions_np[:total_num_scheduled_tokens]
+            ).to(self.device)
+            pre_pcp_qsl = torch.zeros(
+                num_reqs + 1, dtype=torch.int32, device=self.device)
+            pre_pcp_qsl[1:num_reqs + 1] = torch.from_numpy(
+                cu_num_tokens
+            ).to(dtype=torch.int32, device=self.device)
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs, pre_pcp_qsl, pre_pcp_positions)
+
         if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
@@ -791,9 +810,6 @@ class NPUModelRunner(GPUModelRunner):
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
-        # Build prev_positions mapping for async scheduling input_ids handling.
-        self._compute_prev_positions(num_reqs)
-
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         # Calculate M-RoPE positions.
@@ -907,11 +923,14 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        self.input_batch.block_table.compute_slot_mapping(
-            num_reqs,
-            self.query_start_loc.gpu[: num_reqs + 1],
-            self.positions[:total_num_scheduled_tokens],
-        )
+        # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
+        # already computed on GPU before PCP split the positions.
+        if self.pcp_size <= 1:
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                self.positions[:total_num_scheduled_tokens],
+            )
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
