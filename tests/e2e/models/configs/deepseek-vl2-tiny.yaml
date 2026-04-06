@@ -1,11 +1,13 @@
 # DeepSeek-VL2-Tiny 模型测试配置
-# 验证结论：模型无法直接运行，需要适配
+
+## 验证结论：模型无法直接运行，需要适配
 
 model:
   id: "deepseek-ai/deepseek-vl2-tiny"
   task: "image-to-text"
 
-test_cases:
+## test_cases:
+
   - name: "模型加载测试"
     description: "验证模型能否被 vLLM 正常加载"
     input:
@@ -22,7 +24,8 @@ test_cases:
       vllm_compatible: false
       reason: "vLLM 只在顶层查找 architectures 字段"
 
-adaptation_notes: |
+## adaptation_notes:
+
   问题根因：
   1. 模型架构信息在 language_config.architectures 中，不在顶层
   2. 当前 vLLM 版本（0.11.0）只在顶层查找 architectures 字段
