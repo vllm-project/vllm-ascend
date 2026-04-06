@@ -193,3 +193,58 @@ def test_spec_decode_path_keeps_causal_conv1d_metadata_on_device(monkeypatch):
     assert not isinstance(kwargs["cache_indices"], (list, tuple))
     assert not isinstance(kwargs["initial_state_mode"], (list, tuple))
     assert not isinstance(kwargs["num_accepted_tokens"], (list, tuple))
+
+
+def test_recurrent_wrapper_uses_full_state_without_python_compaction(monkeypatch):
+    captured: dict[str, torch.Tensor] = {}
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("Python-side state compaction should not run.")
+
+    def fake_recurrent_op(**kwargs):
+        captured.update(kwargs)
+        kwargs["state"][5].fill_(9)
+        return torch.zeros_like(kwargs["value"])
+
+    fake_ascend_namespace = SimpleNamespace(
+        npu_recurrent_gated_delta_rule_310=fake_recurrent_op
+    )
+    monkeypatch.setattr(
+        patch_qwen3_5_310.torch.ops,
+        "_C_ascend",
+        fake_ascend_namespace,
+        raising=False,
+    )
+    monkeypatch.setattr(patch_qwen3_5_310.torch, "any", _unexpected)
+    monkeypatch.setattr(patch_qwen3_5_310.torch, "unique", _unexpected)
+
+    q = torch.randn((1, 2, 1, 4), dtype=torch.float16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    beta = torch.randn((1, 2, 1), dtype=torch.float16)
+    state = torch.zeros((8, 1, 4, 4), dtype=torch.float32)
+    cu_seqlens = torch.tensor([0, 1, 2], dtype=torch.int32)
+    ssm_state_indices = torch.tensor([[5, -1], [3, -1]], dtype=torch.int32)
+
+    out = patch_qwen3_5_310.npu_recurrent_gated_delta_rule_310(
+        q=q,
+        k=k,
+        v=v,
+        g=None,
+        beta=beta,
+        state=state,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=None,
+        use_qk_l2norm_in_kernel=False,
+    )
+
+    assert out.shape == v.shape
+    assert captured["state"] is state
+    assert captured["state"].dtype == torch.float32
+    assert torch.equal(
+        captured["ssm_state_indices"],
+        torch.tensor([5, 3], dtype=torch.int32),
+    )
+    assert captured["ssm_state_indices"].is_contiguous()
+    assert torch.count_nonzero(state[5]).item() > 0

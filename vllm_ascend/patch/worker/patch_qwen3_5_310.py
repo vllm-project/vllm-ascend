@@ -60,28 +60,6 @@ def _flatten_state_indices(
     return ssm_state_indices.masked_select(valid)[:total_tokens].to(torch.int32).contiguous()
 
 
-def _compact_state_for_recurrent_op(
-    state: torch.Tensor,
-    flat_state_indices: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    valid_mask = flat_state_indices >= 0
-    if not torch.any(valid_mask):
-        raise ValueError("No valid ssm_state_indices found for recurrent_gated_delta_rule_310.")
-
-    compact_indices, inverse = torch.unique(
-        flat_state_indices[valid_mask].to(torch.long),
-        sorted=True,
-        return_inverse=True,
-    )
-    compact_state = state.index_select(0, compact_indices).contiguous()
-    if compact_state.dtype != torch.float16:
-        compact_state = compact_state.to(torch.float16)
-
-    local_state_indices = flat_state_indices.clone()
-    local_state_indices[valid_mask] = inverse.to(local_state_indices.dtype)
-    return compact_state, local_state_indices, compact_indices
-
-
 def npu_recurrent_gated_delta_rule_310(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -100,30 +78,24 @@ def npu_recurrent_gated_delta_rule_310(
 
     total_tokens = v.shape[1]
     flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)
-    compact_state, local_state_indices, compact_indices = _compact_state_for_recurrent_op(
-        state,
-        flat_state_indices,
-    )
     actual_seq_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32).contiguous()
     accepted_tokens = None
     if num_accepted_tokens is not None:
         accepted_tokens = num_accepted_tokens[: actual_seq_lengths.shape[0]].to(torch.int32).contiguous()
 
-    out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule_310(
+    return torch.ops._C_ascend.npu_recurrent_gated_delta_rule_310(
         query=q.squeeze(0).contiguous(),
         key=k.squeeze(0).contiguous(),
         value=v.squeeze(0).contiguous(),
         g=None if g is None else g.squeeze(0).contiguous(),
         gk=None,
         beta=beta.squeeze(0).contiguous(),
-        state=compact_state,
+        state=state,
         actual_seq_lengths=actual_seq_lengths,
-        ssm_state_indices=local_state_indices,
+        ssm_state_indices=flat_state_indices,
         num_accepted_tokens=accepted_tokens,
         scale_value=k.shape[-1] ** -0.5,
     ).unsqueeze(0)
-    state.index_copy_(0, compact_indices, compact_state.to(state.dtype))
-    return out
 
 
 class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
@@ -135,9 +107,9 @@ class Ascend310Qwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         core_attn_out: torch.Tensor,
     ):
         # Core attention computation (called by custom op).
-        # Qwen3.5 keeps float32 SSM cache in some deployments, while the 310P
-        # recurrent fused op currently updates fp16 state. Compact the touched
-        # cache rows, run the fused op, then write the updated rows back.
+        # Qwen3.5 keeps float32 SSM cache in some deployments. Keep the full
+        # state tensor on device and let the 310P recurrent op handle the
+        # internal fp16 execution path without Python-side compaction.
 
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
