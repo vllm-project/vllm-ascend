@@ -49,12 +49,7 @@ function install_binary_test() {
 
     # The vLLM version already in pypi, we install from pypi.
     pip install vllm=="${PIP_VLLM_VERSION}"
-
     pip install vllm-ascend=="${PIP_VLLM_ASCEND_VERSION}"
-    if [ "${PIP_VLLM_ASCEND_VERSION}" == "0.17.0rc1" ]; then
-        pip install torchvision==0.24.0 torchaudio==2.9.0
-    fi
-
     pip list | grep vllm
 
     # Verify the installation
