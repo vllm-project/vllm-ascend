@@ -371,6 +371,9 @@ jobs:
           - name: Qwen3.5-397B-A17B-w8a8-mtp
             os: linux-aarch64-a3-16
             config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
+          - name: Qwen2.5-7B-Instruct
+            os: linux-aarch64-a3-1
+            config_file_path: Qwen2.5-7B-Instruct-A3.yaml
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
