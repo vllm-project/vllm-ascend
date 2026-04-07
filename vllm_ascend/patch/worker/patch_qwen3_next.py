@@ -20,9 +20,9 @@ import torch
 import torch_npu
 from einops import rearrange
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
+from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -35,7 +35,10 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.patch.worker.patch_qwen3_5 import to_int64_tuple
 from vllm_ascend.utils import enable_sp
-
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
 class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
     def forward(
@@ -170,19 +173,32 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
             if mixed_qkv_non_spec is not None:
                 conv_weights_T = conv_weights.transpose(0, 1)
                 activation_num = 1 if self.activation else 0
-                mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    mixed_qkv_non_spec,
-                    conv_weights_T,
-                    conv_state=self_kv_cache[0],
-                    bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=to_int64_tuple(non_spec_query_start_loc),
-                    cache_indices_opt=to_int64_tuple(non_spec_state_indices_tensor),
-                    initial_state_mode_opt=to_int64_tuple(has_initial_state),
-                    num_accepted_tokens_opt=[],
-                    activation_mode=activation_num,
-                    pad_slot_id=PAD_SLOT_ID,
-                    run_mode=0,
-                )
+                if get_ascend_device_type() == AscendDeviceType.A5:
+                    mixed_qkv_non_spec = causal_conv1d_fn( # ok
+                        mixed_qkv_non_spec_T,
+                        conv_weights,
+                        self.conv1d.bias,
+                        activation=self.activation,
+                        conv_states=conv_state,
+                        has_initial_state=has_initial_state,
+                        cache_indices=non_spec_state_indices_tensor,
+                        query_start_loc=non_spec_query_start_loc,
+                        metadata=attn_metadata,
+                    ).transpose(0, 1)
+                else:
+                    mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        mixed_qkv_non_spec,
+                        conv_weights_T,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=to_int64_tuple(non_spec_query_start_loc),
+                        cache_indices_opt=to_int64_tuple(non_spec_state_indices_tensor),
+                        initial_state_mode_opt=to_int64_tuple(has_initial_state),
+                        num_accepted_tokens_opt=[],
+                        activation_mode=activation_num,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=0,
+                    )
         elif attn_metadata.num_decodes > 0:
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
@@ -222,18 +238,33 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
             actual_seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = torch_npu.npu_recurrent_gated_delta_rule(
-                query=query_spec.squeeze(0),
-                key=key_spec.squeeze(0),
-                value=value_spec.squeeze(0),
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
-                state=ssm_state,
-                scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
-                num_accepted_tokens=num_accepted_tokens.to(torch.int32),
-            ).unsqueeze(0)
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                core_attn_out_spec = fused_recurrent_gated_delta_rule(
+                    q=query_spec,
+                    k=key_spec,
+                    v=value_spec,
+                    g=g_spec,
+                    beta=beta_spec,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=cu_seqlens,
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=num_accepted_tokens,
+                    use_qk_l2norm_in_kernel=False,
+                )
+            else:
+                core_attn_out_spec = torch_npu.npu_recurrent_gated_delta_rule(
+                    query=query_spec.squeeze(0),
+                    key=key_spec.squeeze(0),
+                    value=value_spec.squeeze(0),
+                    g=g_spec.squeeze(0),
+                    beta=beta_spec.squeeze(0),
+                    state=ssm_state,
+                    scale=key_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=spec_state_indices_tensor.flatten(),
+                    num_accepted_tokens=num_accepted_tokens.to(torch.int32),
+                ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
@@ -272,17 +303,31 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
             actual_seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
             query_non_spec = l2norm_fwd(query_non_spec)
             key_non_spec = l2norm_fwd(key_non_spec)
-            core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
-                query=query_non_spec.squeeze(0),
-                key=key_non_spec.squeeze(0),
-                value=value_non_spec.squeeze(0),
-                g=g_non_spec.squeeze(0),
-                beta=beta_non_spec.squeeze(0),
-                state=ssm_state,
-                scale=key_non_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=non_spec_state_indices_tensor,
-            ).unsqueeze(0)
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                core_attn_out_non_spec = fused_recurrent_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=ssm_state,
+                    inplace_final_state=True,
+                    cu_seqlens=cu_seqlens,
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    use_qk_l2norm_in_kernel=False,
+                )
+            else:
+                core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
+                    query=query_non_spec.squeeze(0),
+                    key=key_non_spec.squeeze(0),
+                    value=value_non_spec.squeeze(0),
+                    g=g_non_spec.squeeze(0),
+                    beta=beta_non_spec.squeeze(0),
+                    state=ssm_state,
+                    scale=key_non_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                ).unsqueeze(0)
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
@@ -311,5 +356,49 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
 
 
+def _patch_attention_forward(
+    self,
+    positions: torch.Tensor,
+    output: torch.Tensor,
+    hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    qkv, _ = self.qkv_proj(hidden_states)
+    if self.attn_output_gate:
+        _cos_sin_cache = self.rotary_emb.cos_sin_cache
+        q, gate, k, v = torch.ops.vllm.gated_qkv_rmsnorm_rope(
+            input=qkv,
+            cos_sin_cache=_cos_sin_cache,
+            positions=positions,
+
+            q_weight=self.q_norm.weight,
+            k_weight=self.k_norm.weight,
+
+            q_hidden_size=self.q_size,
+            kv_hidden_size=self.kv_size,
+            head_dim=self.head_dim,
+            eps=1e-06,
+        )
+    else:
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
+            -1, self.num_heads * self.head_dim
+        )
+        k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
+            -1, self.num_kv_heads * self.head_dim
+        )
+        q, k = self.rotary_emb(positions, q, k)
+
+    attn_output = self.attn(q, k, v)
+
+    if self.attn_output_gate:
+        gate = torch.sigmoid(gate)
+        attn_output = attn_output * gate
+
+    output[:], _ = self.o_proj(attn_output)
+
+    return output
+
 Qwen3NextGatedDeltaNet.forward = AscendQwen3Next_GatedDeltaNet.forward
 Qwen3NextGatedDeltaNet._forward_core = AscendQwen3Next_GatedDeltaNet._forward_core
+Qwen3NextAttention.forward = _patch_attention_forward
