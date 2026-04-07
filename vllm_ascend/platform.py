@@ -298,9 +298,6 @@ class NPUPlatform(Platform):
         # - Prefill stage: uses PIECEWISE mode
         # - Decode stage: uses FULL mode
         # This is controlled dynamically in model_runner based on is_all_decode flag
-        # Note: We do NOT filter cudagraph_capture_sizes here for speculative decoding
-        # because PIECEWISE (prefill) doesn't require uniform_decode alignment.
-        # Only FULL decode mode requires the alignment.
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             logger.info(
                 "FULL_AND_PIECEWISE enabled on NPU. "
