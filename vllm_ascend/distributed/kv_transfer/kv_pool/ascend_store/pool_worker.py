@@ -162,7 +162,7 @@ class KVPoolWorker:
         self.layer_save_tasks = [[] for i in range(self.num_layers)]
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
-
+        # req_id, layer_id, block info
         self._request_addr_tracker: dict[str, dict[int, dict]] = {}
 
         import os
@@ -328,13 +328,6 @@ class KVPoolWorker:
                 self.kv_recv_thread.add_request((None, layer_load_task, layer_id))
 
     def process_layer_data(self, request: ReqMeta) -> None:
-        """
-        A more efficient version of the layer-wise KV cache retrieval or storage.
-
-        :param request: The request containing meta information about the tokens and blocks.
-
-        :return: A generator that yields either None (for store) or a tensor (for retrieve).
-        """
         if request.block_keys_by_layer is not None and request.starts is not None and request.ends is not None:
             starts = request.starts
             ends = request.ends
