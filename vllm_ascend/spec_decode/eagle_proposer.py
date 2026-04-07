@@ -778,6 +778,9 @@ class SpecDecodeBaseProposer(EagleProposer):
         )
 
         num_indices = token_indices_to_sample.shape[0]
+        # ACL graph may keep these indices as int32 device tensors; normalize
+        # them before sampling hidden states to avoid backend-specific indexing
+        # behavior.
         sample_indices = token_indices_to_sample.to(dtype=torch.long)
         if self.pcp_size > 1:
             # remove graph padding before all_gather
@@ -804,6 +807,8 @@ class SpecDecodeBaseProposer(EagleProposer):
             )
             sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - num_indices))
 
+        # Use explicit index_select here instead of tensor[...] because the
+        # merged ACL graph path is sensitive to advanced indexing semantics.
         sample_hidden_states = torch.index_select(last_hidden_states, 0, sample_indices)
         logits = self.model.compute_logits(sample_hidden_states)
 
@@ -922,6 +927,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 )
                 sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - num_indices))
 
+            # Keep the same explicit indexing rule for subsequent draft steps.
             sample_hidden_states = torch.index_select(last_hidden_states, 0, sample_indices)
             logits = self.model.compute_logits(sample_hidden_states)
 
@@ -1121,6 +1127,9 @@ class SpecDecodeBaseProposer(EagleProposer):
         return self.method not in ("mtp", "draft_model")
 
     def _extract_hidden_state_outputs(self, outputs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        # ACL graph wrappers may add singleton tuple layers around the real
+        # model outputs. Unwrap them once here so the proposer always consumes
+        # tensors with the same structure.
         # Graph wrappers may add singleton tuple layers around the actual model outputs.
         while isinstance(outputs, tuple) and len(outputs) == 1:
             outputs = outputs[0]
