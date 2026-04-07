@@ -964,14 +964,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
+    
     ops.def(
-        "cache_by_group_pre(Tensor slotMappingNpu, int[2] slotMappingList =[], int blockSize=0) -> Tensor"
+        "cache_by_group_pre(Tensor slot_mapping_npu, int[2] slot_mapping_list =[], int block_size=0)"
+         "-> (Tensor group_len ,Tensor group_key_idx, Tensor group_key_cache_idx)"
     );
     ops.impl("cache_by_group_pre", torch::kPrivateUse1, &vllm_ascend::cache_by_group_pre);
 
     ops.def(
-        "reshape_and_cache_by_group(Tensor keyIn, Tensor keyCacheIn, Tensor groupInfo, int blockSize=0) -> ()"
+        "reshape_and_cache_by_group(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("reshape_and_cache_by_group", torch::kPrivateUse1, &vllm_ascend::reshape_and_cache_by_group);
-}
 #endif

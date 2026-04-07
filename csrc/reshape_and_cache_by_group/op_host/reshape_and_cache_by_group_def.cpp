@@ -36,7 +36,19 @@ class ReshapeAndCacheByGroup : public OpDef {
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
         .AutoContiguous();
-    this->Input("groupInfo")
+    this->Input("groupLen")
+        .ParamType(REQUIRED)
+        .DataType({ge::DT_INT32 , ge::DT_INT32 , ge::DT_INT32 })
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .AutoContiguous();
+    this->Input("groupKeyIdx")
+        .ParamType(REQUIRED)
+        .DataType({ge::DT_INT32 , ge::DT_INT32 , ge::DT_INT32 })
+        .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+        .AutoContiguous();
+    this->Input("groupKeyCacheIdx")
         .ParamType(REQUIRED)
         .DataType({ge::DT_INT32 , ge::DT_INT32 , ge::DT_INT32 })
         .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})

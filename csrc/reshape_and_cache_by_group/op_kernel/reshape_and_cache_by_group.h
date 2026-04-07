@@ -67,7 +67,9 @@ public:
     AscendC::LocalTensor<T> tokenLocal;
     AscendC::GlobalTensor<T> keyInputGt;
     AscendC::GlobalTensor<T> keyCacheIntputGt;
-    AscendC::GlobalTensor<uint32_t> groupInfoIntputGt;
+    AscendC::GlobalTensor<uint32_t> groupLenGt;
+    AscendC::GlobalTensor<uint32_t> groupKeyIdxGt;
+    AscendC::GlobalTensor<uint32_t> groupKeyCacheIdxGt;
     AscendC::TBuf<AscendC::TPosition::VECCALC> tokenBuf;
     __aicore__ inline ReshapeAndCacheByGroupBase() {}
 
@@ -99,33 +101,28 @@ public:
             corePerNum = tilingData->corePerNum;
         }
     }
-    __aicore__ inline void Process(GM_ADDR keyIn, GM_ADDR keyCacheIn, GM_ADDR groupInfo)
+    __aicore__ inline void Process(GM_ADDR keyIn, GM_ADDR keyCacheIn, GM_ADDR groupLen, GM_ADDR groupKeyIdx, GM_ADDR groupKeyCacheIdx)
     {
         
         keyInputGt.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(keyIn));
         keyCacheIntputGt.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(keyCacheIn));
-        groupInfoIntputGt.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(groupInfo));
+        groupLenGt.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(groupLen));
+        groupKeyIdxGt.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(groupKeyIdx));
+        groupKeyCacheIdxGt.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(groupKeyCacheIdx));
 
         pipeThis->InitBuffer(tokenBuf,  blockTableSize*tokenByteSize);
         tokenLocal = tokenBuf.Get<T>();
 
         AscendC::DataCopyExtParams copyParams{1, 0,  0, 0, 0};//todo完整块长度
         AscendC::DataCopyPadExtParams<T> padParams{false, 0, 0, 0};
+        
         for (uint32_t i = 0; i < corePerNum; i++) {
             uint32_t idx = (coreId+i*blockNum)*sizeof(GroupInfo)/sizeof(uint32_t);
-         
-            if(idx >= 3*groupInfoLen ||  groupInfoIntputGt.GetValue(idx+1)+groupInfoIntputGt.GetValue(idx)>numTokens \
-                 ||groupInfoIntputGt.GetValue(idx+2)+groupInfoIntputGt.GetValue(idx)>numCache ){
-                // printf("coreId=%d,idx=%d\n",coreId,idx);
-                // printf("groupInfoLen=%d,g1=%d,g2=%d,g3=%d\n,",groupInfoLen,groupInfoIntputGt.GetValue(idx),groupInfoIntputGt.GetValue(idx+1),groupInfoIntputGt.GetValue(idx+2));
-                continue;
-            }
-           
-            copyParams.blockLen = groupInfoIntputGt.GetValue(idx)*tokenByteSize; //单位字节
-            DataCopyPad(tokenLocal, keyInputGt[ groupInfoIntputGt.GetValue(idx+1)*tokenSize], copyParams, padParams); //注意偏移顺序
+            copyParams.blockLen = groupLenGt.GetValue(idx)*tokenByteSize; //单位字节
+            DataCopyPad(tokenLocal, keyInputGt[ groupKeyIdxGt.GetValue(idx)*tokenSize], copyParams, padParams); //注意偏移顺序
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
-            DataCopyPad(keyCacheIntputGt[groupInfoIntputGt.GetValue(idx+2)*tokenSize], tokenLocal, copyParams);
+            DataCopyPad(keyCacheIntputGt[groupKeyCacheIdxGt.GetValue(idx)*tokenSize], tokenLocal, copyParams);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
         }

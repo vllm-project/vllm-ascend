@@ -159,7 +159,8 @@ def test_myops(num_tokens, num_head, block_size, num_blocks,count):
     assert num_tokens==len(slot_list)
     slot_list_np= np.array(slot_list)
     slot_mapping_npu = torch.from_numpy(slot_list_np).to(torch.int32).npu()
-
+    slot_mapping_cpu = torch.empty_like(slot_mapping_npu, device="cpu").pin_memory()
+    slot_mapping_cpu.copy_(slot_mapping_npu, non_blocking=True)
     key = torch.rand((num_tokens, num_head,head_size_k), dtype=torch.float16)
     key_npu = key.npu()
     # key_cache = torch.rand((num_blocks, block_size, num_head, head_size_k), dtype=torch.float16)
@@ -167,11 +168,9 @@ def test_myops(num_tokens, num_head, block_size, num_blocks,count):
     key_cache_npu = key_cache.npu()
 
     key_expect = cal_slot(key_npu, key_cache_npu, slot_list_np, block_size)
-
-    # torch_npu._npu_reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
-    # print(f"{key_cache_npu.shape=} {slot_mapping_npu.shape=} {key_npu.shape=}")
-    # torch_npu.npu_scatter_nd_update_(key_cache_npu, slot_mapping_npu, key_npu)
-    torch.ops._C_ascend.reshape_and_cache_by_group(key_npu, key_cache_npu, slot_list_np, block_size)
+    slot_mapping_list = slot_mapping_cpu.tolist() 
+    group_len,group_key_idx,group_key_cache_idx=torch.ops._C_ascend.cache_by_group_pre( slot_mapping_npu, slot_mapping_list, block_size)
+    torch.ops._C_ascend.reshape_and_cache_by_group(key_npu, key_cache_npu, group_len, group_key_idx, group_key_cache_idx, block_size)
 
     torch.testing.assert_close(key_expect, key_cache_npu, atol=0.001, rtol=0.1 )
 

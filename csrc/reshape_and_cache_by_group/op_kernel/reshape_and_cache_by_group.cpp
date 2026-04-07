@@ -21,12 +21,23 @@
 #include "reshape_and_cache_by_group.h"
 
 extern "C" __global__ __aicore__ void reshape_and_cache_by_group(
-    GM_ADDR keyIn, GM_ADDR keyCacheIn, GM_ADDR groupInfo, GM_ADDR workspace, GM_ADDR tiling)
+    GM_ADDR keyIn, GM_ADDR keyCacheIn, GM_ADDR groupLen, GM_ADDR groupKeyIdx, GM_ADDR groupKeyCacheIdx, GM_ADDR workspace, GM_ADDR tiling)
 {
     AscendC::TPipe pipe;
     REGISTER_TILING_DEFAULT(ReshapeAndCacheByGroup::ReshapeAndCacheByGroupTilingData);
     GET_TILING_DATA(tilingData, tiling);
-    ReshapeAndCacheByGroup::ReshapeAndCacheByGroupBase<half> op;
-    op.Init( &pipe, &tilingData);
-    op.Process(keyIn,keyCacheIn,groupInfo);
+
+    if (TILING_KEY_IS(1)) {
+        ReshapeAndCacheByGroup::ReshapeAndCacheByGroupBase<uint8_t> op;
+        op.Init( &pipe, &tilingData);
+        op.Process(keyIn,keyCacheIn, groupLen, groupKeyIdx, groupKeyCacheIdx);
+    } else if (TILING_KEY_IS(2)) {
+        ReshapeAndCacheByGroup::ReshapeAndCacheByGroupBase<half> op;
+        op.Init( &pipe, &tilingData);
+        op.Process(keyIn,keyCacheIn, groupLen, groupKeyIdx, groupKeyCacheIdx);
+    } else if (TILING_KEY_IS(4)) {
+        ReshapeAndCacheByGroup::ReshapeAndCacheByGroupBase<int32_t> op;
+        op.Init( &pipe, &tilingData);
+        op.Process(keyIn,keyCacheIn, groupLen, groupKeyIdx, groupKeyCacheIdx);
+    }
 }

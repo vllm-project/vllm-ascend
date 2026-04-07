@@ -156,7 +156,9 @@ class AscendSFAMetadata:
     num_decode_tokens: int = 0
     num_prefills: int = 0
     block_size:int =0 
-    groupInfo: torch.Tensor | None = None
+    group_len: torch.Tensor | None = None
+    group_key_idx: torch.Tensor | None = None
+    group_key_cache_idx: torch.Tensor | None = None
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -327,9 +329,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
+        slot_mapping_list = slot_mapping_cpu.tolist()
         if envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
-            groupInfo=torch.ops._C_ascend.cache_by_group_pre( slot_mapping, slot_mapping_cpu.tolist(), block_size)
-
+            group_len,group_key_idx,group_key_cache_idx=torch.ops._C_ascend.cache_by_group_pre( slot_mapping, slot_mapping_list , block_size)
+        else:
+            group_len,group_key_idx,group_key_cache_idx=None,None,None
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -345,7 +349,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
             block_size=block_size,
-            groupInfo=groupInfo,
+            group_len=group_len,
+            group_key_idx=group_key_idx,
+            group_key_cache_idx=group_key_cache_idx,
         )
 
     def build_for_graph_capture(
@@ -1205,8 +1211,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                     k_nope = k_nope.view(k_nope.shape[0], 1, -1)
                     k_pe = k_pe.view(k_pe.shape[0], 1, -1)
                     if self.is_kv_producer and envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
-                        torch.ops._C_ascend.reshape_and_cache_by_group(k_nope, kv_cache[0], attn_metadata.groupInfo, attn_metadata.block_size)
-                        torch.ops._C_ascend.reshape_and_cache_by_group(k_pe, kv_cache[1], attn_metadata.groupInfo, attn_metadata.block_size)
+                        torch.ops._C_ascend.reshape_and_cache_by_group(k_nope, kv_cache[0], attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
+                        torch.ops._C_ascend.reshape_and_cache_by_group(k_pe, kv_cache[1],  attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
                     else:
                         DeviceOperator.reshape_and_cache(
                             key=k_nope[: attn_metadata.num_actual_tokens],
@@ -1221,7 +1227,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.is_kv_producer and envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
-                torch.ops._C_ascend.reshape_and_cache_by_group( k_li.view(-1, k_li.shape[-1]), kv_cache[2].view(-1, k_li.shape[-1]), attn_metadata.groupInfo, attn_metadata.block_size)
+                torch.ops._C_ascend.reshape_and_cache_by_group( k_li.view(-1, k_li.shape[-1]), kv_cache[2].view(-1, k_li.shape[-1]), attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
             else:
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
@@ -1230,7 +1236,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 assert len(kv_cache) == 4
                 assert k_li_scale is not None
                 if self.is_kv_producer and envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
-                    torch.ops._C_ascend.reshape_and_cache_by_group(k_li_scale.view(-1, k_li_scale.shape[-1]), kv_cache[3].view(-1, k_li_scale.shape[-1]), attn_metadata.groupInfo, attn_metadata.block_size)
+                    torch.ops._C_ascend.reshape_and_cache_by_group(k_li_scale.view(-1, k_li_scale.shape[-1]), kv_cache[3].view(-1, k_li_scale.shape[-1]), attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
                 else:
                     torch_npu.npu_scatter_nd_update_(
                         kv_cache[3].view(-1, k_li_scale.shape[-1]),

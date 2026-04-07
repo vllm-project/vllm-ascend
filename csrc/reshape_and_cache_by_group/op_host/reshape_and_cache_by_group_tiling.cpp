@@ -29,8 +29,7 @@ static ge::graphStatus ReshapeAndCacheByGroupTilingFunc(gert::TilingContext* con
     ge::graphStatus ret;
     
     if (op_type == "ReshapeAndCacheByGroup") {
-        //  printf("[ZTLOG] WriteCacheByGroupListCommonTiling\n");
-         ReshapeAndCacheByGroupCommonTiling reshapeandcachebygroup(context);
+        ReshapeAndCacheByGroupCommonTiling reshapeandcachebygroup(context);
         ret = reshapeandcachebygroup.DoTiling();
     }else {
         printf("[ZTLOG] no  ReshapeAndCacheByGroupCommonTiling\n");
@@ -38,7 +37,6 @@ static ge::graphStatus ReshapeAndCacheByGroupTilingFunc(gert::TilingContext* con
     }
 
     if (ret == ge::GRAPH_SUCCESS) {
-        // printf("[ZTLOG] ReshapeAndCacheByGroupTilingFunc success\n");
         return ret;
     }else{
         printf("[ZTLOG] ReshapeAndCacheByGroupTilingFunc failed\n");

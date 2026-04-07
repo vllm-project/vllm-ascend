@@ -116,7 +116,7 @@ ge::graphStatus ReshapeAndCacheByGroupCommonTiling::DoCommonTiling()
 
     auto kCacheShape = context_->GetInputShape(DIM_1);
     auto kCacheDimNum=kCacheShape->GetStorageShape().GetDimNum();
-    if (kCacheDimNum<2||kDimNum>7){
+    if (kCacheDimNum<2||kCacheDimNum>7){
         printf("[ERROR] ReshapeAndCacheByGroup Intput kCacheDimNum < 2 ");
         // OP_LOGE(context_->GetNodeName(), "ReshapeAndCacheByGroup Intput first params dim < 2 || dim_num>7");
     }else {
@@ -132,16 +132,22 @@ ge::graphStatus ReshapeAndCacheByGroupCommonTiling::DoCommonTiling()
     auto xDataType = context_->GetInputDesc(DIM_0)->GetDataType();
     if (xDataType == ge::DataType::DT_INT8) {
         typeByte = sizeof(int8_t);
+        params.tilingKey = 1;
     } else if (xDataType == ge::DataType::DT_FLOAT16 || xDataType == ge::DataType::DT_BF16) {
         typeByte = sizeof(uint16_t);
+        params.tilingKey = 2;
+    } else if (xDataType == ge::DataType::DT_INT32 || xDataType == ge::DataType::DT_UINT32) {
+        typeByte = sizeof(uint32_t);
+        params.tilingKey = 4;
     } else {
         OP_LOGE(context_->GetNodeName(), "Unsupport type.");
         return ge::GRAPH_FAILED;
     }
+
     params.typeByte = typeByte;
 
     auto groupInfoShape = context_->GetInputShape(DIM_2);
-    params.groupInfoLen =  static_cast<uint32_t>(groupInfoShape->GetStorageShape().GetDim(0))/3;
+    params.groupInfoLen =  static_cast<uint32_t>(groupInfoShape->GetStorageShape().GetDim(0));
     params.corepernum = params.groupInfoLen/params.coreNum;
     params.coretail= params.groupInfoLen%params.coreNum;
     
