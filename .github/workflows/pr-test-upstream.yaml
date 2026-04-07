@@ -51,7 +51,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [0, 1, 2, 3]
-            vllm: [v0.17.0]
+            vllm: [14acf429ac08b6d538ca6feb3e06b6d13895804d]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
           env:
