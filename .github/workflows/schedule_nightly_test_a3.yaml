@@ -171,6 +171,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
       should_run: >-
         ${{
@@ -302,3 +303,21 @@ jobs:
         run: |
           # Clear logs generated before the test to avoid confusion
           rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+
+  merge-benchmark-artifacts:
+    name: Merge benchmark artifacts into nightly-a3.zip
+    needs: [parse-trigger, single-node-tests, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.result == 'success' &&
+      (needs.single-node-tests.result != 'skipped' ||
+       needs.multi-node-tests.result != 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge all benchmark result artifacts
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: nightly-a3
+          pattern: nightly-test-benchmark-results-*
+          compression-level: 0
+          delete-merged: true
