@@ -77,7 +77,7 @@ jobs:
             run: |
               apt-get -y install `cat packages.txt`
               apt-get -y install gcc g++ cmake libnuma-dev clang-15
-    
+              git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
               update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
               update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
               pip install uv
@@ -100,7 +100,6 @@ jobs:
               PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
             run: |
               pip install uc-manager
-              git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
               uv pip install -r requirements-dev.txt
               uv pip install -v -e .
               uv pip install tblib mteb runai_model_streamer pqdm timm
