@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <algorithm>
+
 #ifndef RECURRENT_GATED_DELTA_RULE_V310_TORCH_ADPT_H
 #define RECURRENT_GATED_DELTA_RULE_V310_TORCH_ADPT_H
 namespace vllm_ascend {
@@ -73,7 +75,23 @@ at::Tensor npu_recurrent_gated_delta_rule_310(
                  num_accepted_tokens,
                  scale_real,
                  output);
-    at::Tensor touched_state_indices = ssm_state_indices.to(at::kLong).contiguous();
+    // Full-decode graph mode pads the state-index buffer with PAD_SLOT_ID (-1),
+    // but the kernel only consumes the logical token prefix described by
+    // actual_seq_lengths / num_accepted_tokens. Keep the fp32 cache write-back
+    // aligned with that prefix so padded tail entries do not corrupt the last
+    // state row during replay.
+    int64_t active_token_count = ssm_state_indices.size(0);
+    if (num_accepted_tokens.has_value() && num_accepted_tokens->defined()) {
+        active_token_count = query.size(0);
+    } else if (actual_seq_lengths.dim() == 1) {
+        active_token_count = actual_seq_lengths.size(0);
+    }
+    active_token_count = std::min<int64_t>(active_token_count, ssm_state_indices.size(0));
+    if (active_token_count == 0) {
+        return output;
+    }
+
+    at::Tensor touched_state_indices = ssm_state_indices.narrow(0, 0, active_token_count).to(at::kLong).contiguous();
     at::Tensor touched_state_values = state_fp16.index_select(0, touched_state_indices).to(state.scalar_type());
     state.index_copy_(0, touched_state_indices, touched_state_values);
     return output;
