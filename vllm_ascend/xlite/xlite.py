@@ -173,6 +173,8 @@ class QwenMoeXliteModel(LlamaXliteModel):
     def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
         config = super()._build_model_config(vllm_config)
         hf_config = vllm_config.model_config.hf_text_config
+        if hasattr(hf_config, "text_config"):
+            hf_config = hf_config.text_config
         ep_group = get_ep_group()
         config.n_dense_layers = 0
         config.n_routed_experts = hf_config.num_experts
@@ -189,7 +191,10 @@ class QwenMoeXliteModel(LlamaXliteModel):
 
     def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig, config: ModelConfig) -> Model:
         xlite_model = super()._build_model(runnable, vllm_config, config)
-        layers = runnable.model.layers
+        if hasattr(runnable, "language_model"):
+            layers = runnable.language_model.model.layers
+        else:
+            layers = runnable.model.layers
         xlite_model.gate = [layer.mlp.gate.weight for layer in layers]
         xlite_model.re_up_gate = [
             layer.mlp.experts.w13_weight[i] for layer in layers for i in range(layer.mlp.experts.local_num_experts)
@@ -276,6 +281,7 @@ def xlite_model_init(runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Mode
         "Qwen3ForCausalLM": LlamaXliteModel,
         "Qwen3VLForConditionalGeneration": LlamaXliteModel,
         "Qwen3MoeForCausalLM": QwenMoeXliteModel,
+        "Qwen3VLMoeForConditionalGeneration": QwenMoeXliteModel,
         "Glm4MoeForCausalLM": Glm4MoeXliteModel,
     }
 
