@@ -1,13 +1,17 @@
 model_name: "LLM-Research/Molmo-7B-D-0924"
+model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
-model: "vllm-vlm"
+
+serve:
+  max_model_len: 4096
+  trust_remote_code: true
+  gpu_memory_utilization: 0.8
+
 tasks:
 - name: "ceval-valid"
   metrics:
   - name: "acc,none"
     value: 0.71
-max_model_len: 4096
-trust_remote_code: True
-apply_chat_template: False
-fewshot_as_multiturn: False
-gpu_memory_utilization: 0.8
+
+apply_chat_template: false
+fewshot_as_multiturn: false

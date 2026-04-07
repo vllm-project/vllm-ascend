@@ -1,5 +1,16 @@
 model_name: "vllm-ascend/Qwen3-30B-A3B-W8A8"
+model_type: "vllm"
 hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 2
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.7
+  trust_remote_code: false
+  enable_expert_parallel: true
+  quantization: ascend
+
 tasks:
 - name: "gsm8k"
   metrics:
@@ -7,10 +18,7 @@ tasks:
     value: 0.9
   - name: "exact_match,flexible-extract"
     value: 0.8
+
 num_fewshot: 5
-gpu_memory_utilization: 0.7
-enable_expert_parallel: True
-tensor_parallel_size: 2
-apply_chat_template: False
-fewshot_as_multiturn: False
-quantization: ascend
+apply_chat_template: false
+fewshot_as_multiturn: false

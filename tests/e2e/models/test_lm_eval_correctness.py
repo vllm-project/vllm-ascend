@@ -36,9 +36,10 @@ def env_config() -> EnvConfig:
 
 
 def build_model_args(eval_config, tp_size):
-    trust_remote_code = eval_config.get("trust_remote_code", False)
-    max_model_len = eval_config.get("max_model_len", 4096)
-    dtype = eval_config.get("dtype", "auto")
+    serve_cfg = eval_config.get("serve", {})
+    trust_remote_code = serve_cfg.get("trust_remote_code", False)
+    max_model_len = serve_cfg.get("max_model_len", 4096)
+    dtype = serve_cfg.get("dtype", "auto")
     model_args = {
         "pretrained": eval_config["model_name"],
         "tensor_parallel_size": tp_size,
@@ -55,7 +56,7 @@ def build_model_args(eval_config, tp_size):
         "enable_thinking",
         "quantization",
     ]:
-        val = eval_config.get(s, None)
+        val = serve_cfg.get(s, None)
         if val is not None:
             model_args[s] = val
 
@@ -87,7 +88,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         hardware=eval_config.get("hardware", "unknown"),
         model_name=eval_config["model_name"],
         model_args=f"'{','.join(f'{k}={v}' for k, v in model_args.items())}'",
-        model_type=eval_config.get("model", "vllm"),
+        model_type=eval_config.get("model_type", "vllm"),
         datasets=",".join([task["name"] for task in eval_config["tasks"]]),
         apply_chat_template=eval_config.get("apply_chat_template", True),
         fewshot_as_multiturn=eval_config.get("fewshot_as_multiturn", True),
@@ -108,12 +109,15 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
 def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
+    if eval_config.get("model_type", "vllm") == "vllm-asr":
+        pytest.skip("Skipping ASR config, use test_asr_eval.py instead")
+
     model_args = build_model_args(eval_config, tp_size)
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
 
     eval_params = {
-        "model": eval_config.get("model", "vllm"),
+        "model": eval_config.get("model_type", "vllm"),
         "model_args": model_args,
         "tasks": [task["name"] for task in eval_config["tasks"]],
         "apply_chat_template": eval_config.get("apply_chat_template", True),

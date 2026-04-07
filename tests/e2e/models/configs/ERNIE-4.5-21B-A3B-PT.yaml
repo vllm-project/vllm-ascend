@@ -1,9 +1,18 @@
 model_name: "PaddlePaddle/ERNIE-4.5-21B-A3B-PT"
+model_type: "vllm"
 hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.8
+  trust_remote_code: true
+
 tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,flexible-extract"
     value: 0.71
+
 num_fewshot: 5
-trust_remote_code: True

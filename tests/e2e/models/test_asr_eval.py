@@ -201,6 +201,9 @@ def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
     """
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
+    if eval_config.get("model_type", "vllm") != "vllm-asr":
+        pytest.skip(f"Skipping non-ASR config (model_type={eval_config.get('model_type', 'vllm')})")
+
     model_name: str = eval_config["model_name"]
     language: str = eval_config.get("language", "en")
     limit: int | None = eval_config.get("limit", None)
