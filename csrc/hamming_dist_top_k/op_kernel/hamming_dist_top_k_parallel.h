@@ -603,8 +603,9 @@ protected:
     __aicore__ inline void SetBlockTableForIndices(uint32_t curBatchIdx, uint64_t outGmOffset) {
         // 找到当前batch对应的tableblock
         LocalTensor<int32_t> tableBlockTensor = tableBlockBuf_.template Get<int32_t>();
-        DataCopyParams copyParams{1, static_cast<uint16_t>(param_.blockCount * sizeof(int32_t)), 0, 0};
-        DataCopy(tableBlockTensor, keyBlockTableGm_[curBatchIdx * param_.blockCount], copyParams);
+        DataCopyExtParams copyInParams{1, static_cast<uint32_t>(param_.blockCount * sizeof(int32_t)), 0, 0, 0};
+        DataCopyPadExtParams<int32_t> copyInPadParams{false, 0, 0, 0};
+        DataCopyPad(tableBlockTensor, keyBlockTableGm_[curBatchIdx * param_.blockCount], copyInParams, copyInPadParams);
         //DumpTensor(tableBlockTensor, 500, 64);
         SetFlag<HardEvent::MTE2_MTE3>(0);
         WaitFlag<HardEvent::MTE2_MTE3>(0);
@@ -932,8 +933,9 @@ protected:
         LocalTensor<int32_t> blockIdUb = topKInIndexQueue_.AllocTensor<int32_t>();
 
         LocalTensor<int32_t> tableBlockTensor = tableBlockBuf_.template Get<int32_t>();
-        DataCopyParams copyParams{1, static_cast<uint16_t>(param_.blockCount * sizeof(int32_t)), 0, 0};
-        DataCopy(tableBlockTensor, keyBlockTableGm_[curBatchIdx * param_.blockCount], copyParams);
+        DataCopyExtParams copyInParams{1, static_cast<uint32_t>(param_.blockCount * sizeof(int32_t)), 0, 0, 0};
+        DataCopyPadExtParams<int32_t> copyInPadParams{false, 0, 0, 0};
+        DataCopyPad(tableBlockTensor, keyBlockTableGm_[curBatchIdx * param_.blockCount], copyInParams, copyInPadParams);
 
         ::AscendC::WriteBlockTableFromTopK(curBatchIdx, topKIndexUb, blockIdUb, curKScalar, outGmOffset,
             tableBlockTensor, indicesGm_, continFlag_, param_.blockCount);
