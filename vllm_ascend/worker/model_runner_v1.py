@@ -335,7 +335,19 @@ class NPUModelRunner(GPUModelRunner):
             )
             # TODO(zhenwenqi) after https://github.com/vllm-project/vllm/pull/28988 is merged, we can delete this
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
-            self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
+            # Resize positions to accommodate PCP padding. Keep as plain GPU
+            # tensor (not CpuGpuBuffer) so upstream _preprocess can slice it.
+            self.positions = torch.zeros(
+                max_buffer_num_tokens, dtype=torch.int64, device=self.device
+            )
+
+        # Create a CPU numpy buffer for positions computation when
+        # self.positions is a plain tensor (non-CpuGpuBuffer case).
+        self._positions_cpu_buf = torch.zeros(
+            max_buffer_num_tokens, dtype=torch.int64,
+            pin_memory=self.pin_memory,
+        )
+        self._positions_np_buf = self._positions_cpu_buf.numpy()
 
         self._set_up_drafter()
 
@@ -638,9 +650,16 @@ class NPUModelRunner(GPUModelRunner):
         self.with_prefill = with_prefill
 
         # Get positions.
-        positions_np = self.positions.np[:total_num_scheduled_tokens]
-        cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
-        np.add(self.input_batch.num_computed_tokens_cpu[req_indices], arange, out=positions_np)
+        # Use query_pos.np as output buffer for _get_cumsum_and_arange to avoid
+        # corrupting self.arange_np (which is used as both read source and would
+        # be overwritten if used as arange_out, causing aliasing bugs).
+        positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
+        cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
+        np.add(
+            self.input_batch.num_computed_tokens_cpu[req_indices],
+            self.query_pos.np[: cu_num_tokens[-1]],
+            out=positions_np
+        )
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
@@ -674,8 +693,8 @@ class NPUModelRunner(GPUModelRunner):
             # Re-update after PCP split sequences.
             total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
             req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-            cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
-            positions_np = self.positions.np[:total_num_scheduled_tokens]
+            cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
+            positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
             np.add(
                 self.input_batch.num_computed_tokens_cpu[req_indices],
                 position_pcp[:total_num_scheduled_tokens],
@@ -761,15 +780,37 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
             self.gdn_query_start_loc.copy_to_gpu()
 
-        self.seq_lens.np[:num_reqs] = self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
-        self.seq_lens.cpu[num_reqs:].fill_(0)
-        self.seq_lens.copy_to_gpu()
+        self.num_computed_tokens[:num_reqs].copy_(
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+            non_blocking=True,
+        )
+
+        self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
+        self.num_scheduled_tokens.copy_to_gpu(num_reqs)
+        num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
+
+        self.seq_lens[:num_reqs] = (
+            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+        )
+        self.seq_lens[num_reqs:].fill_(0)
+
+        # Compute optimistic seq_lens on CPU (assumes all draft tokens from
+        # previous iteration accepted). Used by _pool() and discard logic.
+        torch.add(
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+            torch.from_numpy(num_scheduled_tokens),
+            out=self.optimistic_seq_lens_cpu[:num_reqs],
+        )
+        self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
+        # Build prev_positions mapping for async scheduling input_ids handling.
+        self._compute_prev_positions(num_reqs)
+
         # Copy the tensors to the NPU.
-        self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens, cu_num_tokens)
+        self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -788,7 +829,10 @@ class NPUModelRunner(GPUModelRunner):
             )
         else:
             # Common case (1D positions)
-            self.positions.copy_to_gpu(total_num_scheduled_tokens)
+            self.positions[:total_num_scheduled_tokens].copy_(
+                self._positions_cpu_buf[:total_num_scheduled_tokens],
+                non_blocking=True,
+            )
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
@@ -806,7 +850,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             discard_requests_mask = original_seq_lens_np < num_tokens_np
         else:
-            discard_requests_mask = self.seq_lens.np[:num_reqs] < num_tokens_np
+            discard_requests_mask = self.optimistic_seq_lens_cpu.numpy()[:num_reqs] < num_tokens_np
 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
@@ -2056,7 +2100,7 @@ class NPUModelRunner(GPUModelRunner):
             # window size when capturing to make sure the correct kernel is selected.
             max_seq_len = self.max_model_len
         else:
-            max_seq_len = self.seq_lens.np[:num_reqs].max().item()
+            max_seq_len = self.optimistic_seq_lens_cpu[:num_reqs].max().item()
         if use_spec_decode and self.need_accepted_tokens:
             self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             self.num_accepted_tokens.np[num_reqs:].fill(1)
@@ -2129,9 +2173,9 @@ class NPUModelRunner(GPUModelRunner):
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
-            seq_lens=self.seq_lens.gpu[:num_reqs_padded],
+            seq_lens=self.seq_lens[:num_reqs_padded],
             # TODO
-            seq_lens_cpu=self.seq_lens.cpu[:num_reqs_padded],
+            seq_lens_cpu=self.optimistic_seq_lens_cpu[:num_reqs_padded],
             # TODO
             num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs_padded],
             num_reqs=num_reqs_padded,
@@ -2143,7 +2187,7 @@ class NPUModelRunner(GPUModelRunner):
             causal=True,
             num_input_tokens=num_tokens_padded,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
-            positions=self.positions.gpu,
+            positions=self.positions,
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
@@ -2407,11 +2451,14 @@ class NPUModelRunner(GPUModelRunner):
                     if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
                     else max_query_len
                 )  # type: ignore[assignment]
-            self.seq_lens.np[:num_reqs_padded] = seq_lens
-            self.seq_lens.np[num_reqs_padded:] = 0
-            self.seq_lens.copy_to_gpu()
+            self.seq_lens[:num_reqs_padded] = torch.tensor(
+                seq_lens,
+                dtype=self.seq_lens.dtype,
+                device=self.seq_lens.device,
+            )
+            self.seq_lens[num_reqs_padded:] = 0
 
-            cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+            cum_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
             num_reqs_padded = self._pad_query_start_loc_for_fia(
@@ -2453,7 +2500,7 @@ class NPUModelRunner(GPUModelRunner):
             elif self.uses_xdrope_dim > 0:
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
-                positions = self.positions.gpu[:num_tokens_padded]
+                positions = self.positions[:num_tokens_padded]
 
             # update global cos, sin
             update_cos_sin(positions)

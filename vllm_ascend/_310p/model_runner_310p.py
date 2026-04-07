@@ -318,6 +318,7 @@ class NPUModelRunner310(NPUModelRunner):
     def _prepare_input_ids(
         self,
         scheduler_output: SchedulerOutput,
+        num_reqs: int,
         total_num_scheduled_tokens: int,
         cu_num_tokens: np.ndarray,
     ) -> None:
