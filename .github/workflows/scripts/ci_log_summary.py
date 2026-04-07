@@ -870,26 +870,38 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
         "env_flakes": [error for error in unique_errors if error["category"] == "Environment Flake"],
     }
 
+def _extend_code_block(lines: list[str], content: str | list[str], info_string: str = "text") -> None:
+        if isinstance(content, str):
+            block_lines = content.splitlines() or [content]
+        else:
+            block_lines = content or [""]
+        lines.extend([f"```{info_string}", *block_lines, "```"])
 
 def _format_error_block(index: int, error: dict) -> list[str]:
-    lines = [
-        f"{index}. `{error['error_type']}`: {error['error_message']}",
-        f"   Category: `{error['category']}`",
-    ]
+    lines = [f"#### {index}. `{error['error_type']}`", ""]
+
+    error_message = error.get("error_message", "")
+    if error_message:
+        lines.extend(["**Message**", ""])
+        _extend_code_block(lines, error_message)
+        lines.append("")
+
+    lines.append(f"**Category:** `{error['category']}`")
 
     failed_test_files = error.get("failed_test_files", [])
     if failed_test_files:
-        lines.append("   Failed test files:")
-        lines.extend(f"   - `{test}`" for test in failed_test_files)
+        lines.extend(["", "**Failed test files**", ""])
+        lines.extend(f"- `{test}`" for test in failed_test_files)
 
     failed_test_cases = error.get("failed_test_cases", [])
     if failed_test_cases:
-        lines.append("   Failed test cases:")
-        lines.extend(f"   - `{test}`" for test in failed_test_cases)
+        lines.extend(["", "**Failed test cases**", ""])
+        lines.extend(f"- `{test}`" for test in failed_test_cases)
 
     context = error.get("context", [])
     if context:
-        lines.extend(["   Context:", "   ```text", *[f"   {line}" for line in context], "   ```"])
+        lines.extend(["", "**Context**", ""])
+        _extend_code_block(lines, context)
 
     return lines
 

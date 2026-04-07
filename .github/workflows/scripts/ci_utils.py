@@ -48,6 +48,11 @@ def _print_github_actions_group_end() -> None:
         print("::endgroup::", flush=True)
 
 
+def _print_github_actions_annotation(annotation: str, message: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::{annotation}::{_escape_github_actions_value(message)}", flush=True)
+
+
 def run_tests(
     files: list[TestFile],
     continue_on_error: bool = False,
@@ -102,6 +107,19 @@ def run_tests(
             )
         finally:
             _print_github_actions_group_end()
+
+        if passed:
+            _print_github_actions_annotation(
+                "notice",
+                f"[{i + 1}/{len(files)}] PASSED  {test.name}  ({elapsed:.0f}s)",
+            )
+        else:
+            _print_github_actions_annotation(
+                "error",
+                f"[{i + 1}/{len(files)}] FAILED {test_group_name}. "
+                "Please go to the Summary section to quickly review the error overview, "
+                "or expand the logs to view the error details.",
+            )
 
         if not passed:
             all_passed = False
