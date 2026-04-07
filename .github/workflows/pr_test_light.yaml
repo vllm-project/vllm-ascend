@@ -72,6 +72,7 @@ jobs:
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
               - 'packages.txt'
+              - '.github/workflows/scripts/**'
             ut_tracker:
               - 'tests/ut/**'
               - '.github/workflows/pr_test_light.yaml'
