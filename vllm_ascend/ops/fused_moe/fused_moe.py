@@ -586,6 +586,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         ascend_config = get_ascend_config()
         # TODO: Enabling the mix placement in deepseek_v2.py
         # remove this part after the mix placement merged into vllm
+        # https://github.com/vllm-project/vllm/pull/31256
         if ascend_config.mix_placement:
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_false
             rocm_aiter_ops.is_fused_moe_enabled = mock_false

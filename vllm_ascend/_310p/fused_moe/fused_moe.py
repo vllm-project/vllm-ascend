@@ -60,9 +60,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         scoring_func: str = "softmax",
         e_score_correction_bias: torch.Tensor | None = None,
         global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-        **kwargs,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -227,7 +225,6 @@ class AscendFusedMoE310(FusedMoE):
         )
         hidden_states = prepare_output.hidden_states
         router_logits = prepare_output.router_logits
-        pertoken_scale = prepare_output.pertoken_scale
         padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
 
         # Matrix multiply.
@@ -244,9 +241,7 @@ class AscendFusedMoE310(FusedMoE):
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
             global_num_experts=self.global_num_experts,
-            expert_map=self.local_expert_map,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            pertoken_scale=pertoken_scale,
         )
 
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(

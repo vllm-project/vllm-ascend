@@ -140,7 +140,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 
         # NOTE: quant_mode differs by quant feature:
         # - Legacy int communication quantization uses quant_mode=2.
-        # - A5 MXFP8 communication uses quant_mode=4.
+        # - A5 MXFP communication uses quant_mode=4 only for dispatch-enabled
+        #   MXFP paths (currently MXFP8).
+        # - MXFP4 keeps quant_mode=0 which means that activations are quantized in
+        #   the MoE MLP path instead of during MC2 dispatch.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif token_dispatch_input.quant.dispatch_with_quant:
@@ -172,7 +175,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp:
+        # Only dispatch-enabled MXFP paths pass y_dtype through MC2. MXFP4
+        # keeps dispatch unquantized and quantizes again inside the MLP path.
+        if (
+            self.a5_need_extra_args
+            and token_dispatch_input.quant.is_mxfp
+            and token_dispatch_input.quant.dispatch_with_quant
+        ):
             y_dtype = torch.float8_e4m3fn
             if (
                 token_dispatch_input.quant.mxfp is not None
@@ -212,6 +221,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             tp_recv_counts,
             expand_scales,
         ) = output[0:7]
+
+        # The dispatch operator may still return a non-None dynamic_scale when
+        # quant_mode=0. Clear it for unquantized dispatch paths such as MXFP4.
+        if not token_dispatch_input.quant.dispatch_with_quant:
+            dynamic_scale = None
 
         group_list_type = 0
         return MoETokenDispatchOutput(
@@ -295,8 +309,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadata]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.ep_rank_id = get_ep_group().rank_in_group
-        self.ep_world_size = get_ep_group().world_size
+        vllm_config = get_current_vllm_config()
+        self.ep_rank_id = get_ep_group().rank_in_group if vllm_config.parallel_config.enable_expert_parallel else 0
+        self.ep_world_size = get_ep_group().world_size if vllm_config.parallel_config.enable_expert_parallel else 1
         global_num_experts = kwargs.get("num_experts", 0)
         self.max_num_tokens = kwargs.get("max_num_tokens")
         num_experts_local = global_num_experts // self.ep_world_size

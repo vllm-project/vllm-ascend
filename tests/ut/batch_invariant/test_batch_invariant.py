@@ -126,7 +126,8 @@ class TestBatchInvariant:
     def test_init_batch_invariance(self, batch_invariant_enabled, has_backend, expected_logger_call):
         """Test init_batch_invariance under different conditions"""
         # Mock dependencies
-        batch_invariant.vllm_is_batch_invariant = MagicMock(return_value=batch_invariant_enabled)
+        import vllm.envs as envs
+        envs.VLLM_BATCH_INVARIANT = batch_invariant_enabled
         batch_invariant.HAS_TRITON = has_backend
         batch_invariant.HAS_ASCENDC_BATCH_INVARIANT = has_backend
         batch_invariant.override_envs_for_invariance = MagicMock()
