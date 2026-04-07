@@ -271,7 +271,7 @@ class KVPoolScheduler:
             starts, ends = self.compute_chunk_offsets(num_chunks)
             request_tracker.starts = starts
             request_tracker.ends = ends
-            request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(starts, request_real.block_ids)
+            request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(starts, unfolded_block_ids)
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -341,7 +341,7 @@ class KVPoolScheduler:
                     request_tracker.block_keys_by_layer = block_keys_by_layer
                     request_tracker.starts = starts
                     request_tracker.ends = ends
-                    request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(starts, request_real.block_ids)
+                    request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(starts, new_block_ids)
 
                     last_chunk_tokens_num = (
                         (len(request_real.prompt_token_ids) // self._block_size * self._block_size)
@@ -407,13 +407,13 @@ class KVPoolScheduler:
                             request_tracker.starts = new_starts
                             request_tracker.ends = new_ends
                             request_tracker.block_keys_by_layer = block_keys_by_layer
-                            request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(new_starts, request.block_ids)
+                            request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(new_starts, new_block_ids)
                         else:
                             request_tracker.starts.extend(new_starts)
                             request_tracker.ends.extend(new_ends)
                             for layer_id, layer_keys in enumerate(block_keys_by_layer):
                                 request_tracker.block_keys_by_layer[layer_id].extend(layer_keys)
-                            new_block_ids_per_chunk = self.compute_block_ids_per_chunk(new_starts, request.block_ids)
+                            new_block_ids_per_chunk = self.compute_block_ids_per_chunk(new_starts, new_block_ids)
                             request_tracker.block_ids_per_chunk.extend(new_block_ids_per_chunk)
 
                     last_chunk_tokens_num = (
