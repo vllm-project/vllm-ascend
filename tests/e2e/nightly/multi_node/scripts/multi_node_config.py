@@ -182,7 +182,11 @@ class MultiNodeConfig:
         npu_per_node: int,
         envs: dict,
         disaggregated_prefill: dict | None,
+<<<<<<< HEAD
         special_dependencies: dict,
+=======
+        special_dependencies: dict | None,
+>>>>>>> 70535bff (CI适配transformers 5.2.0)
         perf_cmd: str | None,
         acc_cmd: str | None,
     ):
@@ -282,7 +286,11 @@ class MultiNodeConfigLoader:
             nodes=nodes,
             npu_per_node=config.get("npu_per_node", 16),
             envs=config.get("env_common", {}),
+<<<<<<< HEAD
             special_dependencies = config.get("special_dependencies", {}),
+=======
+            special_dependencies = special_dependencies.get("special_dependencies", {}),
+>>>>>>> 70535bff (CI适配transformers 5.2.0)
             disaggregated_prefill=config.get("disaggregated_prefill"),
             perf_cmd=benchmarks.get("perf"),
             acc_cmd=benchmarks.get("acc"),
