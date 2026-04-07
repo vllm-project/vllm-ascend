@@ -79,8 +79,7 @@ def run_tests(
     total_start = time.perf_counter()
 
     for i, test in enumerate(files):
-        test_group_name = test.name.split("::", 1)[0]
-        _print_github_actions_group_start(f"[{i + 1}/{len(files)}] {test_group_name}")
+        _print_github_actions_group_start(f"[{i + 1}/{len(files)}] {test.name}")
         try:
             print(f"\n{'.' * 60}", flush=True)
             # NOTE: ci_log_summary.py depend on this
@@ -108,20 +107,13 @@ def run_tests(
         finally:
             _print_github_actions_group_end()
 
-        if passed:
-            _print_github_actions_annotation(
-                "notice",
-                f"[{i + 1}/{len(files)}] PASSED  {test.name}  ({elapsed:.0f}s)",
-            )
-        else:
+        if not passed:
             _print_github_actions_annotation(
                 "error",
-                f"[{i + 1}/{len(files)}] FAILED {test_group_name}. "
+                f"[{i + 1}/{len(files)}] FAILED {test.name}. "
                 "Please go to the Summary section to quickly review the error overview, "
                 "or expand the logs to view the error details.",
             )
-
-        if not passed:
             all_passed = False
             if not continue_on_error:
                 break

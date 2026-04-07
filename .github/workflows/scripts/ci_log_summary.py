@@ -870,12 +870,14 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
         "env_flakes": [error for error in unique_errors if error["category"] == "Environment Flake"],
     }
 
+
 def _extend_code_block(lines: list[str], content: str | list[str], info_string: str = "text") -> None:
-        if isinstance(content, str):
-            block_lines = content.splitlines() or [content]
-        else:
-            block_lines = content or [""]
-        lines.extend([f"```{info_string}", *block_lines, "```"])
+    if isinstance(content, str):
+        block_lines = content.splitlines() or [content]
+    else:
+        block_lines = content or [""]
+    lines.extend([f"```{info_string}", *block_lines, "```"])
+
 
 def _format_error_block(index: int, error: dict) -> list[str]:
     lines = [f"#### {index}. `{error['error_type']}`", ""]

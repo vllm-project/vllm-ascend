@@ -1,5 +1,5 @@
 import importlib.util
-import re
+import regex as re
 import sys
 from pathlib import Path
 
