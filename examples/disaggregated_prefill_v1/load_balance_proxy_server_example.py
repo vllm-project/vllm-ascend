@@ -725,7 +725,7 @@ async def _handle_completions(api: str, request: Request):
         else:
             origin_prompt = ""
         # refer to vLLM sampling_params: max_token default value
-        origin_max_tokens = req_data.get("max_tokens", 16)
+        origin_max_tokens = req_data.get("max_tokens", None)
 
         async def generate_stream():
             nonlocal instance_info
@@ -791,7 +791,8 @@ async def _handle_completions(api: str, request: Request):
                                 messages[0]["content"] = origin_prompt + generated_token
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            if origin_max_tokens:
+                                req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
                             instance_info = await _handle_select_instance(api, req_data, tmp_request_length)
                             break
