@@ -1,4 +1,6 @@
 import pytest
+import subprocess
+import sys
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.multi_node.scripts.multi_node_config import (
