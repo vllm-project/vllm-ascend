@@ -3,6 +3,8 @@
 import socket
 import time
 
+import pytest
+
 import msgspec
 import msgspec.msgpack
 import zmq
@@ -127,6 +129,7 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     assert success_count >= 0.5 * test_count
 
 
+@pytest.mark.skip(reason="TODO: adapt upstream new feature  https://github.com/vllm-project/vllm/pull/37853 (Support register_kv_caches for hybrid models.)")
 def test_cpu_offloading() -> None:
     """
     Tests OffloadingConnector with CPUOffloadingSpec.
