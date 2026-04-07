@@ -16,7 +16,6 @@
 #
 
 import torch
-import torch_npu
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
 from vllm_ascend.ascend_config import get_ascend_config
