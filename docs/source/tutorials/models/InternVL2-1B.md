@@ -1,369 +1,192 @@
-# OpenGVLab/InternVL2-1B
+# InternVL2-1B
 
-## Overview
+## Introduction
 
-**InternVL2-1B** is a state-of-the-art vision-language model (VLM) developed by OpenGVLab. With approximately 1 billion parameters, this model excels at understanding and reasoning about visual content, enabling seamless integration of image and text understanding capabilities.
+InternVL2-1B is a multimodal large language model developed by OpenGVLab (Shanghai AI Lab), and is the smallest model in the InternVL 2.0 series. It consists of InternViT-300M-448px, an MLP projector, and Qwen2-0.5B-Instruct, with approximately 0.9 billion parameters in total. The model supports image, video, and text inputs, enabling capabilities such as visual question answering, image captioning, document understanding, and multimodal reasoning.
 
-Built upon the InternVL series architecture, InternVL2-1B represents an efficient yet powerful multimodal model suitable for a wide range of computer vision and natural language processing tasks.
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, NPU deployment, accuracy and performance evaluation.
 
-### Key Features
+This tutorial uses the vLLM-Ascend `v0.11.0rc3` version for demonstration, showcasing the `InternVL2-1B` model for single-NPU deployment.
 
-| Feature | Description |
-|---------|-------------|
-| **Architecture** | 1B parameter vision-language transformer |
-| **Context Window** | Up to 32,768 tokens |
-| **Precision** | BF16 (BFloat16) optimized for Ascend NPU |
-| **Multimodal** | Supports image and text inputs simultaneously |
-| **Specialization** | Visual question answering, image captioning, document understanding, multimodal reasoning |
-| **Deployment** | Optimized for vLLM Ascend with single-card deployment support |
+## Supported Features
 
-### Model Capabilities
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-- **Visual Question Answering**: Answer complex questions about image content
-- **Image Captioning**: Generate detailed natural language descriptions of images
-- **Document Understanding**: Process and understand document images, charts, and figures
-- **Multimodal Reasoning**: Combine visual and textual information for comprehensive understanding
-- **Object Detection**: Identify and locate objects within images
-- **Chart Analysis**: Interpret and explain data visualizations
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Intended Use Cases
+## Environment Preparation
 
-### Primary Applications
+### Model Weight
 
-1. **Document Processing**
-   - Automated document digitization and understanding
-   - Invoice and receipt processing
-   - Form field extraction
-   - Report generation from visual data
+Require 1 Atlas 800I A2 (64G × 8) node or 1 Atlas 800 A3 (64G × 16) node:
 
-2. **Visual Content Analysis**
-   - Social media content moderation
-   - E-commerce product image analysis
-   - Medical image interpretation assistance
-   - Satellite and aerial imagery analysis
+- `InternVL2-1B`: [Download model weight](https://huggingface.co/OpenGVLab/InternVL2-1B)
 
-3. **Educational Tools**
-   - Interactive learning with visual content
-   - Accessibility services for visually impaired users
-   - Diagram and flowchart interpretation
-   - Educational content generation
+It is recommended to download the model weight to the shared directory, such as `/root/.cache/`.
 
-4. **Enterprise Solutions**
-   - Customer support with visual context
-   - Quality control in manufacturing
-   - Video frame analysis
-   - Multimodal search and retrieval
+### Installation
 
-### Target Users
+Run docker container:
 
-- Data scientists and ML engineers
-- Document processing specialists
-- Healthcare professionals (with appropriate oversight)
-- E-commerce and retail businesses
-- Educational institutions
-- Enterprise AI teams
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
-## Performance Benchmarks
-
-InternVL2-1B demonstrates competitive performance on industry-standard multimodal benchmarks:
-
-| Benchmark | Description | Performance |
-|-----------|-------------|-------------|
-| MMMU | Massive Multimodal Understanding | Strong |
-| TextVQA | Text-based Visual Question Answering | High-performing |
-| ChartQA | Chart Understanding | Competitive |
-| DocVQA | Document Visual Question Answering | High-performing |
-
-> **Note**: Exact benchmark scores may vary based on evaluation configuration and hardware setup. For the most current performance metrics, refer to the official [InternVL model card](https://huggingface.co/OpenGVLab/InternVL2-1B).
-
-## Installation and Setup
-
-### Prerequisites
-
-- Ascend NPU hardware (A2 or A3 series)
-- Docker environment configured for Ascend
-- Single NPU sufficient for InternVL2-1B due to compact model size
-
-### Model Weight Download
-
-Download the model weights from Hugging Face:
-
-```bash
-# Model: OpenGVLab/InternVL2-1B
-# URL: https://huggingface.co/OpenGVLab/InternVL2-1B
-```
-
-> **Important**: The public model files use custom model and tokenizer code, requiring `--trust-remote-code` during deployment.
-
-It is recommended to download the model weights to a shared local directory such as `/data/huggingface_home/` before deployment.
-
-### Docker Deployment
-
-Choose the appropriate Docker image based on your Ascend hardware:
-
-#### A3 Series
-
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:<vllm_ascend_version>-a3
 docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
+--name vllm-ascend \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-p 8000:8000 \
+-it $IMAGE bash
 ```
 
-#### A2 Series
+Setup environment variables:
 
 ```bash
-export IMAGE=quay.io/ascend/vllm-ascend:<vllm_ascend_version>
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --device /dev/davinci0 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+
+# Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 ```
 
-## Deployment Guide
+:::{note}
+`max_split_size_mb` prevents the native allocator from splitting blocks larger than this size (in MB). This can reduce fragmentation and may allow some borderline workloads to complete without running out of memory. You can find more details [<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html).
+:::
 
-### Single-Node Deployment
+## Deployment
 
-`InternVL2-1B` is a BF16 vision-language model with an 8K maximum context length. Due to its compact size (1B parameters), single-card deployment is supported.
+### Offline Inference
 
-Create a deployment script (`deploy_InternVL2_1B.sh`):
-
-```shell
-#!/bin/sh
-export HF_HOME=/data/huggingface_home
-export HF_ENDPOINT=https://hf-mirror.com
-export ASCEND_RT_VISIBLE_DEVICES=0
-export MODEL_PATH="OpenGVLab/InternVL2-1B"
-
-vllm serve ${MODEL_PATH} \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --served-model-name InternVL2-1B \
-    --tensor-parallel-size 1 \
-    --trust-remote-code \
-    --dtype bfloat16 \
-    --max-model-len 8192
-```
-
-**Configuration Notes**:
-- `ASCEND_RT_VISIBLE_DEVICES=0` - Single NPU is sufficient for 1B model
-- `--tensor-parallel-size 1` - No tensor parallelism needed due to model size
-- `--max-model-len 8192` - Vision-language models typically use shorter contexts
-- `--enforce-eager` - Recommended for vision models to ensure stable memory usage
-
-### Multimodal Input Format
-
-InternVL2-1B accepts both text and image inputs. Example API request with image:
-
-```shell
-curl http://<IP>:<Port>/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "InternVL2-1B",
-        "messages": [
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
-                {"type": "text", "text": "Describe this image in detail."}
-            ]}
-        ],
-        "temperature": 0.2,
-        "max_tokens": 512
-    }'
-```
-
-### Python Client Example
+Run the following script to execute offline inference on single-NPU:
 
 ```python
-from openai import OpenAI
+from vllm import LLM, SamplingParams
 
-client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="not-needed"
+MODEL_PATH = "OpenGVLab/InternVL2-1B"
+
+llm = LLM(
+    model=MODEL_PATH,
+    max_model_len=32768,
+    trust_remote_code=True,
+    dtype="bfloat16",
+    limit_mm_per_prompt={"image": 10},
 )
 
-response = client.chat.completions.create(
-    model="InternVL2-1B",
+sampling_params = SamplingParams(
+    max_tokens=512
+)
+
+image_url = "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"
+
+outputs = llm.chat(
     messages=[
         {
             "role": "user",
             "content": [
-                {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
-                {"type": "text", "text": "What does this image show?"}
-            ]
-        }
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Please provide a detailed description of this image"},
+            ],
+        },
     ],
-    temperature=0.2,
-    max_tokens=512
+    sampling_params=sampling_params,
 )
 
-print(response.choices[0].message.content)
+print(outputs[0].outputs[0].text)
 ```
 
-### Sample Use Cases
+### Online Serving
 
-1. **Document Understanding**
-   ```
-   "Extract all text and numbers from this receipt image."
-   ```
+Run docker container to start the vLLM server on single-NPU:
 
-2. **Visual Question Answering**
-   ```
-   "What is unusual about the composition of this photograph?"
-   ```
+```{code-block} bash
+   :substitutions:
+vllm serve OpenGVLab/InternVL2-1B \
+--trust-remote-code \
+--dtype bfloat16 \
+--max-model-len 32768 \
+--enforce-eager
+```
 
-3. **Chart Analysis**
-   ```
-   "Explain the trends shown in this bar chart."
-   ```
+:::{note}
+Add `--max-model-len` option to limit the context length. InternVL2-1B is trained with an 32K context window. Adjust this value according to available HBM on your NPU series.
+:::
 
-## Functional Verification
+If your service starts successfully, you can see the info shown below:
 
-After service startup, verify functionality with domain-specific requests:
+```bash
+INFO:     Started server process [2736]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
 
-### Visual QA Verification
+Once your server is started, you can query the model with input prompts:
 
-```shell
-curl http://<IP>:<Port>/v1/chat/completions \
+```bash
+curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "InternVL2-1B",
-        "messages": [
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "https://example.com/sample.png"}},
-                {"type": "text", "text": "Describe this image in detail."}
-            ]}
-        ],
-        "temperature": 0,
-        "max_tokens": 256
+    "model": "OpenGVLab/InternVL2-1B",
+    "messages": [
+    {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+        {"type": "text", "text": "What is the text in the illustrate?"}
+    ]}
+    ]
     }'
 ```
 
-A valid response should contain a coherent description of the image content with relevant details.
-
 ## Accuracy Evaluation
 
-### Using LM Evaluation Harness
+### Using Language Model Evaluation Harness
 
-An evaluation configuration can be created for InternVL2-1B:
+As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `InternVL2-1B` in offline mode.
+
+1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
+
+   ```shell
+   pip install lm_eval
+   ```
+
+2. An evaluation configuration can be created for InternVL2-1B.
+
+   ```shell
+   pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
+       --config tests/e2e/models/configs/InternVL2-1B.yaml
+   ```
+
+3. After execution, you can get the result. Here is the result of `InternVL2-1B` for reference:
+
+   | tasks | version | Filter | metric | mode | result |
+   | ----- | ----- | ----- | ----- | ----- | ----- |
+   | mmmu_val | - | none | accuracy | gen | 0.3089 |
+
+## Performance
+
+### Using vLLM Benchmark
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
+
+There are three `vllm bench` subcommands:
+
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
+
+The performance evaluation must be conducted in an online mode. Take the `serve` as an example. Run the code as follows.
 
 ```shell
-pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
-    --config tests/e2e/models/configs/InternVL2-1B.yaml
+vllm bench serve --model OpenGVLab/InternVL2-1B --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-## Performance Benchmarking
-
-### Using vLLM Benchmark Tools
-
-After confirming service stability, run performance tests:
-
-```shell
-vllm bench serve \
-  --model OpenGVLab/InternVL2-1B \
-  --trust-remote-code \
-  --dataset-name random \
-  --random-input 512 \
-  --num-prompts 100 \
-  --request-rate 1 \
-  --save-result \
-  --result-dir ./perf_results/
-```
-
-**Benchmarking Recommendations**:
-- Start with moderate prompt lengths and concurrency
-- For vision models, image size significantly impacts memory usage
-- Monitor NPU memory utilization throughout testing
-- Establish baseline metrics before production deployment
-
-## Supported Features
-
-For a complete feature compatibility matrix, refer to [supported features](../../user_guide/support_matrix/supported_models.md).
-
-For feature configuration options, see the [feature guide](../../user_guide/feature_guide/index.md).
-
-## Limitations and Safety Guidelines
-
-### Known Limitations
-
-1. **Image Resolution**: Performance may degrade with very high-resolution images. Consider resizing or using appropriate downsampling.
-
-2. **Custom Code Dependency**: The public Hugging Face model uses custom model and tokenizer code, requiring `trust_remote_code=True` during deployment.
-
-3. **Context Window**: While the model supports up to 32K tokens, actual usable context depends on available NPU memory and image sizes.
-
-4. **Language Support**: Best performance is achieved in English and Chinese. Other languages may have degraded performance.
-
-5. **Feature Coverage**: Actual supported features depend on the vLLM Ascend version and target hardware.
-
-### Safety and Responsible Use
-
-**Important Disclaimers**:
-
-- **Visual Content**: AI-generated descriptions should be verified by humans before critical decisions.
-
-- **Medical/Technical Images**: Do not use for medical diagnosis or technical inspection without expert oversight.
-
-- **Accuracy**: While the model strives for accuracy, generated descriptions may contain errors or misinterpretations.
-
-- **No Substitute for Expertise**: This tool is designed to augment, not replace, professional judgment in visual analysis tasks.
-
-### Ethical Considerations
-
-- Do not use this model for surveillance or invasive monitoring purposes
-- Respect privacy when processing images containing individuals
-- Consider the environmental impact of large-scale model inference
-- Be transparent about AI assistance in visual analysis when required by policy or regulation
-
-## Troubleshooting
-
-### Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| Out of Memory | Reduce `--max-model-len` or use smaller image inputs |
-| Slow Inference | Verify NPU utilization and consider batching requests |
-| Model Loading Errors | Confirm `--trust-remote-code` is enabled |
-| Connection Issues | Check firewall settings and port availability |
-| Image Loading Failures | Verify image URLs are accessible or use local images |
-
-## Support and Resources
-
-- **Model Card**: [Hugging Face - InternVL2-1B](https://huggingface.co/OpenGVLab/InternVL2-1B)
-- **Project Page**: [OpenGVLab](https://huggingface.co/OpenGVLab)
-- **vLLM Ascend Documentation**: [Official Documentation](../../user_guide/)
-- **Issue Reporting**: Please report issues through the appropriate GitHub repositories
-
-## License and Attribution
-
-Please refer to the model card on Hugging Face for specific licensing terms and attribution requirements.
-
----
-
-**Version**: 1.0
-**Last Updated**: March 2026
-**Maintained by**: OpenGVLab and vLLM Ascend Community
+After about several minutes, you can get the performance evaluation result.
