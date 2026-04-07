@@ -771,21 +771,14 @@ class SpecDecodeBaseProposer(EagleProposer):
                 model_kwargs["positions"] = model_positions
 
         ret_hidden_states = self.model(**model_kwargs)
-        if not self.model_returns_tuple():
-            last_hidden_states = ret_hidden_states
-            # When the graph is compiled to aclgraph (run_eagerly disabled),
-            # make_graph_return_tuple wraps the output as a tuple. Unwrap it.
-            if isinstance(last_hidden_states, tuple) and len(last_hidden_states) == 1:
-                last_hidden_states = last_hidden_states[0]
-            hidden_states = last_hidden_states
-        else:
-            last_hidden_states, hidden_states = ret_hidden_states
+        last_hidden_states, hidden_states = self._extract_hidden_state_outputs(ret_hidden_states)
 
         last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
             last_hidden_states, model_positions, hidden_states
         )
 
         num_indices = token_indices_to_sample.shape[0]
+        sample_indices = token_indices_to_sample.to(dtype=torch.long)
         if self.pcp_size > 1:
             # remove graph padding before all_gather
             hidden_states = hidden_states[:num_tokens]
@@ -809,16 +802,14 @@ class SpecDecodeBaseProposer(EagleProposer):
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
-            token_indices_to_sample = nn.functional.pad(
-                token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
-            )
+            sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - num_indices))
 
-        sample_hidden_states = last_hidden_states[token_indices_to_sample]
+        sample_hidden_states = torch.index_select(last_hidden_states, 0, sample_indices)
         logits = self.model.compute_logits(sample_hidden_states)
 
         if lmhead_tp_enable() and num_indices < logits.shape[0]:
             logits = logits[:num_indices]
-            token_indices_to_sample = token_indices_to_sample[:num_indices]
+            sample_indices = sample_indices[:num_indices]
 
         draft_token_ids = logits.argmax(dim=-1)
 
@@ -840,11 +831,11 @@ class SpecDecodeBaseProposer(EagleProposer):
         )
         draft_token_ids_tensor[0] = draft_token_ids
         if self.uses_mrope:
-            positions = self.mrope_positions[:, token_indices_to_sample]
+            positions = torch.index_select(self.mrope_positions, 1, sample_indices)
         else:
-            positions = self.positions[token_indices_to_sample]
-        hidden_states = hidden_states[token_indices_to_sample]
-        token_indices_to_sample = self.arange[:batch_size]
+            positions = torch.index_select(self.positions, 0, sample_indices)
+        hidden_states = torch.index_select(hidden_states, 0, sample_indices)
+        sample_indices = self.arange[:batch_size].to(dtype=torch.long)
 
         input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
 
@@ -918,36 +909,25 @@ class SpecDecodeBaseProposer(EagleProposer):
                 model_kwargs["hidden_states"] = model_hidden_states
 
             ret_hidden_states = self.model(**model_kwargs)
-            if not self.model_returns_tuple():
-                last_hidden_states = ret_hidden_states
-                # When the graph is compiled to aclgraph (run_eagerly disabled),
-                # make_graph_return_tuple wraps the output as a tuple. Unwrap it.
-                if isinstance(last_hidden_states, tuple) and len(last_hidden_states) == 1:
-                    last_hidden_states = last_hidden_states[0]
-                hidden_states = last_hidden_states
-            else:
-                last_hidden_states, hidden_states = ret_hidden_states
+            last_hidden_states, hidden_states = self._extract_hidden_state_outputs(ret_hidden_states)
 
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
                 last_hidden_states, model_positions, hidden_states
             )
 
-            num_indices = token_indices_to_sample.shape[0]
+            num_indices = sample_indices.shape[0]
             if lmhead_tp_enable():
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
-                token_indices_to_sample = nn.functional.pad(
-                    token_indices_to_sample,
-                    (0, max_num_reqs_across_dp - num_indices),
-                )
+                sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - num_indices))
 
-            sample_hidden_states = last_hidden_states[token_indices_to_sample]
+            sample_hidden_states = torch.index_select(last_hidden_states, 0, sample_indices)
             logits = self.model.compute_logits(sample_hidden_states)
 
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
-                token_indices_to_sample = token_indices_to_sample[:num_indices]
+                sample_indices = sample_indices[:num_indices]
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
@@ -1139,6 +1119,33 @@ class SpecDecodeBaseProposer(EagleProposer):
 
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model")
+
+    def _extract_hidden_state_outputs(self, outputs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        # Graph wrappers may add singleton tuple layers around the actual model outputs.
+        while isinstance(outputs, tuple) and len(outputs) == 1:
+            outputs = outputs[0]
+
+        if not self.model_returns_tuple():
+            assert isinstance(outputs, torch.Tensor), f"Expected Tensor output, got {type(outputs)}"
+            return outputs, outputs
+
+        assert isinstance(outputs, tuple) and len(outputs) == 2, (
+            "Expected a pair of hidden-state tensors from the draft model, "
+            f"got {type(outputs)} with value type details "
+            f"{tuple(type(x) for x in outputs) if isinstance(outputs, tuple) else 'N/A'}"
+        )
+        last_hidden_states, hidden_states = outputs
+        while isinstance(last_hidden_states, tuple) and len(last_hidden_states) == 1:
+            last_hidden_states = last_hidden_states[0]
+        while isinstance(hidden_states, tuple) and len(hidden_states) == 1:
+            hidden_states = hidden_states[0]
+        assert isinstance(last_hidden_states, torch.Tensor), (
+            f"Expected last_hidden_states to be a Tensor, got {type(last_hidden_states)}"
+        )
+        assert isinstance(hidden_states, torch.Tensor), (
+            f"Expected hidden_states to be a Tensor, got {type(hidden_states)}"
+        )
+        return last_hidden_states, hidden_states
 
     def attn_update_stack_num_spec_norm(
         self,
