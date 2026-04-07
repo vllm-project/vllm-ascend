@@ -16,9 +16,8 @@
 #
 
 import torch
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+import vllm.envs as envs
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.sampler import (
     DEFAULT_LOGPROBS_MODE,
     AscendSampler,
@@ -27,30 +26,27 @@ from vllm_ascend.sample.sampler import (
 from vllm_ascend.utils import global_stream, npu_stream_switch
 
 
-def _generate_exponential_q(q: torch.Tensor, generators: dict[int, torch.Generator]) -> torch.Tensor:
-    q = q.cpu()
-    if len(generators) != q.shape[0]:
-        q.exponential_()
-    if generators:
-        for i, generator in generators.items():
-            q[i].exponential_(generator=generator)
-    return q.npu()
-
-
 def _random_sample_310p(
     probs: torch.Tensor,
     generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
+    """310P-specific random sampling with CPU exponential generation for q."""
     with npu_stream_switch(global_stream()):
         q = torch.empty_like(probs)
-        q = _generate_exponential_q(q, generators)
+        q = q.cpu()
+        if len(generators) != q.shape[0]:
+            q.exponential_()
+        if generators:
+            for i, generator in generators.items():
+                q[i].exponential_(generator=generator)
+        q = q.npu()
     torch.npu.current_stream().wait_stream(global_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
 
 
 class AscendTopKTopPSampler310(AscendTopKTopPSampler):
     def forward_native(self, logits, generators, k, p):
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             return super().forward_native(logits, generators, k, p)
 
         logits = self.apply_top_k_top_p(logits, k, p)
@@ -61,9 +57,6 @@ class AscendTopKTopPSampler310(AscendTopKTopPSampler):
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        if get_ascend_config().enable_async_exponential:
-            self.async_event.synchronize()
-            return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
         return _random_sample_310p(probs, generators), logits_to_return
 
 
@@ -71,11 +64,3 @@ class AscendSampler310(AscendSampler):
     def __init__(self, logprobs_mode=DEFAULT_LOGPROBS_MODE):
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler310(logprobs_mode=logprobs_mode)
-
-    def do_async_exponential(self, b_s, head_dim, generators):
-        with torch.npu.stream(global_stream()):
-            global_stream().wait_stream(torch.npu.current_stream())
-            q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
-            q = _generate_exponential_q(q, generators)
-            self.async_exponential_event.record()
-        self.set_q_event(q, self.async_exponential_event)
