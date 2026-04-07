@@ -18,41 +18,36 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import numpy as np
 import torch
-
 from vllm.triton_utils import tl, triton
-
-import triton.runtime.driver as driver
 
 MAX_BAD_WORDS_TOTAL_TOKENS = 1024  # Max total tokens for all bad words per request
 MAX_NUM_BAD_WORDS = 128  # Max number of bad words per request
 
 
 def get_npu_vectorcore_num():
-    device = torch.npu.current_device()
-    return driver.active.utils.get_device_properties(device)["num_vectorcore"]
+    return triton.runtime.driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"]
 
 
 @triton.jit
 def _bad_words_kernel(
-        logits_ptr,
-        logits_stride,
-        expanded_idx_mapping_ptr,
-        bad_word_token_ids_ptr,
-        bad_word_token_ids_stride,
-        bad_word_offsets_ptr,
-        bad_word_offsets_stride,
-        num_bad_words_ptr,
-        all_token_ids_ptr,
-        all_token_ids_stride,
-        prompt_len_ptr,
-        total_len_ptr,
-        input_ids_ptr,
-        expanded_local_pos_ptr,
-        num_tokens,
-        max_num_bad_words,
-        MAX_PREFIX_LEN: tl.constexpr,
+    logits_ptr,
+    logits_stride,
+    expanded_idx_mapping_ptr,
+    bad_word_token_ids_ptr,
+    bad_word_token_ids_stride,
+    bad_word_offsets_ptr,
+    bad_word_offsets_stride,
+    num_bad_words_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    prompt_len_ptr,
+    total_len_ptr,
+    input_ids_ptr,
+    expanded_local_pos_ptr,
+    num_tokens,
+    max_num_bad_words,
+    MAX_PREFIX_LEN: tl.constexpr,
 ):
     """
     Optimized bad words filtering kernel for Ascend NPU.
@@ -135,17 +130,17 @@ def _bad_words_kernel(
 
 
 def apply_bad_words(
-        logits: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        bad_word_token_ids: torch.Tensor,
-        bad_word_offsets: torch.Tensor,
-        num_bad_words: torch.Tensor,
-        all_token_ids: torch.Tensor,
-        prompt_len: torch.Tensor,
-        total_len: torch.Tensor,
-        input_ids: torch.Tensor,
-        expanded_local_pos: torch.Tensor,
-        max_num_bad_words: int,
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    bad_word_token_ids: torch.Tensor,
+    bad_word_offsets: torch.Tensor,
+    num_bad_words: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prompt_len: torch.Tensor,
+    total_len: torch.Tensor,
+    input_ids: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+    max_num_bad_words: int,
 ) -> None:
     """
     Apply bad words filtering to logits.
