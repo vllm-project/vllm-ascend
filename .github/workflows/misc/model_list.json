@@ -221,7 +221,6 @@
       "vllm-ascend/Qwen3-8B",
       "vllm-ascend/Qwen3-8B-W4A8",
       "vllm-ascend/Qwen3-8B-W8A8",
-      "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8",
       "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8-Pruning",
       "vllm-ascend/Qwen3-Omni-30B-A3B-Thinking",
       "vllm-ascend/Qwen3-VL-8B-Instruct",
@@ -249,6 +248,7 @@
       "MiniMax/MiniMax-M2.5",
       "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
       "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
-      "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+      "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
+      "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8"
     ]
   }
