@@ -1,11 +1,49 @@
+# NOTE:
+# This file is adapted from vLLM's elastic_execute.py
+#
+# Key differences:
+# 1. Device-specific adaptations: Replaces CUDA-specific operations with NPU (Ascend) equivalents
+#    - Uses `torch_npu` instead of CUDA APIs
+#    - Replaces `torch.accelerator.synchronize()` with `torch.npu.synchronize()`
+#    - Replaces `torch.accelerator.empty_cache()` with `torch.npu.empty_cache()`
+#    - Uses `ACLGraphWrapper` instead of `CUDAGraphWrapper` for graph management
+#
+# 2. Custom weight transfer implementation: Implements `ascend_batch_transfer_weights()`
+#    - Adds support for quantized weight names (aclnn_input_scale, aclnn_input_scale_reciprocal, aclnn_input_offset)
+#    - Uses threading lock (`_PATCH_LOCK`) for thread-safe weight transfer patching
+#
+# 3. Enhanced broadcast_expert_mapping: Simplified signature and implementation
+#    - Removed `physical_to_logical`, `num_local_physical_experts`, `num_logical_experts` parameters
+#    - Uses `expert_maps` tensor directly for broadcasting
+#
+# 4. Extended AscendElasticEPScalingExecutor class:
+#    - Adds `_use_ascend_transfer_impl()` context manager for patching weight transfer
+#    - Implements `_release_acl_graphs()` to clear ACL graphs instead of CUDA graphs
+#    - Adds `_replace_ascend_active_groups()` calls for Ascend-specific group management
+#    - Integrates with `create_ascend_standby_groups()` and `pop_ascend_standby_groups()`
+#    - Adds support for Ascend-specific MoE modules (AscendFusedMoE, AscendSharedFusedMoE)
+#    - Handles Ascend-specific quantization method (AscendW8A8DynamicFusedMoEMethod)
+#    - Integrates with `get_mc2_group()` and `get_dynamic_eplb_group()` for Ascend communication
+#    - Adds `setup_moe_comm_method()` calls for MoE communication setup
+#
+# 5. EPLB (Expert Parallel Load Balancing) adaptations:
+#    - Uses `eplb_loader`, `eplb_adaptor`, `eplb_updator` from model_runner
+#    - Implements `_perform_eplb_reshuffle()` with expert resharding logic
+#    - Handles dynamic EPLB configuration via `get_ascend_config().eplb_config`
+#
+# ============================================================
+
 import copy
 import gc
+import threading
 from collections.abc import Iterable, Sequence
+from contextlib import contextmanager
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch_npu
+import vllm.distributed.elastic_ep.elastic_execute as elastic_execute_mod
 from torch.distributed import P2POp
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import reset_compile_wrapper
@@ -47,8 +85,10 @@ from vllm_ascend.distributed.parallel_state import (
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 
+_PATCH_LOCK = threading.Lock()
 
-def batch_transfer_weights(
+
+def ascend_batch_transfer_weights(
     model: nn.Module,
     is_sender: bool,
     peer_rank: int,
@@ -122,8 +162,14 @@ def broadcast_expert_mapping(
 
 
 class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
-    def __init__(self, worker):
-        super().__init__(worker)
+    @contextmanager
+    def _use_ascend_transfer_impl(self):
+        old_impl = elastic_execute_mod.batch_transfer_weights
+        elastic_execute_mod.batch_transfer_weights = ascend_batch_transfer_weights
+        try:
+            yield
+        finally:
+            elastic_execute_mod.batch_transfer_weights = old_impl
 
     def load_model(self) -> None:
         (
@@ -165,43 +211,10 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
             )
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
-        standby_dp_group = get_standby_dp_group()
-        assert standby_dp_group is not None
-        # Broadcast old_dp_size to all workers in standby group
-        if standby_dp_group.rank_in_group < old_dp_size:
-            old_dp_size_tensor = torch.tensor([old_dp_size], dtype=torch.int64, device="cpu")
-        else:
-            old_dp_size_tensor = torch.empty(1, dtype=torch.int64, device="cpu")
-        old_dp_size_tensor = standby_dp_group.tcp_store_group.broadcast(old_dp_size_tensor, 0)
-
-        num_new_workers = new_dp_size - old_dp_size
-        dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
-
-        # Sender-receiver pairing: the first new_workers % old_dp_size
-        # senders get (k+1) contiguous receivers, the rest get k
-        # receivers.
-        num_dst_per_sender = num_new_workers // old_dp_size
-        remainder = num_new_workers % old_dp_size
-
-        if dp_rank < remainder:
-            recv_begin = dp_rank * (num_dst_per_sender + 1)
-            recv_end = recv_begin + num_dst_per_sender + 1
-        else:
-            recv_begin = remainder * (num_dst_per_sender + 1) + (dp_rank - remainder) * num_dst_per_sender
-            recv_end = recv_begin + num_dst_per_sender
-
-        ranks_to_send = list(range(old_dp_size + recv_begin, old_dp_size + recv_end))
-
         model = self.worker.model_runner.get_model()
-        for new_worker_rank in sorted(ranks_to_send):
-            batch_transfer_weights(
-                model=model,
-                is_sender=True,
-                peer_rank=new_worker_rank,
-                dp_group=standby_dp_group,
-                expert_weights=model.expert_weights,
-            )
-        torch.accelerator.synchronize()
+        model.expert_weights = [item[1] for item in self.worker.model_runner.eplb_adaptor.param_dict.items()]
+        with _PATCH_LOCK, self._use_ascend_transfer_impl():
+            super().transfer_weights(old_dp_size=old_dp_size, new_dp_size=new_dp_size)
 
     def broadcast_expert_mapping(self):
         standby_dp_group = get_standby_dp_group()
@@ -395,36 +408,10 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self._perform_eplb_reshuffle()
 
     def receive_weights(self) -> None:
-        dp_group = get_dp_group()
-        assert isinstance(dp_group, StatelessGroupCoordinator)
-        new_dp_size = dp_group.world_size
-        dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
-
-        # Receive old_dp_size broadcasted during transfer_weights
-        old_dp_size_tensor = torch.empty(1, dtype=torch.int64, device="cpu")
-        old_dp_size_tensor = dp_group.tcp_store_group.broadcast(old_dp_size_tensor, 0)
-        old_dp_size = int(old_dp_size_tensor[0].item())
-
-        # Calculate which existing worker will send to this new worker
-        num_new_workers = new_dp_size - old_dp_size
-        new_worker_idx = dp_rank - old_dp_size
-        num_dst_per_sender = num_new_workers // old_dp_size
-        remainder = num_new_workers % old_dp_size
-
-        if new_worker_idx < remainder * (num_dst_per_sender + 1):
-            sender_rank = new_worker_idx // (num_dst_per_sender + 1)
-        else:
-            sender_rank = remainder + (new_worker_idx - remainder * (num_dst_per_sender + 1)) // num_dst_per_sender
-
         model = self.worker.model_runner.get_model()
-        batch_transfer_weights(
-            model=model,
-            is_sender=False,
-            peer_rank=sender_rank,
-            dp_group=dp_group,
-            expert_weights=model.expert_weights,
-        )
-        torch.accelerator.synchronize()
+        model.expert_weights = [item[1] for item in self.worker.model_runner.eplb_adaptor.param_dict.items()]
+        with _PATCH_LOCK, self._use_ascend_transfer_impl():
+            super().receive_weights()
 
     def receive_expert_mapping(self) -> tuple[torch.Tensor, int, int]:
         dp_group = get_dp_group()
