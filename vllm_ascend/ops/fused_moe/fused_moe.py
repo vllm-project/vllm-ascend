@@ -20,6 +20,8 @@ from functools import wraps
 
 import torch
 import torch.nn.functional as F
+import torch_npu
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
@@ -32,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMo
 from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -39,8 +42,10 @@ from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
-from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
+    ACL_FORMAT_FRACTAL_NZ,
     enable_sp,
     maybe_trans_nz,
     npu_stream_switch,
@@ -63,6 +68,14 @@ class FusedMoEEvents:
     before_combine: torch.npu.Event | None = field(default=None)
 
 
+def mock_false():
+    return False
+
+
+def mock_true():
+    return True
+
+
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
@@ -77,8 +90,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
+        # Therefore, we must cast weights to NZ when fusion is enabled.
+        # Once the underlying dispatch_ffn_combine operator is updated to support
+        # ND format (or other formats), remove this specific 'if' check and the forced
+        # npu_format_cast. At that point, the operator should be able to handle weights
+        # in their native format without explicit casting here.
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        else:
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
     def apply(
         self,
@@ -100,7 +123,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         activation: str = "silu",
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
-        **kwargs,
+        global_redundant_expert_num: int = 0,
+        pertoken_scale: torch.Tensor | None = None,
+        mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -144,20 +169,48 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
+        # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
+        # and provide dummy scales (w1_scale, w2_scale). This is required because:
+        # The underlying Ascend fused operator (e.g., dispatch_ffn_combine) expects
+        # inputs in a list format.
+        # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
+        # incorrect. The ideal solution is to pass None. However, if the underlying
+        # dispatch_ffn_combine C++ operator does not support None for the scale argument
+        # (due to signature constraints), we are forced to use a placeholder empty tensor.
+        # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
+        # or None for scales in non-quantized scenarios.
+        if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+            w1 = [layer.w13_weight]
+            w1_scale = [torch.tensor([], dtype=torch.int64)]
+            w2 = [layer.w2_weight]
+            w2_scale = [torch.tensor([], dtype=torch.int64)]
+        else:
+            w1 = layer.w13_weight
+            w1_scale = None
+            w2 = layer.w2_weight
+            w2_scale = None
+
         final_hidden_states = moe_comm_method.fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            w1_bias=layer.w13_bias if self.moe.has_bias else None,
-            w2_bias=layer.w2_bias if self.moe.has_bias else None,
-            activation=activation,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            dynamic_eplb=self.dynamic_eplb,
-            log2phy=log2phy,
-            mc2_mask=kwargs.get("mc2_mask"),
+            fused_experts_input=build_fused_experts_input(
+                hidden_states=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w1=w1,
+                w2=w2,
+                w1_bias=layer.w13_bias if self.moe.has_bias else None,
+                w2_bias=layer.w2_bias if self.moe.has_bias else None,
+                quant_type=QuantType.NONE,
+                dynamic_eplb=self.dynamic_eplb,
+                expert_map=expert_map,
+                global_redundant_expert_num=global_redundant_expert_num,
+                mc2_mask=mc2_mask,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                log2phy=log2phy,
+                pertoken_scale=pertoken_scale,
+                activation=activation,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+            )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
@@ -215,6 +268,12 @@ class AscendMoERunner(DefaultMoERunner):
         else:
             self.moe_forward = torch.ops.vllm.moe_forward_shared
 
+    @property
+    def use_dp_chunking(self) -> bool:
+        """Ascend uses its own forward_impl path, not the FlashInfer Cutlass
+        chunked path. Always return False to stay on forward_impl."""
+        return False
+
     def forward_impl(
         self,
         layer: torch.nn.Module,
@@ -243,6 +302,7 @@ class AscendFusedMoE(FusedMoE):
 
         num_experts = kwargs["num_experts"]
         intermediate_size = kwargs["intermediate_size"]
+        num_shared_experts = kwargs.get("n_shared_experts", 0)
 
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
@@ -275,8 +335,12 @@ class AscendFusedMoE(FusedMoE):
 
         # init moe
         eplb_config = ascend_config.eplb_config
+        self.mix_placement = getattr(ascend_config, "mix_placement", False)
+        self.n_shared_experts = num_shared_experts
+        num_experts += num_shared_experts if self.mix_placement else 0
+        self.moe_config.num_experts = num_experts
         self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
-            eplb_config, self.moe_instance_id, self.moe_config
+            eplb_config, self.moe_instance_id, self.moe_config, self.mix_placement, num_shared_experts
         )
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
@@ -438,22 +502,22 @@ class AscendFusedMoE(FusedMoE):
 
                 set_flash_common3_context(topk_weights=topk_weights, topk_ids=topk_ids)
 
-        hidden_states, router_logits, mc2_mask, context_metadata = _EXTRA_CTX.moe_comm_method.prepare(
+        prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type,
         )
+        hidden_states = prepare_output.hidden_states
+        router_logits = prepare_output.router_logits
+        mc2_mask = prepare_output.mc2_mask
+        padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
+        pertoken_scale = prepare_output.pertoken_scale
 
         # Make sure the default stream waits for the gate stream to finish.
         if self.multistream_overlap_gate:
             torch.npu.current_stream().wait_stream(AscendFusedMoE.gate_stream)
-
-        if isinstance(hidden_states, tuple):
-            hidden_states, pertoken_scale = hidden_states
-        else:
-            pertoken_scale = None
 
         # Matrix multiply.
         fused_experts_results: FusedExpertsResult = self.quant_method.apply(
@@ -502,7 +566,7 @@ class AscendFusedMoE(FusedMoE):
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
-            context_metadata=context_metadata,
+            padded_hidden_states_shape=padded_hidden_states_shape,
         )
 
         if return_with_event:
@@ -525,13 +589,22 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         routed_input_transform: torch.nn.Module | None = None,
         **kwargs,
     ):
+        ascend_config = get_ascend_config()
+        # TODO: Enabling the mix placement in deepseek_v2.py
+        # remove this part after the mix placement merged into vllm
+        # https://github.com/vllm-project/vllm/pull/31256
+        if ascend_config.mix_placement:
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_false
+            rocm_aiter_ops.is_fused_moe_enabled = mock_false
         AscendFusedMoE.__init__(self, **kwargs)
+        if ascend_config.mix_placement:
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_true
+            rocm_aiter_ops.is_fused_moe_enabled = mock_true
 
         self._routed_input_transform = routed_input_transform
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
-        ascend_config = get_ascend_config()
         self.multistream_overlap_shared_expert = (
             ascend_config.multistream_overlap_shared_expert and self._shared_experts is not None
         )

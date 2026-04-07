@@ -131,10 +131,8 @@ class EplbUpdator:
         self.update_iteration()
 
     def compute_and_set_moe_load(self):
-        local_load = self.adaptor.get_rank_expert_workload()
-        moe_load = (
-            self.comm_group.all_gather(local_load, dim=0).reshape(-1, self.world_size, *local_load.shape[1:]).cpu()
-        )
+        local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
+        moe_load = self.comm_group.all_gather(local_load, dim=1).cpu()
 
         if self.multi_stage:
             moe_load = moe_load.permute(2, 0, 1, 3)
@@ -155,12 +153,12 @@ class EplbUpdator:
         for dst_rank in range(self.world_size):
             if dst_rank == self.rank_id:
                 continue
-            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank))
+            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group))
 
         for src_rank in range(self.world_size):
             if src_rank == self.rank_id:
                 continue
-            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank))
+            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank, group=self.comm_group.device_group))
         if comm_op_list:
             reqs = dist.batch_isend_irecv(comm_op_list)
 

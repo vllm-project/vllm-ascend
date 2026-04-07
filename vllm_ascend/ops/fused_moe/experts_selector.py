@@ -18,6 +18,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import get_weight_prefetch_method
 
 
@@ -34,6 +35,9 @@ def select_experts(
     routed_scaling_factor=1.0,
     e_score_correction_bias: torch.Tensor | None = None,
     indices_type: torch.dtype | None = None,
+    mix_placement: bool = False,
+    num_logical_experts: int = -1,
+    num_shared_experts: int = 0,
     global_num_experts: int = -1,
 ):
     """
@@ -98,6 +102,23 @@ def select_experts(
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )
+    if mix_placement:
+        shared_expert_routing_factor = 1.0 if is_support_npu_moe_gating_top_k else (1 / routed_scaling_factor)
+        batch_size = topk_ids.shape[0]
+        pad_shared_expert_ids = torch.arange(
+            num_logical_experts, num_logical_experts + num_shared_experts, dtype=topk_ids.dtype, device=topk_ids.device
+        ).repeat(batch_size, 1)
+
+        pad_shared_expert_weights = torch.full(
+            (topk_weights.shape[0], num_shared_experts),
+            shared_expert_routing_factor,
+            dtype=topk_weights.dtype,
+            device=topk_weights.device,
+        )
+
+        topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
+        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights], dim=1)
+
     return topk_weights, topk_ids
 
 
@@ -216,7 +237,7 @@ def _select_experts_with_fusion_ops(
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
         e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
-    topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k(
+    topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(
         router_logits,
         k=top_k,
         k_group=topk_group,

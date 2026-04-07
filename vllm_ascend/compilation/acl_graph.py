@@ -74,6 +74,7 @@ class ACLGraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
@@ -91,7 +92,11 @@ class ACLGraphWrapper:
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
-        raise AttributeError(f"Attribute {key} not exists in the runnable of aclgraph wrapper: {self.runnable}")
+        if self.is_debugging_mode:
+            raise AttributeError(
+                f"Attribute {key} not exists in the runnable of aclgraph wrapper: {self._runnable_str}"
+            )
+        raise AttributeError(f"Attribute {key} not found. Set VLLM_LOGGING_LEVEL=DEBUG for more details.")
 
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
@@ -192,11 +197,7 @@ class ACLGraphWrapper:
         # so that update_attn_params only executes after the previous graph replay has fully completed.
         # If we do not in main model and in full-graph mode when using merge-eagle-graph,
         # we do not need to synchronize.
-        use_eagle = (
-            self.vllm_config.speculative_config.method in ("eagle", "eagle3")
-            if self.vllm_config.speculative_config
-            else False
-        )
+        use_eagle = self.vllm_config.speculative_config.use_eagle() if self.vllm_config.speculative_config else False
         if self.runtime_mode != CUDAGraphMode.FULL or not _EXTRA_CTX.is_draft_model or not use_eagle:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()

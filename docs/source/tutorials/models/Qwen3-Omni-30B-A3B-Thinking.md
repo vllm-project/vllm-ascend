@@ -109,7 +109,7 @@ def clean_up():
 
 
 def main():
-    MODEL_PATH = "Qwen3/Qwen3-Omni-30B-A3B-Thinking"
+    MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
     llm = LLM(
         model=MODEL_PATH,
         tensor_parallel_size=2,
@@ -123,7 +123,7 @@ def main():
         temperature=0.6,
         top_p=0.95,
         top_k=20,
-        max_completion_tokens=16384,
+        max_tokens=16384,
     )
 
     processor = Qwen3OmniMoeProcessor.from_pretrained(MODEL_PATH)
@@ -175,6 +175,11 @@ if __name__ == "__main__":
 
 Run the following script to start the vLLM server on Multi-NPU:
 For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 1, and for 32 GB of memory, tensor-parallel-size should be at least 2.
+
+```bash
+export HCCL_BUFFSIZE=512
+export HCCL_OP_EXPANSION_MODE=AIV
+```
 
 ```bash
 vllm serve Qwen/Qwen3-Omni-30B-A3B-Thinking --tensor-parallel-size 2 --enable_expert_parallel
@@ -234,32 +239,32 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
 1. Refer to Using evalscope(<https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip>) for `evalscope`installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
-```bash
-evalscope eval \
-    --model /root/.cache/modelscope/hub/models/Qwen/Qwen3-Omni-30B-A3B-Thinking \
-    --api-url http://localhost:8000/v1 \
-    --api-key EMPTY \
-    --eval-type server \
-    --datasets omni_bench, gsm8k, bbh \
-    --dataset-args '{"omni_bench": { "extra_params": { "use_image": true, "use_audio": false}}}' \
-    --eval-batch-size 1 \
-    --generation-config '{"max_completion_tokens": 10000, "temperature": 0.6}' \
-    --limit 100
-```
+    ```bash
+    evalscope eval \
+        --model /root/.cache/modelscope/hub/models/Qwen/Qwen3-Omni-30B-A3B-Thinking \
+        --api-url http://localhost:8000/v1 \
+        --api-key EMPTY \
+        --eval-type server \
+        --datasets omni_bench, gsm8k, bbh \
+        --dataset-args '{"omni_bench": { "extra_params": { "use_image": true, "use_audio": false}}}' \
+        --eval-batch-size 1 \
+        --generation-config '{"max_completion_tokens": 10000, "temperature": 0.6}' \
+        --limit 100
+    ```
 
 3. After execution, you can get the result, here is the result of `Qwen3-Omni-30B-A3B-Thinking` in vllm-ascend:0.13.0rc1 for reference only.
 
-```bash
- +-----------------------------+------------+----------+----------+-------+---------+---------+
-| Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
-+=============================+============+==========+==========+=======+=========+=========+
-| Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
-+-----------------------------+------------+----------+----------+-------+---------+---------+ 
-| Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
-+-----------------------------+-----------+----------+----------+-------+---------+---------+
-| Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
-+-----------------------------+------------+----------+----------+-------+---------+---------+
-```
+    ```bash
+    +-----------------------------+------------+----------+----------+-------+---------+---------+
+    | Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
+    +=============================+============+==========+==========+=======+=========+=========+
+    | Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
+    +-----------------------------+------------+----------+----------+-------+---------+---------+ 
+    | Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
+    +-----------------------------+-----------+----------+----------+-------+---------+---------+
+    | Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
+    +-----------------------------+------------+----------+----------+-------+---------+---------+
+    ```
 
 ## Performance
 
@@ -267,7 +272,7 @@ evalscope eval \
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
 Refer to vllm benchmark for more details.
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 

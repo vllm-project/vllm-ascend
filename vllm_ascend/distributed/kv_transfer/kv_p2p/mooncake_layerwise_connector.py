@@ -114,6 +114,7 @@ class ReqMeta:
     remote_cache_tokens: int = 0
     local_computed_tokens: int = 0
     local_transed_tokens: int = 0
+    do_virtual: bool = False
 
 
 @dataclass
@@ -211,6 +212,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         num_head_replica: int,
         layer_metadata: dict[str, LayerMetadata],
         use_mla: bool,
+        use_attn_mamba_hybrid: bool,
         k_buffer: torch.Tensor,
         v_buffer: torch.Tensor,
         enable_kv_quant: bool,
@@ -225,6 +227,12 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.kv_cache_config = kv_cache_config
         self.kv_cache_specs = kv_cache_specs
         self.attn_resharding_group_idx = attn_resharding_group_idx
+        self.mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        self.num_speculative_tokens = (
+            self.vllm_config.speculative_config.num_speculative_tokens
+            if self.vllm_config.speculative_config is not None
+            else 0
+        )
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.pd_head_ratio = pd_head_ratio
@@ -232,10 +240,17 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.layer_metadata = layer_metadata
         self.total_layers = total_layers
         self.use_mla = use_mla
+        self.use_attn_mamba_hybrid = use_attn_mamba_hybrid
         self.resharding_stream = resharding_stream
         self.current_layer = -1
 
-        self.send_queue = queue.Queue[SendTask]()
+        send_queue_size = 0
+        if self.pd_head_ratio != 1:
+            if self.use_attn_mamba_hybrid:
+                send_queue_size = len(self.kv_cache_specs)
+            else:
+                send_queue_size = 1
+        self.send_queue = queue.Queue[SendTask](maxsize=send_queue_size)
         self.k_buffer = k_buffer
         self.v_buffer = v_buffer
         self.enable_kv_quant = enable_kv_quant
@@ -273,6 +288,10 @@ class KVCacheSendingLayerThread(threading.Thread):
 
         if isinstance(layer_kv_cache_spec, MambaSpec):
             # only support one block transfer for mamba
+            if self.mamba_cache_mode == "align":
+                transfer_block_idx = len(local_block_ids) - self.num_speculative_tokens - 1
+            else:
+                transfer_block_idx = 0
             local_conv_addr, local_ssm_addr = local_layer_metadata.kv_caches_base_addr
             remote_conv_addr, remote_ssm_addr = remote_layer_metadata.kv_caches_base_addr
             local_conv_len, local_ssm_len = local_layer_metadata.block_len
@@ -280,8 +299,8 @@ class KVCacheSendingLayerThread(threading.Thread):
             if tp_ratio == 1:
                 src_list.extend(
                     [
-                        local_conv_addr + local_block_ids[0] * local_conv_len,
-                        local_ssm_addr + local_block_ids[0] * local_ssm_len,
+                        local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len,
+                        local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len,
                     ]
                 )
                 dst_list.extend(
@@ -316,14 +335,17 @@ class KVCacheSendingLayerThread(threading.Thread):
                     for local_conv_offset, local_conv_size in zip(local_conv_offsets, local_conv_sizes):
                         local_addr_offset = (i * conv_shape[1] + local_conv_offset) * get_dtype_size(conv_dtype)
                         remote_addr_offset = (
-                            (i * conv_shape[1] * tp_ratio) + (self.tp_rank % tp_ratio) * local_conv_size
+                            (i * conv_shape[1] + local_conv_offset) * tp_ratio
+                            + (self.tp_rank % tp_ratio) * local_conv_size
                         ) * get_dtype_size(conv_dtype)
-                        src_list.append(local_conv_addr + local_block_ids[0] * local_conv_len + local_addr_offset)
+                        src_list.append(
+                            local_conv_addr + local_block_ids[transfer_block_idx] * local_conv_len + local_addr_offset
+                        )
                         dst_list.append(remote_conv_addr + remote_block_ids[0] * remote_conv_len + remote_addr_offset)
                         length_list.append(local_conv_size * get_dtype_size(conv_dtype))
                 # ssm
                 remote_addr_offset = (self.tp_rank % tp_ratio) * math.prod(ssm_shape) * get_dtype_size(ssm_dtype)
-                src_list.append(local_ssm_addr + local_block_ids[0] * local_ssm_len)
+                src_list.append(local_ssm_addr + local_block_ids[transfer_block_idx] * local_ssm_len)
                 dst_list.append(remote_ssm_addr + remote_block_ids[0] * remote_ssm_len + remote_addr_offset)
                 length_list.append(local_ssm_len)
         else:
@@ -451,6 +473,7 @@ class KVCacheSendingLayerThread(threading.Thread):
 
         for session_id, transfer_meta in session_meta.items():
             if len(transfer_meta.src) > 0:
+                req_start_time = time.perf_counter()
                 ret = self.engine.batch_transfer_sync_write(
                     session_id, transfer_meta.src, transfer_meta.dst, transfer_meta.length
                 )
@@ -466,6 +489,16 @@ class KVCacheSendingLayerThread(threading.Thread):
                                     req_id, req_meta, layer_group_idx
                                 )  # TODO Send a signal indicating transmission failure
                 else:
+                    req_end_time = time.perf_counter()
+                    total_transfer_size = sum(transfer_meta.length) / 1024
+                    req_transfer_elapsed = (req_end_time - req_start_time) * 1000
+                    logger.debug(
+                        "Layer%d KV cache transfer task %dKB to remote_session_id [%s] took %.3f ms.",
+                        send_task.layer_idx,
+                        total_transfer_size,
+                        session_id,
+                        req_transfer_elapsed,
+                    )
                     if send_task.layer_idx == (self.total_layers - 1):
                         for req_id in transfer_meta.req_ids:
                             req_meta = send_task.send_request[req_id]
@@ -494,7 +527,6 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.lock = threading.Lock()
         self.done_requests = set[str]()
         self.task_tracker = dict[str, int]()
-        self.request_map = dict[str, str]()
         self.ready_event = ready_event
         self.metadata = metadata
 
@@ -511,11 +543,12 @@ class KVCacheRecvingLayerThread(threading.Thread):
 
     def update_task(self, req_id, trans_count):
         with self.lock:
+            if req_id not in self.task_tracker:
+                self.task_tracker[req_id] = 0
             self.task_tracker[req_id] += 1
             if self.task_tracker[req_id] == trans_count:
                 self.task_tracker.pop(req_id)
-                self.done_requests.add(self.request_map[req_id])
-                self.request_map.pop(req_id)
+                self.done_requests.add(req_id)
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
@@ -587,6 +620,7 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
             remote_tp_size=kv_transfer_params.get("remote_tp_size"),
             remote_pcp_size=kv_transfer_params.get("remote_pcp_size"),
             remote_dcp_size=kv_transfer_params.get("remote_dcp_size"),
+            do_virtual=kv_transfer_params.get("do_virtual"),
             chunk_finish=chunk_finish,
             remote_cache_tokens=remote_cache_tokens,
             local_computed_tokens=local_computed_tokens,
@@ -770,6 +804,7 @@ class MooncakeLayerwiseConnectorScheduler:
         )
 
         if params is not None and params.get("do_remote_prefill"):
+            do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
             remote_cached_tokens = request.num_computed_tokens
             # Get unhashed blocks to pull from remote.
@@ -804,16 +839,16 @@ class MooncakeLayerwiseConnectorScheduler:
                 remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
                 remote_cached_tokens=remote_cached_tokens,
             )
+            if not do_virtual:
+                future = self.executor.submit(
+                    self._access_metaserver, url=params.get("metaserver", None), message=kv_transfer_params
+                )
 
-            future = self.executor.submit(
-                self._access_metaserver, url=params.get("metaserver", None), message=kv_transfer_params
-            )
+                def handle_exception(future):
+                    if future.exception():
+                        logger.error(f"Access metaserver fail: {future.exception()}")
 
-            def handle_exception(future):
-                if future.exception():
-                    logger.error(f"Access metaserver fail: {future.exception()}")
-
-            future.add_done_callback(handle_exception)
+                future.add_done_callback(handle_exception)
 
         # Layerwise prefiller add request need send
         if params is not None and params.get("do_remote_decode"):
@@ -980,6 +1015,8 @@ class MooncakeLayerwiseConnectorWorker:
         self.side_channel_host = get_ip()
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.use_mla = self.vllm_config.model_config.use_mla
+        self.request_map = dict[str, str]()
+        self.use_attn_mamba_hybrid = False
         if self.use_mla:
             self.total_num_kv_heads = 1
         else:
@@ -1034,6 +1071,7 @@ class MooncakeLayerwiseConnectorWorker:
         # TODO(kunpengW-code): Reuse k_buffer, v_buffer
         self.k_quant_buffer: torch.Tensor | None = None
         self.v_quant_buffer: torch.Tensor | None = None
+        self.virtual_request: set[str] = set()
 
     def create_kv_buffer(self, first_kv_cache_tuple):
         alignment = 2 * 1024 * 1024
@@ -1056,7 +1094,7 @@ class MooncakeLayerwiseConnectorWorker:
             buffer_list.append(self.k_buffer)
             buffer_list.append(self.v_buffer)
         if self.enable_kv_quant:
-            quant_k_cache_numel = first_kv_cache_tuple[0].numel() // 2
+            quant_k_cache_numel = first_kv_cache_tuple[0].numel()
             self.k_quant_buffer = torch.zeros(
                 quant_k_cache_numel + alignment, dtype=torch.int8, device=first_kv_cache.device
             )
@@ -1075,10 +1113,8 @@ class MooncakeLayerwiseConnectorWorker:
 
         for tensor in buffer_list:
             assert tensor.data_ptr() % alignment == 0, "The address of the registered kv cache should be aligned to 2M"
-            ret_value = self.engine.register_memory(tensor.data_ptr(), tensor.numel())
-            logger.info(
-                f"Register memory for prefill when pd head ratio > 1 {tensor.data_ptr()} {tensor.numel()} {ret_value=}"
-            )
+            ret_value = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
+            logger.info(f"Register memory buffer for transfer, buffer size:{tensor.numel() * tensor.element_size()}")
             if ret_value != 0:
                 raise RuntimeError("Mooncake memory registration failed. ")
 
@@ -1090,7 +1126,7 @@ class MooncakeLayerwiseConnectorWorker:
             for layer_name in kv_cache_group_spec.layer_names:
                 layer2group_ids[layer_name] = i
 
-        use_mamba, use_attn, use_attn_mamba_hybrid = False, False, False
+        use_mamba, use_attn = False, False
         conv_total_padding_size = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             for layer_name in kv_cache_tensor.shared_by:
@@ -1104,7 +1140,7 @@ class MooncakeLayerwiseConnectorWorker:
                 if isinstance(layer_kv_cache_spec, AttentionSpec):
                     use_attn = True
             if use_mamba and use_attn:
-                use_attn_mamba_hybrid = True
+                self.use_attn_mamba_hybrid = True
                 break
 
         ptrs = []
@@ -1140,7 +1176,7 @@ class MooncakeLayerwiseConnectorWorker:
                 single_layer_meta.block_len.append(single_kv_cache.element_size() * math.prod(block_shape))
                 single_layer_meta.block_size_scale.append(block_size_scale)
                 self.kernel_block_size_scale[layer2group_ids[layer_name]] = block_size_scale
-                if single_kv_cache.data_ptr() not in ptrs and not use_attn_mamba_hybrid:
+                if single_kv_cache.data_ptr() not in ptrs and not self.use_attn_mamba_hybrid:
                     ptrs.append(single_kv_cache.data_ptr())
                     lengths.append(
                         num_blocks * single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
@@ -1148,7 +1184,7 @@ class MooncakeLayerwiseConnectorWorker:
                 logger.info(f"layer: {layer_name}, num_blocks: {num_blocks}, block_shape: {block_shape}")
             self.layer_metadata[layer_name] = single_layer_meta
 
-        if use_attn_mamba_hybrid:
+        if self.use_attn_mamba_hybrid:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 tensor_addrs = []
                 for layer_name in kv_cache_tensor.shared_by:
@@ -1199,6 +1235,7 @@ class MooncakeLayerwiseConnectorWorker:
                 num_head_replica=self.num_head_replica,
                 layer_metadata=self.layer_metadata,
                 use_mla=self.use_mla,
+                use_attn_mamba_hybrid=self.use_attn_mamba_hybrid,
                 k_buffer=self.k_buffer,
                 v_buffer=self.v_buffer,
                 enable_kv_quant=self.enable_kv_quant,
@@ -1231,6 +1268,12 @@ class MooncakeLayerwiseConnectorWorker:
             if self.vllm_config.kv_transfer_config.is_kv_consumer
             else set()
         )
+        done_recving = {self.request_map[s] for s in done_recving if s in self.request_map}
+        done_recving.update(self.virtual_request)
+        self.virtual_request = set()
+        for req_id in done_recving:
+            req_id = req_id[:-9]
+            self.request_map.pop(req_id, None)
         if len(done_recving) > 0:
             logger.info(
                 f"Number of completed KV cache recv requests: {len(done_recving)}, receive requests: {done_recving}"
@@ -1403,11 +1446,12 @@ class MooncakeLayerwiseConnectorWorker:
         self.current_layer = 0
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
             for req_id, meta in metadata.requests.items():
+                if meta.do_virtual:
+                    self.virtual_request.add(req_id)
+                    continue
                 external_req_id = get_external_request_id(req_id)
                 assert self.kv_recv_layer_thread is not None
-                with self.kv_recv_layer_thread.lock:
-                    self.kv_recv_layer_thread.task_tracker[external_req_id] = 0
-                    self.kv_recv_layer_thread.request_map[external_req_id] = req_id
+                self.request_map[external_req_id] = req_id
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
             # update trans info
             update_metadata = {}
@@ -1493,12 +1537,15 @@ class MooncakeLayerwiseConnectorWorker:
     ) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
+            if self.current_layer >= self.total_layers:
+                self.current_layer += 1
+                return
             # get reshape and cache event
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
-            if (
-                type(attn_metadata) is dict and not getattr(attn_metadata[layer_name], "reshape_cache_event", None)
-            ) or (not getattr(attn_metadata, "reshape_cache_event", None)):
+            if (self.use_mla and not hasattr(attn_metadata[layer_name], "reshape_cache_event")) or (
+                not self.use_mla and not hasattr(attn_metadata, "reshape_cache_event")
+            ):
                 reshape_cache_event = torch.npu.Event()
                 reshape_cache_event.record()
             elif self.use_mla:
@@ -1613,7 +1660,14 @@ class MooncakeLayerwiseConnectorWorker:
             for req_id, req_meta in connector_metadata.requests.items():
                 if len(req_meta.local_block_ids[layer_group_idx]) == 0:
                     continue
-                req_meta_update = self.update_decoder_info(req_id, req_meta)
+                try:
+                    req_meta_update = self.update_decoder_info(req_id, req_meta)
+                except Exception as e:
+                    logger.warning(
+                        f"MooncakeLayerwiseConnector transfer fail for req_id {req_id} in layer_idx "
+                        f"{self.current_layer}, update_decoder_info with error: {e}"
+                    )
+                    continue
                 logger.debug(f"Add request {req_id} to kv send layer thread. {req_meta_update=}")
                 layer_send_task.send_request[req_id] = req_meta_update
 
@@ -1668,6 +1722,7 @@ class MooncakeLayerwiseConnectorWorker:
                     f"from {req_meta.remote_host}:{req_meta.remote_port}"
                     f"fail with error: {e}"
                 )
+                raise e
             assert req_meta.remote_engine_id != self.engine_id, (
                 f"Conflict engine id {req_meta.remote_engine_id} with local engine id {self.local_engine_id}."
             )
@@ -1708,7 +1763,19 @@ class MooncakeLayerwiseConnectorWorker:
             encoded_data = msg_encoder.encode((DONE_SENDING_MSG, external_req_id, req_meta.trans_count[group_idx]))
             with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore
                 ensure_zmq_send(sock, encoded_data, f"{req_meta.remote_host}:{req_meta.remote_port}")
-                ack = sock.recv()
+                # Avoid blocking forever waiting for the REQ/ACK response.
+                sock.setsockopt(zmq.RCVTIMEO, int(self.timeout * 1000))  # type: ignore
+                try:
+                    ack = sock.recv()
+                except zmq.Again:  # type: ignore
+                    logger.warning(
+                        "Timeout waiting ACK for request %s from %s:%d (timeout=%.3fs)",
+                        external_req_id,
+                        req_meta.remote_host,
+                        req_meta.remote_port,
+                        self.timeout,
+                    )
+                    return
                 if ack != b"ACK":
                     raise ValueError(f"Unexpected ACK response: {ack}")
         except Exception as e:
