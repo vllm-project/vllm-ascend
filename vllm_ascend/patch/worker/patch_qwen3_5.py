@@ -18,9 +18,10 @@
 
 
 import torch
-from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 
@@ -132,6 +133,7 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
                 hidden_states = hidden_states * (self.ffn_layer_scale.to(hidden_states.dtype) + 1)
 
         return hidden_states, residual
+
 
 Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
