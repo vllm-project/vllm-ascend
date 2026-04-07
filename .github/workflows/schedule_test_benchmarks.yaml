@@ -51,7 +51,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - vllm_branch: 35141a7eeda941a60ad5a4956670c60fd5a77029
+          - vllm_branch: 14acf429ac08b6d538ca6feb3e06b6d13895804d
             vllm_ascend_branch: main
       max-parallel: 1
     container:
