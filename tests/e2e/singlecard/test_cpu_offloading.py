@@ -128,7 +128,7 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     assert success_count >= 0.5 * test_count
 
 
-@pytest.mark.skip(reason="TODO: adapt upstream new feature https://github.com/vllm-project/vllm/pull/37853")
+@pytest.mark.skip(reason="cpu offload connector is deprecated.")
 def test_cpu_offloading() -> None:
     """
     Tests OffloadingConnector with CPUOffloadingSpec.
