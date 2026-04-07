@@ -409,9 +409,10 @@ class CpuAlloc:
         self.bind(main_pid, self.assign_main[current_npu], True)
         for acl_thread in threads_map.get(main_pid, {}).get("acl_thread", []):
             self.bind(acl_thread, self.assign_acl[current_npu], False)
-            self.bind_memory(acl_thread, current_npu)
         for release_thread in threads_map.get(main_pid, {}).get("release_thread", []):
             self.bind(release_thread, self.assign_rel[current_npu], False)
+        # Migrate memory once for the whole process, after all threads are pinned.
+        self.bind_memory(main_pid, current_npu)
 
     def bind_npu_irq(self) -> None:
         if not os.access("/proc/irq", os.W_OK):
