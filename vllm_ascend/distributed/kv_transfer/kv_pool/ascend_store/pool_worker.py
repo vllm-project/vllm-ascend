@@ -355,61 +355,99 @@ class KVPoolWorker:
             if layer_id not in self._request_addr_tracker[request.req_id]:
                 self._request_addr_tracker[request.req_id][layer_id] = {
                     'processed_count': 0,
-                    'addr_list': [],
-                    'size_list': [],
-                    'gvas_list': [],
+                    'chunk_addr_list': [],
+                    'chunk_size_list': [],
+                    'chunk_gvas_list': [],
+                    'last_block_addr': [],
+                    'last_block_size': [],
+                    'last_block_gvas': [],
                 }
 
             layer_tracker = self._request_addr_tracker[request.req_id][layer_id]
             processed_count = layer_tracker['processed_count']
-            new_block_count = len(keys_multi_chunk) - processed_count
+            keys_per_chunk = self.tp_size // self.put_step * self.pcp_size * self.dcp_size
+            num_chunks = len(starts)
+            total_keys = len(keys_multi_chunk)
+            has_last_block = total_keys > num_chunks * keys_per_chunk
 
             can_save = request.can_save
             if can_save is not None and can_save:
-                if new_block_count > 0:
-                    new_keys = keys_multi_chunk[processed_count:]
+                need_process_chunks = processed_count < num_chunks
+
+                if need_process_chunks:
                     new_starts = starts[processed_count:]
                     new_ends = ends[processed_count:]
+                    chunks_to_process = min(num_chunks - processed_count, len(new_starts))
+                    for chunk_idx in range(chunks_to_process):
+                        chunk_keys = keys_multi_chunk[(processed_count + chunk_idx) * keys_per_chunk : (processed_count + chunk_idx + 1) * keys_per_chunk]
+                        for key in chunk_keys:
+                            addr, size = self.token_database.prepare_value_layer(
+                                new_starts[chunk_idx],
+                                new_ends[chunk_idx],
+                                request.block_ids, layer_id)
+                            layer_tracker['chunk_addr_list'].extend(addr)
+                            layer_tracker['chunk_size_list'].extend(size)
+                            gva = request.key_gva_mapping[key] if request.key_gva_mapping else None
+                            if gva is not None:
+                                layer_tracker['chunk_gvas_list'].extend([gva, gva + size[0]])
+                    layer_tracker['processed_count'] = num_chunks
 
-                    for idx, key in enumerate(new_keys):
+                if has_last_block:
+                    last_block_keys = keys_multi_chunk[num_chunks * keys_per_chunk:]
+                    last_block_addr = []
+                    last_block_size = []
+                    last_block_gvas = []
+                    last_block_start = num_chunks * self.block_size
+                    last_block_end = last_block_start + self.block_size
+                    for key in last_block_keys:
                         addr, size = self.token_database.prepare_value_layer(
-                            new_starts[idx], new_ends[idx], request.block_ids, layer_id)
-                        layer_tracker['addr_list'].extend(addr)
-                        layer_tracker['size_list'].extend(size)
+                            last_block_start, last_block_end,
+                            request.block_ids, layer_id)
+                        last_block_addr.extend(addr)
+                        last_block_size.extend(size)
                         gva = request.key_gva_mapping[key] if request.key_gva_mapping else None
                         if gva is not None:
-                            layer_tracker['gvas_list'].extend([gva, gva + size[0]])
+                            last_block_gvas.extend([gva, gva + size[0]])
+                    layer_tracker['last_block_addr'] = last_block_addr
+                    layer_tracker['last_block_size'] = last_block_size
+                    layer_tracker['last_block_gvas'] = last_block_gvas
+                else:
+                    layer_tracker['last_block_addr'] = []
+                    layer_tracker['last_block_size'] = []
+                    layer_tracker['last_block_gvas'] = []
 
-                    layer_tracker['processed_count'] = len(keys_multi_chunk)
+                final_addr_list = layer_tracker['chunk_addr_list'] + layer_tracker['last_block_addr']
+                final_size_list = layer_tracker['chunk_size_list'] + layer_tracker['last_block_size']
+                final_gvas_list = layer_tracker['chunk_gvas_list'] + layer_tracker['last_block_gvas']
 
                 req_meta = LasyerMultiBlockReqMeta(
                     request.req_id, keys_multi_chunk, starts, ends,
                     request.block_ids, layer_id, request.is_last_chunk
                 )
                 req_meta.key_gva_mapping = request.key_gva_mapping
-                req_meta.addr_list = layer_tracker['addr_list'].copy()
-                req_meta.size_list = layer_tracker['size_list'].copy()
-                req_meta.gvas_list = layer_tracker['gvas_list'].copy()
+                req_meta.addr_list = final_addr_list
+                req_meta.size_list = final_size_list
+                req_meta.gvas_list = final_gvas_list
                 self.layer_save_tasks[layer_id].append(req_meta)
 
             load_spec = request.load_spec
             if load_spec is not None and load_spec.can_load:
                 token_len = load_spec.kvpool_cached_tokens
-                num_saved_blocks = token_len // self.block_size
-                if token_len % self.block_size == 0:
-                    load_keys = keys_multi_chunk[:num_saved_blocks]
-                    load_starts = starts[:num_saved_blocks]
-                    load_ends = ends[:num_saved_blocks]
-                else:
+                num_saved_chunks = token_len // self.block_size
+                has_load_last_block = token_len % self.block_size != 0
+
+                load_keys = keys_multi_chunk[:num_saved_chunks * keys_per_chunk]
+                load_starts = starts[:num_saved_chunks] if num_saved_chunks <= len(starts) else starts
+                load_ends = ends[:num_saved_chunks] if num_saved_chunks <= len(ends) else ends
+
+                if has_load_last_block:
                     last_block_key = (
                         f"{self.metadata.model_name}"
                         f"@pcp{self.metadata.pcp_rank}@dcp{self.metadata.dcp_rank}"
                         f"@head_or_tp_rank:{self.metadata.head_or_tp_rank}"
                         f"@{request.req_id}_lastblock@{layer_id}"
                     )
-                    load_keys = keys_multi_chunk[:num_saved_blocks] + [last_block_key]
-                    load_starts = starts
-                    load_ends = ends
+                    load_keys = load_keys + [last_block_key]
 
                 load_tracker_key = f"{request.req_id}_load"
                 if load_tracker_key not in self._request_addr_tracker:
@@ -417,43 +455,71 @@ class KVPoolWorker:
                 if layer_id not in self._request_addr_tracker[load_tracker_key]:
                     self._request_addr_tracker[load_tracker_key][layer_id] = {
                         'processed_count': 0,
-                        'addr_list': [],
-                        'size_list': [],
-                        'gvas_list': [],
+                        'chunk_addr_list': [],
+                        'chunk_size_list': [],
+                        'chunk_gvas_list': [],
+                        'last_block_addr': [],
+                        'last_block_size': [],
+                        'last_block_gvas': [],
                     }
 
                 load_tracker = self._request_addr_tracker[load_tracker_key][layer_id]
                 load_processed_count = load_tracker['processed_count']
-                new_load_count = len(load_keys) - load_processed_count
 
-                if new_load_count > 0:
-                    new_load_keys = load_keys[load_processed_count:]
-                    new_load_starts = load_starts[load_processed_count:] if load_processed_count < len(load_starts) else load_starts
-                    new_load_ends = load_ends[load_processed_count:] if load_processed_count < len(load_ends) else load_ends
+                if load_processed_count < num_saved_chunks:
+                    new_load_starts = load_starts[load_processed_count:]
+                    new_load_ends = load_ends[load_processed_count:]
+                    chunks_to_process = min(num_saved_chunks - load_processed_count, len(new_load_starts))
+                    for chunk_idx in range(chunks_to_process):
+                        chunk_keys = load_keys[(load_processed_count + chunk_idx) * keys_per_chunk : (load_processed_count + chunk_idx + 1) * keys_per_chunk]
+                        for key in chunk_keys:
+                            addr, size = self.token_database.prepare_value_layer(
+                                new_load_starts[chunk_idx],
+                                new_load_ends[chunk_idx],
+                                request.block_ids, layer_id)
+                            load_tracker['chunk_addr_list'].extend(addr)
+                            load_tracker['chunk_size_list'].extend(size)
+                            gva = request.key_gva_mapping[key] if request.key_gva_mapping else None
+                            if gva is not None:
+                                load_tracker['chunk_gvas_list'].extend([gva, gva + size[0]])
+                    load_tracker['processed_count'] = num_saved_chunks
 
-                    for idx, key in enumerate(new_load_keys):
-                        start_idx = min(idx, len(new_load_starts) - 1) if new_load_starts else 0
-                        end_idx = min(idx, len(new_load_ends) - 1) if new_load_ends else 0
+                if has_load_last_block:
+                    last_block_keys = load_keys[num_saved_chunks * keys_per_chunk:]
+                    last_block_addr = []
+                    last_block_size = []
+                    last_block_gvas = []
+                    last_block_start = num_saved_chunks * self.block_size
+                    last_block_end = last_block_start + self.block_size
+                    for key in last_block_keys:
                         addr, size = self.token_database.prepare_value_layer(
-                            new_load_starts[start_idx] if new_load_starts else 0,
-                            new_load_ends[end_idx] if new_load_ends else self.block_size,
+                            last_block_start, last_block_end,
                             request.block_ids, layer_id)
-                        load_tracker['addr_list'].extend(addr)
-                        load_tracker['size_list'].extend(size)
+                        last_block_addr.extend(addr)
+                        last_block_size.extend(size)
                         gva = request.key_gva_mapping[key] if request.key_gva_mapping else None
                         if gva is not None:
-                            load_tracker['gvas_list'].extend([gva, gva + size[0]])
+                            last_block_gvas.extend([gva, gva + size[0]])
+                    load_tracker['last_block_addr'] = last_block_addr
+                    load_tracker['last_block_size'] = last_block_size
+                    load_tracker['last_block_gvas'] = last_block_gvas
+                else:
+                    load_tracker['last_block_addr'] = []
+                    load_tracker['last_block_size'] = []
+                    load_tracker['last_block_gvas'] = []
 
-                    load_tracker['processed_count'] = len(load_keys)
+                final_load_addr_list = load_tracker['chunk_addr_list'] + load_tracker['last_block_addr']
+                final_load_size_list = load_tracker['chunk_size_list'] + load_tracker['last_block_size']
+                final_load_gvas_list = load_tracker['chunk_gvas_list'] + load_tracker['last_block_gvas']
 
                 req_meta = LasyerMultiBlockReqMeta(
                     request.req_id, load_keys, load_starts, load_ends,
                     request.block_ids, layer_id
                 )
                 req_meta.key_gva_mapping = request.key_gva_mapping
-                req_meta.addr_list = load_tracker['addr_list'].copy()
-                req_meta.size_list = load_tracker['size_list'].copy()
-                req_meta.gvas_list = load_tracker['gvas_list'].copy()
+                req_meta.addr_list = final_load_addr_list
+                req_meta.size_list = final_load_size_list
+                req_meta.gvas_list = final_load_gvas_list
                 self.layer_load_tasks[layer_id].append(req_meta)
 
     def wait_for_layer_load(self) -> None:
