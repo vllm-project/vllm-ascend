@@ -52,7 +52,7 @@ class LlamaXliteModel(XliteModel):
         rank = torch.distributed.get_rank()
         xlite_model.init(config, rank)
 
-        freq_cis = self._precompute_freqs_cis(config.head_dim, config.max_seq_len, dtype, config.rope_theta)
+        freq_cis = self._precompute_freqs_cis(config.rope_head_dim, config.max_seq_len, dtype, config.rope_theta)
 
         return (xlite_model, freq_cis, config.hidden_size, dtype)
 
@@ -170,17 +170,6 @@ class LlamaXliteModel(XliteModel):
 
 
 class QwenMoeXliteModel(LlamaXliteModel):
-    def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, int, int, torch.dtype]:
-        dtype = vllm_config.model_config.dtype
-        config = self._build_model_config(vllm_config)
-        xlite_model = self._build_model(runnable, vllm_config, config)
-        rank = torch.distributed.get_rank()
-        xlite_model.init(config, rank)
-
-        freq_cis = super()._precompute_freqs_cis(config.head_dim, config.max_seq_len, dtype, config.rope_theta)
-
-        return (xlite_model, freq_cis, config.hidden_size, dtype)
-
     def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
         config = super()._build_model_config(vllm_config)
         hf_config = vllm_config.model_config.hf_text_config
@@ -213,17 +202,6 @@ class QwenMoeXliteModel(LlamaXliteModel):
 
 
 class Glm4MoeXliteModel(LlamaXliteModel):
-    def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, int, int, torch.dtype]:
-        dtype = vllm_config.model_config.dtype
-        config = self._build_model_config(vllm_config)
-        xlite_model = self._build_model(runnable, vllm_config, config)
-        rank = torch.distributed.get_rank()
-        xlite_model.init(config, rank)
-
-        freq_cis = super()._precompute_freqs_cis(config.rope_head_dim, config.max_seq_len, dtype, config.rope_theta)
-
-        return (xlite_model, freq_cis, config.hidden_size, dtype)
-
     def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
         config = super()._build_model_config(vllm_config)
         hf_config = vllm_config.model_config.hf_text_config
