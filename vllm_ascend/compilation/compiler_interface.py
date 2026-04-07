@@ -36,11 +36,22 @@ from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
+def _restore_non_tuple_output(compiled_fn: Callable) -> Callable:
+    def wrapped(*args, **kwargs):
+        output = compiled_fn(*args, **kwargs)
+        while isinstance(output, tuple) and len(output) == 1:
+            output = output[0]
+        return output
+
+    return wrapped
+
+
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
     recursive_compile_fx = functools.partial(compile_fx, inner_compile=inner_compile, decompositions=decompositions)
 
     if not graph_returns_tuple(graph):
-        return make_graph_return_tuple(graph, example_inputs, recursive_compile_fx)
+        compiled_fn = make_graph_return_tuple(graph, example_inputs, recursive_compile_fx)
+        return _restore_non_tuple_output(compiled_fn)
     return aot_autograd(fw_compiler=inner_compile)(graph, example_inputs)
 
 
@@ -159,6 +170,7 @@ def npugraph_ex_compile(
         # torch.compile requires the output of the fx graph to be a tuple
         if not graph_returns_tuple(graph):
             compiled_fn = make_graph_return_tuple(graph, example_inputs, npugraph_ex)
+            compiled_fn = _restore_non_tuple_output(compiled_fn)
         else:
             compiled_fn = npugraph_ex(graph, example_inputs)
 
