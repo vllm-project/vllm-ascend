@@ -69,6 +69,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
