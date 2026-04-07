@@ -39,6 +39,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -149,6 +150,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -230,7 +232,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          python3 -m pip uninstall -y triton-ascend
+          python3 -m pip uninstall -y triton triton-ascend
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
 
   e2e-4-cards:
@@ -257,6 +259,7 @@ jobs:
           apt-get update -y
           apt install git wget curl -y
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
