@@ -1393,12 +1393,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
-            # When the graph is compiled to aclgraph (run_eagerly disabled),
-            # make_graph_return_tuple wraps the output as a tuple. Unwrap it.
-            if not self.use_aux_hidden_state_outputs and isinstance(hidden_states, tuple) and len(hidden_states) == 1:
-                hidden_states = hidden_states[0]
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, aux_hidden_states = hidden_states
+            hidden_states, aux_hidden_states = self._normalize_model_forward_outputs(hidden_states)
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
@@ -1815,6 +1810,28 @@ class NPUModelRunner(GPUModelRunner):
                 NPUModelRunner._all_gather_hidden_states_list(hidden_states[1]),
             )
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
+
+    def _normalize_model_forward_outputs(
+        self, outputs: Any
+    ) -> tuple[torch.Tensor | IntermediateTensors, list[torch.Tensor] | None]:
+        # ACL graph wrappers may add singleton tuple layers around the actual
+        # model outputs. Normalize them once before downstream indexing logic.
+        while isinstance(outputs, tuple) and len(outputs) == 1:
+            outputs = outputs[0]
+
+        aux_hidden_states = None
+        if self.use_aux_hidden_state_outputs:
+            assert isinstance(outputs, tuple) and len(outputs) == 2, (
+                "Expected hidden states and aux hidden states from model forward, "
+                f"got {type(outputs)}"
+            )
+            hidden_states, aux_hidden_states = outputs
+            while isinstance(hidden_states, tuple) and len(hidden_states) == 1:
+                hidden_states = hidden_states[0]
+        else:
+            hidden_states = outputs
+
+        return hidden_states, aux_hidden_states
 
     def _model_forward(
         self,
@@ -2500,14 +2517,7 @@ class NPUModelRunner(GPUModelRunner):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
-            else:
-                hidden_states = outputs
-            # When the graph is compiled to aclgraph (run_eagerly disabled),
-            # make_graph_return_tuple wraps the output as a tuple. Unwrap it.
-            if isinstance(hidden_states, tuple) and len(hidden_states) == 1:
-                hidden_states = hidden_states[0]
+            hidden_states, _ = self._normalize_model_forward_outputs(outputs)
             dummy_compute_logits(hidden_states)
 
             if self.drafter:
