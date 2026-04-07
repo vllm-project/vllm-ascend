@@ -95,8 +95,6 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
 
         prefix = self.quant_prefix_mapper(model_type, prefix)
-        if prefix.startswith("language_model"):
-            prefix = prefix.split(".", 1)[-1]
 
         if isinstance(layer, LinearBase):
             packed = getattr(self, "packed_modules_mapping", {})
