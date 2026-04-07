@@ -100,7 +100,7 @@ jobs:
               PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
             run: |
               pip install uc-manager
-              uv git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+              git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
               uv pip install -r requirements-dev.txt
               uv pip install -v -e .
               uv pip install tblib mteb runai_model_streamer pqdm timm
