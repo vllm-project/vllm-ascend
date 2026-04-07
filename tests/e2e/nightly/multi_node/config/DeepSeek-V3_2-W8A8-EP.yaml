@@ -122,7 +122,6 @@ deployment:
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
-          --headless
           --port $SERVER_PORT
           --data-parallel-size 8
           --data-parallel-size-local 4

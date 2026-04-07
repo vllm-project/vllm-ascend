@@ -84,6 +84,7 @@ deployment:
     server_cmd: >
       vllm serve Eco-Tech/GLM-5-w8a8
           --host 0.0.0.0
+          --headless
           --port $SERVER_PORT
           --data-parallel-size 4
           --data-parallel-start-rank 2
@@ -176,6 +177,7 @@ deployment:
     server_cmd: >
       vllm serve Eco-Tech/GLM-5-w8a8
           --host 0.0.0.0
+          --headless
           --port $SERVER_PORT
           --data-parallel-size 8
           --data-parallel-start-rank 4
