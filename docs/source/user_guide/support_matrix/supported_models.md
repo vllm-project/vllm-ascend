@@ -28,6 +28,8 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | GLM-4.x                       | 🔵        |                                                                      || A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|198k||[GLM-4.x](../../tutorials/models/GLM4.x.md)|
 | GLM-5                         | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 198k || [GLM-5](../../tutorials/models/GLM5.md) |
 | Kimi-K2-Thinking              | 🔵        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
+| DeepseekOCR2                  | ✅        |                                                                      | ✅ | A2/A3 ||✅||||✅|||||||||| [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
+| MiniMax-M2.5                  | ✅        |                                                                      | ✅ | A2/A3 |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|✅|✅|192k|🟡| [DeepSeekOCR2](../../tutorials/models/MiniMax-M2.5.md) |
 
 #### Extended Compatible Models
 
