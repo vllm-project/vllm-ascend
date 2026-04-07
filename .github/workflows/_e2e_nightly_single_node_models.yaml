@@ -213,8 +213,16 @@ jobs:
           any_failure=0
           for model in $models; do
             echo "Running test for model: $model"
-            pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
-              --config "tests/e2e/models/configs/${model}.yaml" || {
+            config_path="./tests/e2e/models/configs/${model}.yaml"
+            model_type=$(python3 -c "import yaml,sys; c=yaml.safe_load(open('${config_path}')); print(c.get('model_type','vllm'))" 2>/dev/null || echo "vllm")
+            if [[ "$model_type" == "vllm-asr" ]]; then
+              test_script="./tests/e2e/models/test_asr_eval.py"
+            else
+              test_script="./tests/e2e/models/test_lm_eval_correctness.py"
+            fi
+            echo "  model_type=${model_type} → ${test_script}"
+            pytest -sv "${test_script}" \
+              --config "${config_path}" || {
               echo "Test failed for model: $model"
               any_failure=1
             }

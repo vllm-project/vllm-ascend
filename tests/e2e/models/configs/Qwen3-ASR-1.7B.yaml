@@ -1,0 +1,47 @@
+model_name: "Qwen/Qwen3-ASR-1.7B"
+model_type: "vllm-asr"
+hardware: "Atlas A2 Series"
+
+# === vllm serve configuration ===
+# Equivalent to running:
+#   vllm serve Qwen/Qwen3-ASR-1.7B \
+#     --tensor-parallel-size 1 \
+#     --dtype auto \
+#     --max-model-len 4096 \
+#     --gpu-memory-utilization 0.8
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.8
+  trust_remote_code: false
+
+# === Open ASR Leaderboard evaluation tasks ===
+# Datasets from: https://github.com/huggingface/open_asr_leaderboard
+# Metric: WER (Word Error Rate, lower is better), validated with RTOL=0.10
+tasks:
+  - name: "librispeech_test_clean"
+    dataset: "librispeech_asr"
+    split: "test.clean"
+    dataset_config: "clean"
+    audio_column: "audio"
+    text_column: "text"
+    metrics:
+      - name: "wer"
+        value: 0.035   # Placeholder — measure on first run and lock in
+
+  - name: "librispeech_test_other"
+    dataset: "librispeech_asr"
+    split: "test.other"
+    dataset_config: "other"
+    audio_column: "audio"
+    text_column: "text"
+    metrics:
+      - name: "wer"
+        value: 0.08    # Placeholder — measure on first run and lock in
+
+# Evaluation settings
+limit: 100           # Samples per dataset split; set to null for full evaluation
+batch_size: 8
+language: "en"
+normalizer: "whisper"  # Text normalization: "whisper" uses EnglishTextNormalizer
