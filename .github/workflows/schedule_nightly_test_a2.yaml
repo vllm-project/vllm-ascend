@@ -126,7 +126,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_ascend_branch: [releases-v0.18.0]
+        vllm_ascend_branch: [main]
         test_config:
           # pytest-driven tests
           - name: test_custom_op
