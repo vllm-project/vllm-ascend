@@ -183,7 +183,7 @@ def mla_forward(
         attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
     else:
         attn_metadata = forward_context.attn_metadata
-    kv_cache = self.mla_attn.kv_cache[0]
+    kv_cache = self.mla_attn.kv_cache
     self.mla_attn.impl.forward(
         self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
     )
