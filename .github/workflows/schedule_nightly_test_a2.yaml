@@ -87,6 +87,9 @@ jobs:
             os: linux-aarch64-a2b3-4
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/
           # YAML-driven tests
+          - name: qwen3-vl-32b-instruct-w8a8
+            os: linux-aarch64-a2b3-4
+            config_file_path: Qwen3-VL-32B-Instruct-W8A8.yaml
           - name: qwen3-32b
             os: linux-aarch64-a2b3-4
             config_file_path: Qwen3-32B.yaml
