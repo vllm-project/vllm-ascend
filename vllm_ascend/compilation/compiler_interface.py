@@ -183,7 +183,7 @@ def npugraph_ex_compile(
         with open(cache_path, "w") as f:
             f.write(py_code_holder[0])
         handle = (key, cache_path)
-        logger.debug(f"Saved compiled graph to cache: {cache_path}")
+        logger.info(f"Saved compiled graph to cache: {cache_path}")
     return compiled_fn, handle
 
 
@@ -270,5 +270,8 @@ class AscendCompiler(CompilerInterface):
             py_code = f.read()
         artifacts = _CompiledFxArtifacts()
         artifacts.py_code = py_code
-        logger.debug("Loaded npugraph_ex compilation cache from %s", path)
-        return _CompiledFxGraph.load_artifacts(artifacts)
+        logger.info("Loaded npugraph_ex compilation cache from %s", path)
+        compiled_fn = _CompiledFxGraph.load_artifacts(artifacts)
+        if not graph_returns_tuple(graph):
+            compiled_fn = _restore_non_tuple_output(compiled_fn)
+        return compiled_fn
