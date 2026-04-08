@@ -259,7 +259,7 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
-    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+    import vllm.envs as envs
 
     global _CUSTOM_OP_ENABLED
 
@@ -271,7 +271,7 @@ def enable_custom_op():
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
     # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    if vllm_is_batch_invariant() or get_ascend_device_type() == AscendDeviceType.A5:
+    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -604,8 +604,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.conv import AscendConv2dLayer, AscendConv3dLayer
+    from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
+    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -616,6 +617,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
+    from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
+    from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
@@ -653,8 +656,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
-        "Conv2dLayer": AscendConv2dLayer,
         "Conv3dLayer": AscendConv3dLayer,
+        "RelPosAttention": AscendRelPosAttention,
+        "CustomQwen2Decoder": AscendCustomQwen2Decoder,
+        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
@@ -1112,6 +1117,12 @@ def refresh_block_size(vllm_config):
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128
+            return
+
+    ascend_config = get_ascend_config()
+    if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
+        logger.warning("Setting block size to 128 for xlite compatibility.")
+        cache_config.block_size = 128
 
 
 def dispose_layer(layer: Any):
@@ -1278,3 +1289,9 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))

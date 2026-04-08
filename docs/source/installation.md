@@ -11,7 +11,7 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
+    | Ascend HDK    | Refer to the documentation [CANN 8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
     | CANN          | == 8.5.1                        | Required for vllm-ascend and torch-npu    |
     | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
@@ -180,9 +180,9 @@ source $HOME/.local/bin/env
 # Install vllm-project/vllm. The newest supported version is |vllm_version|.
 pip install vllm==|pip_vllm_version|
 
-# Install vllm-project/vllm-ascend from wheelnext incremental index.
+# Install vllm-project/vllm-ascend from wheelnext index.
 uv pip install --system -v \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/incremental  \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
 --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple   \
 vllm-ascend==|pip_vllm_ascend_version|
 
@@ -234,12 +234,12 @@ Supported images as following.
 
 | image name | Hardware | OS |
 |-|-|-|
-| vllm-ascend:<image-tag> | Atlas A2 | Ubuntu |
-| vllm-ascend:<image-tag>-openeuler | Atlas A2 | openEuler |
-| vllm-ascend:<image-tag>-a3 | Atlas A3 | Ubuntu |
-| vllm-ascend:<image-tag>-a3-openeuler | Atlas A3 | openEuler |
-| vllm-ascend:<image-tag>-310p | Atlas 300I | Ubuntu |
-| vllm-ascend:<image-tag>-310p-openeuler | Atlas 300I | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }} | Atlas A2 | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-openeuler | Atlas A2 | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-a3 | Atlas A3 | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler | Atlas A3 | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas 300I | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas 300I | openEuler |
 
 :::{dropdown} Click here to see "Build from Dockerfile"
 or build IMAGE from **source code**:
