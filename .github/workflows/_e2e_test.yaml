@@ -2,6 +2,11 @@ name: 'e2e test'
 
 on:
   workflow_call:
+    secrets:
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
     inputs:
       vllm:
         required: true
@@ -9,6 +14,18 @@ on:
       image:
         required: true
         type: string
+      image_a3_2:
+        required: false
+        type: string
+        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
+      image_a3_4:
+        required: false
+        type: string
+        default: m.daocloud.io/quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
+      image_310p:
+        required: false
+        type: string
+        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
       type:
         required: true
         type: string
@@ -49,6 +66,11 @@ env:
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
+  AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
 
 jobs:
   e2e-light:
@@ -105,13 +127,36 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
 
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
 
       - name: Run vllm-project/vllm-ascend test
         env:
@@ -213,13 +258,36 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
 
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
       - name: Run e2e test
         if: ${{ inputs.type == 'full' }}
         env:
@@ -246,7 +314,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize singlecard-full failure
-        if: ${{ inputs.type == 'full' }}
+        if: ${{ always() && inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run singlecard-full test" \
@@ -279,7 +347,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
+      image: ${{ inputs.image_a3_2 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -325,13 +393,36 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
 
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -382,7 +473,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
+      image: ${{ inputs.image_a3_2 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -430,13 +521,36 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
 
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
       - name: Run vllm-project/vllm-ascend test (full)
         if: ${{ inputs.type == 'full' }}
         env:
@@ -462,7 +576,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-2-full failure
-        if: ${{ inputs.type == 'full' }}
+        if: ${{ always() && inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run multicard-2-full test " \
@@ -515,7 +629,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
+      image: ${{ inputs.image_a3_4 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -562,13 +676,36 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
 
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_4 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_4 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         if: ${{ inputs.type == 'full' }}
@@ -595,7 +732,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-4-full failure
-        if: ${{ inputs.type == 'full' }}
+        if: ${{ always() && inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run vllm-project/vllm-ascend test for V1 Engine" \
@@ -624,7 +761,7 @@ jobs:
     runs-on: linux-aarch64-310p-1
     if: ${{ inputs.contains_310 || inputs.p310_tests != '' }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
+      image: ${{ inputs.image_310p }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -668,13 +805,36 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
 
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
 
       - name: Run vllm-project/vllm-ascend test
         if: ${{ inputs.contains_310 }}
@@ -710,7 +870,7 @@ jobs:
     runs-on: linux-aarch64-310p-4
     if: ${{ inputs.contains_310 }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
+      image: ${{ inputs.image_310p }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -752,13 +912,36 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install -e .
           uv pip uninstall triton
 
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -v -e .
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
 
       - name: Run vllm-project/vllm-ascend test
         env:
