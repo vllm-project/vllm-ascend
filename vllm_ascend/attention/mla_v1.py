@@ -1613,8 +1613,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
-        if has_prefill:
-            wait_for_kv_layer_from_connector(layer_name)
+        # if has_prefill:
+        wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
         if has_decode:
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
@@ -1732,6 +1732,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         del o_proj_input
 
-        if has_prefill:
-            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        # if has_prefill:
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded
