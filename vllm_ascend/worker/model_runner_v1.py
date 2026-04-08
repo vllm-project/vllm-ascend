@@ -123,8 +123,6 @@ from vllm_ascend.utils import (
     enable_sp,
     enable_sp_by_pass,
     global_stream,
-    is_drafter_moe_model,
-    is_moe_model,
     lmhead_tp_enable,
     set_weight_prefetch_method,
 )
@@ -478,36 +476,8 @@ class NPUModelRunner(GPUModelRunner):
         - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
         - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
         """
-        # For dense models, since we don't actually need dp communication, we simply skip it.
-        # This usually happens when main model is moe while eagle draft model is dense.
-        is_context_moe_model = (
-            is_drafter_moe_model(self.vllm_config) if is_draft_model else is_moe_model(self.vllm_config)
-        )
-        if not is_context_moe_model:
-            return True
-
-        # Only applicable to MoE models on KV consumer ranks.
-        if not self.is_kv_consumer:
-            return False
-
-        def needs_mc2(num_tokens: int) -> bool:
-            return select_moe_comm_method(num_tokens, self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
-
-        # Determine whether decode must use MC2. Use max cudagraph capture size
-        # if available, otherwise use the maximal uniform decode token count.
-        if self.compilation_config.cudagraph_capture_sizes:
-            potential_max_tokens = self.compilation_config.max_cudagraph_capture_size
-        else:
-            potential_max_tokens = self.max_num_reqs * self.uniform_decode_query_len
-        decode_must_use_mc2 = needs_mc2(potential_max_tokens)
-
-        # For prefill, use the scheduler's max_num_batched_tokens for a single
-        # batch.
-        prefill_must_use_mc2 = needs_mc2(self.vllm_config.scheduler_config.max_num_batched_tokens)
-
-        # Skip all-reduce if decode requires MC2 and either prefill also
-        # requires MC2 or recompute-based scheduler is enabled.
-        return decode_must_use_mc2 and (prefill_must_use_mc2 or self.ascend_config.recompute_scheduler_enable)
+        from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+        return should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model)
 
     def _sync_metadata_across_dp(
         self, num_tokens: int, with_prefill: bool = False, is_draft_model: bool = False
