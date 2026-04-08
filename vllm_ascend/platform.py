@@ -417,17 +417,16 @@ class NPUPlatform(Platform):
                 "needs to be equal if use pcp or dcp > 1 in P/D disaggregate and kv pool scenario."
             )
 
-        # pcp&dcp are not compatible with full graph
+        # pcp/dcp are not compatible with full graph
         if (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-            and parallel_config.decode_context_parallel_size > 1 
-            and parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size > 1
         ):
             raise ValueError(
                 f"prefill_context_parallel_size({parallel_config.prefill_context_parallel_size}) "
                 f"decode_context_parallel_size({parallel_config.decode_context_parallel_size}) "
                 f"cudagraph_mode({compilation_config.cudagraph_mode}) "
-                "Long sequence with PCP&DCP does not support full graph mode. "
+                "PCP/DCP does not support full graph mode. "
             )
 
         use_sparse = (
