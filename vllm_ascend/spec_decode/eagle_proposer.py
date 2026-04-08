@@ -1173,6 +1173,10 @@ class SpecDecodeBaseProposer(EagleProposer):
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     common_attn_metadata.seq_lens_cpu, input_batch_size
                 )
+                if common_attn_metadata._seq_lens_cpu is not None:
+                    common_attn_metadata._seq_lens_cpu = self._adjust_tensor(
+                        common_attn_metadata._seq_lens_cpu, input_batch_size
+                    )
                 if common_attn_metadata.num_computed_tokens_cpu is not None:
                     common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                         common_attn_metadata.num_computed_tokens_cpu, input_batch_size
@@ -1205,6 +1209,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
         if common_attn_metadata.seq_lens_cpu is not None:
             common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+        if common_attn_metadata._seq_lens_cpu is not None:
+            common_attn_metadata._seq_lens_cpu = common_attn_metadata._seq_lens_cpu.clone()
         if common_attn_metadata.num_computed_tokens_cpu is not None:
             common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
         common_attn_metadata.positions = common_attn_metadata.positions.clone()
@@ -1238,6 +1244,12 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
             exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
             common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
+        if common_attn_metadata._seq_lens_cpu is not None:
+            common_attn_metadata._seq_lens_cpu[:batch_size] = (
+                common_attn_metadata._seq_lens_cpu[:batch_size] + 1
+            )
+            exceeds_mask_internal = common_attn_metadata._seq_lens_cpu[:batch_size] >= self.max_model_len
+            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal, 1)
         if common_attn_metadata.num_computed_tokens_cpu is not None:
             common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:

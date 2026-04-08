@@ -2273,6 +2273,11 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens[:num_reqs_padded],
+            # Always pass optimistic_seq_lens_cpu via _seq_lens_cpu so NPU
+            # attention backends can get CPU seq_lens without GPU->CPU sync.
+            # This is separate from seq_lens_cpu (None in async) which eagle
+            # proposer checks to distinguish async/non-async behavior.
+            _seq_lens_cpu=self.optimistic_seq_lens_cpu[:num_reqs_padded],
             # TODO
             seq_lens_cpu=seq_lens_cpu,
             # TODO

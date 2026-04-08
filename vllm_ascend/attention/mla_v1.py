@@ -435,8 +435,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
-        self.seq_lens = None
-        if common_attn_metadata.seq_lens_cpu is not None:
+        # Prefer _seq_lens_cpu (always available, updated during draft
+        # iterations) over seq_lens_cpu (None in async spec decode mode).
+        if common_attn_metadata._seq_lens_cpu is not None:
+            self.seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif common_attn_metadata.seq_lens_cpu is not None:
             self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")

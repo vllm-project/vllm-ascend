@@ -278,10 +278,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
-        if common_attn_metadata.seq_lens is not None:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        else:
+        # Prefer _seq_lens_cpu (always available, updated during draft
+        # iterations) over seq_lens_cpu (None in async spec decode mode).
+        if common_attn_metadata._seq_lens_cpu is not None:
+            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        else:
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
