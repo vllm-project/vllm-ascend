@@ -265,9 +265,6 @@ class CpuAlloc:
         else:
             total_npus = len(running)
 
-        if total_npus <= 0:
-            return
-
         # Compute global per-NPU slicing
         base = total_cpu // total_npus
         extra = total_cpu % total_npus
@@ -300,12 +297,6 @@ class CpuAlloc:
             if npu < 0 or npu >= total_npus:
                 raise RuntimeError(f"Invalid NPU id {npu}, total_npus={total_npus}.")
             cpus = _slice_for_npu(npu)
-            # Extra safety: should always be >= base >= 5
-            if len(cpus) < MIN_CPUS_PER_NPU:
-                raise RuntimeError(
-                    f"NPU{npu} got too few CPUs: {len(cpus)} (<5). "
-                    f"total_allowed={total_cpu}, total_npus={total_npus}, base={base}, extra={extra}"
-                )
             self.npu_cpu_pool[npu] = cpus
 
     @staticmethod
