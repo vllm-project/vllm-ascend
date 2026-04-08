@@ -16,13 +16,6 @@ def validate_cmp(y_cal, y_ref, device="npu"):
     torch.testing.assert_close(y_ref, y_cal, rtol=3e-03, atol=1e-02, equal_nan=True)
 
 
-def to_int64_tuple(t):
-    t = t.to(torch.int64)
-    if t.dim() == 0:
-        return (t.item(),)
-    return tuple(t.tolist())
-
-
 @pytest.mark.parametrize("has_initial_state", [False, True])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
@@ -85,10 +78,10 @@ def test_ascend_causal_conv1d_310_fn(
         weight_origin,
         bias=bias,
         conv_states=conv_states_origin,
-        query_start_loc=to_int64_tuple(query_start_loc),
-        cache_indices=to_int64_tuple(cache_indices),
-        initial_state_mode=to_int64_tuple(has_initial_state_tensor),
-        num_accepted_tokens=[],
+        query_start_loc=query_start_loc.to(torch.int64),
+        cache_indices=cache_indices.to(torch.int64),
+        initial_state_mode=has_initial_state_tensor.to(torch.int64),
+        num_accepted_tokens=None,
         activation_mode=activation_mode,
         pad_slot_id=PAD_SLOT_ID,
         run_mode=0,
@@ -130,17 +123,16 @@ def test_causal_conv1d_310_update(batch_size, dim, width, seqlen, has_bias, silu
     activation = None if not silu_activation else "silu"
 
     activation_mode = 1 if activation else 0
-    has_initial_state_tensor = torch.tensor([True] * batch_size, device=device, dtype=torch.bool)
     conv_states_origin = conv_states.transpose(-1, -2)
     out = torch.ops._C_ascend.npu_causal_conv1d_310(
         x.transpose(-1, -2),
         weight.transpose(-1, -2),
         bias=bias,
         conv_states=conv_states_origin,
-        query_start_loc=[],
-        cache_indices=to_int64_tuple(conv_state_indices),
-        initial_state_mode=to_int64_tuple(has_initial_state_tensor),
-        num_accepted_tokens=[],
+        query_start_loc=None,
+        cache_indices=conv_state_indices.to(torch.int64),
+        initial_state_mode=None,
+        num_accepted_tokens=None,
         activation_mode=activation_mode,
         pad_slot_id=PAD_SLOT_ID,
         run_mode=1,

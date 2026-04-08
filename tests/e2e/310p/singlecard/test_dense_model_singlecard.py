@@ -15,7 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import pytest
 
 from tests.e2e.conftest import VllmRunner
 
@@ -51,10 +50,6 @@ def test_qwen3_dense_tp1_w8a8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@pytest.mark.skip(
-    reason="Upstream changes caused the 310P Qwen 3.5 patch to become"
-    " invalid; YangShuai52 is currently working on the fix"
-)
 def test_qwen3_5_dense_tp1_fp16():
     example_prompts = [
         "Hello, my name is",
