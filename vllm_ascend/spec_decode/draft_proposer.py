@@ -44,7 +44,6 @@ class AscendDraftModelProposer(SpecDecodeBaseProposer):
                 "Please pass 'draft_tensor_parallel_size' in the speculative_config."
             )
 
-    @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
         spec = self.speculative_config
