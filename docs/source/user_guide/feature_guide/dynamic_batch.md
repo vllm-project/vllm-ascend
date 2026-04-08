@@ -15,7 +15,7 @@ We are working on further improvements and this feature will support more XPUs i
 
 2. `Pandas` is needed to load the lookup table, in case pandas is not installed.
   
- ```bash
+    ```bash
     pip install pandas 
     ```
 
