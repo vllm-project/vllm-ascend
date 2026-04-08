@@ -158,7 +158,9 @@ checkout_src() {
 
     if [ ! -d "$WORKSPACE/vllm" ]; then
         echo "Cloning vllm version/ref: $VLLM_VERSION"
-        git clone --depth 1 --branch "$VLLM_VERSION" https://github.com/vllm-project/vllm.git "$WORKSPACE/vllm"
+        git init "$WORKSPACE/vllm"
+        git -C "$WORKSPACE/vllm" fetch --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_VERSION"
+        git -C "$WORKSPACE/vllm" checkout FETCH_HEAD
     fi
 }
 
@@ -241,9 +243,6 @@ main() {
     fi
     show_vllm_info
     show_triton_ascend_info
-    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
-        install_extra_components
-    fi
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }

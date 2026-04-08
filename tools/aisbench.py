@@ -28,7 +28,7 @@ import pandas as pd
 import regex as re
 from modelscope import snapshot_download  # type: ignore
 
-BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
+BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("/vllm-workspace/benchmark"))
 DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets")
 REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api")
 DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")

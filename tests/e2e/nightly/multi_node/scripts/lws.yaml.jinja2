@@ -38,8 +38,8 @@ spec:
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
                 value: {{ runner | default("linux-aarch64-a3-0") }}
-              - name: VLLM_ASCEND_VERSION
-                value: {{ vllm_ascend_ref | default("main") }}
+              - name: BENCHMARK_HOME
+                value: {{  benchmark_home | default("/vllm-workspace/benchmark") }}
             command:
               - sh
               - -c
@@ -106,8 +106,8 @@ spec:
                 value: {{ benchmark_job_name | default("") }}
               - name: VLLM_CI_RUNNER
                 value: {{ runner | default("linux-aarch64-a3-0") }}
-              - name: VLLM_ASCEND_VERSION
-                value: {{ vllm_ascend_ref | default("main") }}
+              - name: BENCHMARK_HOME
+                value: {{  benchmark_home | default("/vllm-workspace/benchmark") }}
             command:
               - sh
               - -c
