@@ -39,6 +39,7 @@ from .kv_c8 import AscendFAQuantAttentionMethod
 from .registry import get_scheme_class, register_scheme
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
+from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
 from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
 from .w4a16 import AscendW4A16FusedMoEMethod
 from .w4a16_awq import AscendW4A16AWQFusedMoEMethod, AscendW4A16AWQLinearMethod
@@ -51,7 +52,11 @@ from .w8a16 import AscendW8A16LinearMethod
 
 def is_mx_quant_type(instance: Any) -> bool:
     """Checks if the quantization method is a microscaling (MX) type."""
-    MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod,)
+    MX_QUANT_TYPES = (
+        AscendW8A8MXFP8DynamicLinearMethod,
+        AscendW4A4MXFP4DynamicLinearMethod,
+        AscendW4A4MXFP4DynamicFusedMoEMethod,
+    )
     return isinstance(instance, MX_QUANT_TYPES)
 
 
@@ -82,4 +87,6 @@ __all__ = [
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
     "AscendFAQuantAttentionMethod",
+    "AscendW4A4MXFP4DynamicLinearMethod",
+    "AscendW4A4MXFP4DynamicFusedMoEMethod",
 ]
