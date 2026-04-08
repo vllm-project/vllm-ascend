@@ -72,19 +72,15 @@ class ProfilingChunkScheduler(Scheduler):
             log_stats=log_stats,
         )
 
-        from vllm_ascend.ascend_config import get_ascend_config
+        from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
+        init_ascend_config(vllm_config)
         profiling_cfg = get_ascend_config().profiling_chunk_config
-
-        base_chunk = self.scheduler_config.long_prefill_token_threshold
-        if base_chunk <= 0:
-            base_chunk = self.max_num_scheduled_tokens
+        base_chunk = self.max_num_scheduled_tokens
 
         self.profiling_chunk_manager = ProfilingChunkManager(
             base_chunk_size=base_chunk,
-            page_size=self.block_size,
-            context_len=self.max_model_len,
-            max_prefill_tokens=self.max_num_scheduled_tokens,
+            page_size=self.cache_config.block_size,
             smooth_factor=profiling_cfg.smooth_factor,
             min_chunk=profiling_cfg.min_chunk,
         )
@@ -93,7 +89,7 @@ class ProfilingChunkScheduler(Scheduler):
         logger.info(
             "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",
             base_chunk,
-            self.block_size,
+            self.cache_config.block_size,
             profiling_cfg.smooth_factor,
             profiling_cfg.min_chunk,
         )
@@ -127,10 +123,24 @@ class ProfilingChunkScheduler(Scheduler):
         # Determine unique_reply_rank for PP setups
         rpc_kwargs = self._build_rpc_kwargs(model_executor)
 
-        for i in range(num_samples + 1):
+        total_steps = num_samples + 1
+        log_interval = max(1, total_steps // 10)
+        t_start = time.perf_counter()
+
+        for i in range(total_steps):
             chunk_size = int(base_chunk_size - (i - 1) * (base_chunk_size / num_samples))
             if chunk_size <= 0:
                 break
+
+            if i % log_interval == 0 or i == total_steps - 1:
+                elapsed = time.perf_counter() - t_start
+                logger.info(
+                    "[ProfilingChunk] Profiling prefill latency: %d/%d samples done (chunk=%d, elapsed=%.1fs)",
+                    max(i - 1, 0),
+                    num_samples,
+                    chunk_size,
+                    elapsed,
+                )
 
             try:
                 result = model_executor.collective_rpc(
@@ -215,7 +225,7 @@ class ProfilingChunkScheduler(Scheduler):
     # schedule() override
     # ------------------------------------------------------------------
     # The method below is copied from the upstream Scheduler.schedule()
-    # (vLLM v0.15.x) with profiling-based chunk sizing applied to both
+    # (vLLM v0.18.0) with profiling-based chunk sizing applied to both
     # RUNNING requests (chunked prefill continuation) and WAITING
     # requests (new prefill).  Modified sections are marked with
     # ">>> PROFILING CHUNK" comments.
@@ -298,7 +308,7 @@ class ProfilingChunkScheduler(Scheduler):
                 if predicted_chunk is not None and predicted_chunk > 0:
                     if predicted_chunk <= num_new_tokens:
                         dynamic_chunking_full = True
-                        num_new_tokens = predicted_chunk
+                    num_new_tokens = min(predicted_chunk, num_new_tokens)
             # <<< PROFILING CHUNK <<<
 
             if self.need_mamba_block_aligned_split:
@@ -439,6 +449,7 @@ class ProfilingChunkScheduler(Scheduler):
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
+                connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
 
                 if request.num_computed_tokens == 0:
                     new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
@@ -459,7 +470,11 @@ class ProfilingChunkScheduler(Scheduler):
                         request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
+                        connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
+                        connector_prefix_cache_hits = num_external_computed_tokens
+
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
+                    assert num_computed_tokens <= request.num_tokens
                 else:
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
@@ -546,20 +561,28 @@ class ProfilingChunkScheduler(Scheduler):
                         self.encoder_cache_manager.free(request)
                     break
 
+                # KVTransfer: the connector uses this info to determine
+                # if a load is needed. Note that
+                # This information is used to determine if a load is
+                # needed for this request.
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
                         self.kv_cache_manager.get_blocks(request.request_id),
                         num_external_computed_tokens,
                     )
+                    if self.connector_prefix_cache_stats is not None and connector_prefix_cache_queries != 0:
+                        self.connector_prefix_cache_stats.record(
+                            num_tokens=connector_prefix_cache_queries,
+                            num_hits=connector_prefix_cache_hits,
+                            preempted=request.num_preemptions > 0,
+                        )
 
                 request = self.waiting.pop_request()
                 if load_kv_async:
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
-
-                self._update_connector_prefix_cache_stats(request)
 
                 self.running.append(request)
                 if self.log_stats:

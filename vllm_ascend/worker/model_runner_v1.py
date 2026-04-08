@@ -1246,7 +1246,9 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 logger.warning("RoutedExpertsCapturer is not initialized.")
 
-        self._execution_start_time = time.perf_counter()
+        if self.ascend_config.profiling_chunk_config.enabled:
+            self._sync_device()
+            self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
@@ -1712,9 +1714,6 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 logger.warning("RoutedExpertsCapturer is not initialized.")
 
-        execution_time_ms = 0.0
-        if hasattr(self, '_execution_start_time'):
-            execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
@@ -1726,9 +1725,9 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
         )
-        # Set execution_time_ms as a dynamic attribute since the upstream
-        # ModelRunnerOutput dataclass does not define this field.
-        model_runner_output.execution_time_ms = execution_time_ms
+        if self.ascend_config.profiling_chunk_config.enabled and hasattr(self, '_execution_start_time'):
+            self._sync_device()
+            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB update"):

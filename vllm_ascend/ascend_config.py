@@ -52,6 +52,12 @@ class AscendConfig:
 
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
+        if self.profiling_chunk_config.enabled and vllm_config.parallel_config.pipeline_parallel_size <= 1:
+            raise ValueError(
+                "profiling_chunk_config requires pipeline parallelism (pp > 1). "
+                "Please set --pipeline-parallel-size to a value greater than 1, "
+                "or disable profiling_chunk_config."
+            )
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)

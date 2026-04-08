@@ -183,8 +183,6 @@ class ChunkSizePredictor:
         history_len: int,
         base_chunk_size: int,
         page_size: int,
-        context_len: int,
-        max_chunk_size: int | None = None,
     ) -> int | None:
         """Predict next chunk size x such that f(L+x) - f(L) = target_latency."""
         if not self.is_ready or self.target_latency is None:
@@ -211,16 +209,10 @@ class ChunkSizePredictor:
         chunk_size = max(int(smoothed), self.min_chunk)
 
         align = max(page_size, 64)
-        chunk_size = (chunk_size // align) * align
+        chunk_size = ((chunk_size + align - 1) // align) * align
         if chunk_size < align:
             chunk_size = align
 
-        max_allowed = context_len - history_len
-        if max_chunk_size:
-            max_allowed = min(max_allowed, max_chunk_size)
-        chunk_size = min(chunk_size, max_allowed)
-
-        chunk_size = (chunk_size // align) * align
         logger.debug("[ProfilingChunk] Predicted chunk_size=%d", chunk_size)
         return chunk_size if chunk_size >= align else None
 
@@ -229,8 +221,6 @@ class ChunkSizePredictor:
         history_len: int,
         base_chunk_size: int,
         page_size: int,
-        context_len: int,
-        max_chunk_size: int | None = None,
     ) -> int | None:
         """Predict next chunk size x using the history-aware model
         f(C,H) = a*C(C+H) + b*C + c*H."""
@@ -263,16 +253,10 @@ class ChunkSizePredictor:
         chunk_size = max(int(smoothed), self.min_chunk)
 
         align = max(page_size, 64)
-        chunk_size = (chunk_size // align) * align
+        chunk_size = ((chunk_size + align - 1) // align) * align
         if chunk_size < align:
             chunk_size = align
 
-        max_allowed = context_len - history_len
-        if max_chunk_size:
-            max_allowed = min(max_allowed, max_chunk_size)
-        chunk_size = min(chunk_size, max_allowed)
-
-        chunk_size = (chunk_size // align) * align
         return chunk_size if chunk_size >= align else None
 
 
@@ -286,19 +270,16 @@ class ProfilingChunkManager:
         self,
         base_chunk_size: int,
         page_size: int,
-        context_len: int,
-        max_prefill_tokens: int | None = None,
         smooth_factor: float = 0.8,
         min_chunk: int = 4096,
     ):
         self.base_chunk_size = base_chunk_size
         self.page_size = page_size
-        self.context_len = context_len
-        self.max_prefill_tokens = max_prefill_tokens
         self.chunked_fit_data: list = []
 
         self.predictor = ChunkSizePredictor(smooth_factor=smooth_factor, min_chunk=min_chunk)
         self._profiling_done = False
+        self._set_time_done = False
 
     @property
     def is_ready(self) -> bool:
@@ -383,13 +364,7 @@ class ProfilingChunkManager:
             predict_func = self.predictor.predict
         else:
             predict_func = self.predictor.predict_with_history
-        return predict_func(
-            history_len=history_len,
-            base_chunk_size=self.base_chunk_size,
-            page_size=self.page_size,
-            context_len=self.context_len,
-            max_chunk_size=self.max_prefill_tokens,
-        )
+        return predict_func(history_len=history_len, base_chunk_size=self.base_chunk_size, page_size=self.page_size)
 
     def record_batch_execution_time(self, request_chunks: list, elapsed_time: float) -> bool:
         """Record batch execution time for online model refinement.
