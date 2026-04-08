@@ -518,7 +518,6 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
-        print(f'{remote_block_ids=} {local_block_ids=}')
         for i in range(self.hma_group_size):
             grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
                 remote_block_ids[i], local_block_ids[i]
