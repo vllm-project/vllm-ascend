@@ -131,7 +131,7 @@ def test_causal_conv1d_310_update(batch_size, dim, width, seqlen, has_bias, silu
         conv_states=conv_states_origin,
         query_start_loc=None,
         cache_indices=conv_state_indices.to(torch.int64),
-        initial_state_mode=has_initial_state_tensor.to(torch.int64),
+        initial_state_mode=None,
         num_accepted_tokens=None,
         activation_mode=activation_mode,
         pad_slot_id=PAD_SLOT_ID,
