@@ -66,7 +66,7 @@ from vllm.distributed.elastic_ep.standby_state import (
 from vllm.distributed.parallel_state import _replace_active_groups
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig, FusedMoE
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
@@ -277,7 +277,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         moe_modules = [
             module
             for module in self.worker.model_runner.model.modules()
-            if (module.__class__.__name__ == "AscendFusedMoE" or module.__class__.__name__ == "AscendSharedFusedMoE")
+            if isinstance(module, FusedMoE)
         ]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         assert all(module.moe_config.num_local_experts == num_local_experts for module in moe_modules), (
@@ -430,7 +430,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         moe_modules = [
             module
             for module in self.worker.model_runner.model.modules()
-            if (module.__class__.__name__ == "AscendFusedMoE" or module.__class__.__name__ == "AscendSharedFusedMoE")
+            if isinstance(module, FusedMoE)
         ]
         for module in moe_modules:
             with set_current_vllm_config(self.worker.vllm_config):
