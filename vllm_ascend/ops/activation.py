@@ -50,6 +50,7 @@ class AscendSwigluOAIAndMul:
         layer = MinimalSwigluOAIAndMul()
         return SwigluOAIAndMul.forward_native(layer, x)
 
+
 def swiglustep_and_mul(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
     """Out-variant of swiglustep activation.
 

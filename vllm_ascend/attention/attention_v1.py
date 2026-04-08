@@ -300,7 +300,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         #     swa_mask = self.attn_mask_builder.get_swa_mask(
         #         self.model_config.dtype, self.model_config.hf_text_config.sliding_window
         #     )
-        
+
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
@@ -572,7 +572,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_heads=self.num_heads,
                 sparse_mode=4 if self.sliding_window is not None else 3,
                 scale=self.scale,
-                pre_tokens=self.sliding_window-1 if self.sliding_window is not None else SWA_INT_MAX,
+                pre_tokens=self.sliding_window - 1 if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=1 if self.sliding_window is not None else SWA_INT_MAX,
             )
             if _EXTRA_CTX.is_draft_model:
@@ -621,7 +621,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_heads=self.num_heads,
             sparse_mode=4 if self.sliding_window is not None else 3,
             scale=self.scale,
-            pre_tokens=self.sliding_window-1 if self.sliding_window is not None else SWA_INT_MAX,
+            pre_tokens=self.sliding_window - 1 if self.sliding_window is not None else SWA_INT_MAX,
             next_tokens=1 if self.sliding_window is not None else SWA_INT_MAX,
             workspace=workspace,
             out=[output, softmax_lse],
@@ -749,7 +749,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_heads=self.num_heads,
             num_key_value_heads=self.num_kv_heads,
             input_layout="TND",
-            pre_tokens=self.sliding_window-1,
+            pre_tokens=self.sliding_window - 1,
             next_tokens=1,
             block_size=block_size,
             atten_mask=attn_metadata.attn_mask,
