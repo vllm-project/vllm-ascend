@@ -38,7 +38,7 @@ def to_int64_tuple(t):
     return tuple(t.tolist())
 
 
-class Ascend310GatedDeltaNetAttention(GatedDeltaNetAttention):
+class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
