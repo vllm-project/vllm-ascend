@@ -76,6 +76,8 @@ jobs:
           # Overwrite e2e and examples
           cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
           cp -r examples /vllm-workspace/vllm-ascend/
+          # We handle all version control documentation on the main branch.
+          cp -r docs /vllm-workspace/vllm-ascend/
 
           # Simulate container to enter directory
           cd /workspace

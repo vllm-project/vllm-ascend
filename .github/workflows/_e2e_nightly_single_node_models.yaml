@@ -20,9 +20,10 @@ name: 'e2e nightly models test'
 on:
   workflow_call:
     inputs:
-      vllm:
+      vllm_version:
         required: true
         type: string
+        description: vllm version/ref to use (branch, tag, or commit hash)
       vllm-ascend:
         required: false
         type: string
@@ -107,7 +108,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
+          ref: ${{ inputs.vllm_version }}
           path: ./vllm-empty
 
       - name: Install vllm-project/vllm from source

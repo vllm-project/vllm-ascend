@@ -28,7 +28,7 @@ spec:
                 value: {{ fail_tag | default("FAIL_TAG") }}
               - name: IS_PR_TEST
                 value: "{{ is_pr_test | default("false") }}"
-              - name: VLLM_VERSION
+              - name: VLLM_REF
                 value: {{ vllm_version | default("latest") }}
               - name: VLLM_ASCEND_REF
                 value: {{ vllm_ascend_ref | default("main") }}
@@ -96,7 +96,7 @@ spec:
                 value: {{ fail_tag | default("FAIL_TAG") }}
               - name: IS_PR_TEST
                 value: "{{ is_pr_test | default("false") }}"
-              - name: VLLM_VERSION
+              - name: VLLM_REF
                 value: {{ vllm_version | default("latest") }}
               - name: VLLM_ASCEND_REF
                 value: {{ vllm_ascend_ref | default("main") }}

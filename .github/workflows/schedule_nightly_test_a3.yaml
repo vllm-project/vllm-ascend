@@ -327,6 +327,7 @@ jobs:
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_version: ${{ needs.setup-vars.outputs.vllm_version }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (

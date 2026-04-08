@@ -19,8 +19,8 @@ set +eu
 source /usr/local/Ascend/nnal/atb/set_env.sh
 set -eu
 
-# Home path for aisbench
-export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
+# Home path for aisbench (respect env from lws.yaml if set)
+export BENCHMARK_HOME=${BENCHMARK_HOME:-${WORKSPACE}/benchmark}
 
 # Logging configurations
 export VLLM_LOGGING_LEVEL="INFO"
@@ -132,9 +132,9 @@ checkout_src() {
     git checkout FETCH_HEAD
 
     if [ ! -d "$WORKSPACE/vllm" ]; then
-        echo "Cloning vllm version/ref: $VLLM_VERSION"
+        echo "Cloning vllm ref: $VLLM_REF"
         git init "$WORKSPACE/vllm"
-        git -C "$WORKSPACE/vllm" fetch --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_VERSION"
+        git -C "$WORKSPACE/vllm" fetch --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_REF"
         git -C "$WORKSPACE/vllm" checkout FETCH_HEAD
     fi
 }

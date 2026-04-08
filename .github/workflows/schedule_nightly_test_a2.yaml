@@ -158,6 +158,7 @@ jobs:
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_version: ${{ needs.setup-vars.outputs.vllm_version }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -246,7 +247,7 @@ jobs:
         test_config: ${{ fromJson(needs.generate-accuracy-matrix.outputs.nightly_matrix) }}
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: ${{ needs.setup-vars.outputs.vllm_version }}
+      vllm_version: ${{ needs.setup-vars.outputs.vllm_version }}
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
@@ -273,7 +274,7 @@ jobs:
         test_config: ${{ fromJson(needs.generate-accuracy-matrix.outputs.pr_only_matrix) }}
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: ${{ needs.setup-vars.outputs.vllm_version }}
+      vllm_version: ${{ needs.setup-vars.outputs.vllm_version }}
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}

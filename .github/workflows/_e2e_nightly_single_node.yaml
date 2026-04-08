@@ -37,9 +37,9 @@ on:
         required: false
         type: string
       vllm_version:
-        required: false
+        required: true
         type: string
-        default: "v0.18.0"
+        description: vllm version/ref to use (branch, tag, or commit hash)
       should_run:
         required: true
         type: boolean
