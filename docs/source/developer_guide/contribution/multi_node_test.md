@@ -72,7 +72,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 3. Add the case to nightly workflow
 
-Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/nightly_test_a3.yaml)
+Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)
 
    ```yaml
     multi-node-tests:
