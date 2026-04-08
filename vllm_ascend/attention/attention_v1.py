@@ -214,6 +214,15 @@ class AscendMetadata:
     # kvcomp
     kvcomp_metadata: Optional[KVCompMetaData] = None
 
+    chunk_sizes_for_hamming = None
+
+    max_seq_len_for_hamming = None
+
+    block_tables_for_hamming = None
+
+    new_seq_lens_list = None
+
+
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
     Builder for constructing AscendMetadata from CommonAttentionMetadata.
@@ -331,6 +340,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
         if hasattr(common_attn_metadata, "kvcomp_metadata"):
             attn_metadata.kvcomp_metadata = common_attn_metadata.kvcomp_metadata
+            kvcomp_metadata = attn_metadata.kvcomp_metadata
             attn_metadata.actual_query_lens = recover_request_lengths(query_start_loc).to(torch.int32)
             actual_query_lens_cpu = recover_request_lengths(query_start_loc_cpu).to(torch.int32)
             if (attn_state == AscendAttentionState.DecodeOnly and actual_query_lens_cpu.numel() > num_actual_tokens):
@@ -339,6 +349,29 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 actual_query_lens_cpu = actual_query_lens_cpu.clone()
                 actual_query_lens_cpu[num_actual_tokens:] = 0
             attn_metadata.actual_query_lens_list = actual_query_lens_cpu.tolist()
+            real_batch_size = seq_lens.shape[0]
+            runtime_seq_lens_list = attn_metadata.seq_lens_list[:real_batch_size]
+            if num_actual_tokens < real_batch_size:
+                runtime_seq_lens_list = (runtime_seq_lens_list[:num_actual_tokens] + [0] * (real_batch_size - num_actual_tokens))
+            runtime_max_seq_len_for_hamming = max(runtime_seq_lens_list) if runtime_seq_lens_list else 0
+            # Keep the capture-time upper bound when it exists so the graph attributes
+            # used by HammingDistTopK stay stable between capture and replay.
+            attn_metadata.max_seq_len_for_hamming = (attn_metadata.max_seq_len if attn_metadata.max_seq_len is not None else runtime_max_seq_len_for_hamming)
+            attn_metadata.chunk_sizes_for_hamming = kvcomp_metadata.chunk_sizes_for_hamming_full[:real_batch_size]
+            attn_metadata.block_tables_for_hamming = block_table[:real_batch_size]
+            top_k_for_hamming_cpu = kvcomp_metadata.topk_for_hamming_full_cpu[:real_batch_size].clone()
+            if num_actual_tokens < real_batch_size:
+                top_k_for_hamming_cpu[num_actual_tokens:] = 0
+
+            runtime_seq_lens_cpu = torch.tensor(runtime_seq_lens_list, dtype=torch.int32)
+            kvcomp_config = kvcomp_metadata.kvcomp_config
+            remainder = runtime_seq_lens_cpu % kvcomp_config.chunk_size
+            new_seq_lens = torch.where(
+                remainder == 0,
+                kvcomp_config.chunk_size * top_k_for_hamming_cpu,
+                kvcomp_config.chunk_size * (top_k_for_hamming_cpu - 1) + remainder,
+            )
+            attn_metadata.new_seq_lens_list = new_seq_lens.tolist()
         return attn_metadata
 
     def build_for_graph_capture(
@@ -844,14 +877,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # Feed length 0 for those requests so both custom KVComp ops ignore them.
             valid_query_mask = attn_metadata.slot_mapping[query_start_locs] >= 0
             seq_lens_for_reshape = torch.where(valid_query_mask, actual_query_lens, torch.zeros_like(actual_query_lens),).contiguous()
-            
-            if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
-                logger.info(f"attn_state={attn_metadata.attn_state.name}")
-                logger.info(f"num_actual_tokens={num_actual_tokens}")
-                # logger.info(f"valid_query_mask={valid_query_mask}")
-                logger.info(f"slot_mapping.shape={attn_metadata.slot_mapping.shape}, slot_mapping_op.shape={slot_mapping_op.shape}")
-                logger.info(f"query_start_loc.shape={attn_metadata.query_start_loc.shape}, actual_query_lens.shape={actual_query_lens.shape}")
-                logger.info(f"query_start_locs.shape={query_start_locs.shape}, valid_query_mask.shape={valid_query_mask.shape}")
                 
             torch.ops._C_ascend.npu_reshape_and_cache_bnsd(
                 hashk_op,
@@ -860,15 +885,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 seq_lens_for_reshape,
                 hashk_cache_op
             )
-            if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
-                logger.info(f"npu_reshape_and_cache_bnsd ok")
             if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-                if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
-                    logger.info(f"not DecodeOnly, jump Hamming")
                 return block_table, actual_seq_lengths_kv
-
-            if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
-                logger.info(f"is DecodeOnly, goto Hamming")
 
             # 运行时真实 batch
             real_batch_size = attn_metadata.seq_lens.shape[0] # 这里是不会padding的。。。
@@ -878,51 +896,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
             top_k_for_hamming = torch.where(valid_query_mask[:real_batch_size], top_k_for_hamming_base, torch.zeros_like(top_k_for_hamming_base),)
             # Hamming and FIA replay must agree on which requests are real.
             # Zero-tail the padded decode requests here so replay metadata stays self-consistent.
-            runtime_seq_lens_list = attn_metadata.seq_lens_list[:real_batch_size]
-            if attn_metadata.num_actual_tokens < real_batch_size:
-                runtime_seq_lens_list = (runtime_seq_lens_list[:attn_metadata.num_actual_tokens] + [0] * (real_batch_size - attn_metadata.num_actual_tokens))
-            runtime_max_seq_len_for_hamming = max(runtime_seq_lens_list) if runtime_seq_lens_list else 0
-            # Keep the capture-time upper bound when it exists so the graph attributes
-            # used by HammingDistTopK stay stable between capture and replay.
-            max_seq_len_for_hamming = (attn_metadata.max_seq_len if attn_metadata.max_seq_len is not None else runtime_max_seq_len_for_hamming)
-            chunk_sizes_for_hamming = kvcomp_metadata.chunk_sizes_for_hamming_full[:real_batch_size]
-            block_tables_for_hamming = attn_metadata.block_tables[:real_batch_size]
-            top_k_for_hamming_cpu = kvcomp_metadata.topk_for_hamming_full_cpu[:real_batch_size].clone()
-            if attn_metadata.num_actual_tokens < real_batch_size:
-                top_k_for_hamming_cpu[attn_metadata.num_actual_tokens:] = 0
-
-            runtime_seq_lens_cpu = torch.tensor(runtime_seq_lens_list, dtype=torch.int32)
-            remainder = runtime_seq_lens_cpu % kvcomp_config.chunk_size
-            new_seq_lens = torch.where(
-                remainder == 0,
-                kvcomp_config.chunk_size * top_k_for_hamming_cpu,
-                kvcomp_config.chunk_size * (top_k_for_hamming_cpu - 1) + remainder,
-            )
-            new_seq_lens_list = new_seq_lens.tolist()
 
             hashq = hash_encoder.compute_hash(query[:real_batch_size])
             hashq = hashq.unsqueeze(2).contiguous()
             # indices = kvcomp_metadata.hamming_output[:real_batch_size]
-            if torch.distributed.get_rank() == 0 and self.layerIndex in [7, 60]:
-                logger.info(f"real_batch_size={real_batch_size}")
-                logger.info(f"len(seq_lens_list)={len(attn_metadata.seq_lens_list)}, len(runtime_seq_lens_list)={len(runtime_seq_lens_list)}")
+
             new_block_table = torch.ops._C_ascend.npu_hamming_dist_top_k(
                 hashq,
                 hashk_cache_op,
                 None,
                 top_k_for_hamming,
                 seq_lens_for_hamming,
-                chunk_sizes_for_hamming,
-                max_seq_len_for_hamming,
+                attn_metadata.chunk_sizes_for_hamming,
+                attn_metadata.max_seq_len_for_hamming,
                 sink,
                 recent,
                 None,
-                block_tables_for_hamming,
+                attn_metadata.block_tables_for_hamming,
                 None,
                 kvcomp_metadata.hamming_output[:real_batch_size]
             )
             new_block_table = new_block_table.squeeze(1).contiguous()
             kvcomp_metadata.hamming_output = new_block_table
+            new_seq_lens_list = attn_metadata.new_seq_lens_list
             kvcomp_metadata.seq_lens_for_hamming = new_seq_lens_list
 
         return new_block_table, new_seq_lens_list
