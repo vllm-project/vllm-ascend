@@ -376,7 +376,10 @@ class KVPoolWorker:
                 if key_gva_mapping is not None:
                     gva = key_gva_mapping.get(key)
                     if gva is not None:
-                        tracker['chunk_gvas_list'].extend([gva, gva + size[0]])
+                        offset = 0
+                        for s in size:
+                            tracker['chunk_gvas_list'].append(gva + offset)
+                            offset += s
 
         tracker['processed_count'] = num_chunks
 
@@ -415,7 +418,10 @@ class KVPoolWorker:
             if key_gva_mapping is not None:
                 gva = key_gva_mapping.get(key)
                 if gva is not None:
-                    last_block_gvas.extend([gva, gva + size[0]])
+                    offset = 0
+                    for s in size:
+                        last_block_gvas.append(gva + offset)
+                        offset += s
 
         tracker['last_block_addr'] = last_block_addr
         tracker['last_block_size'] = last_block_size
