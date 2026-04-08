@@ -241,6 +241,8 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas 300I | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas 300I | openEuler |
 
+Atlas 300I image support is available from `v0.14.0rc1-310p` onward. If you need 310P MoE, W8A8, or weightNZ support, use `v0.15.0rc1-310p` or later.
+
 :::{dropdown} Click here to see "Build from Dockerfile"
 or build IMAGE from **source code**:
 
