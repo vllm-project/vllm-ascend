@@ -42,7 +42,7 @@ We need to implement the `create_weights`, `process_weights_after_loading`, and 
     "model.layers.0.mlp.gate.weight": "FLOAT",
     "model.layers.0.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
     "model.layers.0.mlp.experts.0.gate_proj.weight_scale": "W8A8_DYNAMIC",
-    "model.layers.0.mlp.experts.0.gate_proj.weight_offset": "W8A8_DYNAMIC",
+    "model.layers.0.mlp.experts.0.gate_proj.weight_offset": "W8A8_DYNAMIC"
 }
 ```
 

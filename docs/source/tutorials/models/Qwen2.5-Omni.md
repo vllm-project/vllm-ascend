@@ -69,7 +69,7 @@ docker run --rm \
 #### Single NPU (Qwen2.5-Omni-7B)
 
 :::{note}
-The env `LOCAL_MEDIA_PATH` which allowing API requests to read local images or videos from directories specified by the server file system. Please note this is a security risk. Should only be enabled in trusted environments.
+The **environment variable** `LOCAL_MEDIA_PATH` which **allows** API requests to read local images or videos from directories specified by the server file system. Please note this is a security risk. Should only be enabled in trusted environments.
 
 :::
 
@@ -99,7 +99,7 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 
 `--allowed-local-media-path` is optional, only set it if you need infer model with local media file.
 
-`--gpu-memory-utilization` should not be set manually only if you know what this parameter aims to.
+`--gpu-memory-utilization` should not be set manually unless you know what this parameter does.
 
 #### Multiple NPU (Qwen2.5-Omni-7B)
 
@@ -128,7 +128,7 @@ Not supported yet.
 
 ## Functional Verification
 
-If your service start successfully, you can see the info shown below:
+If your service **starts** successfully, you can see the info shown below:
 
 ```bash
 INFO:     Started server process [2736]

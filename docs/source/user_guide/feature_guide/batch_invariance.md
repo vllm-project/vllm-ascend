@@ -18,9 +18,8 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance currently requires Ascend NPUs for 910B,
-because only 910B supports batch invariance with HCCL communication for now,
-we will support other NPUs in the future.
+Batch invariance currently requires Ascend 910B NPUs, because only the 910B supports batch invariance with HCCL communication for now.
+We will support other NPUs in the future.
 
 ## Software Requirements
 

@@ -722,7 +722,7 @@ python load_balance_proxy_server_example.py \
       $node_d1_ip \
     --decoder-ports \
       9300 9301 9302 9303 \
-      9300 9301 9302 9303 \
+      9300 9301 9302 9303
 ```
 
 ## Functional Verification
@@ -763,7 +763,7 @@ Here are two accuracy evaluation methods.
 
 ### Using Language Model Evaluation Harness
 
-Not test yet.
+Not tested yet.
 
 ## Performance
 
@@ -802,7 +802,7 @@ vllm bench serve \
   --port 8000 \
   --endpoint /v1/completions \
   --max-concurrency 1 \
-  --request-rate 1 \
+  --request-rate 1
 ```
 
 After about several minutes, you can get the performance evaluation result.
