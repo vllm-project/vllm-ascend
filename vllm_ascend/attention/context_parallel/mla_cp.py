@@ -2,6 +2,7 @@ from typing import ClassVar, Optional, Tuple, TypeVar
 
 import numpy as np
 import torch
+from vllm.logger import logger
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -61,7 +62,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     CPChunkedContextMetadata,
     _npu_attention_update,
     _process_attn_out_lse,
-    _npu_update_dycp_attn_with_mask,
+    _npu_update_dycp_attn,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
@@ -286,11 +287,17 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         # [bs, pcp_size, dcp_size]
         num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[: self.num_decodes_flatten]
 
-        cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
-        cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
-        decode_metadata.cp_seq_len = cp_seq_len.tolist()
+        # cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
+        # cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
+        # decode_metadata.cp_seq_len = cp_seq_len.tolist()
+        cp_seq_len = get_dcp_local_seq_lens(decode_metadata.seq_lens,
+                                            self.dycp_size,
+                                            self.dycp_rank,
+                                            self.cp_local_block_size
+                                            )
+        # logger.info(f"======= decode_metadata.seq_lens: {decode_metadata.seq_lens}, cp_seq_len: {cp_seq_len}, common_attn_metadata.num_dycp_reqs: {common_attn_metadata.num_dycp_reqs}")
         if common_attn_metadata.num_dycp_reqs:
-            decode_metadata.seq_len[:common_attn_metadata.num_dycp_reqs] = decode_metadata.cp_seq_len[:common_attn_metadata.num_dycp_reqs]
+            decode_metadata.seq_lens[:common_attn_metadata.num_dycp_reqs] = cp_seq_len[:common_attn_metadata.num_dycp_reqs]
 
         actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
@@ -371,15 +378,171 @@ class AscendMlaCPImpl(AscendMLAImpl):
         draft_attn_metadatas=None,
         num_dycp_reqs: int = 0,
     ):
+        def _seq_len(seq):
+            if seq is None:
+                return None
+            if isinstance(seq, torch.Tensor):
+                return seq.numel()
+            if isinstance(seq, np.ndarray):
+                return seq.size
+            return len(seq)
+
+        def _to_list(seq):
+            if seq is None:
+                return []
+            if isinstance(seq, torch.Tensor):
+                return seq.tolist()
+            return list(seq)
+
+        def _align_to_target_len(seq, target_len):
+            if target_len is None:
+                return seq
+            if len(seq) < target_len:
+                return seq + [0] * (target_len - len(seq))
+            if len(seq) > target_len:
+                return seq[:target_len]
+            return seq
+
+        def _align_seq_like(src_seq, target_len, template_seq=None):
+            if target_len is None and template_seq is not None:
+                target_len = _seq_len(template_seq)
+            if target_len is None:
+                return src_seq
+            if isinstance(src_seq, torch.Tensor):
+                cur_len = src_seq.numel()
+                if cur_len < target_len:
+                    pad = torch.zeros(target_len - cur_len, dtype=src_seq.dtype, device=src_seq.device)
+                    aligned = torch.cat([src_seq, pad], dim=0)
+                else:
+                    aligned = src_seq[:target_len]
+                if isinstance(template_seq, torch.Tensor):
+                    if aligned.dtype != template_seq.dtype or aligned.device != template_seq.device:
+                        aligned = aligned.to(dtype=template_seq.dtype, device=template_seq.device)
+                return aligned
+            if isinstance(src_seq, np.ndarray):
+                cur_len = src_seq.size
+                if cur_len < target_len:
+                    pad = np.zeros(target_len - cur_len, dtype=src_seq.dtype)
+                    aligned = np.concatenate([src_seq, pad], axis=0)
+                else:
+                    aligned = src_seq[:target_len]
+                if isinstance(template_seq, np.ndarray) and aligned.dtype != template_seq.dtype:
+                    aligned = aligned.astype(template_seq.dtype, copy=False)
+                return aligned
+
+            aligned = _align_to_target_len(_to_list(src_seq), target_len)
+            if isinstance(template_seq, torch.Tensor):
+                return torch.tensor(aligned, dtype=template_seq.dtype, device=template_seq.device)
+            if isinstance(template_seq, np.ndarray):
+                return np.array(aligned, dtype=template_seq.dtype)
+            if isinstance(template_seq, tuple):
+                return tuple(aligned)
+            return aligned
+
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        graph_key = (num_tokens, num_dycp_reqs) if num_dycp_reqs > 0 else num_tokens
-        attn_params = graph_params.attn_params.get(graph_key, graph_params.attn_params.get(num_tokens, []))
-        handles = graph_params.handles.get(graph_key, graph_params.handles.get(num_tokens, []))
-        events = graph_params.events.get(graph_key, graph_params.events.get(num_tokens, []))
-        workspace = graph_params.workspaces.get(graph_key, graph_params.workspaces.get(num_tokens))
+
+        def _make_graph_key(tokens: int, dycp_reqs: int):
+            return (tokens, dycp_reqs) if dycp_reqs > 0 else tokens
+
+        graph_key = _make_graph_key(num_tokens, num_dycp_reqs)
+        attn_params = graph_params.attn_params.get(graph_key, [])
+        handles = graph_params.handles.get(graph_key, [])
+        events = graph_params.events.get(graph_key, [])
+        workspace = graph_params.workspaces.get(graph_key)
+
+        # In MLA-CP decode, capture key may be based on real decode tokens
+        # while replay path may pass padded token count. If the direct key
+        # misses, try runtime actual-token keys before giving up.
+        if len(attn_params) == 0 or len(handles) == 0 or len(events) == 0:
+            candidate_tokens = []
+            actual_tokens = getattr(forward_context, "num_actual_tokens", None)
+            if isinstance(actual_tokens, int) and actual_tokens >= 0:
+                candidate_tokens.append(actual_tokens)
+            if forward_context.attn_metadata:
+                first_meta = next(iter(forward_context.attn_metadata.values()))
+                decode_tokens = getattr(first_meta, "num_decode_tokens", None)
+                if isinstance(decode_tokens, int) and decode_tokens >= 0:
+                    candidate_tokens.append(decode_tokens)
+
+            candidate_keys = []
+            for candidate in [num_tokens] + candidate_tokens:
+                # Try exact dycp key first.
+                candidate_keys.append(_make_graph_key(candidate, num_dycp_reqs))
+                # Fallback to 1D key when capture happened without dycp split.
+                if num_dycp_reqs > 0:
+                    candidate_keys.append(candidate)
+
+            # Keep order and deduplicate.
+            deduped_candidate_keys = list(dict.fromkeys(candidate_keys))
+
+            for candidate_key in deduped_candidate_keys:
+                candidate_params = graph_params.attn_params.get(candidate_key, [])
+                candidate_handles = graph_params.handles.get(candidate_key, [])
+                candidate_events = graph_params.events.get(candidate_key, [])
+                if len(candidate_params) > 0 and len(candidate_handles) > 0 and len(candidate_events) > 0:
+                    graph_key = candidate_key
+                    attn_params = candidate_params
+                    handles = candidate_handles
+                    events = candidate_events
+                    workspace = graph_params.workspaces.get(graph_key)
+                    break
+
+        if len(attn_params) == 0 or len(handles) == 0 or len(events) == 0:
+            logger.warning_once(
+                "AscendMlaCPImpl.update_graph_params found empty graph params for key %s "
+                "(num_tokens=%s, num_dycp_reqs=%s).",
+                graph_key,
+                num_tokens,
+                num_dycp_reqs,
+            )
+            return
+
+        num_layers = len(forward_context.attn_metadata)
+        if len(attn_params) < num_layers or len(handles) < num_layers or len(events) < num_layers:
+            logger.warning_once(
+                "AscendMlaCPImpl.update_graph_params layer count mismatch (insufficient): "
+                "metadata=%s, params=%s, handles=%s, events=%s, key=%s.",
+                num_layers,
+                len(attn_params),
+                len(handles),
+                len(events),
+                graph_key,
+            )
+            return
+
+        # If this key contains multiple capture rounds, pick the chunk that
+        # matches current decode token shape first.
+        expected_decode_tokens = None
+        if forward_context.attn_metadata:
+            first_meta = next(iter(forward_context.attn_metadata.values()))
+            expected_decode_tokens = getattr(first_meta, "num_decode_tokens", None)
+
+        if len(attn_params) > num_layers and isinstance(expected_decode_tokens, int):
+            selected = None
+            max_offset = min(len(attn_params), len(handles), len(events)) - num_layers
+            for offset in range(0, max_offset + 1):
+                param0 = attn_params[offset]
+                q_nope = param0[0] if isinstance(param0, tuple) and len(param0) > 0 else None
+                q_tokens = q_nope.shape[0] if isinstance(q_nope, torch.Tensor) else None
+                if q_tokens == expected_decode_tokens:
+                    selected = offset
+                    break
+            if selected is not None:
+                attn_params = attn_params[selected : selected + num_layers]
+                handles = handles[selected : selected + num_layers]
+                events = events[selected : selected + num_layers]
+            else:
+                attn_params = attn_params[:num_layers]
+                handles = handles[:num_layers]
+                events = events[:num_layers]
+        else:
+            # Align with other attention backends by default.
+            attn_params = attn_params[:num_layers]
+            handles = handles[:num_layers]
+            events = events[:num_layers]
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         with torch.npu.stream(update_stream):
@@ -409,17 +572,36 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 ) = param
 
                 decode_meta = forward_context.attn_metadata[key].decode
-                # if num_dycp_reqs > 0:
-                # seq_len = decode_meta.seq_lens
-                # else:
-                seq_len = decode_meta.cp_seq_len
-                if isinstance(seq_len, torch.Tensor):
-                    seq_len = seq_len.tolist()
-                actual_seq_lengths_kv = seq_len
+                if decode_meta is None:
+                    raise AssertionError("decode_meta should not be None when updating decode graph params.")
 
-                pad_length = num_tokens - len(actual_seq_lengths_kv)
-                if pad_length > 0:
-                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (num_tokens - len(actual_seq_lengths_kv))
+                # Keep the replay update argument shape aligned with what was
+                # captured for this graph entry.
+                captured_actual_seq_lengths = actual_seq_lengths
+                captured_actual_seq_lengths_kv = actual_seq_lengths_kv
+                target_kv_len = _seq_len(captured_actual_seq_lengths_kv)
+                if target_kv_len is None:
+                    target_kv_len = q_nope.shape[0]
+
+                actual_seq_lengths_kv = _align_seq_like(
+                    decode_meta.seq_lens,
+                    target_kv_len,
+                    template_seq=captured_actual_seq_lengths_kv,
+                )
+
+                # Only TND layout uses query cumulative lengths. For BNSD path
+                # this argument should stay as captured (typically None).
+                if input_layout == "TND":
+                    target_q_len = _seq_len(captured_actual_seq_lengths)
+                    if target_q_len is None:
+                        target_q_len = q_nope.shape[0]
+                    actual_seq_lengths = _align_seq_like(
+                        decode_meta.actual_seq_lengths_q,
+                        target_q_len,
+                        template_seq=captured_actual_seq_lengths,
+                    )
+                else:
+                    actual_seq_lengths = captured_actual_seq_lengths
 
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
@@ -818,7 +1000,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         num_dycp_reqs = attn_metadata.num_dycp_reqs
         assert decode_meta is not None
 
-        seq_lens = decode_meta.cp_seq_len
+        seq_lens = decode_meta.seq_lens
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
@@ -918,7 +1100,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     weak_ref_tensors(decode_meta.block_table),
                     block_size,
                     actual_seq_lengths,
-                    decode_meta.cp_seq_len,
+                    decode_meta.seq_lens,
                     weak_ref_tensors(attn_output),
                     weak_ref_tensors(softmax_lse),
                 )
@@ -945,7 +1127,14 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         # Update out&lse
         if self.dycp_size > 1 and num_dycp_reqs > 0:
-            attn_output[:num_dycp_reqs] = _npu_update_dycp_attn(num_dycp_reqs, attn_output, softmax_lse)
+            dycp_attn_output = _npu_update_dycp_attn(
+                num_dycp_reqs, attn_output, softmax_lse
+            )
+            # Only the leading DYCP requests need cross-rank merging. Keep any
+            # trailing DP requests in their original positions for sampling.
+            attn_output[:num_dycp_reqs].copy_(
+                dycp_attn_output.to(attn_output.dtype)
+            )
             return self._v_up_proj(attn_output)
         attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
         attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
@@ -1227,5 +1416,5 @@ def split_prefill_metadata(
         cos=dp_cos,
         pcp_metadata=None,  # DP 不需要
     )
-    
+
     return dycp_prefill, dp_prefill

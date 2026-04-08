@@ -17,18 +17,40 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+def build_batch_req_id_to_cp_size(
+    req_ids: Sequence[str],
+    scheduler_req_cp_size: Mapping[str, int],
+    cached_req_cp_size: Mapping[str, int],
+    num_cp_request: int,
+    fallback_cp_size: int,
+) -> dict[str, int]:
+    req_id_to_cp_size: dict[str, int] = {}
+    for req_index, req_id in enumerate(req_ids):
+        if req_id in scheduler_req_cp_size:
+            cp_size = scheduler_req_cp_size[req_id]
+        elif req_index < num_cp_request:
+            cached_cp_size = cached_req_cp_size.get(req_id)
+            cp_size = cached_cp_size if cached_cp_size and cached_cp_size > 1 else fallback_cp_size
+        else:
+            cp_size = 1
+        req_id_to_cp_size[req_id] = cp_size
+    return req_id_to_cp_size
 
 
 class PCPManager:
@@ -484,15 +506,22 @@ class PCPManager:
         tokens_original: list[int] | None = None,
     ):
         if not self.pcp_use_hybrid_attn or tokens_original is None:
+            num_logits_reqs = min(num_reqs, cu_num_tokens.shape[0])
+            num_dycp_reqs = min(self.num_dycp_reqs, num_logits_reqs)
+            cu_num_tokens_np = torch.from_numpy(cu_num_tokens[:num_logits_reqs])
             logits_indices = (
-                torch.from_numpy(cu_num_tokens) * self.pcp_world_size
-                - self.num_pcp_pads_cpu_tensor[: self.num_reqs]
+                cu_num_tokens_np * self.pcp_world_size
+                - self.num_pcp_pads_cpu_tensor[:num_logits_reqs]
                 - 1
             )
-            cu_num_tokens_np = torch.from_numpy(cu_num_tokens)
-            logits_indices = cu_num_tokens_np * self.pcp_world_size - self.num_pcp_pads_cpu_tensor[: self.num_reqs] - 1
-            logits_indices[self.num_dycp_reqs: self.num_reqs] = cu_num_tokens_np[
-                self.num_dycp_reqs - 1] * 2 + cu_num_tokens_np[self.num_dycp_reqs:] - cu_num_tokens_np[self.num_dycp_reqs - 1] - 1
+            if 0 < num_dycp_reqs < num_logits_reqs:
+                dycp_tokens = cu_num_tokens_np[num_dycp_reqs - 1]
+                logits_indices[num_dycp_reqs:num_logits_reqs] = (
+                    dycp_tokens * self.pcp_world_size
+                    + cu_num_tokens_np[num_dycp_reqs:num_logits_reqs]
+                    - dycp_tokens
+                    - 1
+                )
         else:
             tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
             num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
@@ -547,6 +576,7 @@ class PCPManager:
                     cp_hidden_states, 0, self.pcp_allgather_restore_idx.gpu[:cp_hidden_states.shape[0]])
                 dp_hidden_states = torch.cat([cp_hidden_states, dp_hidden_states])
             hidden_states = dp_hidden_states
+
             return hidden_states
         else:
             if self.pcp_padded_tokens_fla > 0:
@@ -555,7 +585,9 @@ class PCPManager:
                 )
             hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
-            return torch.index_select(hidden_states, 0, restore_idx)
+            hidden_states = torch.index_select(hidden_states, 0, restore_idx)
+
+            return hidden_states
 
     def generate_pcp_mtp_input(
         self,
@@ -771,7 +803,7 @@ class PCPManager:
             prefill_context_lens = input_batch.num_computed_tokens_cpu[self.num_decode_reqs : self.num_dycp_reqs]
             context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
             num_computed_tokens_of_pcp_dcp = torch.zeros(
-                [self.num_dycp_reqs * self.decode_threshold, self.pcp_world_size, self.dcp_world_size],
+                [self.num_dycp_reqs * self.decode_threshold, self.pcp_world_size, self.dcp_world_size*self.dycp_world_size],
                 dtype=torch.int32,
             )
             # For pcp + spec decode, we flatten seq_lens
@@ -784,19 +816,11 @@ class PCPManager:
                         self._get_cp_local_seq_lens(
                             torch.tensor(context_lens) - decode_idx,
                             self.pcp_world_size,
-                            self.dcp_world_size,
+                            self.dycp_world_size,
                             self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
                         )
                     )[:self.num_dycp_reqs]
-                else:
-                    num_computed_tokens_of_pcp_dcp[self.decode_threshold - 1 - decode_idx :: self.decode_threshold] = (
-                        self._get_cp_local_seq_lens(
-                            torch.tensor(context_lens) - decode_idx,
-                            self.pcp_world_size,
-                            self.dcp_world_size,
-                            self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
-                        )
-                    )
+
             if self.decode_threshold > 1:
                 num_computed_tokens_of_pcp_dcp_list = []
                 if self.num_decode_reqs:

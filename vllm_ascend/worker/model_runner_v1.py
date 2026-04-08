@@ -128,7 +128,7 @@ from vllm_ascend.utils import (
     set_weight_prefetch_method,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.pcp_utils import PCPManager, build_batch_req_id_to_cp_size
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -430,6 +430,7 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
         self.sampling_done_event: torch.npu.Event | None = None
+        self.req_id_to_cp_size = {}
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -449,6 +450,36 @@ class NPUModelRunner(GPUModelRunner):
     @property
     def use_prefill_cp(self) -> bool:
         return self.pcp_size > 1 or self.prefill_dycp_size > 1
+
+    def _get_fallback_cp_size(self) -> int:
+        parallel_config = self.vllm_config.parallel_config
+        dp_per_domain = max(1, parallel_config.dp_per_domain)
+        return max(1, parallel_config.data_parallel_size // dp_per_domain)
+
+    def _get_req_cp_size(self, req_id: str) -> int:
+        return self.req_id_to_cp_size.get(
+            req_id,
+            self.input_batch.req_id_to_cp_size.get(req_id, 1),
+        )
+
+    def _update_batch_req_cp_sizes(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_cp_request: int,
+    ) -> None:
+        scheduler_req_cp_size = getattr(scheduler_output, "req_id_to_cp_size", {}) or {}
+        if scheduler_req_cp_size:
+            self.req_id_to_cp_size.update(scheduler_req_cp_size)
+
+        req_id_to_cp_size = build_batch_req_id_to_cp_size(
+            self.input_batch.req_ids,
+            scheduler_req_cp_size,
+            self.req_id_to_cp_size,
+            num_cp_request,
+            self._get_fallback_cp_size(),
+        )
+        self.req_id_to_cp_size.update(req_id_to_cp_size)
+        self.input_batch.req_id_to_cp_size = req_id_to_cp_size
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -804,7 +835,11 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.copy_to_gpu()
 
         self.seq_lens.np[:num_reqs] = self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
-        self.seq_lens.cpu[num_reqs:].fill_(0)
+        # Keep CPU seq_lens tail clean because metadata builders consume
+        # seq_lens_cpu[:num_reqs_padded] in full-graph mode.
+        # If tail is stale, padded requests may inherit old lengths and
+        # produce incorrect attention inputs during graph replay.
+        self.seq_lens.np[num_reqs:] = 0
         self.seq_lens.copy_to_gpu()
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
@@ -865,7 +900,30 @@ class NPUModelRunner(GPUModelRunner):
             num_draft_tokens = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
             if self.use_cp:
-                logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens, num_reqs, tokens_original)
+                base_logits_indices = torch.from_numpy(cu_num_tokens[:num_reqs].copy()) - 1
+                if self.use_prefill_cp:
+                    logits_indices = self.pcp_manager.get_logits_indices(cu_num_tokens, num_reqs, tokens_original)
+                    logger.debug(
+                        f"logits_indices prefill_cp num_reqs={num_reqs}, "
+                        f"num_cp_request={num_cp_request}, cu_num_tokens={cu_num_tokens[:num_reqs].tolist()}, "
+                        f"logits_indices={logits_indices.tolist()}"
+                    )
+                elif self.dycp_size > 1 and num_cp_request > 0:
+                    num_dycp_reqs = num_cp_request
+                    logits_indices = base_logits_indices
+                    logger.debug(
+                        f"logits_indices dycp num_reqs={num_reqs}, "
+                        f"num_dycp_reqs={num_dycp_reqs}, "
+                        f"cu_num_tokens={cu_num_tokens[:num_reqs].tolist()}, logits_indices={logits_indices.tolist()}"
+                    )
+                else:
+                    logits_indices = base_logits_indices
+                    logger.debug(
+                        f"logits_indices cp_base num_reqs={num_reqs}, "
+                        f"num_cp_request={num_cp_request}, dycp_size={self.dycp_size}, "
+                        f"dcp_size={self.dcp_size}, cu_num_tokens={cu_num_tokens[:num_reqs].tolist()}, "
+                        f"logits_indices={logits_indices.tolist()}"
+                    )
                 logits_indices = logits_indices.pin_memory().to(self.device, non_blocking=True)
             else:
                 logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
@@ -913,14 +971,8 @@ class NPUModelRunner(GPUModelRunner):
         if lmhead_tp_enable():
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
             logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
-        cp_index = num_cp_request
-        domain_count = self.vllm_config.parallel_config.data_parallel_size // self.vllm_config.parallel_config.dp_per_domain
-        for req_id in self.input_batch.req_ids:
-            if cp_index > 0:
-                self.input_batch.req_id_to_cp_size[req_id] = domain_count
-            else:
-                self.input_batch.req_id_to_cp_size[req_id] = 1
-            cp_index-=1
+
+        self._update_batch_req_cp_sizes(scheduler_output, num_cp_request)
 
         return (
             logits_indices,
@@ -1217,6 +1269,11 @@ class NPUModelRunner(GPUModelRunner):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
+                if self.dycp_size > 1:
+                    self.req_id_to_cp_size.update(
+                        getattr(scheduler_output, "req_id_to_cp_size", {}) or {}
+                    )
+
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -1241,7 +1298,26 @@ class NPUModelRunner(GPUModelRunner):
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
-                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                    modelrunneroutput = self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+
+                    # modelrunneroutput.kv_connector_output.req_id_to_cp_size = scheduler_output.req_id_to_cp_size
+                    if modelrunneroutput.kv_connector_output is not None and self.dycp_size > 1:
+                        # logger.info(f"chenxiao--debug modelrunneroutput.kv_connector_output.finished_sending:{modelrunneroutput.kv_connector_output.finished_sending}")
+                        for req_id in modelrunneroutput.kv_connector_output.finished_sending:
+                            modelrunneroutput.kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(
+                                req_id
+                            )
+                            # logger.info(f"chenxiao--debug 0000000000")
+                            # self.req_id_to_cp_size.pop(req_id, None)
+                    if modelrunneroutput.kv_connector_output is not None and self.dycp_size > 1:
+                        # logger.info(f"chenxiao--debug modelrunneroutput.kv_connector_output.finished_sending:{modelrunneroutput.kv_connector_output.finished_recving}")
+                        for req_id in modelrunneroutput.kv_connector_output.finished_recving:
+                            modelrunneroutput.kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(
+                                req_id
+                            )
+                            # logger.info(f"chenxiao--debug 0000000000")
+
+                    return modelrunneroutput
                 if self.cache_config.kv_sharing_fast_prefill:
                     assert not self.num_prompt_logprobs, (
                         "--kv-sharing-fast-prefill produces incorrect "
@@ -1448,6 +1524,13 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
         with record_function_or_nullcontext("post process"):
+            if kv_connector_output.finished_sending:
+                for req_id in kv_connector_output.finished_sending:
+                    kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(req_id)
+            
+            if kv_connector_output.finished_recving:
+                for req_id in kv_connector_output.finished_recving:
+                    kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(req_id)
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
@@ -1460,6 +1543,12 @@ class NPUModelRunner(GPUModelRunner):
                         self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
+            if self.use_cp and self.dycp_size > 1:
+                preview_logits_indices = logits_indices[:num_reqs].detach().cpu().tolist()
+                logger.debug(
+                    f"sample_prepare hidden_states_shape={tuple(hidden_states.shape)}, "
+                    f"num_reqs={num_reqs}, preview_logits_indices={preview_logits_indices}"
+                )
 
             if not self.broadcast_pp_output:
                 # Common case.
@@ -1879,19 +1968,11 @@ class NPUModelRunner(GPUModelRunner):
                 torch.npu.current_stream().synchronize()
 
             assert positions is not None
-            num_cp_reqs = getattr(
-                forward_context.batch_descriptor,
-                "num_cp_reqs",
-                getattr(
-                    forward_context.batch_descriptor,
-                    "num_dycp_reqs",
-                    getattr(
-                        forward_context,
-                        "num_cp_reqs",
-                        getattr(forward_context, "num_dycp_reqs", 0),
-                    ),
-                ),
-            )
+            # Use runtime forward context as the source of truth.
+            # batch_descriptor may be reused by dispatcher and can diverge from
+            # current step cp-request count in some decode paths. Keep the
+            # explicit runtime value (including 0) to avoid graph-key mismatch.
+            num_cp_reqs = getattr(forward_context, "num_cp_reqs", getattr(forward_context, "num_dycp_reqs", 0))
             update_full_graph_params(
                 self.attn_backend,
                 self.update_stream,

@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.distributed import get_dcp_group, get_decode_context_model_parallel_world_size, get_pcp_group, get_dycp_group
+from vllm.logger import logger
 
 
 @dataclass
@@ -120,6 +121,7 @@ def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) 
 
 
 def _npu_update_dycp_attn(num_dycp_reqs, attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:
+
     assert num_dycp_reqs > 0, "num_dycp_reqs should be greater than 0"
     dycp_group = get_dycp_group()
     softmax_lse = softmax_lse.to(torch.float32)[:num_dycp_reqs]
@@ -154,67 +156,8 @@ def _npu_update_dycp_attn(num_dycp_reqs, attn_output: torch.Tensor, softmax_lse:
 
     # Reshape back: [S*H, D] -> [S, H, D]
     attn_out = attn_out.view(S, H, D)
+
     return attn_out
-
-
-def _npu_update_dycp_attn_with_mask(dycp_mask: torch.Tensor, attn_output: torch.Tensor,
-                                     softmax_lse: torch.Tensor, dycp_group, ) -> torch.Tensor:
-    """
-    DYCP attention update using a mask tensor to select requests.
-
-    Args:
-        dycp_mask: Boolean mask tensor of shape [total_reqs], where True indicates
-                   a DYCP request that needs to be processed
-        attn_output: Attention output tensor [total_reqs, H, D]
-        softmax_lse: Log-sum-exp tensor [total_reqs, H, 1]
-        dycp_group: DYCP process group for collective operations
-        dycp_size: World size of DYCP group
-
-    Returns:
-        Updated attention output for DYCP requests [num_dycp_reqs, H, D]
-    """
-    # assert dycp_mask.any(), "dycp_mask should have at least one True value"
-    if dycp_mask is None:
-        return attn_output
-
-    assert dycp_mask.dtype == torch.bool, "dycp_mask should be a boolean tensor"
-    dycp_size = dycp_group.world_size
-    total_reqs = attn_output.shape[0]
-    num_dycp_reqs = dycp_mask.sum().item()
-    H = attn_output.shape[1]
-    D = attn_output.shape[2]
-
-    # Convert to float32
-    dycp_softmax_lse = softmax_lse.to(torch.float32)[:num_dycp_reqs]
-    dycp_attn_output = attn_output.to(torch.float32)[:num_dycp_reqs]
-
-    S = num_dycp_reqs
-
-    # Concat out & lse: [S, H, D] + [S, H, 1] -> [S, H, D+1]
-    attn_out_lse = torch.cat([dycp_attn_output, dycp_softmax_lse], dim=-1)
-
-    # AllGather within DYCP group: [S, H, D+1] -> [dycp_size * S, H, D+1]
-    attn_out_lse = dycp_group.all_gather(attn_out_lse.contiguous(), dim=0)
-
-    # Reshape: [dycp_size * S, H, D+1] -> [dycp_size, S, H, D+1]
-    attn_out_lse = attn_out_lse.view(dycp_size, S, H, D + 1)
-
-    # Split out and lse
-    out_flat, lse_flat = torch.split(attn_out_lse, [D, 1], dim=-1)
-
-    # Flatten for npu_attention_update: out [N, S*H, D], lse [N, S*H]
-    out_flat = out_flat.flatten(1, 2)
-    lse_flat = lse_flat.flatten(1, -1)
-
-    # Unbind to list and merge via npu_attention_update
-    out_list = out_flat.unbind(0)
-    lse_list = lse_flat.unbind(0)
-    dycp_attn_output, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
-
-    # Reshape back: [S*H, D] -> [S, H, D]
-    dycp_attn_output = dycp_attn_output.view(S, H, D)
-    attn_output[:num_dycp_reqs] = dycp_attn_output
-    return attn_output
 
 
 def _npu_attention_update(head_size, attn_out_lse: torch.Tensor) -> torch.Tensor:

@@ -244,12 +244,15 @@ def update_full_graph_params(
     speculative_config=None,
     num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
-    num_cp_reqs: int = 0,
-    num_dycp_reqs: int = 0,
+    num_cp_reqs: int | None = None,
+    num_dycp_reqs: int | None = None,
 ):
-    if num_cp_reqs > 0:
+    # Respect explicitly passed values (including 0). This avoids
+    # accidentally overriding runtime cp-request count with stale values
+    # from batch_descriptor in decode graph replay.
+    if num_cp_reqs is not None:
         effective_num_cp_reqs = num_cp_reqs
-    elif num_dycp_reqs > 0:
+    elif num_dycp_reqs is not None:
         effective_num_cp_reqs = num_dycp_reqs
     else:
         batch_descriptor = getattr(forward_context, "batch_descriptor", None)
