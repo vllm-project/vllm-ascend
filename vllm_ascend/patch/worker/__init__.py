@@ -39,7 +39,6 @@ import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
 if is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5_310  # noqa
 else:
-    import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
