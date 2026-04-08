@@ -26,6 +26,9 @@
 import json
 import os
 
+from docutils.parsers.rst import directives
+from sphinx.directives.code import CodeBlock
+
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
@@ -151,8 +154,18 @@ if READTHEDOCS_VERSION_TYPE == "tag":
         os.remove(header_file)
 
 
+class SyncMetadataCodeBlock(CodeBlock):
+    """Code block supporting docs-to-YAML sync metadata."""
+
+    option_spec = CodeBlock.option_spec | {
+        "sync-yaml": directives.unchanged_required,
+        "sync-target": directives.unchanged_required,
+        "sync-class": directives.unchanged_required,
+    }
+
+
 def setup(app):
-    pass
+    app.add_directive("test", SyncMetadataCodeBlock)
 
 
 if __name__ == "__main__":
