@@ -19,8 +19,8 @@ We are working on further improvements and this feature will support more XPUs i
     pip install pandas 
     ```
 
-
 ### Tuning Parameters
+
 `--SLO_limits_for_dynamic_batch` is the tuning parameter (integer type) for the dynamic batch feature, larger values impose more constraints on the latency limitation, leading to higher effective throughput. The parameter can be selected according to the specific models or service requirements.
 
 ```python
