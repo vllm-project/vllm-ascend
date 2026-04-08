@@ -66,7 +66,7 @@ from vllm.distributed.elastic_ep.standby_state import (
 from vllm.distributed.parallel_state import _replace_active_groups
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig, FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEParallelConfig
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
@@ -274,11 +274,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self.worker.model_runner.eplb_loader.comm_group = get_dynamic_eplb_group()
 
         # Reconfigure MoE modules with new EP size
-        moe_modules = [
-            module
-            for module in self.worker.model_runner.model.modules()
-            if isinstance(module, FusedMoE)
-        ]
+        moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, FusedMoE)]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         assert all(module.moe_config.num_local_experts == num_local_experts for module in moe_modules), (
             "All MoE modules must have the same number of experts"
@@ -307,10 +303,18 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
             module.moe_config.mc2_group = get_mc2_group()
 
             with set_current_vllm_config(self.worker.vllm_config):
-                if hasattr(module.quant_method, "quant_method") and isinstance(
-                    module.quant_method.quant_method, AscendW8A8DynamicFusedMoEMethod
+                if isinstance(
+                    quant_method := getattr(module.quant_method, "quant_method", None), AscendW8A8DynamicFusedMoEMethod
                 ):
-                    module.quant_method.quant_method = AscendW8A8DynamicFusedMoEMethod()
+                    quant_method.ep_group = get_ep_group()
+                    try:
+                        device_group = get_mc2_group().device_group
+                        # TODO: Try local_rank = ep_group.rank_in_group
+                        local_rank = get_mc2_group().rank_in_group
+                        backend = device_group._get_backend(torch.device("npu"))
+                        quant_method.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+                    except AttributeError:
+                        quant_method.moe_all_to_all_group_name = ""
                 setup_moe_comm_method(module.moe_config)
 
         if self.worker.vllm_config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
@@ -427,24 +431,18 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         return expert_maps, num_local_experts, num_logical_experts
 
     def prepare_new_worker(self) -> None:
-        moe_modules = [
-            module
-            for module in self.worker.model_runner.model.modules()
-            if isinstance(module, FusedMoE)
-        ]
+        moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, FusedMoE)]
         for module in moe_modules:
             with set_current_vllm_config(self.worker.vllm_config):
-                if hasattr(module.quant_method, "quant_method") and isinstance(
-                    module.quant_method.quant_method, AscendW8A8DynamicFusedMoEMethod
+                if isinstance(
+                    quant_method := getattr(module.quant_method, "quant_method", None), AscendW8A8DynamicFusedMoEMethod
                 ):
                     try:
                         device_group = get_mc2_group().device_group
                         # TODO: Try local_rank = ep_group.rank_in_group
                         local_rank = get_mc2_group().rank_in_group
                         backend = device_group._get_backend(torch.device("npu"))
-                        module.quant_method.quant_method.moe_all_to_all_group_name = backend.get_hccl_comm_name(
-                            local_rank
-                        )
+                        quant_method.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
                     except AttributeError:
-                        module.quant_method.quant_method.moe_all_to_all_group_name = ""
+                        quant_method.moe_all_to_all_group_name = ""
                 setup_moe_comm_method(module.moe_config)
