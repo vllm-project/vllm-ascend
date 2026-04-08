@@ -18,8 +18,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node, 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G * 8)nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B)
-- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G * 8)nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
+- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node, 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G × 8)nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B)
+- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G × 8)nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -191,7 +191,7 @@ vllm serve Qwen/Qwen3-235B-A22B \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --async-scheduling \
---gpu-memory-utilization 0.9 \
+--gpu-memory-utilization 0.9
 ```
 
 Node1
@@ -440,7 +440,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enforce-eager \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
---enforce-eager \
 --no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",

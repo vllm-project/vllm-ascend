@@ -4,6 +4,12 @@ This document details the benchmark methodology for vllm-ascend, aimed at evalua
 
 **Benchmark Coverage**: We measure offline E2E latency and throughput, and fixed-QPS online serving benchmarks. For more details, see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
 
+**Legend Description**:
+
+- ✅ = Supported
+- 🟡 = Partial / Work in progress
+- 🚧 = Under development
+  
 ## 1. Run docker container
 
 ```{code-block} bash

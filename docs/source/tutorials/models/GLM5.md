@@ -1351,7 +1351,7 @@ Here are two accuracy evaluation methods.
 
 ### Using Language Model Evaluation Harness
 
-Not test yet.
+Not tested yet.
 
 ## Performance
 
