@@ -27,6 +27,7 @@ from vllm.v1.executor.multiproc_executor import (
 )
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
+
 class AscendMultiprocExecutor(MultiprocExecutor):
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -165,7 +166,6 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
 
 class AscendWorkerProc(WorkerProc):
-
     @instrument(span_name="Worker init")
     def __init__(
         self,
@@ -180,9 +180,7 @@ class AscendWorkerProc(WorkerProc):
         self.rank = rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
-        all_kwargs: list[dict] = [
-            {} for _ in range(vllm_config.parallel_config.world_size)
-        ]
+        all_kwargs: list[dict] = [{} for _ in range(vllm_config.parallel_config.world_size)]
         all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -194,18 +192,14 @@ class AscendWorkerProc(WorkerProc):
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
-        self.setup_proc_title_and_log_prefix(
-            enable_ep=vllm_config.parallel_config.enable_expert_parallel
-        )
+        self.setup_proc_title_and_log_prefix(enable_ep=vllm_config.parallel_config.enable_expert_parallel)
 
         # Load model
         is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         if not is_eep_new_worker:
             self.worker.init_device()
             # Update process title now that parallel groups are initialized
-            self.setup_proc_title_and_log_prefix(
-                enable_ep=vllm_config.parallel_config.enable_expert_parallel
-            )
+            self.setup_proc_title_and_log_prefix(enable_ep=vllm_config.parallel_config.enable_expert_parallel)
             self.worker.load_model()
 
         scheduler_config = vllm_config.scheduler_config
@@ -233,6 +227,7 @@ class AscendWorkerProc(WorkerProc):
     @staticmethod
     def worker_main(*args, **kwargs):
         from vllm_ascend.utils import adapt_patch
+
         adapt_patch(is_global_patch=True)
         WorkerProc.worker_main(*args, **kwargs)
 
@@ -277,20 +272,16 @@ class AscendWorkerProc(WorkerProc):
             "inherited_fds": inherited_fds if inherited_fds is not None else [],
         }
         # Run EngineCore busy loop in background process.
-        if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
-            proc = context.Process(
-                target=WorkerProc.worker_main,
-                kwargs=process_kwargs,
-                name=f"VllmWorker-{rank}",
-                daemon=False,
-            )
-        else:
-            proc = context.Process(
-                target=AscendWorkerProc.worker_main,
-                kwargs=process_kwargs,
-                name=f"VllmWorker-{rank}",
-                daemon=True,
-            )
+        daemon_mode = not (
+            os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
+            or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
+        )
+        proc = context.Process(
+            target=AscendWorkerProc.worker_main,
+            kwargs=process_kwargs,
+            name=f"VllmWorker-{rank}",
+            daemon=daemon_mode,
+        )
 
         proc.start()
         # Close child ends of pipes here in the parent
