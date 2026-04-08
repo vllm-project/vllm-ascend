@@ -83,6 +83,17 @@ class KVPoolScheduler:
     def compute_block_ids_per_chunk(self, starts: list[int], block_ids: list[int]) -> list[int]:
         return [block_ids[start // self._block_size] for start in starts]
 
+    def _generate_keys_and_alloc(self, block_hashes, req_id='') -> tuple[list[list[str]], dict[str, int | None]]:
+        block_keys_by_layer = self.generate_keys(block_hashes, req_id=req_id)
+        all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
+        if self.store_scheduler is not None:
+            gvas = self.store_scheduler.batch_alloc(all_keys,
+                                                    [self.page_size_bytes for _ in range(len(all_keys))])
+        else:
+            gvas = [None] * len(all_keys)
+        key_gva_mapping = dict(zip(all_keys, gvas))
+        return block_keys_by_layer, key_gva_mapping
+
     def generate_keys(self, chunk_hashes, req_id=''):
         keys_per_layer = self.tp_size // self.put_step * self.pcp_size * self.dcp_size
         num_chunks = len(chunk_hashes)
@@ -256,14 +267,8 @@ class KVPoolScheduler:
                 if self._discard_partial_chunks
                 else len(request.prompt_token_ids)
             )
-            block_keys_by_layer = self.generate_keys(request_real.block_hashes, req_id=request.req_id)
-            all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
-            if self.store_scheduler is not None:
-                gvas = self.store_scheduler.batch_alloc(all_keys,
-                                                        [self.page_size_bytes for _ in range(len(all_keys))])
-            else:
-                gvas = [None] * len(all_keys)
-            key_gva_mapping = dict(zip(all_keys, gvas))
+            block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+                request_real.block_hashes, req_id=request.req_id)
             request_tracker.key_gva_mapping = key_gva_mapping
             request_tracker.block_keys_by_layer = block_keys_by_layer
 
@@ -329,14 +334,8 @@ class KVPoolScheduler:
 
                     num_chunks = len(request_real.block_hashes)
                     starts, ends = self.compute_chunk_offsets(num_chunks)
-                    block_keys_by_layer = self.generate_keys(request_real.block_hashes, req_id=req_id)
-                    all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
-                    if self.store_scheduler is not None:
-                        gvas = self.store_scheduler.batch_alloc(all_keys,
-                                                                [self.page_size_bytes for _ in range(len(all_keys))])
-                    else:
-                        gvas = [None] * len(all_keys)
-                    key_gva_mapping = dict(zip(all_keys, gvas))
+                    block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+                        request_real.block_hashes, req_id=req_id)
                     request_tracker.key_gva_mapping = key_gva_mapping
                     request_tracker.block_keys_by_layer = block_keys_by_layer
                     request_tracker.starts = starts
@@ -386,14 +385,7 @@ class KVPoolScheduler:
                     #     continue
                     if new_block_ids is not None:
                         new_block_hashes = request.block_hashes[-len(new_block_ids):]
-                        block_keys_by_layer = self.generate_keys(new_block_hashes)
-                        all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
-                        if self.store_scheduler is not None:
-                            gvas = self.store_scheduler.batch_alloc(all_keys,
-                                                                    [self.page_size_bytes for _ in range(len(all_keys))])
-                        else:
-                            gvas = [None] * len(all_keys)
-                        key_gva_mapping = dict(zip(all_keys, gvas))
+                        block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(new_block_hashes)
                         request_tracker.key_gva_mapping.update(key_gva_mapping)
                         request_tracker.update(new_block_ids)
 
@@ -466,6 +458,15 @@ class KVPoolScheduler:
                 )
 
                 self._request_trackers[request_id] = request_tracker
+
+                num_chunks = num_tokens_to_compute // self._block_size
+                has_last_block = num_tokens_to_compute % self._block_size != 0
+                block_hashes_for_keys = request.block_hashes[:num_chunks]
+                block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+                    block_hashes_for_keys, req_id=request_id if has_last_block else '')
+                request_tracker.key_gva_mapping = key_gva_mapping
+                request_tracker.block_keys_by_layer = block_keys_by_layer
+
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
@@ -475,6 +476,8 @@ class KVPoolScheduler:
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
+                    req_meta.key_gva_mapping = key_gva_mapping
+                    req_meta.block_keys_by_layer = block_keys_by_layer
                     meta.add_request(req_meta)
         return meta
 
