@@ -246,7 +246,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize singlecard-full failure
-        if: ${{ inputs.type == 'full' }}
+        if: ${{ always() && inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run singlecard-full test" \
@@ -462,7 +462,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-2-full failure
-        if: ${{ inputs.type == 'full' }}
+        if: ${{ always() && inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run multicard-2-full test " \
@@ -595,7 +595,7 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Summarize multicard-4-full failure
-        if: ${{ inputs.type == 'full' }}
+        if: ${{ always() && inputs.type == 'full' }}
         run: |
           python3 .github/workflows/scripts/ci_log_summary.py \
             --step-name "Run vllm-project/vllm-ascend test for V1 Engine" \
