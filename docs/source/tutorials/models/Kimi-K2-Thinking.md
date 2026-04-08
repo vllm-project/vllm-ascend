@@ -103,7 +103,7 @@ Your model files look like:
 |-- modeling_deepseek.py
 |-- tiktoken.model
 |-- tokenization_kimi.py
-`-- tokenizer_config.json
+|-- tokenizer_config.json
 ```
 
 ## Online Inference on Multi-NPU
