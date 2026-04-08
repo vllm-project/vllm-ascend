@@ -190,7 +190,6 @@ jobs:
             --log-file /tmp/e2e-singlecard-light-part${{ matrix.part }}.log \
             --output "$GITHUB_STEP_SUMMARY"
 
-
       - name: Upload timing data
         uses: actions/upload-artifact@v4
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
