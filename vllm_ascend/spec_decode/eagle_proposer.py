@@ -781,10 +781,6 @@ class SpecDecodeBaseProposer(EagleProposer):
         )
 
         num_indices = token_indices_to_sample.shape[0]
-        # ACL graph may keep these indices as int32 device tensors; normalize
-        # them before sampling hidden states to avoid backend-specific indexing
-        # behavior.
-        sample_indices = token_indices_to_sample.to(dtype=torch.long)
         if self.pcp_size > 1:
             # remove graph padding before all_gather
             hidden_states = hidden_states[:num_tokens]
@@ -808,16 +804,16 @@ class SpecDecodeBaseProposer(EagleProposer):
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
-            sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - num_indices))
+            token_indices_to_sample = nn.functional.pad(
+                token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
+            )
 
-        # Use explicit index_select here instead of tensor[...] because the
-        # merged ACL graph path is sensitive to advanced indexing semantics.
-        sample_hidden_states = torch.index_select(last_hidden_states, 0, sample_indices)
+        sample_hidden_states = last_hidden_states[token_indices_to_sample]
         logits = self.model.compute_logits(sample_hidden_states)
 
         if lmhead_tp_enable() and num_indices < logits.shape[0]:
             logits = logits[:num_indices]
-            sample_indices = sample_indices[:num_indices]
+            token_indices_to_sample = token_indices_to_sample[:num_indices]
 
         draft_token_ids = logits.argmax(dim=-1)
 
@@ -839,11 +835,11 @@ class SpecDecodeBaseProposer(EagleProposer):
         )
         draft_token_ids_tensor[0] = draft_token_ids
         if self.uses_mrope:
-            positions = torch.index_select(self.mrope_positions, 1, sample_indices)
+            positions = self.mrope_positions[:, token_indices_to_sample]
         else:
-            positions = torch.index_select(self.positions, 0, sample_indices)
-        hidden_states = torch.index_select(hidden_states, 0, sample_indices)
-        sample_indices = self.arange[:batch_size].to(dtype=torch.long)
+            positions = self.positions[token_indices_to_sample]
+        hidden_states = hidden_states[token_indices_to_sample]
+        token_indices_to_sample = self.arange[:batch_size]
 
         input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
 
@@ -923,20 +919,22 @@ class SpecDecodeBaseProposer(EagleProposer):
                 last_hidden_states, model_positions, hidden_states
             )
 
-            num_indices = sample_indices.shape[0]
+            num_indices = token_indices_to_sample.shape[0]
             if lmhead_tp_enable():
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
-                sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - num_indices))
+                token_indices_to_sample = nn.functional.pad(
+                    token_indices_to_sample,
+                    (0, max_num_reqs_across_dp - num_indices),
+                )
 
-            # Keep the same explicit indexing rule for subsequent draft steps.
-            sample_hidden_states = torch.index_select(last_hidden_states, 0, sample_indices)
+            sample_hidden_states = last_hidden_states[token_indices_to_sample]
             logits = self.model.compute_logits(sample_hidden_states)
 
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
-                sample_indices = sample_indices[:num_indices]
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
@@ -1133,7 +1131,6 @@ class SpecDecodeBaseProposer(EagleProposer):
         # ACL graph wrappers may add singleton tuple layers around the real
         # model outputs. Unwrap them once here so the proposer always consumes
         # tensors with the same structure.
-        # Graph wrappers may add singleton tuple layers around the actual model outputs.
         while isinstance(outputs, tuple) and len(outputs) == 1:
             outputs = outputs[0]
 
