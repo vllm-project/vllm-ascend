@@ -381,7 +381,7 @@ class XliteWrapper:
             num_decodes = attn_metadata.num_decode_tokens
             num_prefills = attn_metadata.num_prefills
             batch = num_prefills + num_decodes
-            seq_lens = attn_metadata.seq_lens[:batch].to("cpu")
+            seq_lens = attn_metadata.seq_lens[:batch]
             seq_tensor = torch.cat([torch.tensor([0]), torch.tensor(attn_metadata.actual_seq_lengths_q)], dim=0)
             query_lens = seq_tensor[1:] - seq_tensor[:-1]
             query_lens = query_lens[:batch]
