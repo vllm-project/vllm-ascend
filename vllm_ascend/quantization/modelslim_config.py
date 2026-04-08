@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, calc_split_factor, get_ascend_device_type, AscendDeviceType
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, calc_split_factor
 
 from .methods import get_scheme_class
 
@@ -556,7 +556,10 @@ class AscendModelSlimConfig(QuantizationConfig):
             and vllm_config.kv_transfer_config.is_kv_consumer
             and not vllm_config.kv_transfer_config.is_kv_producer
         )
-        return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return self.is_fa_quant_layer(layer_name)
+        else:
+            return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
 
     def is_indexer_quant_layer(self, prefix):
         if self.enable_indexer_quant:
@@ -568,7 +571,7 @@ class AscendModelSlimConfig(QuantizationConfig):
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
-            quant_dtype = torch.float8_e4m3fn if get_ascend_device_type == AscendDeviceType.A5 else torch.int8
+            quant_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
             # For MLA models like deepseek, we only quantify K cache to ensure accuracy
             if model_config.use_mla:
                 return quant_dtype, ori_dtype

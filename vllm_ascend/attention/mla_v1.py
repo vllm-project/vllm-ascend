@@ -50,7 +50,7 @@ from vllm_ascend.ops.layer_shard_linear import (
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, weak_ref_tensors, get_ascend_device_type, AscendDeviceType
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, weak_ref_tensors
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -739,7 +739,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         if self.fa_quant_layer:
-            self.dtype = torch.float8_e4m3fn if get_ascend_device_type == AscendDeviceType.A5 else torch.int8
+            self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
         else:
             self.vllm_config.model_config.dtype
         self.dtype = torch.int8 if self.fa_quant_layer else self.vllm_config.model_config.dtype
@@ -953,7 +953,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 post_process_after_loading_for_shard_weight_series(layer)
 
     def _process_weights_for_fused_fa_quant(self):
-        if get_ascend_device_type == AscendDeviceType.A5:
+        if get_ascend_device_type() == AscendDeviceType.A5:
             layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
             self.fa_kscale = layer.fa_kscale
             self.fa_vscale = layer.fa_vscale
@@ -1318,15 +1318,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
-            nz_fmt_last_dim = 16
-            k_nope = k_nope.view(
-                -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
-            )
-            k_pe = k_pe.view(
-                -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
-            )
-        elif self.enable_kv_nz:
+        # if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+        #     nz_fmt_last_dim = 16
+        #     k_nope = k_nope.view(
+        #         -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
+        #     )
+        #     k_pe = k_pe.view(
+        #         -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
+        #     )
+        if self.enable_kv_nz:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // nz_fmt_last_dim, block_size, nz_fmt_last_dim
@@ -1391,6 +1391,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_mask = None
 
         if get_ascend_device_type() == AscendDeviceType.A5:
+            input_layout = "BNSD"
             q_nope, pertoken_scale = torch_npu.npu_dynamic_quant(q_nope,dst_type=torch.float8_e4m3fn)
             q_pe = (q_pe / pertoken_scale.unsqueeze(-1) / self.fa_kscale).to(torch.bfloat16)
             common_kwargs_v2 = {
@@ -1739,7 +1740,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
         # MLA Preprocess
-        if self.fa_quant_layer or (self.enable_mlapo and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS):
+        if (get_ascend_device_type() != AscendDeviceType.A5 and self.fa_quant_layer) or (self.enable_mlapo and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS):
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
