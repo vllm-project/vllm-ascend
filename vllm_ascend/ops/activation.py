@@ -49,3 +49,16 @@ class AscendSwigluOAIAndMul:
 
         layer = MinimalSwigluOAIAndMul()
         return SwigluOAIAndMul.forward_native(layer, x)
+
+def swiglustep_and_mul(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
+    """Out-variant of swiglustep activation.
+
+    Writes into `out`:
+      silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+    """
+    gate, up = x.chunk(2, dim=-1)
+    gate = torch.nn.functional.silu(gate)
+    gate = gate.clamp(max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    out = gate * up
+    return out

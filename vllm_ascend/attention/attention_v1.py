@@ -296,11 +296,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         swa_mask = None
         is_swa = hasattr(self.model_config.hf_text_config, "sliding_window")
-        if self.model_config is not None and is_swa:
-            swa_mask = self.attn_mask_builder.get_swa_mask(
-                self.model_config.dtype, self.model_config.hf_text_config.sliding_window
-            )
-
+        # if self.model_config is not None and is_swa:
+        #     swa_mask = self.attn_mask_builder.get_swa_mask(
+        #         self.model_config.dtype, self.model_config.hf_text_config.sliding_window
+        #     )
+        
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
@@ -490,6 +490,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_kv_heads,
                         num_heads,
                         scale,
+                        sliding_window,
                         attn_output,
                         softmax_lse,
                     ) = param
@@ -519,7 +520,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_key_value_heads=num_kv_heads,
                         num_heads=num_heads,
                         scale=scale,
-                        sparse_mode=3,
+                        sparse_mode=4 if sliding_window is not None else 3,
+                        pre_tokens=sliding_window - 1 if sliding_window is not None else SWA_INT_MAX,
+                        next_tokens=1 if sliding_window is not None else SWA_INT_MAX,
                         workspace=graph_params.workspaces.get(num_tokens),
                         out=[attn_output, softmax_lse],
                     )
@@ -567,8 +570,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
-                sparse_mode=3,
+                sparse_mode=4 if self.sliding_window is not None else 3,
                 scale=self.scale,
+                pre_tokens=self.sliding_window-1 if self.sliding_window is not None else SWA_INT_MAX,
+                next_tokens=1 if self.sliding_window is not None else SWA_INT_MAX,
             )
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
@@ -595,6 +600,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.num_heads,
                 self.scale,
+                self.sliding_window,
                 weak_ref_tensors(output),
                 weak_ref_tensors(softmax_lse),
             )
@@ -613,8 +619,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv=actual_seq_lengths_kv,
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
+            sparse_mode=4 if self.sliding_window is not None else 3,
             scale=self.scale,
-            sparse_mode=3,
+            pre_tokens=self.sliding_window-1 if self.sliding_window is not None else SWA_INT_MAX,
+            next_tokens=1 if self.sliding_window is not None else SWA_INT_MAX,
             workspace=workspace,
             out=[output, softmax_lse],
         )
@@ -731,28 +739,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
         batch_size = attn_metadata.seq_lens.shape[0]
-        block_size = 128
-        query = query.view(batch_size, 1, self.num_heads * self.head_size)
-        key = self.key_cache
-        value = self.value_cache
-        if self.key_cache is not None and self.value_cache is not None:
-            block_size = self.key_cache.shape[1]
-            key = self.key_cache.flatten(2, 3).contiguous()
-            value = self.value_cache.flatten(2, 3).contiguous()
-
+        num_block, block_size, _, _ = self.key_cache.shape
+        key = self.key_cache.view(num_block, block_size, -1)
+        value = self.value_cache.view(num_block, block_size, -1)
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query,
             key,
             value,
             num_heads=self.num_heads,
             num_key_value_heads=self.num_kv_heads,
-            input_layout="BSH",
+            input_layout="TND",
+            pre_tokens=self.sliding_window-1,
+            next_tokens=1,
             block_size=block_size,
-            pre_tokens=self.sliding_window,
+            atten_mask=attn_metadata.attn_mask,
+            sparse_mode=4,
             scale=self.scale,
             block_table=attn_metadata.block_tables,
-            actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
-            actual_seq_lengths_kv=attn_metadata.seq_lens,
+            actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+            actual_seq_lengths_kv=attn_metadata.seq_lens_list,
         )
 
         attn_output = attn_output.view(batch_size, self.num_heads, self.head_size)
@@ -824,6 +829,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query=query,
                 key=key,
                 value=value,
+                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+                next_tokens=0 if self.sliding_window is not None else SWA_INT_MAX,
                 atten_mask=attn_metadata.attn_mask,
                 block_table=block_table,
                 input_layout="TND",
@@ -833,7 +840,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,
-                sparse_mode=3,
+                sparse_mode=4 if self.sliding_window is not None else 3,
             )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)

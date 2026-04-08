@@ -19,13 +19,14 @@ import torch
 import torch_npu
 from torch.nn.functional import pad
 from vllm.triton_utils import HAS_TRITON
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, swiglustep_and_mul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.utils import (
     dispose_tensor,
@@ -101,6 +102,8 @@ def quant_apply_mlp(
     scale_type: torch.dtype | None = None,
     per_token_scale_type: torch.dtype | None = None,
     use_bf16: bool = True,
+    activation: str | None = None,
+    **kwargs,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
@@ -225,7 +228,10 @@ def quant_apply_mlp(
         )[0]
         dispose_tensor(unquantized_hidden_states)
         # act_fn: swiglu
-        hidden_states = torch_npu.npu_swiglu(hidden_states)
+        if activation == MoEActivation.SWIGLUSTEP:
+            hidden_states = swiglustep_and_mul(hidden_states, limit=7.0)
+        else:
+            hidden_states = torch_npu.npu_swiglu(hidden_states)
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -258,7 +264,7 @@ def quant_apply_mlp(
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
                 bias=bias1,
             )
-        elif use_gmm_swiglu_quant_fusion:
+        elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP:
             hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
@@ -290,15 +296,19 @@ def quant_apply_mlp(
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
-            if HAS_TRITON:
-                from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
-
-                hidden_states, swiglu_out_scale = swiglu_quant(
-                    hidden_states, group_list=group_list, group_list_type=group_list_type
-                )
-            else:
-                hidden_states = torch_npu.npu_swiglu(hidden_states)
+            if activation == MoEActivation.SWIGLUSTEP:
+                hidden_states = swiglustep_and_mul(hidden_states, limit=7.0)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            else:
+                if HAS_TRITON:
+                    from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
+
+                    hidden_states, swiglu_out_scale = swiglu_quant(
+                        hidden_states, group_list=group_list, group_list_type=group_list_type
+                    )
+                else:
+                    hidden_states = torch_npu.npu_swiglu(hidden_states)
+                    hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -349,6 +359,8 @@ def unquant_apply_mlp(
     if activation == "swigluoai":
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
+    elif activation == MoEActivation.SWIGLUSTEP:
+        gate_up_out = swiglustep_and_mul(gate_up_out, limit=7.0)
     else:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
@@ -444,4 +456,5 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         scale_type=scale_type,
         per_token_scale_type=per_token_scale_type,
         use_bf16=use_bf16,
+        activation=activation,
     )
