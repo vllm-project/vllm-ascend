@@ -327,6 +327,10 @@ class NPUPlatform(Platform):
                 f"{vllm_config.parallel_config.tensor_parallel_size}"
             )
             if len(sp_aclgraph_sizes) != len(original_sizes):
+                # If user set the max_num_seqs miss fit the multiple of tp_size,
+                # we need to match the max_cudagraph_capture_size with the valid max size,
+                # so we can avoid initialization error of vllm server.
+                compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
@@ -497,21 +501,6 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        # NOTE: vllm sets `speculative_config.enforce_eager` as True if using
-        # deepseek_v32 with mtp. Since we support graph mode, we simply ignore
-        # it here. However, this fix will also implicitly ignore user setting of
-        # `speculative_config.enforce_eager`, we need to take care and remove it
-        # once vllm supports this feature.
-        speculative_config = vllm_config.speculative_config
-        if (
-            model_config
-            and speculative_config
-            and hasattr(model_config.hf_text_config, "model_type")
-            and model_config.hf_text_config.model_type == "deepseek_v32"
-            and speculative_config.enforce_eager
-        ):
-            speculative_config.enforce_eager = False
-
         if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."
@@ -607,7 +596,6 @@ class NPUPlatform(Platform):
         attn_metadata: dict[str, Any],
         vllm_config: VllmConfig,
         dp_metadata,
-        virtual_engine: int = 0,  # ToDo:: Remove me when upgrade to vllm 0.19.0 from 0.18.0
         num_tokens: int = 0,
         num_tokens_across_dp: torch.Tensor | None = None,
         cudagraph_runtime_mode=None,
@@ -785,6 +773,19 @@ class NPUPlatform(Platform):
                     "Parameter '--max-num-partial-prefills' is optimized for ROCm. Resetting to default (1) for Ascend."
                 )
                 vllm_config.scheduler_config.max_num_partial_prefills = 1
+
+            # Disable async scheduling when speculative decoding is active.
+            # Ascend does not implement the GPU-side num_computed_tokens
+            # correction (update_num_computed_tokens_for_batch_change) required
+            # for async spec decode, which causes accuracy divergence.
+            if vllm_config.speculative_config is not None and getattr(
+                vllm_config.scheduler_config, "async_scheduling", False
+            ):
+                logger.warning(
+                    "Async scheduling with speculative decoding is not yet "
+                    "supported on Ascend. Disabling async scheduling."
+                )
+                vllm_config.scheduler_config.async_scheduling = False
 
         # ==================== 6. Speculative Config ====================
         if vllm_config.speculative_config:
