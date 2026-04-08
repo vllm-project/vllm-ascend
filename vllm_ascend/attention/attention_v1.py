@@ -279,7 +279,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         block_table = common_attn_metadata.block_table_tensor
         if common_attn_metadata.seq_lens is not None:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         else:
             seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
