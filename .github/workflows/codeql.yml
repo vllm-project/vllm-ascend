@@ -1,0 +1,48 @@
+name: "CodeQL for VA Repository"
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: # 支持手动触发，方便调试
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write  # 必须开启，否则无法将报告上传到 Security 标签页
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'cpp', 'python' ]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        # 建议初期开启扩展规则，发现更多潜在风险
+        queries: security-extended,security-and-quality
+
+    # --- C++ 编译逻辑 ---
+    - name: C++ Build (CMake)
+      if: matrix.language == 'cpp'
+      run: |
+        mkdir build
+        cd build
+        cmake ..
+        make -j$(nproc) 
+
+    # --- Python 自动处理 ---
+    # Python 不需要手动编译，CodeQL 会自动扫描文件系统
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{ matrix.language }}"
