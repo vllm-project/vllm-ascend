@@ -505,7 +505,6 @@ class TestEagleProposerPropose():
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
         self.runner.pin_memory = False
-        self.runner._sync_metadata_across_dp.return_value = (13, None, False)
 
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
         self.vllm_config.scheduler_config.max_num_seqs = 32
@@ -563,9 +562,9 @@ class TestEagleProposerPropose():
         # Clear the current vllm config
         set_current_vllm_config(None)
 
-    # config: prefill, Qwen3-8B, tp1, enforce_eager, no_async_scheduling, eagle3, k=3, "disable_padded_drafter_batch": False
+    # config: prefill and decode, Qwen3-8B, tp1, enforce_eager, no_async_scheduling, eagle3, k=3, "disable_padded_drafter_batch": False
     @pytest.mark.parametrize(
-        'query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,' \
+        'flag_prefill_decode, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,' \
         'num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,' \
         'slot_mapping, causal, logits_indices_padded, num_logits_indices,' \
         'encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,' \
@@ -575,7 +574,7 @@ class TestEagleProposerPropose():
         'graph_pad_size, num_input_tokens, prefill_context_parallel_metadata',
         [
             (
-                torch.tensor([ 0, 13], device=torch.device("cpu"), dtype=torch.int32), torch.tensor([ 0, 13], dtype=torch.int32), 
+                "prefill", torch.tensor([ 0, 13], device=torch.device("cpu"), dtype=torch.int32), torch.tensor([ 0, 13], dtype=torch.int32), 
                 torch.tensor([13], device=torch.device("cpu"), dtype=torch.int32), 1, 13, 13, 13,
                 torch.eye(256, device=torch.device("cpu"), dtype=torch.int32)[0].unsqueeze(0),
                 torch.tensor([128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140], device=torch.device("cpu"), dtype=torch.int32),
@@ -583,10 +582,19 @@ class TestEagleProposerPropose():
                 torch.cat([torch.arange(13), torch.zeros(8704 - 13)]),
                 AscendAttentionState.PrefillNoCache, -1, 13, None
             ),
+            (
+                "decode", torch.tensor([ 0, 4, 8, 12], device=torch.device("cpu"), dtype=torch.int32), torch.tensor([ 0, 4, 8, 12], dtype=torch.int32), 
+                torch.tensor([21, 17, 17], device=torch.device("cpu"), dtype=torch.int32), 3, 12, 4, 0,
+                torch.cat([torch.eye(256, device="cpu", dtype=torch.int32)[0].unsqueeze(0)*i for i in [1,2,3]], dim=0),
+                torch.tensor([145, 146, 147, 148, 269, 270, 271, 272, 397, 398, 399, 400], device=torch.device("cpu"), dtype=torch.int32),
+                True, None, None, None, None, None, None, None, None, None, torch.tensor([21, 17, 17], dtype=torch.int32), torch.tensor([17, 13, 13], dtype=torch.int32), 4, [],
+                torch.cat([torch.tensor([17, 18, 19, 20, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), torch.zeros(8704 - 30)]),
+                AscendAttentionState.ChunkedPrefill, -1, 12, None
+            ),
         ]
     )
     @patch('vllm_ascend.spec_decode.eagle_proposer.AscendEagleProposer.get_model')
-    def test_propose(self, mock_get_model, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
+    def test_propose(self, mock_get_model, flag_prefill_decode, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
                      num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
                      slot_mapping, causal, logits_indices_padded, num_logits_indices,
                      encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,
@@ -596,8 +604,9 @@ class TestEagleProposerPropose():
                      graph_pad_size, num_input_tokens, prefill_context_parallel_metadata
                     ):
         # mock and adjust functions and var in propose
+        self.runner._sync_metadata_across_dp.return_value = (num_actual_tokens, None, False)
         self.proposer.model = MagicMock(spec=Eagle3LlamaForCausalLM)
-        custom_combined_hidden_states = torch.zeros(13, 4096, device=self.device, dtype=torch.bfloat16)
+        custom_combined_hidden_states = torch.zeros(num_actual_tokens, 4096, device=self.device, dtype=torch.bfloat16)
         self.proposer.model.combine_hidden_states.return_value = custom_combined_hidden_states
         mock_get_model.return_value = self.proposer.model
         self.proposer.hidden_size = 4096
@@ -623,7 +632,10 @@ class TestEagleProposerPropose():
 
         # create common_attn_metadata
         mock_common_attn_metadata= MagicMock()
-        mock_common_attn_metadata.batch_size.return_value = 1
+        if not self.is_decode(flag_prefill_decode):
+            mock_common_attn_metadata.batch_size.return_value = 1
+        if self.is_decode(flag_prefill_decode):
+            mock_common_attn_metadata.batch_size.return_value = 3
         self.value_mock_common_attn_metadata(mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
                                         num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
                                         slot_mapping, causal, logits_indices_padded, num_logits_indices,
@@ -635,21 +647,39 @@ class TestEagleProposerPropose():
                                         )
         
         # create other parameters
-        target_token_ids = torch.tensor([151644, 872, 198, 5501, 7512, 14678, 51765, 30, 151645, 198, 151644, 77091, 198], device=self.device, dtype=torch.int32)
-        target_positions = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], device=self.device)
-        target_hidden_states = torch.zeros(13, 12288, device=self.device, dtype=torch.bfloat16)
-        next_token_ids = torch.tensor([151667], device=self.device, dtype=torch.int32)
-        token_indices_to_sample = None
-        target_model_batch_desc = BatchDescriptor(num_tokens=13, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0)
-        mock_sampling_metadata = MagicMock()
-        mm_embed_inputs = None
-        req_scheduled_tokens = {'0-8222703c': 13}
-        long_seq_metadata = None
-        num_prefill_reqs = 0
-        num_decode_reqs = 0
-        scheduler_output = MagicMock()
-        num_scheduled_tokens = 13
-        num_rejected_tokens_gpu = None
+        if not self.is_decode(flag_prefill_decode):
+            target_token_ids = torch.tensor([151644, 872, 198, 5501, 7512, 14678, 51765, 30, 151645, 198, 151644, 77091, 198], device=self.device, dtype=torch.int32)
+            target_positions = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], device=self.device)
+            target_hidden_states = torch.zeros(num_actual_tokens, 12288, device=self.device, dtype=torch.bfloat16)
+            next_token_ids = torch.tensor([151667], device=self.device, dtype=torch.int32)
+            token_indices_to_sample = None
+            target_model_batch_desc = BatchDescriptor(num_tokens=num_actual_tokens, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0)
+            mock_sampling_metadata = MagicMock()
+            mm_embed_inputs = None
+            req_scheduled_tokens = {'0-8222703c': 13}
+            long_seq_metadata = None
+            num_prefill_reqs = 0
+            num_decode_reqs = 0
+            scheduler_output = MagicMock()
+            num_scheduled_tokens = num_actual_tokens
+            num_rejected_tokens_gpu = None
+
+        if self.is_decode(flag_prefill_decode):
+            target_token_ids = torch.tensor([279, 1196, 374, 8014, 151667, 198, 32313, 11, 151667, 198, 32313, 11], device=self.device, dtype=torch.int32)
+            target_positions = torch.tensor([17, 18, 19, 20, 13, 14, 15, 16, 13, 14, 15, 16], device=self.device)
+            target_hidden_states = torch.zeros(num_actual_tokens, 12288, device=self.device, dtype=torch.bfloat16)
+            next_token_ids = torch.tensor([4588,  279,  279], device=self.device, dtype=torch.int32)
+            token_indices_to_sample = torch.tensor([1, 7, 11], device=self.device, dtype=torch.int32)
+            target_model_batch_desc = BatchDescriptor(num_tokens=num_actual_tokens, num_reqs=None, uniform=False, has_lora=False, num_active_loras=0)
+            mock_sampling_metadata = MagicMock()
+            mm_embed_inputs = None
+            req_scheduled_tokens = {'0-b69afbe5': 4, '1-b60368b9': 4, '2-82281e95': 4}
+            long_seq_metadata = None
+            num_prefill_reqs = 0
+            num_decode_reqs = 0
+            scheduler_output = MagicMock()
+            num_scheduled_tokens = num_actual_tokens
+            num_rejected_tokens_gpu = torch.tensor([2, 0, 0], device=self.device, dtype=torch.int32)
 
         #run
         with patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect):
@@ -659,7 +689,7 @@ class TestEagleProposerPropose():
                                     mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
                                     scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
                                     )
-                self.assert_value_common_attn_metadata(captured_common_attn_metadata)
+                self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode)
 
     # give common_attn_metadata value
     def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
@@ -701,16 +731,27 @@ class TestEagleProposerPropose():
         mock_common_attn_metadata.prefill_context_parallel_metadata = prefill_context_parallel_metadata
 
     # assert the value common_attn_metadata
-    def assert_value_common_attn_metadata(self, captured_common_attn_metadata):
-        assert torch.equal(captured_common_attn_metadata.query_start_loc, torch.tensor([0, 1]))
-        assert torch.equal(captured_common_attn_metadata.query_start_loc_cpu, torch.tensor([0, 1]))
-        assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15]))
-        assert captured_common_attn_metadata.num_reqs == 1
-        assert captured_common_attn_metadata.num_actual_tokens == 1
-        assert captured_common_attn_metadata.max_query_len == 1
-        assert captured_common_attn_metadata.max_seq_len == 13
-        assert torch.equal(captured_common_attn_metadata.block_table_tensor, torch.eye(256, dtype=torch.int32)[0].unsqueeze(0))
-        assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142]), torch.full((8703,), -1)]))
+    def assert_value_common_attn_metadata(self, captured_common_attn_metadata, flag_prefill_decode):
+        if not self.is_decode(flag_prefill_decode):
+            assert torch.equal(captured_common_attn_metadata.query_start_loc, torch.tensor([0, 1]))
+            assert torch.equal(captured_common_attn_metadata.query_start_loc_cpu, torch.tensor([0, 1]))
+            assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15]))
+            assert captured_common_attn_metadata.num_reqs == 1
+            assert captured_common_attn_metadata.num_actual_tokens == 1
+            assert captured_common_attn_metadata.max_query_len == 1
+            assert captured_common_attn_metadata.max_seq_len == 13
+            assert torch.equal(captured_common_attn_metadata.block_table_tensor, torch.eye(256, dtype=torch.int32)[0].unsqueeze(0))
+            assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142]), torch.full((8703,), -1)]))
+        if self.is_decode(flag_prefill_decode):
+            assert torch.equal(captured_common_attn_metadata.query_start_loc, torch.tensor([0, 1, 2, 3]))
+            assert torch.equal(captured_common_attn_metadata.query_start_loc_cpu, torch.tensor([0, 1, 2, 3]))
+            assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19]))
+            assert captured_common_attn_metadata.num_reqs == 3
+            assert captured_common_attn_metadata.num_actual_tokens == 3
+            assert captured_common_attn_metadata.max_query_len == 1
+            assert captured_common_attn_metadata.max_seq_len == 0
+            assert torch.equal(captured_common_attn_metadata.block_table_tensor, torch.cat([torch.eye(256, device="cpu", dtype=torch.int32)[0].unsqueeze(0)*i for i in [1,2,3]], dim=0))
+            assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([148, 274, 402]), torch.full((8701,), -1)]))
         assert captured_common_attn_metadata.causal == True
         assert captured_common_attn_metadata.logits_indices_padded == None
         assert captured_common_attn_metadata.num_logits_indices == None
@@ -721,12 +762,29 @@ class TestEagleProposerPropose():
         assert captured_common_attn_metadata._seq_lens_cpu == None
         assert captured_common_attn_metadata._num_computed_tokens_cpu == None
         assert captured_common_attn_metadata._num_computed_tokens_cache == None
-        assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([15]))
-        assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([2]))
+        if not self.is_decode(flag_prefill_decode):
+            assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([15]))
+            assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([2]))
+        if self.is_decode(flag_prefill_decode):
+            assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19]))
+            assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15]))
         assert captured_common_attn_metadata.decode_token_per_req == 1
         assert captured_common_attn_metadata.actual_seq_lengths_q == []
-        assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-13), dtype=torch.int64))
+        if not self.is_decode(flag_prefill_decode):
+            assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-13), dtype=torch.int64))
+        if self.is_decode(flag_prefill_decode):
+            assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
         assert captured_common_attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         assert captured_common_attn_metadata.graph_pad_size == -1
-        assert captured_common_attn_metadata.num_input_tokens == 13
+        if not self.is_decode(flag_prefill_decode):
+            assert captured_common_attn_metadata.num_input_tokens == 13
+        if self.is_decode(flag_prefill_decode):
+            assert captured_common_attn_metadata.num_input_tokens == 12
         assert captured_common_attn_metadata.prefill_context_parallel_metadata == None
+
+    # prefill or decode
+    def is_decode(self, flag_prefill_decode):
+        if flag_prefill_decode == "decode":
+            return True
+        if flag_prefill_decode == "prefill":
+            return False
