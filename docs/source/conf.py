@@ -80,7 +80,7 @@ myst_substitutions = {
     "ci_vllm_version": "v0.18.0",
     # main branch compatibility matrix - updated dynamically
     # vLLM commit hash for main branch
-    "main_vllm_commit": "14acf429ac08b6d538ca6feb3e06b6d13895804d",
+    "main_vllm_commit": "29e48707e8144b78dd5d756f793c26a405043f3d",
     # vLLM tag for main branch
     "main_vllm_tag": "",
     # Python version for main branch
