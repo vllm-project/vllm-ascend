@@ -127,6 +127,7 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     set_weight_prefetch_method,
+    should_skip_allreduce_across_dp_group,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -481,18 +482,6 @@ class NPUModelRunner(GPUModelRunner):
             and not self.model_config.enforce_eager
         )
 
-    def _skip_all_reduce_across_dp_group(self, is_draft_model=False) -> bool:
-        """
-        Decide whether to skip the all-reduce across the data-parallel (DP) group.
-
-        Skipping is applicable for all dense models and for moe models only on ranks
-        that act as KV consumers. We skip the DP all-reduce when either:
-        - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
-        - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
-        """
-        from vllm_ascend.utils import should_skip_allreduce_across_dp_group
-        return should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model)
-
     def _sync_metadata_across_dp(
         self, num_tokens: int, with_prefill: bool = False, is_draft_model: bool = False
     ) -> tuple[int, torch.Tensor | None, bool]:
@@ -505,7 +494,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, with_prefill
 
-        if self._skip_all_reduce_across_dp_group(is_draft_model):
+        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, with_prefill
 
@@ -1905,7 +1894,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return False, None, cudagraph_mode
 
-        if self._skip_all_reduce_across_dp_group():
+        if should_skip_allreduce_across_dp_group(self.vllm_config):
             num_tokens_after_padding = torch.tensor([num_tokens_padded] * self.dp_size, device="cpu", dtype=torch.int32)
             return False, num_tokens_after_padding, cudagraph_mode
 
