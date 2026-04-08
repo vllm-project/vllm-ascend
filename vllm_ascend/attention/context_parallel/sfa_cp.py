@@ -190,6 +190,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         block_arange = attn_metadata.sfa_cp_metadata.block_arange
         kv, block_num = self.gather_kv_cross_cp(kv, block_table)
         key_rope, block_num = self.gather_kv_cross_cp(key_rope, block_table)
+        block_table = self.gather_block_table(block_num, block_table, block_arange)
         assert block_table is not None
         if self.pcp_size == 1:
             attn_output = self._execute_sparse_flash_attention(
