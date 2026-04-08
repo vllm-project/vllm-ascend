@@ -37,6 +37,7 @@ import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next  # noqa
 import vllm_ascend.patch.worker.patch_deepseekv3  # noqa
 import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+import vllm_ascend.patch.worker.patch_qwen3_omni_moe_thinker  # noqa
 
 if os.getenv("SHM_BARRIER", "true").lower() in ("true", "1"):
     import vllm_ascend.patch.platform.patch_message_queue  # noqa
