@@ -94,6 +94,7 @@ jobs:
             working-directory: ./vllm-empty
             run: |
               VLLM_TARGET_DEVICE=empty uv pip install -e .
+              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Install vllm-project/vllm-ascend
             env:
