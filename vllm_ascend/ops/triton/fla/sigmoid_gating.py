@@ -39,7 +39,7 @@ else:
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["scale", "N", "T", "B"])
+@triton.jit(do_not_specialize=["N", "T"])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
@@ -53,9 +53,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     ssm_state_indices,
     num_accepted_tokens,
     scale,
-    N,  # num of sequences
-    T,  # num of tokens
-    B,
+    N: tl.constexpr,  # num of sequences
+    T: tl.constexpr,  # num of tokens
+    B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -134,9 +134,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
         b_g = tl.load(p_g).to(tl.float32)
 
-        if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        # if USE_QK_L2NORM_IN_KERNEL:
+        #     b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+        #     b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
         # [BK, BV]
         # b_h *= tl.exp(b_g)
@@ -302,19 +302,19 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         tl.store(p_o + i * HV * V, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         # # Update pointers for next timestep
-        # p_q += H * K
-        # p_k += H * K
-        # p_o += HV * V
-        # p_v += HV * V
-        # p_b += HV
-        # p_a += HV
+        p_q += H * K
+        p_k += H * K
+        p_o += HV * V
+        p_v += HV * V
+        p_b += HV
+        p_a += HV
 
     # Store final state back to h0_source with bounds checking
-    if USE_INITIAL_STATE:
-        idx = tl.load(h0_indices + i_n)
-        if idx >= 0:
-            p_h0 = h0_source + idx * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-            tl.store(p_h0, b_h.to(p_h0.dtype.element_ty), mask=mask_h)
+    # if USE_INITIAL_STATE:
+    #     idx = tl.load(h0_indices + i_n)
+    #     if idx >= 0:
+    #         p_h0 = h0_source + idx * HV * K * V + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+    #         tl.store(p_h0, b_h.to(p_h0.dtype.element_ty), mask=mask_h)
 
 
 def fused_sigmoid_gating_delta_rule_update(
@@ -388,6 +388,7 @@ def fused_sigmoid_gating_delta_rule_update(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         num_warps=num_warps,
         num_stages=num_stages,
+        inject_block_all=True,
     )
     o = o.squeeze(0)
     return o
