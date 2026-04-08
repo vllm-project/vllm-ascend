@@ -518,6 +518,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         req_start_time = time.perf_counter()
         src_list, dst_list, length_list = [], [], []
+        print(f'{remote_block_ids=} {local_block_ids=}')
         for i in range(self.hma_group_size):
             grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
                 remote_block_ids[i], local_block_ids[i]
@@ -1227,7 +1228,7 @@ class MooncakeConnectorWorker:
         self._layer_specs = {
             layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names
         }
-        self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
+        self.hma_group_size = len(kv_cache_config.kv_cache_groups)
 
         # Mamba metadata
         self._is_mamba_group = [isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups]
