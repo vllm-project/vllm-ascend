@@ -194,6 +194,8 @@ jobs:
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      # This is only used in the pull-request scenario to determine the vllm-ascend ref to test.
+      # For scheduled runs, the image is built from the latest main/release branch, so we always want to test the latest code.
       vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
       vllm_version: ${{ needs.setup-vars.outputs.vllm_version }}
       should_run: >-

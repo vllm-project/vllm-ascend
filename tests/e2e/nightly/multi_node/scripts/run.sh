@@ -109,52 +109,27 @@ check_and_config() {
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
 
-install_extra_components() {
-    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
-    
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
-        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
-        return 1
-    fi
-    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-    
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
-        echo "Failed to download custom_ops wheel"
-        return 1
-    fi
-    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    
-    export ASCEND_CUSTOM_OPP_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}"
-    export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh
-    
-    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
-          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    echo "====> Extra components installation completed"
-}
-
 checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
     pip uninstall -y vllm vllm-ascend || true
-    cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
     rm -rf "$WORKSPACE/vllm" "$WORKSPACE/vllm-ascend"
 
-    if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
-        echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
-        git clone --depth 1 "$VLLM_ASCEND_REMOTE_URL" "$WORKSPACE/vllm-ascend"
-        cd "$WORKSPACE/vllm-ascend"
+    echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL ref: $VLLM_ASCEND_REF"
+    git init "$WORKSPACE/vllm-ascend"
+    cd "$WORKSPACE/vllm-ascend"
+    git remote add origin "$VLLM_ASCEND_REMOTE_URL"
+    if ! git fetch --depth 1 origin "$VLLM_ASCEND_REF"; then
+        # VLLM_ASCEND_REF might be a PR head commit hash, look up the PR ref
         PR_REF=$(git ls-remote origin 'refs/pull/*/head' | grep "^${VLLM_ASCEND_REF}" | awk '{print $2}' | head -1)
         if [ -n "$PR_REF" ]; then
             git fetch --depth 1 origin "$PR_REF"
-            git checkout FETCH_HEAD
         else
-            git fetch origin '+refs/pull/*/head:refs/remotes/pull/*' 2>/dev/null || true
-            git checkout "$VLLM_ASCEND_REF"
+            print_error "Failed to fetch vllm-ascend ref: $VLLM_ASCEND_REF"
         fi
     fi
+    git checkout FETCH_HEAD
 
     if [ ! -d "$WORKSPACE/vllm" ]; then
         echo "Cloning vllm version/ref: $VLLM_VERSION"
@@ -169,22 +144,6 @@ install_vllm() {
     VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
     pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
     pip install -e "$WORKSPACE/vllm-ascend"
-}
-
-install_aisbench() {
-    echo "====> Install AISBench benchmark"
-
-    BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
-
-    cp -r /tmp/aisbench-backup "$BENCH_DIR"
-
-    cd "$BENCH_DIR"
-    pip install -e . \
-        -r requirements/api.txt \
-        -r requirements/extra.txt
-
-    python3 -m pip cache purge || echo "WARNING: pip cache purge failed, but proceeding..."
-
 }
 
 show_triton_ascend_info() {
@@ -239,7 +198,6 @@ main() {
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
         install_vllm
-        install_aisbench
     fi
     show_vllm_info
     show_triton_ascend_info
