@@ -30,6 +30,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
@@ -153,6 +154,43 @@ class NPUPlatform(Platform):
         config_deprecated_logging()
 
     @classmethod
+    def _get_default_max_cudagraph_capture_size(cls, vllm_config: VllmConfig) -> int | None:
+        """Mirror the default-max branch in vLLM's `_set_cudagraph_sizes()`.
+
+        This helper corresponds to the upstream block under
+        "determine the initial max_cudagraph_capture_size" when
+        `compilation_config.max_cudagraph_capture_size is None`.
+
+        Ascend injects this default earlier via `apply_config_platform_defaults()`
+        so the rest of `_set_cudagraph_sizes()` can keep using upstream logic for
+        size-list generation, token-cap clipping, SP filtering, and later
+        post-processing. The only intentional difference from upstream is removing
+        the CUDA-oriented trailing `* 2`: Ascend wants the default capture upper
+        bound to track `max_num_seqs * decode_query_len`, capped at 512.
+
+        Returning `None` means the platform should not inject a default. This
+        covers the cases where the user has already provided either
+        `max_cudagraph_capture_size` or `cudagraph_capture_sizes`.
+        """
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.max_cudagraph_capture_size is not None:
+            return None
+        if compilation_config.cudagraph_capture_sizes is not None:
+            return None
+
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
+        if max_num_seqs is None:
+            return None
+
+        decode_query_len = 1
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        if speculative_config and speculative_config.num_speculative_tokens:
+            decode_query_len += speculative_config.num_speculative_tokens
+
+        return min(max_num_seqs * decode_query_len, 512)
+
+    @classmethod
     def get_device_capability(cls, device_id: int = 0):
         return None
 
@@ -165,6 +203,10 @@ class NPUPlatform(Platform):
 
             pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
             logger.info(f"set sp_min_token_num to {pass_config.sp_min_token_num}")
+
+        default_max_cg_capture_size = cls._get_default_max_cudagraph_capture_size(vllm_config)
+        if default_max_cg_capture_size is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -183,17 +225,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
-        cache_config = vllm_config.cache_config
-        if cache_config.user_specified_block_size:
-            # User specified --block-size; keep it.
-            return
-        model_config = vllm_config.model_config
-        if model_config is not None and model_config.is_hybrid:
-            # Hybrid attention+mamba models rely on the model-specific sizing
-            # logic rather than the generic platform default.
-            return
-
-        super().update_block_size_for_backend(vllm_config)
+        # TODO: NPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
 
     @classmethod
     def set_device(cls, device: torch.device):
@@ -273,7 +307,10 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        # set cudaprah sizes before extending `compilation_config.splitting_ops`
+        # Recompute cudagraph sizes after Ascend-specific compatibility updates.
+        # The platform default max is injected earlier via
+        # `apply_config_platform_defaults`, so this late pass should only honor
+        # the current max / size inputs after the mode adjustments above.
         vllm_config._set_cudagraph_sizes()
         # TODO delete graph size update here when compilation_config.pass_config.enable_sp
         # is supported by vllm-ascend.
@@ -290,6 +327,10 @@ class NPUPlatform(Platform):
                 f"{vllm_config.parallel_config.tensor_parallel_size}"
             )
             if len(sp_aclgraph_sizes) != len(original_sizes):
+                # If user set the max_num_seqs miss fit the multiple of tp_size,
+                # we need to match the max_cudagraph_capture_size with the valid max size,
+                # so we can avoid initialization error of vllm server.
+                compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
@@ -482,20 +523,11 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        # NOTE: vllm sets `speculative_config.enforce_eager` as True if using
-        # deepseek_v32 with mtp. Since we support graph mode, we simply ignore
-        # it here. However, this fix will also implicitly ignore user setting of
-        # `speculative_config.enforce_eager`, we need to take care and remove it
-        # once vllm supports this feature.
-        speculative_config = vllm_config.speculative_config
-        if (
-            model_config
-            and speculative_config
-            and hasattr(model_config.hf_text_config, "model_type")
-            and model_config.hf_text_config.model_type == "deepseek_v32"
-            and speculative_config.enforce_eager
-        ):
-            speculative_config.enforce_eager = False
+        if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+            raise ValueError(
+                "fused mc2 op cannot be used with hierarchy communication."
+                "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
+            )
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -586,7 +618,6 @@ class NPUPlatform(Platform):
         attn_metadata: dict[str, Any],
         vllm_config: VllmConfig,
         dp_metadata,
-        virtual_engine: int = 0,  # ToDo:: Remove me when upgrade to vllm 0.19.0 from 0.18.0
         num_tokens: int = 0,
         num_tokens_across_dp: torch.Tensor | None = None,
         cudagraph_runtime_mode=None,
@@ -764,6 +795,19 @@ class NPUPlatform(Platform):
                     "Parameter '--max-num-partial-prefills' is optimized for ROCm. Resetting to default (1) for Ascend."
                 )
                 vllm_config.scheduler_config.max_num_partial_prefills = 1
+
+            # Disable async scheduling when speculative decoding is active.
+            # Ascend does not implement the GPU-side num_computed_tokens
+            # correction (update_num_computed_tokens_for_batch_change) required
+            # for async spec decode, which causes accuracy divergence.
+            if vllm_config.speculative_config is not None and getattr(
+                vllm_config.scheduler_config, "async_scheduling", False
+            ):
+                logger.warning(
+                    "Async scheduling with speculative decoding is not yet "
+                    "supported on Ascend. Disabling async scheduling."
+                )
+                vllm_config.scheduler_config.async_scheduling = False
 
         # ==================== 6. Speculative Config ====================
         if vllm_config.speculative_config:

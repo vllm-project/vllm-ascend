@@ -216,7 +216,7 @@ class NPUWorker(WorkerBase):
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
-        if tags is None or "weights" in tags:
+        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
             for name, param in model.named_parameters():
                 if "w2_weight" in name and param.shape[2] == hidden_size:
                     parts = name.split(".")
@@ -298,12 +298,6 @@ class NPUWorker(WorkerBase):
         # Initialize device properties used by triton kernels.
         init_device_properties_triton()
 
-        # binding cpu
-        if get_ascend_config().enable_cpu_binding:
-            try:
-                bind_cpus(self.local_rank)
-            except Exception as e:
-                logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
         return device
 
     def init_device(self):
@@ -475,6 +469,13 @@ class NPUWorker(WorkerBase):
         # may cause performance degradation at runtime.
         if get_ascend_device_type() != AscendDeviceType.A5:
             self._warm_up_atb()
+        # Bind after warmup so hot allocations are already materialized on the
+        # worker process before migratepages/taskset run.
+        if get_ascend_config().enable_cpu_binding:
+            try:
+                bind_cpus(self.local_rank)
+            except Exception as e:
+                logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -609,7 +610,7 @@ class NPUWorker(WorkerBase):
             export_type=torch_npu.profiler.ExportType.Text,
             profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
             msprof_tx=False,
-            aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+            aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
             l2_cache=False,
             op_attr=False,
             data_simplification=True,
