@@ -1306,9 +1306,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     common_attn_metadata.seq_lens_cpu, input_batch_size
                 )
-                common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
-                    common_attn_metadata.num_computed_tokens_cpu, input_batch_size
-                )
+                if common_attn_metadata._seq_lens_cpu is not None:
+                    common_attn_metadata._seq_lens_cpu = self._adjust_tensor(
+                        common_attn_metadata._seq_lens_cpu, input_batch_size
+                    )
+                if common_attn_metadata.num_computed_tokens_cpu is not None:
+                    common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
+                        common_attn_metadata.num_computed_tokens_cpu, input_batch_size
+                    )
                 common_attn_metadata.query_start_loc = self.arange[: input_batch_size + 1]
                 common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
                     self.token_arange_np[: input_batch_size + 1]
@@ -1335,8 +1340,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # in the merged graph, it does not affect position 1
         # FIXME(lilinsiman)
         common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
-        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
-        common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
+        if common_attn_metadata.seq_lens_cpu is not None:
+            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+        if common_attn_metadata._seq_lens_cpu is not None:
+            common_attn_metadata._seq_lens_cpu = common_attn_metadata._seq_lens_cpu.clone()
+        if common_attn_metadata.num_computed_tokens_cpu is not None:
+            common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
         common_attn_metadata.positions = common_attn_metadata.positions.clone()
 
         # NOTE(woosuk): We should handle the case where the draft model
@@ -1364,11 +1373,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_max_model_len, 1)
-
-        common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
-        exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
-        common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
-        common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
+        if common_attn_metadata.seq_lens_cpu is not None:
+            common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
+            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
+            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
+        if common_attn_metadata._seq_lens_cpu is not None:
+            common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
+            exceeds_mask_internal = common_attn_metadata._seq_lens_cpu[:batch_size] >= self.max_model_len
+            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal, 1)
+        if common_attn_metadata.num_computed_tokens_cpu is not None:
+            common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions[0])
         else:
@@ -1444,7 +1458,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def prepare_next_token_ids_padded(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -1464,11 +1478,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
+        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(common_attn_metadata.seq_lens_cpu[i].item())
-                for i in range(num_reqs)
-            ]
+            [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 

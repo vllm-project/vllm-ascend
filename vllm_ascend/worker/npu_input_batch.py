@@ -169,7 +169,7 @@ class NPUInputBatch(InputBatch):
 
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
-            (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
