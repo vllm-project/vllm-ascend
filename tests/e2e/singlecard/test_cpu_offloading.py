@@ -5,6 +5,7 @@ import time
 
 import msgspec
 import msgspec.msgpack
+import pytest
 import zmq
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
@@ -127,6 +128,7 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     assert success_count >= 0.5 * test_count
 
 
+@pytest.mark.skip(reason="cpu offload connector is deprecated.")
 def test_cpu_offloading() -> None:
     """
     Tests OffloadingConnector with CPUOffloadingSpec.

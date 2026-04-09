@@ -22,7 +22,15 @@ name: Nightly Image Build Schedule
 
 on:
   workflow_dispatch:
-    # Next step: Add more inputs here if needed, e.g. vllm version, vllm-ascend version, image tag, etc.
+    inputs:
+      vllm_ascend_branch:
+        description: 'Branch to nightly test'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+          - main
+          - releases/v0.18.0
 
 jobs:
   build-a2:

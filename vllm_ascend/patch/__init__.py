@@ -344,17 +344,15 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest processor implementation.
 #
-# ** 10. File: worker/patch_v2/patch_eagle.py**
+# ** 10. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
 #    Why:
-#       `propose` method use torch.gather, but the gather operator will
-#       pollute the arguments passed to it. the bug is reported to huawei
-#       CANN team, but not fixed yet.
+#       support flash comm v1 for qwen3vl.
 #    How：
-#       clone the out attribute ahead of gather to avoid the bug.
+#       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
 #    Future Plan:
-#       Remove this patch when cann fix the gather bug.
+#       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
 #
 # ** 11. File: worker/patch_unquantized_gemm.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -678,3 +676,14 @@
 #       for loading extra KV cache quantisation parameters in model load_weights,
 #       or when the Qwen3 model's weight names are aligned with the parameter
 #       names expected by the quantisation backend.
+# ** 28. File: worker/patch_qwen3vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3.Qwen3Attention.forward` and
+#      `vllm.model_executor.models.qwen3_moe.Qwen3MoeAttention.forward`
+#    Why:
+#       support triton_split_qkv_rmsnorm_mrope fused kernel for Qwen3Attention and Qwen3MoeAttention.
+#    How：
+#       override forward method with the triton_split_qkv_rmsnorm_mrope fused kernel,
+#       when using mrope.
+#    Future Plan:
+#       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.

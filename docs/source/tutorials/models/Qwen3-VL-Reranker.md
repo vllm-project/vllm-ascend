@@ -212,7 +212,7 @@ Processed prompts: 100%|██████████████████�
 For more examples, refer to the vLLM official examples:
 
 - [Offline Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_reranker_offline.py)
-- [Online Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_reranker_online.py)
+- [Online Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_rerank_api_online.py)
 
 ## Performance
 

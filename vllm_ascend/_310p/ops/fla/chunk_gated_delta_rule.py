@@ -23,10 +23,6 @@ import torch.nn.functional as F
 CHUNK_SIZE = 64
 
 
-def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
-    return x * torch.rsqrt(x.square().sum(dim=dim, keepdim=True) + eps)
-
-
 def _expand_qk_to_v_heads(x: torch.Tensor, num_v_heads: int) -> torch.Tensor:
     """
     Expand q/k heads to match v heads for grouped-value-attention semantics.
@@ -104,12 +100,12 @@ def _torch_chunk_gated_delta_rule_chunked(
     query/key: [B, T, H, K]
     value:     [B, T, H, V]
     g/beta:    [B, T, H]
-    initial_state: [B, H, K, V]
+    initial_state: [B, H, V, K]
     """
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
-        query = _l2norm(query, dim=-1, eps=1e-6)
-        key = _l2norm(key, dim=-1, eps=1e-6)
+        query = F.normalize(query, p=2, dim=-1, eps=1e-6).to(query.dtype)
+        key = F.normalize(key, p=2, dim=-1, eps=1e-6).to(key.dtype)
 
     query, key, value, beta, g = [
         x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
@@ -155,7 +151,7 @@ def _torch_chunk_gated_delta_rule_chunked(
     k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
 
     last_recurrent_state = (
-        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim, device=value.device, dtype=value.dtype)
+        torch.zeros(batch_size, num_heads, v_head_dim, k_head_dim, device=value.device, dtype=value.dtype)
         if initial_state is None
         else initial_state.to(value)
     )
@@ -167,13 +163,12 @@ def _torch_chunk_gated_delta_rule_chunked(
     for i in range(0, total_sequence_length // chunk_size):
         q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
         attn_inter_chunk = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask_upper, 0)
-        v_prime = k_cumdecay[:, :, i] @ last_recurrent_state
+        v_prime = k_cumdecay[:, :, i] @ last_recurrent_state.transpose(-1, -2)
         v_new = v_i - v_prime
-        inter_state = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
+        inter_state = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state.transpose(-1, -2)
         core_attn_out[:, :, i] = inter_state + attn_inter_chunk @ v_new
-        last_recurrent_state = (
-            last_recurrent_state * g[:, :, i, -1, None, None].exp()
-            + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
+        last_recurrent_state = last_recurrent_state * g[:, :, i, -1, None, None].exp() + v_new.transpose(-1, -2) @ (
+            k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]
         )
 
     if not output_final_state:
@@ -221,7 +216,7 @@ def chunk_gated_delta_rule_pytorch(
     if initial_state is not None:
         states = initial_state.to(torch.float32).clone()
     else:
-        states = torch.zeros(num_states, h_v, k_dim, v_dim, dtype=torch.float32, device=q.device)
+        states = torch.zeros(num_states, h_v, v_dim, k_dim, dtype=torch.float32, device=q.device)
 
     out = torch.zeros_like(v)
     for seq_idx, start, end in seq_ranges:

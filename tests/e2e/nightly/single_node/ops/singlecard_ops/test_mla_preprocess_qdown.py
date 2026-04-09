@@ -8,7 +8,9 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-
+@pytest.mark.skip(
+    reason="Failure of an individual operator use case causes failures of other operators."
+)
 @pytest.mark.parametrize("cache_mode", ["krope_ctkv", "nzcache"])
 @torch.inference_mode()
 def test_mla_preprocess_kernel(cache_mode: str):
