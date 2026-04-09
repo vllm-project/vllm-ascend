@@ -38,9 +38,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
+from vllm_ascend._310p.ops.rotary_embedding import begin_mrope_forward_310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend._310p.ops.rotary_embedding import begin_mrope_forward_310
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
