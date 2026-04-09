@@ -275,10 +275,10 @@ class RequestTracker:
     starts: list[int] | None = None
     ends: list[int] | None = None
 
-    block_ids_per_chunk: list[int] | None = None
     sizes_per_chunk: list[list[int]] | None = None
 
     processed_block_count: int = 0
+    last_block_keys_by_layer: list[list[str]] | None = None
 
     @staticmethod
     def from_new_request(
@@ -353,11 +353,11 @@ class ReqMeta:
 
     key_gva_mapping: dict[str, int | None] | None = None
     block_keys_by_layer: list[list[str]] | None = None
+    last_block_keys_by_layer: list[list[str]] | None = None
 
     starts: list[int] | None = None
     ends: list[int] | None = None
 
-    block_ids_per_chunk: list[int] | None = None
     sizes_per_chunk: list[list[int]] | None = None
 
     processed_block_count: int = 0
