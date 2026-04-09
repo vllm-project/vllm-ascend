@@ -3,11 +3,13 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -184,20 +186,16 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
         # Build flat pointer arrays for all sub-tensors × all block pairs.
         # sub-tensors = [layer0_key, layer0_value, layer1_key, layer1_value, ...]
+        # Fully vectorized via numpy broadcasting (no Python loop).
         num_pairs = src_sub_block_count
         num_sub_tensors = len(self._block_size_in_bytes_arr)
         total = num_pairs * num_sub_tensors
 
-        all_src = np.empty(total, dtype=np.int64)
-        all_dst = np.empty(total, dtype=np.int64)
-        all_sizes = np.empty(total, dtype=np.int64)
-
-        for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
-            start = t_idx * num_pairs
-            end = start + num_pairs
-            all_src[start:end] = src_base_ptrs[t_idx] + src_block_ids * bsz
-            all_dst[start:end] = dst_base_ptrs[t_idx] + dst_block_ids * bsz
-            all_sizes[start:end] = bsz
+        # (num_sub_tensors, 1) + (1, num_pairs) * (num_sub_tensors, 1) -> (num_sub_tensors, num_pairs)
+        bsz_col = self._block_size_in_bytes_arr[:, None]  # (T, 1)
+        all_src = (src_base_ptrs[:, None] + src_block_ids[None, :] * bsz_col).ravel()
+        all_dst = (dst_base_ptrs[:, None] + dst_block_ids[None, :] * bsz_col).ravel()
+        all_sizes = np.broadcast_to(bsz_col, (num_sub_tensors, num_pairs)).ravel().copy()
 
         batch_src = torch.from_numpy(all_src)
         batch_dst = torch.from_numpy(all_dst)

@@ -126,6 +126,39 @@ set(
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 
+# Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
+# Can be overridden via environment variable:
+#   VLLM_ASCEND_ENABLE_BATCH_MEMCPY=1  -> force enable
+#   VLLM_ASCEND_ENABLE_BATCH_MEMCPY=0  -> force disable
+#   unset                               -> auto-detect from CANN headers
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES ${ASCEND_HOME_PATH}/include)
+set(CMAKE_REQUIRED_LIBRARIES ascendcl)
+set(CMAKE_REQUIRED_LINK_OPTIONS "-L${ASCEND_HOME_PATH}/lib64")
+
+if(DEFINED ENV{VLLM_ASCEND_ENABLE_BATCH_MEMCPY})
+  if("$ENV{VLLM_ASCEND_ENABLE_BATCH_MEMCPY}" STREQUAL "1")
+    message(STATUS "aclrtMemcpyBatchAsync: force enabled via VLLM_ASCEND_ENABLE_BATCH_MEMCPY=1")
+    target_compile_definitions(vllm_ascend_C PRIVATE CANN_MEMCPY_BATCH_ASYNC)
+  else()
+    message(STATUS "aclrtMemcpyBatchAsync: force disabled via VLLM_ASCEND_ENABLE_BATCH_MEMCPY=0")
+  endif()
+else()
+  check_cxx_source_compiles("
+    #include <acl/acl_rt.h>
+    int main() {
+      (void)aclrtMemcpyBatchAsync;
+      return 0;
+    }
+  " HAVE_ACLRT_MEMCPY_BATCH_ASYNC)
+  if(HAVE_ACLRT_MEMCPY_BATCH_ASYNC)
+    message(STATUS "aclrtMemcpyBatchAsync: detected in CANN headers, enabling batch memcpy path")
+    target_compile_definitions(vllm_ascend_C PRIVATE CANN_MEMCPY_BATCH_ASYNC)
+  else()
+    message(STATUS "aclrtMemcpyBatchAsync: not found in CANN headers, using fallback aclrtMemcpyAsync loop")
+  endif()
+endif()
+
 target_link_directories(
   vllm_ascend_C
   PRIVATE
