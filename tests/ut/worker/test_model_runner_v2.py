@@ -63,7 +63,7 @@ class TestNPUModelRunnerV2(unittest.TestCase):
         ):
             runner.profile_run()
 
-        self.assertEqual(observed_runs, [(8, True), (16, False)])
+        self.assertEqual(observed_runs, [(8, True), (16, True)])
         self.assertFalse(get_mrv2_in_profile_run())
 
     def test_profile_run_keeps_normal_dummy_run_outside_profile_override(self):
@@ -85,4 +85,4 @@ class TestNPUModelRunnerV2(unittest.TestCase):
         ):
             runner.profile_run()
 
-        self.assertEqual(observed_runs, [(16, False)])
+        self.assertEqual(observed_runs, [(16, True)])

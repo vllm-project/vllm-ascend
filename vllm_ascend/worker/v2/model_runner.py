@@ -162,21 +162,17 @@ class NPUModelRunner(GPUModelRunner):
             raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
 
     @torch.inference_mode()
-    def _dummy_run(self, num_tokens: int, *args, in_profile_run: bool = False, **kwargs):
-        with override_mrv2_in_profile_run(in_profile_run):
-            return super()._dummy_run(num_tokens, *args, **kwargs)
-
-    @torch.inference_mode()
     def profile_run(self) -> None:
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        if (
-            mc2_tokens_capacity is not None
-            and self.max_num_tokens > mc2_tokens_capacity
-            and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
-            in {MoECommType.MC2, MoECommType.FUSED_MC2}
-        ):
-            self._dummy_run(mc2_tokens_capacity, skip_attn=True, in_profile_run=True)
-        super().profile_run()
+        with override_mrv2_in_profile_run(True):
+            if (
+                mc2_tokens_capacity is not None
+                and self.max_num_tokens > mc2_tokens_capacity
+                and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
+                in {MoECommType.MC2, MoECommType.FUSED_MC2}
+            ):
+                self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
+            super().profile_run()
 
     def prepare_inputs(
         self,
