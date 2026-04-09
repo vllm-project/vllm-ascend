@@ -731,6 +731,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
         batch_size = attn_metadata.seq_lens.shape[0]
+        _cann_supported_head_size = self.head_size in (64, 128, 192)
+
+        if not _cann_supported_head_size:
+            # Unsupported head_dim: use SDPA with KV from paged cache.
+            # Reuse _forward_sdpa_paged which handles KV gathering and
+            # sliding window truncation.
+            # Reshape query to match _forward_sdpa_paged expectations.
+            output = self._forward_sdpa_paged(query, None, None, attn_metadata, output)
+            return output
+
         block_size = 128
         query = query.view(batch_size, 1, self.num_heads * self.head_size)
         key = self.key_cache
@@ -790,8 +800,37 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+        # CANN npu_fused_infer_attention_score_v2 (TND) only supports
+        # head_dim in {64, 128, 192}. Gemma4 uses head_dim=256 (sliding)
+        # and 512 (full), both unsupported. Use SDPA fallback.
+        _cann_supported_head_size = self.head_size in (64, 128, 192)
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
+            if not _cann_supported_head_size:
+                # Unsupported head_dim: use SDPA fallback.
+                # For PrefillNoCache (block_table is None), process each
+                # sequence separately to avoid cross-sequence attention
+                # leakage from is_causal=True on the concatenated batch.
+                if block_table is None:
+                    attn_output = self._forward_sdpa_per_sequence(
+                        query, key, value,
+                        attn_metadata.seq_lens_list, num_tokens,
+                    )
+                    attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+                    output[:num_tokens] = attn_output[:num_tokens]
+                    return output
+                q_sdpa = query.permute(1, 0, 2).unsqueeze(0)
+                k_sdpa = key.permute(1, 0, 2).unsqueeze(0)
+                v_sdpa = value.permute(1, 0, 2).unsqueeze(0)
+                attn_output = torch.nn.functional.scaled_dot_product_attention(
+                    q_sdpa, k_sdpa, v_sdpa,
+                    is_causal=False,
+                    scale=self.scale,
+                    enable_gqa=(self.num_heads != self.num_kv_heads),
+                ).squeeze(0).permute(1, 0, 2)
+                attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+                output[:num_tokens] = attn_output[:num_tokens]
+                return output
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
@@ -820,23 +859,177 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_metadata.attn_mask,
-                block_table=block_table,
-                input_layout="TND",
-                block_size=block_size,
-                actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale=self.scale,
-                sparse_mode=3,
-            )
+            if not _cann_supported_head_size:
+                if block_table is None:
+                    # PrefillNoCache: CANN TND kernels only support head_dim
+                    # in {64, 128, 192}. Use PyTorch SDPA for all other sizes.
+                    # IMPORTANT: is_causal=True creates a full lower-triangular
+                    # mask over the concatenated batch, allowing cross-sequence
+                    # attention leakage. Process each sequence separately to
+                    # maintain proper isolation.
+                    seq_lens = attn_metadata.seq_lens_list
+                    attn_output = self._forward_sdpa_per_sequence(
+                        query, key, value, seq_lens, num_tokens,
+                    )
+                else:
+                    # ChunkedPrefill / DecodeOnly with cache: gather KV from
+                    # paged cache and use SDPA (CANN paged attention also fails
+                    # for unsupported head_dims).
+                    output = self._forward_sdpa_paged(query, key, value, attn_metadata, output)
+                    return output
+            else:
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=query,
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=block_table,
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    sparse_mode=3,
+                )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def _forward_sdpa_per_sequence(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        seq_lens: list[int],
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """SDPA fallback for PrefillNoCache with unsupported head_dim.
+
+        When multiple sequences are batched together, is_causal=True on the
+        concatenated tokens creates a full lower-triangular mask that allows
+        cross-sequence attention leakage (token from seq B can attend to
+        tokens from seq A). This method processes each sequence separately
+        with its own causal mask to maintain proper isolation.
+
+        For a single sequence, falls back to a simple is_causal=True call.
+        """
+        attn_output = torch.empty_like(query)
+        offset = 0
+        enable_gqa = self.num_heads != self.num_kv_heads
+        for slen in seq_lens:
+            end = offset + slen
+            q_s = query[offset:end].permute(1, 0, 2).unsqueeze(0)
+            k_s = key[offset:end].permute(1, 0, 2).unsqueeze(0)
+            v_s = value[offset:end].permute(1, 0, 2).unsqueeze(0)
+            out_s = torch.nn.functional.scaled_dot_product_attention(
+                q_s, k_s, v_s,
+                is_causal=True,
+                scale=self.scale,
+                enable_gqa=enable_gqa,
+            ).squeeze(0).permute(1, 0, 2)
+            attn_output[offset:end] = out_s
+            offset = end
+        return attn_output
+
+    def _forward_sdpa_paged(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """SDPA fallback for unsupported head_dim.
+
+        Gathers KV from paged cache and runs scaled_dot_product_attention.
+        Handles both sliding window (SWA) and full attention.
+
+        Always processes each sequence separately when there are multiple
+        sequences in the batch, to prevent cross-sequence attention leakage.
+        Uses is_causal=True for prefill, is_causal=False for decode.
+        """
+        num_tokens = query.shape[0]
+        key2, value2, block_size, block_table, actual_seq_lengths_kv = (
+            self._get_fia_params(key, value, attn_metadata)
+        )
+
+        seq_lens = attn_metadata.seq_lens_list
+        # Determine per-sequence query lengths from query_start_loc.
+        # For ChunkedPrefill, some sequences may be decoding (1 token)
+        # while others are being prefilled (many tokens). Each needs
+        # different causal masking: prefill needs is_causal=True,
+        # decode needs is_causal=False.
+        num_seqs = len(seq_lens)
+        q_lens = attn_metadata.actual_seq_lengths_q[:num_seqs]
+        enable_gqa = self.num_heads != self.num_kv_heads
+
+        # Always process each sequence separately to prevent cross-sequence
+        # attention leakage when multiple sequences are batched together.
+        if len(seq_lens) > 1:
+            attn_output = torch.empty_like(query)
+            offset = 0
+            for i, slen in enumerate(seq_lens):
+                kv_start = 0
+                if self.sliding_window is not None:
+                    kv_start = max(0, slen - self.sliding_window)
+                num_blocks_needed = (slen + block_size - 1) // block_size
+                bt = block_table[i, :num_blocks_needed]
+                k_blocks = self.key_cache[bt]
+                v_blocks = self.value_cache[bt]
+                k_flat = k_blocks.reshape(-1, self.num_kv_heads, self.head_size)[kv_start:slen]
+                v_flat = v_blocks.reshape(-1, self.num_kv_heads, self.head_size)[kv_start:slen]
+
+                # For decode, each sequence contributes 1 query token.
+                # For prefill, each sequence contributes its full prefill length.
+                q_len_i = q_lens[i]
+                # Use causal masking only for sequences with >1 query token (prefill).
+                seq_is_causal = q_len_i > 1
+
+                q_s = query[offset:offset + q_len_i].permute(1, 0, 2).unsqueeze(0)
+                k_s = k_flat.permute(1, 0, 2).unsqueeze(0)
+                v_s = v_flat.permute(1, 0, 2).unsqueeze(0)
+                out_s = torch.nn.functional.scaled_dot_product_attention(
+                    q_s, k_s, v_s,
+                    is_causal=seq_is_causal,
+                    scale=self.scale,
+                    enable_gqa=enable_gqa,
+                ).squeeze(0).permute(1, 0, 2)
+                attn_output[offset:offset + q_len_i] = out_s
+                offset += q_len_i
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
+
+        # Single sequence: safe to process as one batch
+        all_k, all_v = [], []
+        for i, slen in enumerate(seq_lens):
+            kv_start = 0
+            if self.sliding_window is not None:
+                kv_start = max(0, slen - self.sliding_window)
+            num_blocks_needed = (slen + block_size - 1) // block_size
+            bt = block_table[i, :num_blocks_needed]
+            k_blocks = self.key_cache[bt]
+            v_blocks = self.value_cache[bt]
+            k_flat = k_blocks.reshape(-1, self.num_kv_heads, self.head_size)[kv_start:slen]
+            v_flat = v_blocks.reshape(-1, self.num_kv_heads, self.head_size)[kv_start:slen]
+            all_k.append(k_flat)
+            all_v.append(v_flat)
+
+        k_gathered = torch.cat(all_k, dim=0) if len(all_k) > 1 else all_k[0]
+        v_gathered = torch.cat(all_v, dim=0) if len(all_v) > 1 else all_v[0]
+
+        q_sdpa = query.permute(1, 0, 2).unsqueeze(0)
+        k_sdpa = k_gathered.permute(1, 0, 2).unsqueeze(0)
+        v_sdpa = v_gathered.permute(1, 0, 2).unsqueeze(0)
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            q_sdpa, k_sdpa, v_sdpa,
+            is_causal=q_lens[0] > 1 if len(q_lens) == 1 else False,
+            scale=self.scale,
+            enable_gqa=enable_gqa,
+        ).squeeze(0).permute(1, 0, 2)
+
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
@@ -920,12 +1113,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
+        _cann_supported_head_size = self.head_size in (64, 128, 192)
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and using_paged_attention(num_tokens, self.vllm_config)
             and self.sliding_window is None
         ):
-            output = self.forward_paged_attention(query, attn_metadata, output)
+            if not _cann_supported_head_size:
+                # CANN _npu_paged_attention doesn't support head_dim >= 512.
+                # Use SDPA with KV gathered from paged cache.
+                output = self._forward_sdpa_paged(query, key, value, attn_metadata, output)
+            else:
+                output = self.forward_paged_attention(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output)
 
@@ -964,11 +1163,36 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata is None:
             return output.fill_(0)
         output_padded = None
-        if key is not None and value is not None:
+        # Skip KV cache update for YOCO KV-shared layers — the target
+        # layer has already written the correct K, V to the shared cache.
+        is_kv_shared = getattr(layer, 'kv_sharing_target_layer_name', None) is not None
+        if key is not None and value is not None and not is_kv_shared:
             output_padded = output
             query, key, value, output_padded = self.reshape_and_cache(
                 query, key, value, kv_cache, attn_metadata, output
             )
+        elif is_kv_shared:
+            # Shared layers share the target layer's cache. Bind it here
+            # so that decode paths (e.g. _forward_fia_slidingwindow) can
+            # read from it.
+            if self.key_cache is None and len(kv_cache) > 1:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            # For SDPA fallback paths (unsupported head_dim), the prefill
+            # code uses the input key/value tensors directly instead of
+            # reading from the paged cache.  Shared layers must use the
+            # target layer's K/V (already in the cache), not their own
+            # recomputed K/V.  Gather them from the cache via slot_mapping.
+            if key is not None and value is not None and self.key_cache is not None:
+                slots = attn_metadata.slot_mapping[:attn_metadata.num_actual_tokens]
+                # key_cache: (num_blocks, block_size, num_kv_heads, head_size)
+                num_blocks, block_size = self.key_cache.shape[0], self.key_cache.shape[1]
+                kv_dim = self.key_cache.shape[2] * self.key_cache.shape[3]
+                k_from_cache = self.key_cache.reshape(num_blocks * block_size, kv_dim)[slots]
+                v_from_cache = self.value_cache.reshape(num_blocks * block_size, kv_dim)[slots]
+                # Reshape to 3D (num_tokens, num_kv_heads, head_size) to match
+                # the format expected by the downstream attention path.
+                key = k_from_cache.view(-1, self.key_cache.shape[2], self.key_cache.shape[3])
+                value = v_from_cache.view(-1, self.value_cache.shape[2], self.value_cache.shape[3])
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
