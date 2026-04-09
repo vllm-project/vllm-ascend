@@ -75,7 +75,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         self.input_batch = input_batch
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
-        with build_attn_metadata_wrapper():
+        with build_attn_metadata_wrapper(), torch_gather_wrapper():
             return super().propose(
                 input_batch,
                 attn_metadata,
@@ -159,11 +159,13 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         attn_state = AscendAttentionState.DecodeOnly
         seq_lens_cpu = self._get_seq_lens_cpu()
+        seq_lens_list = seq_lens_cpu.tolist()
         # attn_metadata is build in vllm's super class.
         # We need to update attn_state for each layer's metadata.
         for metadata in attn_metadata.values():
             metadata.attn_state = attn_state
             metadata.seq_lens_cpu = seq_lens_cpu
+            metadata.seq_lens_list = seq_lens_list
 
     def _get_seq_lens_cpu(self) -> torch.Tensor:
         """Get seq_lens_cpu from input_batch."""
@@ -181,3 +183,28 @@ def build_attn_metadata_wrapper():
         yield
     finally:
         vllm.v1.worker.gpu.spec_decode.eagle.speculator.build_attn_metadata = original_func
+
+
+# TODO Remove this patch when cann fix the gather bug.
+# NOTE(Ronald1995): torch.gather will pollute the cache such as self.input_buffers.positions
+# the bug is reported to huawei CANN team, but not fixed yet.
+# NOTE(drslark): make a temporary patch only for `torch.gather`
+_original_gather = torch.gather
+
+
+def gather(input, dim, index, *, sparse_grad=False, out=None):
+    if out is None:
+        return _original_gather(input, dim, index, sparse_grad=sparse_grad)
+    out[:] = _original_gather(input, dim, index, sparse_grad=sparse_grad)
+    return out
+
+
+@contextmanager
+def torch_gather_wrapper():
+    """Context manager to override torch.gather for Ascend NPUs."""
+    original_gather = torch.gather
+    try:
+        torch.gather = gather
+        yield
+    finally:
+        torch.gather = original_gather
