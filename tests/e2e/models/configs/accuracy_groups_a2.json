@@ -48,7 +48,7 @@
       "model_list": [
         "gemma-3-4b-it",
         "internlm3-8b-instruct",
-        "deepseek-ai/DeepSeek-OCR-2"
+        "DeepSeek-OCR-2"
       ]
     }
   ]
