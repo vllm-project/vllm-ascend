@@ -166,6 +166,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
 
   double-node-tests:
@@ -238,6 +240,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
   single-node-tests:
     name: single-node
@@ -375,6 +379,9 @@ jobs:
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
 
   clear-pre-logs:
@@ -397,6 +404,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Merge all benchmark result artifacts
+        continue-on-error: true
         uses: actions/upload-artifact/merge@v4
         continue-on-error: true
         with:
