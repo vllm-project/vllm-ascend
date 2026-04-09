@@ -40,7 +40,6 @@ import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_eagle  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
 import vllm_ascend.patch.worker.patch_routed_experts_capturer  # noqa
