@@ -99,8 +99,6 @@ include_directories(
   ${TORCH_INCLUDE_DIRS}
   ${TORCH_NPU_PATH}/include
   ${ASCEND_HOME_PATH}/include
-  ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
-  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
   ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host
 )
 
@@ -109,8 +107,6 @@ set(
   ${TORCH_INCLUDE_DIRS}
   ${TORCH_NPU_INCLUDE_DIRS}
   ${ASCEND_HOME_PATH}/include
-  ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
-  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
@@ -120,8 +116,6 @@ pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 # aclrtLaunchHostFunc, which breaks host-print compilation.
 target_include_directories(vllm_ascend_C BEFORE PRIVATE
   ${ASCEND_HOME_PATH}/include
-  ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
-  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
 )
 
 if(SOC_VERSION MATCHES "ascend310p.*")
