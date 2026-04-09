@@ -1,4 +1,6 @@
 import pytest
+import subprocess
+import sys
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.multi_node.scripts.multi_node_config import (
@@ -9,6 +11,15 @@ from tools.aisbench import run_aisbench_cases
 @pytest.mark.asyncio
 async def test_multi_node() -> None:
     config = MultiNodeConfigLoader.from_yaml()
+    # TODO: remove this part after the transformers version upgraded
+    if config.special_dependencies:
+        for k, v in config.special_dependencies.items():
+            command = [
+                sys.executable,
+                "-m", "pip", "install",
+                f"{k}=={v}",
+            ]
+            subprocess.call(command)
 
     with ProxyLauncher(
             nodes=config.nodes,

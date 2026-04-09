@@ -182,6 +182,7 @@ class MultiNodeConfig:
         npu_per_node: int,
         envs: dict,
         disaggregated_prefill: dict | None,
+        special_dependencies: dict,
         perf_cmd: str | None,
         acc_cmd: str | None,
     ):
@@ -194,6 +195,7 @@ class MultiNodeConfig:
 
         self.cur_index = self._resolve_cur_index()
         self.cur_node = self.nodes[self.cur_index]
+        self.special_dependencies = special_dependencies
 
         self.disagg_cfg = (DisaggregatedPrefillCfg(disaggregated_prefill,
                                                    len(nodes))
@@ -280,6 +282,7 @@ class MultiNodeConfigLoader:
             nodes=nodes,
             npu_per_node=config.get("npu_per_node", 16),
             envs=config.get("env_common", {}),
+            special_dependencies = config.get("special_dependencies", {}),
             disaggregated_prefill=config.get("disaggregated_prefill"),
             perf_cmd=benchmarks.get("perf"),
             acc_cmd=benchmarks.get("acc"),
