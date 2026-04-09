@@ -259,7 +259,7 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
-    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+    import vllm.envs as envs
 
     global _CUSTOM_OP_ENABLED
 
@@ -271,7 +271,7 @@ def enable_custom_op():
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
     # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    if vllm_is_batch_invariant() or get_ascend_device_type() == AscendDeviceType.A5:
+    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -606,6 +606,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
+    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -658,12 +659,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
+        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
+        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
             AscendRMSNorm310,
@@ -688,6 +691,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
+                "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
             }
         )
 
@@ -999,6 +1003,62 @@ def is_hierarchical_communication_enabled():
     ) or get_ascend_config().enable_mc2_hierarchy_comm
 
 
+def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
+    """Decide whether to skip the all-reduce across the DP group.
+
+    Skipping is applicable for all dense models and for moe models only on ranks
+    that act as KV consumers. We skip the DP all-reduce when either:
+    - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
+    - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+
+    Skipping means each rank may have a different number of tokens, so MC2 needs
+    a non-zero global_bs and must NOT receive mc2_mask.
+
+    Returns False when hierarchy comm is enabled because hierarchy requires
+    global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
+    """
+    if is_hierarchical_communication_enabled():
+        return False
+
+    # For dense models, since we don't actually need dp communication, we simply skip it.
+    # This usually happens when main model is moe while eagle draft model is dense.
+    is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
+    if not is_context_moe_model:
+        return True
+
+    # Only applicable to MoE models on KV consumer ranks.
+    is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+    if not is_kv_consumer:
+        return False
+
+    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+    def needs_mc2(n: int) -> bool:
+        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+
+    compilation_config = vllm_config.compilation_config
+    scheduler_config = vllm_config.scheduler_config
+    speculative_config = vllm_config.speculative_config
+    uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
+    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
+    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
+
+    # Determine whether decode must use MC2. Use max cudagraph capture size
+    # if available, otherwise use the maximal uniform decode token count.
+    if compilation_config.cudagraph_capture_sizes:
+        potential_max_tokens = compilation_config.max_cudagraph_capture_size
+    else:
+        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+
+    decode_must_use_mc2 = needs_mc2(potential_max_tokens)
+    # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
+    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
+    # Skip all-reduce if decode requires MC2 and either prefill also
+    # requires MC2 or recompute-based scheduler is enabled.
+    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+
+
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
@@ -1115,6 +1175,12 @@ def refresh_block_size(vllm_config):
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128
+            return
+
+    ascend_config = get_ascend_config()
+    if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
+        logger.warning("Setting block size to 128 for xlite compatibility.")
+        cache_config.block_size = 128
 
 
 def dispose_layer(layer: Any):
@@ -1281,3 +1347,9 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))

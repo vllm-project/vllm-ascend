@@ -43,6 +43,8 @@
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
+#include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
+#include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
@@ -812,6 +814,40 @@ std::vector<at::Tensor> moe_grouped_matmul(
 
 } // namespace vllm_ascend
 
+#ifdef ASCEND_PLATFORM_310P
+// Pybind on Ascend 310P
+TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
+{
+    ops.def(
+        "npu_causal_conv1d_310(Tensor x, "
+        "                         Tensor weight, "
+        "                         Tensor? bias, "
+        "                         Tensor conv_states, "
+        "                         int[] query_start_loc, "
+        "                         int[] cache_indices, "
+        "                         int[] initial_state_mode, "
+        "                         int[] num_accepted_tokens, "
+        "                         int activation_mode, "
+        "                         int pad_slot_id, "
+        "                         int run_mode) -> (Tensor output)");
+    ops.impl("npu_causal_conv1d_310", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_310);
+
+    ops.def(
+        "npu_recurrent_gated_delta_rule_310(Tensor query, "
+        "                                   Tensor key, "
+        "                                   Tensor value, "
+        "                                   Tensor beta, "
+        "                                   Tensor state, "
+        "                                   Tensor actual_seq_lengths, "
+        "                                   Tensor ssm_state_indices, "
+        "                                   Tensor? g, "
+        "                                   Tensor? gk, "
+        "                                   Tensor? num_accepted_tokens, "
+        "                                   float scale_value=1.0) -> (Tensor output)");
+    ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
+}
+#else
+// Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
 
@@ -1044,3 +1080,4 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
 }
+#endif
