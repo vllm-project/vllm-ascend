@@ -1574,11 +1574,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         sin = attn_metadata.prefill.sin
         prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
         prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
-        if self.is_kv_producer:
-            attn_metadata.reshape_cache_event = torch.npu.Event()
         prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
-        if self.is_kv_producer:
-            attn_metadata.reshape_cache_event.record()
         prefill_k_nope, prefill_value = (
             self.kv_b_proj(prefill_k_c_normed)[0]
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -1642,11 +1638,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
+        attn_metadata.reshape_cache_event = torch.npu.Event()
         if has_decode:
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
         # Preprocess for prefill tokens
         if has_prefill:
             prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
+        attn_metadata.reshape_cache_event.record()
         return decode_preprocess_res, prefill_preprocess_res
 
     def get_num_actual_tokens(self, attn_metadata: M):
@@ -1758,6 +1756,5 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         del o_proj_input
 
-        if has_prefill:
-            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded
