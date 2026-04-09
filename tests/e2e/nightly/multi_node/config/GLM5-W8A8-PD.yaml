@@ -49,7 +49,7 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64
@@ -96,7 +96,7 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64
@@ -143,7 +143,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92
@@ -191,7 +191,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92
