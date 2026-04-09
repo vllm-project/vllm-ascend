@@ -1233,22 +1233,14 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-<<<<<<< HEAD
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
-=======
     python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
->>>>>>> c40a387f63bdc451c198bfa036c723c162545278
     ```
 
 2. Prefill node 1
 
     ```shell
     # change ip to your own
-<<<<<<< HEAD
-    python launch_online_dp.py --dp-size 4 --tp-size 8 --dp-size-local 2 --dp-rank-start 2 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
-=======
     python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address $node_p0_ip --dp-rpc-port 10521 --vllm-start-port 6700
->>>>>>> c40a387f63bdc451c198bfa036c723c162545278
     ```
 
 3. Decode node 0
@@ -1369,9 +1361,6 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-<<<<<<< HEAD
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
-=======
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 ## Best Practices
@@ -1399,4 +1388,3 @@ In this chapter, we recommend best practices in prefill-decode disaggregation sc
   --reasoning-parser glm45 \
   --enable-auto-tool-choice \
   ```
->>>>>>> c40a387f63bdc451c198bfa036c723c162545278
