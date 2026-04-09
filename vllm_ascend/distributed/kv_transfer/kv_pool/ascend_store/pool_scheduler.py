@@ -67,42 +67,44 @@ class KVPoolScheduler:
         # TODO 这里只需要申请，不需要读取，这里各种并行是不存在的，这里需要对并行size进行循环，访问每一个并行
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.num_kv_head = model_config.get_total_num_kv_heads()
+        self.use_mla = False
+        if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
+            self.use_mla = True
+        if self.use_mla:
+            self.num_kv_head = 1
+        else:
+            self.num_kv_head = model_config.get_total_num_kv_heads()
         if self.num_kv_head < self.tp_size:
+            logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>> num_kv_head {self.num_kv_head}")
             self.put_step = self.tp_size // self.num_kv_head
         else:
+            logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>> !!!!!!!!!! num_kv_head {self.num_kv_head}")
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model_name = model_config.model.split('/')[-1]
 
-    def compute_chunk_offsets(self, num_chunks: int) -> tuple[list[int], list[int]]:
-        starts = [chunk_id * self._block_size for chunk_id in range(num_chunks)]
+    def compute_block_offsets(self, num_blocks: int) -> tuple[list[int], list[int]]:
+        starts = [chunk_id * self._block_size for chunk_id in range(num_blocks)]
         ends = [start + self._block_size for start in starts]
         return starts, ends
 
-    def compute_block_ids_per_chunk(self, starts: list[int], block_ids: list[int]) -> list[int]:
-        return [block_ids[start // self._block_size] for start in starts]
-
-    def _generate_keys_and_alloc(self, block_hashes, req_id='') -> tuple[list[list[str]], dict[str, int | None]]:
-        block_keys_by_layer = self.generate_keys(block_hashes, req_id=req_id)
+    def _generate_keys_and_alloc(self, block_hashes, req_id='') -> tuple[list[list[str]], list[list[str]], dict[str, int | None]]:
+        block_keys_by_layer, last_block_keys_by_layer = self.generate_keys(block_hashes, req_id=req_id)
         all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
+        all_keys.extend([key for layer_keys in last_block_keys_by_layer for key in layer_keys])
         if self.store_scheduler is not None:
             gvas = self.store_scheduler.batch_alloc(all_keys,
                                                     [self.page_size_bytes for _ in range(len(all_keys))])
         else:
             gvas = [None] * len(all_keys)
-        key_gva_mapping = dict(zip(all_keys, gvas))
-        return block_keys_by_layer, key_gva_mapping
+        key_gva_mapping = dict[str, None](zip[tuple[str, None]](all_keys, gvas))
+        return block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping
 
     def generate_keys(self, chunk_hashes, req_id=''):
-        keys_per_layer = self.tp_size // self.put_step * self.pcp_size * self.dcp_size
-        num_chunks = len(chunk_hashes)
         has_last_block = req_id != ''
-        keys_per_layer *= num_chunks + (1 if has_last_block else 0)
 
-        def _build_layer_keys(layer_id: int) -> list[str]:
-            layer_keys = []
-            chunk_key_templates = [
+        def _build_layer_keys(layer_id: int) -> tuple[list[str], list[str]]:
+            chunk_keys = [
                 f"{self.model_name}@pcp{pcp_rank}@dcp{dcp_rank}"
                 f"@head_or_tp_rank:{head_or_tp_rank}@{chunk_hash.hex()}@{layer_id}"
                 for pcp_rank in range(self.pcp_size)
@@ -110,8 +112,8 @@ class KVPoolScheduler:
                 for head_or_tp_rank in range(self.tp_size // self.put_step)
                 for chunk_hash in chunk_hashes
             ]
-            layer_keys.extend(chunk_key_templates)
 
+            last_block_keys = []
             if has_last_block:
                 last_block_keys = [
                     f"{self.model_name}@pcp{pcp_rank}@dcp{dcp_rank}"
@@ -120,10 +122,11 @@ class KVPoolScheduler:
                     for dcp_rank in range(self.dcp_size)
                     for head_or_tp_rank in range(self.tp_size // self.put_step)
                 ]
-                layer_keys.extend(last_block_keys)
-            return layer_keys
-
-        return [_build_layer_keys(layer_id) for layer_id in range(self.num_layers)]
+            return chunk_keys, last_block_keys
+        results = [_build_layer_keys(layer_id) for layer_id in range(self.num_layers)]
+        block_keys_by_layer = [r[0] for r in results]
+        last_block_keys_by_layer = [r[0] for r in results]
+        return block_keys_by_layer, last_block_keys_by_layer
 
     def get_num_new_matched_tokens(
         self,
@@ -228,7 +231,7 @@ class KVPoolScheduler:
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
-
+        logger.info(f">>>>>>>>>>>>>>>>>>>> scheduler bind connector meta")
         force_skip_save = self.kv_role == "kv_consumer" and not self.consumer_is_to_put
 
         for finished_req_id in scheduler_output.finished_req_ids:
@@ -267,16 +270,17 @@ class KVPoolScheduler:
                 if self._discard_partial_chunks
                 else len(request.prompt_token_ids)
             )
-            block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
-                request_real.block_hashes, req_id=request.req_id)
+
+            num_blocks = len(unfolded_block_ids)
+            starts, ends = self.compute_block_offsets(num_blocks)
+
+            block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+                request_real.block_hashes[:num_blocks], req_id=request.req_id)
             request_tracker.key_gva_mapping = key_gva_mapping
             request_tracker.block_keys_by_layer = block_keys_by_layer
-
-            num_chunks = len(request_real.block_hashes)
-            starts, ends = self.compute_chunk_offsets(num_chunks)
+            request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
             request_tracker.starts = starts
             request_tracker.ends = ends
-            request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(starts, unfolded_block_ids)
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -291,9 +295,9 @@ class KVPoolScheduler:
             if req_meta is not None:
                 req_meta.key_gva_mapping = key_gva_mapping
                 req_meta.block_keys_by_layer = block_keys_by_layer
+                req_meta.last_block_keys_by_layer = last_block_keys_by_layer
                 req_meta.starts = starts
                 req_meta.ends = ends
-                req_meta.block_ids_per_chunk = request_tracker.block_ids_per_chunk
                 req_meta.processed_block_count = request_tracker.processed_block_count
                 meta.add_request(req_meta)
 
@@ -332,15 +336,15 @@ class KVPoolScheduler:
                     )
                     self._request_trackers[req_id] = request_tracker
 
-                    num_chunks = len(request_real.block_hashes)
-                    starts, ends = self.compute_chunk_offsets(num_chunks)
-                    block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
-                        request_real.block_hashes, req_id=req_id)
-                    request_tracker.key_gva_mapping = key_gva_mapping
+                    num_blocks = len(new_block_ids)
+                    starts, ends = self.compute_block_offsets(num_blocks)
+                    block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+                        request_real.block_hashes[:num_blocks], req_id=req_id)
+
                     request_tracker.block_keys_by_layer = block_keys_by_layer
+                    request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
                     request_tracker.starts = starts
                     request_tracker.ends = ends
-                    request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(starts, new_block_ids)
 
                     last_chunk_tokens_num = (
                         (len(request_real.prompt_token_ids) // self._block_size * self._block_size)
@@ -360,9 +364,9 @@ class KVPoolScheduler:
                     if req_meta is not None:
                         req_meta.key_gva_mapping = key_gva_mapping
                         req_meta.block_keys_by_layer = block_keys_by_layer
+                        req_meta.last_block_keys_by_layer = last_block_keys_by_layer
                         req_meta.starts = starts
                         req_meta.ends = ends
-                        req_meta.block_ids_per_chunk = request_tracker.block_ids_per_chunk
                         req_meta.processed_block_count = request_tracker.processed_block_count
 
                 # decode/chunked request
@@ -384,30 +388,28 @@ class KVPoolScheduler:
                     # if num_computed_token >= len(request.prompt_token_ids):
                     #     continue
                     if new_block_ids is not None:
-                        new_block_hashes = request.block_hashes[-len(new_block_ids):]
-                        block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(new_block_hashes)
+                        # TODO 这里是否有问题？
+                        start_idx = len(request_tracker.allocated_block_ids)
+                        end_idx = start_idx + len(new_block_ids)
+                        new_block_hashes = request.block_hashes[start_idx : end_idx]
+                        block_keys_by_layer, _, key_gva_mapping = self._generate_keys_and_alloc(new_block_hashes)
                         request_tracker.key_gva_mapping.update(key_gva_mapping)
                         request_tracker.update(new_block_ids)
 
                         existing_chunk_count = len(request_tracker.starts) if request_tracker.starts else 0
-                        new_num_chunks = len(new_block_hashes)
+                        new_num_blocks = len(new_block_hashes)
                         base_offset = existing_chunk_count * self._block_size
-                        new_starts = [base_offset + chunk_id * self._block_size for chunk_id in range(new_num_chunks)]
+                        new_starts = [base_offset + chunk_id * self._block_size for chunk_id in range(new_num_blocks)]
                         new_ends = [start + self._block_size for start in new_starts]
-                        
                         if request_tracker.starts is None:
                             request_tracker.starts = new_starts
                             request_tracker.ends = new_ends
                             request_tracker.block_keys_by_layer = block_keys_by_layer
-                            request_tracker.block_ids_per_chunk = self.compute_block_ids_per_chunk(new_starts, new_block_ids)
                         else:
                             request_tracker.starts.extend(new_starts)
                             request_tracker.ends.extend(new_ends)
                             for layer_id, layer_keys in enumerate(block_keys_by_layer):
                                 request_tracker.block_keys_by_layer[layer_id].extend(layer_keys)
-                            new_block_ids_per_chunk = self.compute_block_ids_per_chunk(new_starts, new_block_ids)
-                            request_tracker.block_ids_per_chunk.extend(new_block_ids_per_chunk)
-
                     last_chunk_tokens_num = (
                         (len(request.prompt_token_ids) // self._block_size * self._block_size)
                         if self._discard_partial_chunks
@@ -434,11 +436,10 @@ class KVPoolScheduler:
                     req_meta.starts = request_tracker.starts
                     req_meta.ends = request_tracker.ends
                     req_meta.block_keys_by_layer = request_tracker.block_keys_by_layer
-                    req_meta.block_ids_per_chunk = request_tracker.block_ids_per_chunk
+                    req_meta.last_block_keys_by_layer = request_tracker.last_block_keys_by_layer
                     req_meta.processed_block_count = request_tracker.processed_block_count
                 if req_meta is not None:
                     meta.add_request(req_meta)
-
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
         for request_id, (request, block_ids) in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
@@ -459,13 +460,14 @@ class KVPoolScheduler:
 
                 self._request_trackers[request_id] = request_tracker
 
-                num_chunks = num_tokens_to_compute // self._block_size
+                num_blocks = num_tokens_to_compute // self._block_size
                 has_last_block = num_tokens_to_compute % self._block_size != 0
-                block_hashes_for_keys = request.block_hashes[:num_chunks]
-                block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+                block_hashes_for_keys = request.block_hashes[:num_blocks]
+                block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
                     block_hashes_for_keys, req_id=request_id if has_last_block else '')
                 request_tracker.key_gva_mapping = key_gva_mapping
                 request_tracker.block_keys_by_layer = block_keys_by_layer
+                request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
 
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
@@ -478,6 +480,7 @@ class KVPoolScheduler:
                 if req_meta is not None:
                     req_meta.key_gva_mapping = key_gva_mapping
                     req_meta.block_keys_by_layer = block_keys_by_layer
+                    req_meta.last_block_keys_by_layer = last_block_keys_by_layer
                     meta.add_request(req_meta)
         return meta
 
