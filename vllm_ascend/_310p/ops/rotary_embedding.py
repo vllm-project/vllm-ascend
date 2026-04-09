@@ -20,7 +20,25 @@ import torch
 import torch_npu
 from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
 
-from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding, AscendRotaryEmbedding, get_cos_and_sin_slice
+from vllm_ascend.ops.rotary_embedding import (
+    AscendMRotaryEmbedding,
+    AscendRotaryEmbedding,
+    get_cos_and_sin_slice,
+)
+
+_mrope_cos_slice: torch.Tensor | None = None
+_mrope_sin_slice: torch.Tensor | None = None
+_mrope_forward_id: int = 0
+_prepared_mrope_forward_id: int = -1
+_prepared_mrope_dtype: torch.dtype | None = None
+_prepared_mrope_device: torch.device | None = None
+_prepared_mrope_interleaved: bool | None = None
+_prepared_mrope_section: tuple[int, ...] | None = None
+
+
+def begin_mrope_forward_310():
+    global _mrope_forward_id
+    _mrope_forward_id += 1
 
 
 def _rope_forward_oot(
@@ -102,6 +120,53 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
             torch.cat([m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))], dim=-1),
         )
 
+    def _get_or_prepare_mrope_cos_sin(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        global _mrope_cos_slice
+        global _mrope_sin_slice
+        global _prepared_mrope_forward_id
+        global _prepared_mrope_dtype
+        global _prepared_mrope_device
+        global _prepared_mrope_interleaved
+        global _prepared_mrope_section
+
+        current_section = tuple(self.mrope_section or [])
+        cache_hit = (
+            _prepared_mrope_forward_id == _mrope_forward_id
+            and _mrope_cos_slice is not None
+            and _mrope_sin_slice is not None
+            and _prepared_mrope_dtype == query.dtype
+            and _prepared_mrope_device == query.device
+            and _prepared_mrope_interleaved == self.mrope_interleaved
+            and _prepared_mrope_section == current_section
+        )
+        if cache_hit:
+            return _mrope_cos_slice, _mrope_sin_slice
+
+        assert positions.ndim in (1, 2), "M-RoPE positions must be [num_tokens] or [3, num_tokens]."
+        cos_sin = self.cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        if positions.ndim == 2:
+            assert positions.shape[0] == 3, "MRoPE expects positions [3, num_tokens] (T/H/W)."
+            cos, sin = self._merge_mrope_cos_sin(cos, sin)
+        # `npu_apply_rotary_pos_emb` follows ApplyRotaryPosEmbV2 semantics:
+        # q_embed = q * cos + rotate(q) * sin, where cos/sin have full rotary dim.
+        # MRoPE merge above gives half-dim cos/sin, so expand to full dim here.
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
+        num_tokens = positions.shape[-1]
+        _mrope_cos_slice = cos.contiguous().view(1, num_tokens, 1, -1)
+        _mrope_sin_slice = sin.contiguous().view(1, num_tokens, 1, -1)
+        _prepared_mrope_forward_id = _mrope_forward_id
+        _prepared_mrope_dtype = query.dtype
+        _prepared_mrope_device = query.device
+        _prepared_mrope_interleaved = self.mrope_interleaved
+        _prepared_mrope_section = current_section
+        return _mrope_cos_slice, _mrope_sin_slice
+
     def forward_oot(
         self,
         positions: torch.Tensor,
@@ -126,20 +191,7 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         # switching rotary kernel mode.
         rotary_mode = "half"
         num_tokens = query.shape[0]
-
-        assert positions.ndim in (1, 2), "M-RoPE positions must be [num_tokens] or [3, num_tokens]."
-        cos_sin = self.cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        if positions.ndim == 2:
-            assert positions.shape[0] == 3, "MRoPE expects positions [3, num_tokens] (T/H/W)."
-            cos, sin = self._merge_mrope_cos_sin(cos, sin)
-        # `npu_apply_rotary_pos_emb` follows ApplyRotaryPosEmbV2 semantics:
-        # q_embed = q * cos + rotate(q) * sin, where cos/sin have full rotary dim.
-        # MRoPE merge above gives half-dim cos/sin, so expand to full dim here.
-        cos = torch.cat((cos, cos), dim=-1)
-        sin = torch.cat((sin, sin), dim=-1)
-        cos = cos.contiguous().view(1, num_tokens, 1, -1)
-        sin = sin.contiguous().view(1, num_tokens, 1, -1)
+        cos, sin = self._get_or_prepare_mrope_cos_sin(positions, query)
 
         # Keep branch layout aligned with rope implementation for better numerical consistency.
         if self.head_size == 128 and self.rotary_dim == self.head_size:

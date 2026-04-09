@@ -40,6 +40,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend._310p.ops.rotary_embedding import begin_mrope_forward_310
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -189,6 +190,8 @@ class NPUModelRunner310(NPUModelRunner):
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         with temporary_context:
+            if self.uses_mrope:
+                begin_mrope_forward_310()
             return super()._dummy_run(
                 num_tokens=num_tokens,
                 with_prefill=with_prefill,
@@ -204,6 +207,11 @@ class NPUModelRunner310(NPUModelRunner):
                 num_active_loras=num_active_loras,
                 profile_seq_lens=profile_seq_lens,
             )
+
+    def execute_model(self, *args, **kwargs):
+        if self.uses_mrope:
+            begin_mrope_forward_310()
+        return super().execute_model(*args, **kwargs)
 
     def _check_and_update_cudagraph_mode(
         self,
