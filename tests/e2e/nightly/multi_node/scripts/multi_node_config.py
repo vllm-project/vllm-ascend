@@ -2,7 +2,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import regex as re
 import yaml
@@ -183,8 +183,8 @@ class MultiNodeConfig:
         envs: dict,
         disaggregated_prefill: dict | None,
         special_dependencies: dict,
-        perf_cmd: str | None,
-        acc_cmd: str | None,
+        perf_cmd: dict[str, Any] | None,
+        acc_cmd: dict[str, Any] | None,
     ):
         self.model = model
         self.test_name = test_name
