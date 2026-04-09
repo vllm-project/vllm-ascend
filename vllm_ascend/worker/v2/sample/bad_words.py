@@ -29,7 +29,7 @@ def get_npu_vectorcore_num():
     return triton.runtime.driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"]
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens", "max_num_bad_words"])
 def _bad_words_kernel(
     logits_ptr,
     logits_stride,
