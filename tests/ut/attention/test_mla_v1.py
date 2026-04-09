@@ -182,7 +182,7 @@ class TestAscendMLAMetadata(TestBase):
 
         metadata = AscendMLAMetadata(
             num_actual_tokens_pcp_padded, num_actual_tokens, slot_mapping,
-            query_start_loc, seq_lens, block_tables, num_decodes,
+            query_start_loc, seq_lens, seq_lens, block_tables, num_decodes,
             num_decode_tokens, num_prefills, num_input_tokens, query_lens,
             head_dim, attn_mask, attn_state, decode, prefill)
 

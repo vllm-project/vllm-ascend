@@ -7,14 +7,15 @@ packaging
 pip
 pybind11
 pyyaml
+regex
 scipy
 pandas
 psutil
 setuptools>=64
 setuptools-scm>=8
 torch==2.9.0
-torchvision
-torchaudio
+torchvision==0.24.0
+torchaudio==2.9.0
 wheel
 xgrammar>=0.1.30
 pandas-stubs
