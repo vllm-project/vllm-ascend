@@ -37,6 +37,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  security-events: write # 必须：用于上传扫描报告
+
 jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
@@ -83,6 +87,49 @@ jobs:
               - 'vllm_ascend/ops/fused_moe/**'
               - 'CMakeLists.txt'
 
+  # === 新增：CodeQL 静态扫描任务 ===
+  codeql-analysis:
+    name: CodeQL Analysis
+    needs: [changes]
+    # 只要代码有变动且 lint 开启，就进行扫描
+    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
+    runs-on: linux-aarch64-a2b3-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'cpp', 'python' ]
+
+    steps:
+      - name: Setup git proxy
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # 初始接入建议使用标准规则，避免告警爆炸
+          queries: security-extended
+
+      # 针对 C++ 必须进行编译提取
+      - name: Build C++ Source
+        if: matrix.language == 'cpp'
+        run: |
+          mkdir -p build && cd build
+          cmake .. -DENABLE_ASCEND=ON
+          make -j$(nproc)
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
   ut:
     needs: [lint, changes]
     name: unit test
