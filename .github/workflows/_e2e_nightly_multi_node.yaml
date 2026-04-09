@@ -58,6 +58,11 @@ on:
         type: string
         default: ''
         description: job name used as benchmark artifact identifier, defaults to config_file_path stem
+      vllm_ascend_branch:
+        required: false
+        type: string
+        default: ''
+        description: branch name used as prefix in artifact names to distinguish dual-branch test runs
     secrets:
       KUBECONFIG_B64:
         required: true
@@ -105,20 +110,31 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set job variables
+        id: vars
         run: |
           # Derive a unique, valid k8s resource name from config_file_path.
           # Append 6-char random suffix to avoid conflicts; total length capped at 63 chars.
 
           config_file="${{ inputs.config_file_path }}"
-          lws_suffix=$(echo "$config_file" | sed 's/\.yaml$//' | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
+          config_stem=$(echo "$config_file" | sed 's/\.yaml$//')
+          lws_suffix=$(echo "$config_stem" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
           rand_suffix=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-6)
           LWS_NAME="vllm-${lws_suffix}-${rand_suffix}"
+
+          branch="${{ inputs.vllm_ascend_branch }}"
+          if [ -n "$branch" ]; then
+            ARTIFACT_NAME="${branch}-${config_stem}-ascend-logs"
+          else
+            ARTIFACT_NAME="${config_stem}-ascend-logs"
+          fi
 
           {
             echo "LWS_NAME=${LWS_NAME}"
             echo "LEADER_POD=${LWS_NAME}-0"
             echo "LOG_PREFIX=${{ inputs.ascend_log_prefix }}/${LWS_NAME}"
           } >> $GITHUB_ENV
+
+          echo "artifact_name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
 
       - name: Prepare scripts
         run: |
@@ -364,7 +380,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.config_file_path }}-ascend-logs
+          name: ${{ steps.vars.outputs.artifact_name }}
           path: /tmp/ascend-logs.tar.gz
           retention-days: 7
 
