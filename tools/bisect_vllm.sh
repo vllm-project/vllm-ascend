@@ -38,14 +38,14 @@ BAD_COMMIT=""
 TEST_CMD=""
 VLLM_REPO=""
 ASCEND_REPO=""
-FETCH_DEPTH=0
+FETCH_DEPTH=""
 STEP_TIMEOUT=1800
 TOTAL_TIMEOUT=20400
 EXTRA_ENV=""
-NO_FETCH=false
 TEST_CMDS_FILE=""
 SKIPPED_COMMITS=""
 FORCE_REINSTALL=false
+SUMMARY_OUTPUT="/tmp/bisect_summary.md"
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
 log_ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
@@ -70,19 +70,29 @@ Optional:
   --vllm-repo <path>        Path to vllm repo (auto-detect via pip show, fallback ./vllm-empty)
   --ascend-repo <path>      Path to vllm-ascend repo (auto-detect via pip show, fallback .)
   --env "K=V K2=V2"         Extra environment variables for the test command
-  --fetch-depth <N>         Git fetch depth (default: 500)
-  --no-fetch                Skip git fetch and use local repo history as-is
+  --fetch-depth <N>         Fetch remote vllm history before bisecting; use 0 for full history
   --step-timeout <seconds>  Per-step timeout (default: 1800)
-  --total-timeout <seconds> Total timeout (default: 14400)
+  --total-timeout <seconds> Total timeout (default: 20400)
+  --summary-output <path>   Markdown summary output path (default: /tmp/bisect_summary.md)
   -h, --help                Show this help message
 
 Examples:
-  ./.github/workflows/scripts/bisect_vllm.sh \
-    --test-cmd "VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py"
-  ./.github/workflows/scripts/bisect_vllm.sh \
-    --good abc1234 --bad def5678 --test-cmd "pytest -sv tests/e2e/singlecard/test_models.py"
-  ./.github/workflows/scripts/bisect_vllm.sh \
-    --no-fetch --good abc1234 --bad def5678 --vllm-repo /path/to/vllm --test-cmds-file /tmp/cmds.txt
+  # 1. Local usage: reproduce a known regression range with explicit good/bad commits
+  ./tools/bisect_vllm.sh \
+    --good 35141a7eeda941a60ad5a4956670c60fd5a77029 \
+    --bad 6e1100889e6a675d17ad82815acf8f02f1cc419e \
+    --test-cmd "pytest -sv tests/ut/test_example.py::test_case; pytest -sv tests/ut/test_example_2.py"
+
+  # 2. Run against explicit local checkouts without fetching remote history
+  ./tools/bisect_vllm.sh \
+    --good abc1234 \
+    --bad def5678 \
+    --vllm-repo /path/to/vllm \
+    --ascend-repo /path/to/vllm-ascend \
+    --test-cmd "pytest -sv tests/ut/test_example.py"
+
+  # 3. Batch bisect multiple failing commands from a file
+  ./tools/bisect_vllm.sh --good abc1234 --bad def5678 --test-cmds-file /tmp/bisect_cmds.txt
 
 Commit can be specified as: hash, branch name, tag (e.g. v0.15.0), or HEAD~N.
 EOF
@@ -100,9 +110,9 @@ parse_args() {
             --ascend-repo) ASCEND_REPO="$2"; shift 2 ;;
             --env) EXTRA_ENV="$2"; shift 2 ;;
             --fetch-depth) FETCH_DEPTH="$2"; shift 2 ;;
-            --no-fetch) NO_FETCH=true; shift ;;
             --step-timeout) STEP_TIMEOUT="$2"; shift 2 ;;
             --total-timeout) TOTAL_TIMEOUT="$2"; shift 2 ;;
+            --summary-output) SUMMARY_OUTPUT="$2"; shift 2 ;;
             -h|--help) usage ;;
             *) die "Unknown option: $1" ;;
         esac
@@ -113,6 +123,9 @@ parse_args() {
     fi
     if [[ -n "${TEST_CMDS_FILE}" && ! -f "${TEST_CMDS_FILE}" ]]; then
         die "Test commands file not found: ${TEST_CMDS_FILE}"
+    fi
+    if [[ -n "${FETCH_DEPTH}" && ! "${FETCH_DEPTH}" =~ ^[0-9]+$ ]]; then
+        die "--fetch-depth must be a non-negative integer"
     fi
 }
 
@@ -203,8 +216,8 @@ resolve_commit() {
         log_error "Cannot resolve ${label} commit '${ref}'."
         log_warn "Possible causes:"
         log_warn "  - The commit hash is incorrect"
-        log_warn "  - The commit is outside --fetch-depth ${FETCH_DEPTH} (try --fetch-depth 0 for full history)"
-        log_warn "  - Running locally without remote; use --no-fetch and ensure history is available"
+        log_warn "  - The commit is not present in local history"
+        log_warn "  - Try --fetch-depth 500, or --fetch-depth 0 for full history"
         return 1
     fi
     obj_type=$(git -C "${VLLM_REPO}" cat-file -t "${resolved}" 2>/dev/null || true)
@@ -213,8 +226,8 @@ resolve_commit() {
 }
 
 fetch_vllm_history() {
-    if [[ "${NO_FETCH}" == "true" ]]; then
-        log_info "Skipping git fetch (--no-fetch specified)"
+    if [[ -z "${FETCH_DEPTH}" ]]; then
+        log_info "Skipping git fetch (local history only)"
         return
     fi
     log_info "Fetching vllm history (depth=${FETCH_DEPTH})..."
@@ -263,7 +276,7 @@ prepare_vllm_repo() {
     if [[ "${commit_count}" == "0" ]]; then
         log_error "No commits found between good (${GOOD_COMMIT:0:12}) and bad (${BAD_COMMIT:0:12})."
         log_error "Either the range is empty, or good is not an ancestor of bad."
-        log_warn "Check that --good is older than --bad, and both are reachable with --fetch-depth ${FETCH_DEPTH}."
+        log_warn "Check that --good is older than --bad, and fetch more history with --fetch-depth if needed."
         exit 1
     fi
     log_info "Commits in range: ${commit_count}"
@@ -352,7 +365,8 @@ _generate_report() {
         --total-steps "${total_steps}" \
         --total-commits "${total_commits}" \
         ${skipped:+--skipped "${skipped}"} \
-        --log-file "${BISECT_LOG_FILE}"
+        --log-file "${BISECT_LOG_FILE}" \
+        --summary-output "${SUMMARY_OUTPUT}"
 }
 
 # Main bisect loop. Keep the per-step logs explicit so CI output stays readable.

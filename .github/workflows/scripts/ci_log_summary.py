@@ -1032,7 +1032,9 @@ def select_representative_test_cases(distinct_errors: list[dict]) -> list[str]:
         if not cases:
             continue
 
-        selected = next((test_case for test_case in cases if test_case not in used_cases), cases[0])
+        selected = next((test_case for test_case in cases if test_case not in used_cases), None)
+        if selected is None:
+            continue
         representatives.append(selected)
         used_cases.add(selected)
 
