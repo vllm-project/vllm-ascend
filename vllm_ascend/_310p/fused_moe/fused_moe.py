@@ -115,6 +115,14 @@ class AscendFusedMoE310(FusedMoE):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        upstream_runner = getattr(self, "runner", None)
+        upstream_shared_experts = getattr(upstream_runner, "shared_experts", None)
+        self._raw_gate = kwargs.get("gate", getattr(upstream_runner, "gate", None))
+        self._raw_shared_experts = kwargs.get(
+            "shared_experts",
+            getattr(upstream_shared_experts, "_layer", None),
+        )
+
         self.global_num_experts = kwargs["num_experts"]
 
         if self.quant_config is None:
@@ -166,8 +174,8 @@ class AscendFusedMoE310(FusedMoE):
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
-            gate=self.gate,
-            shared_experts=self.shared_experts,
+            gate=self._raw_gate,
+            shared_experts=self._raw_shared_experts,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,

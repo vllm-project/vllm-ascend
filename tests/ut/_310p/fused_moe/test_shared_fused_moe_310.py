@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 import torch.nn.functional as F
@@ -108,3 +108,34 @@ def test_forward_impl_without_shared_experts_returns_routed_only_310():
 def test_is_internal_router_is_false_310():
     layer = _build_layer(_DummySharedExperts(with_gate=True))
     assert layer.is_internal_router is False
+
+
+def test_init_runner_uses_cached_raw_gate_and_shared_experts_310():
+    layer = AscendFusedMoE310.__new__(AscendFusedMoE310)
+    layer.moe_config = MagicMock()
+    layer.router = MagicMock()
+    layer._routed_input_transform = MagicMock()
+    layer._raw_gate = MagicMock()
+    layer._raw_shared_experts = MagicMock()
+    layer.quant_method = MagicMock()
+    layer.reduce_results = False
+    layer.vllm_config = MagicMock(parallel_config=MagicMock(enable_dbo=False))
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.fused_moe.AscendMoERunner",
+        return_value=MagicMock(),
+    ) as mock_runner:
+        runner = layer._init_runner()
+
+    assert runner is mock_runner.return_value
+    mock_runner.assert_called_once_with(
+        layer=layer,
+        moe_config=layer.moe_config,
+        router=layer.router,
+        routed_input_transform=layer._routed_input_transform,
+        gate=layer._raw_gate,
+        shared_experts=layer._raw_shared_experts,
+        quant_method=layer.quant_method,
+        reduce_results=layer.reduce_results,
+        enable_dbo=False,
+    )

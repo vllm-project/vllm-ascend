@@ -1,9 +1,10 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
@@ -83,3 +84,55 @@ def test_RMSNorm_forward_310p(mock_add_rmsnorm, mock_rmsnorm, residual, dummy_te
         expected_out_x = dummy_tensor + 1
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
+
+
+def test_RMSNorm_forward_gemma4_uses_native(dummy_tensor, default_vllm_config):
+    default_vllm_config.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type="gemma4")
+    )
+    layer = RMSNorm(hidden_size=8, eps=1e-05)
+    expected = object()
+
+    with patch.object(RMSNorm, "forward_native", return_value=expected) as mock_forward_native, patch(
+        "torch_npu.npu_rms_norm"
+    ) as mock_rmsnorm:
+        output = layer.forward_oot(dummy_tensor, None)
+
+    assert output is expected
+    mock_forward_native.assert_called_once_with(dummy_tensor, None)
+    mock_rmsnorm.assert_not_called()
+
+
+def test_RMSNorm_forward_higher_rank_uses_native(default_vllm_config):
+    default_vllm_config.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type="llama")
+    )
+    layer = RMSNorm(hidden_size=8, eps=1e-05)
+    x = torch.randn(2, 4, 8, dtype=torch.float16)
+    expected = object()
+
+    with patch.object(RMSNorm, "forward_native", return_value=expected) as mock_forward_native, patch(
+        "torch_npu.npu_rms_norm"
+    ) as mock_rmsnorm:
+        output = layer.forward_oot(x, None)
+
+    assert output is expected
+    mock_forward_native.assert_called_once_with(x, None)
+    mock_rmsnorm.assert_not_called()
+
+
+def test_GemmaRMSNorm_forward_uses_native(dummy_tensor, default_vllm_config):
+    default_vllm_config.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type="gemma4")
+    )
+    layer = GemmaRMSNorm(hidden_size=8, eps=1e-05)
+    expected = object()
+
+    with patch.object(GemmaRMSNorm, "forward_native", return_value=expected) as mock_forward_native, patch(
+        "torch.ops._C_ascend.npu_gemma_rms_norm"
+    ) as mock_gemma_rmsnorm:
+        output = layer.forward_oot(dummy_tensor, None)
+
+    assert output is expected
+    mock_forward_native.assert_called_once_with(dummy_tensor, None)
+    mock_gemma_rmsnorm.assert_not_called()

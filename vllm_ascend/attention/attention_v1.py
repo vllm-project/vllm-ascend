@@ -256,6 +256,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
+        hf_text_config = getattr(getattr(vllm_config, "model_config", None), "hf_text_config", None)
+        if hf_text_config is not None and getattr(hf_text_config, "model_type", None) in {"gemma4", "gemma4_text"}:
+            head_dim = getattr(hf_text_config, "head_dim", None)
+            global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+            if head_dim is not None and global_head_dim is not None and global_head_dim > head_dim:
+                return AttentionCGSupport.NEVER
+
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.ALWAYS
@@ -379,6 +386,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.hidden_size = self.num_heads * self.head_size
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = sliding_window
+        self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
         self.alibi_slopes = alibi_slopes
@@ -696,10 +705,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return output
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
-        # PrefillNoCache doesn't need key_cache, but other modes do
-        # Only initialize/require cache for modes that actually use it
+        # PrefillNoCache doesn't need key_cache, but other modes do.
+        # Only initialize/require cache for modes that actually use it.
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
-            # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
+            # Initialize cache from kv_cache if not already set (for DecodeOnly mode).
             if self.key_cache is None and kv_cache is not None:
                 if (
                     isinstance(kv_cache, torch.Tensor)
@@ -714,6 +723,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 raise RuntimeError(
                     f"key_cache is None in _get_fia_params for mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
                 )
+
+        if (
+            self.kv_sharing_target_layer_name is not None
+            and self.key_cache is not None
+            and self.value_cache is not None
+            and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+        ):
+            batch_size = attn_metadata.seq_lens.shape[0]
+            block_table = attn_metadata.block_tables[:batch_size, :]
+            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+            key = self.key_cache.view(  # type: ignore
+                num_block, block_size, -1
+            )
+            value = self.value_cache.view(  # type: ignore
+                num_block, block_size, -1
+            )
+            actual_seq_lengths_kv = attn_metadata.seq_lens_list
+            return key, value, block_size, block_table, actual_seq_lengths_kv
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
@@ -754,6 +781,151 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
+
+    def _is_gemma4_model(self) -> bool:
+        hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
+        return hf_text_config is not None and getattr(hf_text_config, "model_type", None) in {"gemma4", "gemma4_text"}
+
+    def _gather_paged_kv_to_dense(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = block_table.shape[0]
+        block_size = key.shape[1]
+        hidden_size = key.shape[2]
+        max_blocks_per_seq = block_table.shape[1]
+        max_tokens_padded = max_blocks_per_seq * block_size
+
+        flat_ids = block_table.reshape(-1)
+        gathered_k = key[flat_ids].view(batch_size, max_tokens_padded, hidden_size)
+        gathered_v = value[flat_ids].view(batch_size, max_tokens_padded, hidden_size)
+
+        seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=key.device)
+        positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key.device)
+        valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).view(-1)
+
+        dense_k = gathered_k.view(-1, hidden_size)[valid_mask]
+        dense_v = gathered_v.view(-1, hidden_size)[valid_mask]
+
+        dense_k = dense_k.view(-1, self.num_kv_heads, self.head_size)
+        dense_v = dense_v.view(-1, self.num_kv_heads, self.head_size)
+        return dense_k, dense_v
+
+    def _expand_kv_for_dense_attention(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.num_kv_heads == self.num_heads:
+            return key, value
+
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                f"Dense attention fallback requires num_heads divisible by num_kv_heads, "
+                f"got num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}"
+            )
+
+        repeat_factor = self.num_heads // self.num_kv_heads
+        key = key.unsqueeze(2).expand(-1, -1, repeat_factor, -1).reshape(key.shape[0], self.num_heads, self.head_size)
+        value = (
+            value.unsqueeze(2).expand(-1, -1, repeat_factor, -1).reshape(value.shape[0], self.num_heads, self.head_size)
+        )
+        return key, value
+
+    def _forward_gemma4_torch_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+        input_key = key[:num_tokens]
+        input_value = value[:num_tokens]
+        key, value, _, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+
+        if (
+            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and self.attn_type != AttentionType.ENCODER_DECODER
+        ):
+            key = key[:num_tokens]
+            value = value[:num_tokens]
+
+        if isinstance(actual_seq_lengths_kv, list):
+            kv_seq_lens = actual_seq_lengths_kv
+        else:
+            kv_seq_lens = actual_seq_lengths_kv.tolist()
+
+        q_cu_seq_lens = attn_metadata.actual_seq_lengths_q
+        q_seq_lens: list[int] = []
+        prev = 0
+        for q_end in q_cu_seq_lens:
+            q_seq_lens.append(q_end - prev)
+            prev = q_end
+
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            kv_seq_lens = q_seq_lens
+        use_current_step_kv = (
+            self.kv_sharing_target_layer_name is None
+            and attn_metadata.attn_state != AscendAttentionState.DecodeOnly
+            and q_seq_lens == kv_seq_lens
+        )
+        if use_current_step_kv:
+            key = input_key
+            value = input_value
+        elif block_table is not None:
+            key, value = self._gather_paged_kv_to_dense(key, value, block_table, kv_seq_lens)
+
+        key, value = self._expand_kv_for_dense_attention(key, value)
+
+        q_start = 0
+        kv_start = 0
+        for q_len, kv_len in zip(q_seq_lens, kv_seq_lens):
+            q_seq = query[q_start : q_start + q_len].transpose(0, 1)
+            k_seq = key[kv_start : kv_start + kv_len].transpose(0, 1)
+            v_seq = value[kv_start : kv_start + kv_len].transpose(0, 1)
+            attn_mask = None
+            is_causal = False
+            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                if self.sliding_window is not None:
+                    query_positions = torch.arange(kv_len - q_len, kv_len, device=q_seq.device)
+                    key_positions = torch.arange(kv_len, device=q_seq.device)
+                    attn_mask = key_positions.unsqueeze(0) > (query_positions.unsqueeze(1) - self.sliding_window)
+            elif self.sliding_window is None and q_len == kv_len:
+                is_causal = True
+            else:
+                query_positions = torch.arange(kv_len - q_len, kv_len, device=q_seq.device)
+                key_positions = torch.arange(kv_len, device=q_seq.device)
+                attn_mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
+                if self.sliding_window is not None:
+                    attn_mask = attn_mask & (
+                        key_positions.unsqueeze(0) > (query_positions.unsqueeze(1) - self.sliding_window)
+                    )
+
+            out_seq = (
+                torch.nn.functional.scaled_dot_product_attention(
+                    q_seq.unsqueeze(0),
+                    k_seq.unsqueeze(0),
+                    v_seq.unsqueeze(0),
+                    attn_mask=(attn_mask.unsqueeze(0).unsqueeze(0) if attn_mask is not None else None),
+                    dropout_p=0.0,
+                    scale=self.scale,
+                    is_causal=is_causal,
+                )
+                .squeeze(0)
+                .transpose(0, 1)
+            )
+            output[q_start : q_start + q_len] = out_seq
+
+            q_start += q_len
+            kv_start += kv_len
+
+        return output
 
     def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
         batch_size = attn_metadata.seq_lens.shape[0]
@@ -924,6 +1096,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.kv_sharing_target_layer_name is not None:
+                return query, key, value, output
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             DeviceOperator.reshape_and_cache(
@@ -949,6 +1123,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
+        if self._is_gemma4_model():
+            return self._forward_gemma4_torch_attention(query, key, value, attn_metadata, output)
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and using_paged_attention(num_tokens, self.vllm_config)

@@ -1008,6 +1008,20 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens,
         )
 
+    def _prepare_model_inputs(
+        self,
+        num_tokens_padded: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if self.is_multimodal_model and not self.model_config.is_encoder_decoder:
+            if self.model.requires_raw_input_tokens and self.mm_budget is None:
+                return self.input_ids.gpu[:num_tokens_padded], None
+            return self._prepare_mm_inputs(num_tokens_padded)
+
+        if self.enable_prompt_embeds:
+            return None, self.inputs_embeds.gpu[:num_tokens_padded]
+
+        return self.input_ids.gpu[:num_tokens_padded], None
+
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
             attn_state = AscendAttentionState.PrefillNoCache
@@ -2592,12 +2606,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            if self.is_multimodal_model and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
-                input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
-            else:
-                input_ids = self.input_ids.gpu[:num_tokens_padded]
-                inputs_embeds = None
+            input_ids, inputs_embeds = self._prepare_model_inputs(num_tokens_padded)
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]

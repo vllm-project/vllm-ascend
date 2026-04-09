@@ -35,7 +35,7 @@ async def run_completion_test(config: SingleNodeConfig, server: "RemoteOpenAISer
 async def run_image_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     from tools.send_mm_request import send_image_request
 
-    send_image_request(config.model, server)
+    send_image_request(config.model, server, request_args=config.api_keyword_args)
 
 
 async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:

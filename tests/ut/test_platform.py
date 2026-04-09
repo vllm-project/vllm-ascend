@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -165,6 +166,38 @@ class TestNPUPlatform(TestBase):
         self.platform.apply_config_platform_defaults(vllm_config)
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
+
+    def test_fix_incompatible_config_disables_gemma4_graph_mode(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(
+                    model_type="gemma4",
+                    head_dim=256,
+                    global_head_dim=512,
+                ),
+                enforce_eager=False,
+            ),
+            cache_config=None,
+            observability_config=None,
+            scheduler_config=SimpleNamespace(
+                max_num_batched_tokens=64,
+                max_num_partial_prefills=1,
+                async_scheduling=False,
+            ),
+            speculative_config=None,
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+                max_cudagraph_capture_size=64,
+            ),
+            kv_transfer_config=None,
+            attention_config=None,
+        )
+
+        NPUPlatform._fix_incompatible_config(vllm_config)
+
+        self.assertTrue(vllm_config.model_config.enforce_eager)
+        self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.NONE)
+        self.assertEqual(vllm_config.scheduler_config.max_num_batched_tokens, 64)
 
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)

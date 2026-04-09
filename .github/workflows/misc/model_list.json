@@ -130,6 +130,7 @@
       "dengcao/ms-marco-MiniLM-L6-v2",
       "facebook/opt-125m",
       "google/gemma-2-9b",
+      "google/gemma-4-E2B-it",
       "google/gemma-3n-E2B-it",
       "google/siglip2-base-patch16-224",
       "hmellor/Ilama-3.2-1B",

@@ -1,6 +1,8 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.v1.attention.backend import AttentionCGSupport
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
@@ -111,6 +113,15 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.builder.build(1, common_attn_metadata, mock_model)
 
+    def test_get_cudagraph_support_disables_gemma4(self):
+        self.mock_vllm_config.model_config.hf_text_config.model_type = "gemma4"
+        self.mock_vllm_config.model_config.hf_text_config.head_dim = 256
+        self.mock_vllm_config.model_config.hf_text_config.global_head_dim = 512
+
+        support = self.builder.get_cudagraph_support(self.mock_vllm_config, MagicMock())
+
+        self.assertEqual(support, AttentionCGSupport.NEVER)
+
 
 class TestAscendAttentionBackendImpl(TestBase):
 
@@ -195,6 +206,113 @@ class TestAscendAttentionBackendImpl(TestBase):
             logits_soft_cap=None,
             attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name=None)
+
+    def test_forward_impl_uses_gemma4_torch_attention_fallback(self):
+        self.impl.vllm_config.model_config.hf_text_config = SimpleNamespace(
+            model_type="gemma4"
+        )
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        output = torch.empty_like(query)
+        attn_metadata = MagicMock()
+
+        with patch.object(
+            self.impl,
+            "_forward_gemma4_torch_attention",
+            return_value=output,
+        ) as mock_gemma4_torch_attention, patch.object(
+            self.impl,
+            "forward_paged_attention",
+        ) as mock_paged_attention, patch.object(
+            self.impl,
+            "forward_fused_infer_attention",
+        ) as mock_fused_infer_attention:
+            result = self.impl.forward_impl(
+                query,
+                key,
+                value,
+                None,
+                attn_metadata,
+                output,
+            )
+
+        self.assertIs(result, output)
+        mock_gemma4_torch_attention.assert_called_once_with(
+            query,
+            key,
+            value,
+            attn_metadata,
+            output,
+        )
+        mock_paged_attention.assert_not_called()
+        mock_fused_infer_attention.assert_not_called()
+
+    @patch('vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache')
+    def test_reshape_and_cache_skips_shared_kv_update(self, mock_reshape_and_cache):
+        impl_shared = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name="0.attn")
+
+        query = torch.randn(4, 8, 64)
+        key = torch.randn(4, 8, 64)
+        value = torch.randn(4, 8, 64)
+        kv_cache = (
+            torch.empty(5, 128, 8, 64),
+            torch.empty(5, 128, 8, 64),
+        )
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.num_actual_tokens = 4
+
+        impl_shared.reshape_and_cache(query, key, value, kv_cache, metadata, output)
+
+        self.assertIs(impl_shared.key_cache, kv_cache[0])
+        self.assertIs(impl_shared.value_cache, kv_cache[1])
+        mock_reshape_and_cache.assert_not_called()
+
+    def test_get_fia_params_uses_shared_kv_cache_for_prefill(self):
+        impl_shared = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name="0.attn")
+        impl_shared.key_cache = torch.randn(5, 128, 8, 64)
+        impl_shared.value_cache = torch.randn(5, 128, 8, 64)
+
+        key = torch.randn(4, 8, 64)
+        value = torch.randn(4, 8, 64)
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.seq_lens = torch.tensor([4], dtype=torch.int32)
+        metadata.seq_lens_list = [4]
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+
+        out_key, out_value, block_size, block_table, actual_seq_lengths_kv = (
+            impl_shared._get_fia_params(key, value, metadata)
+        )
+
+        self.assertEqual(block_size, 128)
+        self.assertTrue(torch.equal(block_table, metadata.block_tables[:1, :]))
+        self.assertEqual(actual_seq_lengths_kv, [4])
+        self.assertEqual(out_key.shape, (5, 128, 8 * 64))
+        self.assertEqual(out_value.shape, (5, 128, 8 * 64))
+        self.assertNotEqual(out_key.data_ptr(), key.data_ptr())
+        self.assertNotEqual(out_value.data_ptr(), value.data_ptr())
 
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""

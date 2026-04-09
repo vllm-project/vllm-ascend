@@ -100,6 +100,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Mistral3                       | 🔵            |                                                                      | A2/A3 |
 | Phi-3-Vision/Phi-3.5-Vision    | 🔵            |                                                                      | A2/A3 |
 | Gemma3                         | 🔵            |                                                                      | A2/A3 |
+| Gemma4                         | 🔵            | Verified on `google/gemma-4-E2B-it`, `google/gemma-4-E4B-it`, `google/gemma-4-31B-it`, and `google/gemma-4-26B-A4B-it` for text/image; audio/video remain unsupported by the upstream transformers backend | A2/A3 |
 | Llama3.2                       | 🔵            |                                                                      | A2/A3 |
 | PaddleOCR-VL                   | 🔵            |                                                                      | A2/A3 |
 | Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |       |
