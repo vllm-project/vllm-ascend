@@ -1,56 +1,43 @@
-name: "CodeQL for VA Repository"
+name: "CodeQL Analysis"
 
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: [ "feature/codeql" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch: # 支持手动触发，方便调试
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write  # 必须开启，否则无法将报告上传到 Security 标签页
-
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [ 'cpp', 'python' ]
+    name: Analyze
+    # 使用 VA 仓同款自建 ARM 运行器
+    runs-on: linux-aarch64-a2b3-0 
+    
+    # 指定华为昇腾 CI 专用容器
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
+      options: --user root # 确保有权限安装插件
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6 # 沿用 VA 仓推荐版本
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages: ${{ matrix.language }}
-        # 建议初期开启扩展规则，发现更多潜在风险
-        queries: security-extended,security-and-quality
+      # 设置代理（解决国内容器拉取 GitHub 资源慢的问题）
+      - name: Setup git proxy
+        run: |
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
-    # --- 安装编译依赖 ---
-    - name: Install dependencies
-      if: matrix.language == 'cpp'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y pybind11-dev # 安装 pybind11 开发库
-        # 如果后面还报缺少别的库，也在这里一并加上
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: 'cpp, python'
 
-    # --- C++ 编译逻辑 ---
-    - name: C++ Build (CMake)
-      if: matrix.language == 'cpp'
-      run: |
-        mkdir build
-        cd build
-        cmake ..
-        make -j$(nproc) 
+      # 此时环境里已经自带了 torch, pybind11 和 CANN
+      - name: C++ Build (CMake)
+        shell: bash -el {0} # 激活容器内的环境变量
+        run: |
+          mkdir build && cd build
+          cmake .. -DENABLE_ASCEND=ON # 开启昇腾适配
+          make -j$(nproc)
 
-    # --- Python 自动处理 ---
-    # Python 不需要手动编译，CodeQL 会自动扫描文件系统
-
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
-      with:
-        category: "/language:${{ matrix.language }}"
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
