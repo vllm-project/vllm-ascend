@@ -502,6 +502,42 @@ at::Tensor npu_causal_conv1d_custom_meta(
     at::Tensor output = at::empty_symint(x.sym_sizes(), x.options());
     return output;
 }
+
+at::Tensor npu_causal_conv1d_310_meta(
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias,
+    const at::Tensor& conv_states,
+    at::IntArrayRef query_start_loc,
+    at::IntArrayRef cache_indices,
+    at::IntArrayRef initial_state_mode,
+    at::IntArrayRef num_accepted_tokens,
+    int64_t activation_mode,
+    int64_t pad_slot_id,
+    int64_t run_mode)
+{
+
+    at::Tensor output = at::empty_symint(x.sym_sizes(), x.options());
+    return output;
+}
+
+at::Tensor npu_recurrent_gated_delta_rule_310_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& beta,
+    at::Tensor& state,
+    const at::Tensor& actual_seq_lengths,
+    const at::Tensor& ssm_state_indices,
+    const c10::optional<at::Tensor>& g,
+    const c10::optional<at::Tensor>& gk,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    double scale_value)
+{
+
+    at::Tensor output = at::empty_symint(value.sym_sizes(), value.options());
+    return output;
+}
   
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
@@ -572,9 +608,21 @@ at::Tensor npu_lightning_indexer_quant_meta(
 } // namespace meta
 } // namespace vllm_ascend
 
-namespace {
 // Register the meta implementations of the custom kernels for symbolic tracing, this will also
 // the custom kernel been captured into aclgraph
+#ifdef ASCEND_PLATFORM_310P
+// Pybind on Ascend 310P
+namespace {
+TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+    // causal_conv1d_310
+    ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
+    // npu_recurrent_gated_delta_rule_310
+    ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
+}
+}
+#else
+// Pybind on other platform
+namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
@@ -620,3 +668,4 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
 }
 }
+#endif

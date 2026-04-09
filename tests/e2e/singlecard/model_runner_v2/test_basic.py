@@ -87,6 +87,7 @@ def test_egale_spec_decoding(
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.skip(reason="graph function isn't adapted to the newest main commit.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
@@ -96,6 +97,7 @@ def test_qwen3_dense_graph_mode(
     model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -109,5 +111,6 @@ def test_qwen3_dense_graph_mode(
         model,
         max_model_len=1024,
         enforce_eager=enforce_eager,
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)

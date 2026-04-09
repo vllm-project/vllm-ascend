@@ -28,6 +28,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
@@ -96,6 +97,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
+        # When enable hierarchical communication, param `expert_scales` need to be passed in.
         self.need_expert_scale = is_hierarchical_communication_enabled()
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
@@ -115,6 +117,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
+        # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
+        self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
+
+        if not self.enable_dispatch_v2 and self.need_comm_alg:
+            raise RuntimeError(
+                "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
+            )
+
     def get_dispatch_mc2_kwargs(
         self,
         token_dispatch_input: MoETokenDispatchInput,
@@ -129,7 +139,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         assert expert_map is not None, "expert_map is required for MC2 token dispatch."
         # NOTE: quant_mode differs by quant feature:
         # - Legacy int communication quantization uses quant_mode=2.
-        # - A5 MXFP8 communication uses quant_mode=4.
+        # - A5 MXFP communication uses quant_mode=4 only for dispatch-enabled
+        #   MXFP paths (currently MXFP8).
+        # - MXFP4 keeps quant_mode=0 which means that activations are quantized in
+        #   the MoE MLP path instead of during MC2 dispatch.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif token_dispatch_input.quant.dispatch_with_quant:
@@ -162,7 +175,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp:
+        # Only dispatch-enabled MXFP paths pass y_dtype through MC2. MXFP4
+        # keeps dispatch unquantized and quantizes again inside the MLP path.
+        if (
+            self.a5_need_extra_args
+            and token_dispatch_input.quant.is_mxfp
+            and token_dispatch_input.quant.dispatch_with_quant
+        ):
             y_dtype = torch.float8_e4m3fn
             if (
                 token_dispatch_input.quant.mxfp is not None
@@ -176,6 +195,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "expert_scales": topk_weights.to(torch.float32),
                 }
             )
+        if self.need_comm_alg:
+            stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -200,6 +221,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             tp_recv_counts,
             expand_scales,
         ) = output[0:7]
+
+        # The dispatch operator may still return a non-None dynamic_scale when
+        # quant_mode=0. Clear it for unquantized dispatch paths such as MXFP4.
+        if not token_dispatch_input.quant.dispatch_with_quant:
+            dynamic_scale = None
 
         group_list_type = 0
         return MoETokenDispatchOutput(
@@ -265,6 +291,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
+        if self.need_comm_alg:
+            stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2

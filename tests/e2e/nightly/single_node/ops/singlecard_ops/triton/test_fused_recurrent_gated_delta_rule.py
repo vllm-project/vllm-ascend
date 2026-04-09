@@ -25,7 +25,7 @@ def test_fused_recurrent_gated_delta_rule_310p_parity_precision():
         torch.float16
     )
 
-    initial_state = torch.randn(2, num_v_heads, kdim, vdim, dtype=torch.float16, device=device)
+    initial_state = torch.randn(2, num_v_heads, vdim, kdim, dtype=torch.float16, device=device)
     cu_seqlens = torch.tensor([0, 4, 9], dtype=torch.long, device=device)
     # For inplace_final_state=True, Ascend triton kernel expects explicit per-token state indices.
     # seq0 (len=4) -> state 0, seq1 (len=5) -> state 1.
@@ -77,3 +77,38 @@ def test_fused_recurrent_gated_delta_rule_310p_parity_precision():
         atol=1e-2,
         equal_nan=True,
     )
+
+
+def test_fused_recurrent_gated_delta_rule_310_state_layout_matches_vllm():
+    q = torch.tensor([[[[1.0, 0.0]]]], dtype=torch.float32)
+    k = torch.tensor([[[[1.0, 0.0]]]], dtype=torch.float32)
+    v = torch.tensor([[[[10.0, 20.0, 30.0]]]], dtype=torch.float32)
+    g = torch.zeros(1, 1, 1, dtype=torch.float32)
+    beta = torch.ones(1, 1, 1, dtype=torch.float32)
+    initial_state = torch.tensor(
+        [[[[1.0, 2.0], [4.0, 8.0], [16.0, 32.0]]]],
+        dtype=torch.float32,
+    )
+
+    out, final_state = fused_recurrent_gated_delta_rule_pytorch(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        inplace_final_state=False,
+        cu_seqlens=None,
+        ssm_state_indices=None,
+        num_accepted_tokens=None,
+        use_qk_l2norm_in_kernel=False,
+    )
+
+    expected_out = torch.tensor([[[[10.0, 20.0, 30.0]]]], dtype=torch.float32) / (2.0**0.5)
+    expected_state = torch.tensor(
+        [[[[10.0, 2.0], [20.0, 8.0], [30.0, 32.0]]]],
+        dtype=torch.float32,
+    )
+
+    torch.testing.assert_close(out, expected_out, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(final_state, expected_state, rtol=1e-5, atol=1e-5)
