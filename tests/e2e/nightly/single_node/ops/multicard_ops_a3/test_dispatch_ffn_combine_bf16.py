@@ -135,12 +135,15 @@ class TestDispatchFFNCombine:
             expert_idx=expert_idx,
             scale1=scale1_npu,
             scale2=scale2_npu,
+            bias1=torch.tensor([]),
+            bias2=torch.tensor([]),
             probs=probs,
             group=self.hcomm_info,
             max_output_size=512,
             out=out,
             expert_token_nums=expert_token_nums,
         )
+        print(f"[Rank {self.rank}] 算子执行成功，输出张量前5个元素：{out[:5, 0].cpu().tolist()}")
         return True
 
     def run_normal(self) -> bool:
@@ -188,6 +191,8 @@ class TestDispatchFFNCombine:
             expert_idx=expert_idx,
             scale1=scale1_npu,
             scale2=scale2_npu,
+            bias1=torch.tensor([]),
+            bias2=torch.tensor([]),
             probs=probs,
             group=self.hcomm_info,
             max_output_size=512,
