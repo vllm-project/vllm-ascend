@@ -1,0 +1,232 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Bisect vLLM
+run-name: >-
+  ${{
+    inputs.caller_type == 'main2main' &&
+    format(
+      'Bisect vLLM caller-{0} pr-{1} token-{2}',
+      inputs.caller_run_id,
+      inputs.main2main_pr_number,
+      inputs.main2main_dispatch_token
+    ) ||
+    format('Bisect vLLM caller-{0}', inputs.caller_run_id)
+  }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      caller_type:
+        description: 'Calling mode: standalone or main2main'
+        required: false
+        default: 'standalone'
+      caller_run_id:
+        description: 'Caller workflow run id for traceability'
+        required: false
+        default: 'manual'
+      good_commit:
+        description: 'Known good vllm commit (leave empty to auto-detect from main branch)'
+        required: false
+        default: ''
+      bad_commit:
+        description: 'Known bad vllm commit (leave empty to auto-detect from current branch)'
+        required: false
+        default: ''
+      test_cmd:
+        description: 'Failing pytest command(s), semicolon-separated for batch mode'
+        required: true
+        default: 'pytest -sv tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py'
+      main2main_pr_number:
+        description: 'Main2Main PR number for callback-safe finalize dispatch'
+        required: false
+        default: ''
+      main2main_dispatch_token:
+        description: 'Current guarded dispatch token for main2main callback'
+        required: false
+        default: ''
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ${{ inputs.caller_type == 'main2main' && format('main2main-bisect-pr-{0}', inputs.main2main_pr_number) || format('bisect-vllm-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  set-params:
+    name: Set parameters
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout vllm-benchmarks repo
+        uses: actions/checkout@v6
+
+      - name: Install Python deps for bisect helper
+        run: python3 -m pip install --user 'pyyaml==6.0.2'
+
+      - name: Resolve parameters and build matrix
+        id: resolve
+        run: |
+          python3 .github/workflows/scripts/bisect_helper.py batch-matrix \
+            --test-cmds "${{ inputs.test_cmd }}" \
+            --output-format github
+
+  bisect:
+    name: Bisect (${{ matrix.group }})
+    needs: set-params
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-params.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    container:
+      image: ${{ matrix.image }}
+      env:
+        VLLM_LOGGING_LEVEL: ${{ matrix.cenv_VLLM_LOGGING_LEVEL }}
+        VLLM_USE_MODELSCOPE: ${{ matrix.cenv_VLLM_USE_MODELSCOPE }}
+        HF_HUB_OFFLINE: ${{ matrix.cenv_HF_HUB_OFFLINE }}
+        SOC_VERSION: ${{ matrix.cenv_SOC_VERSION }}
+        MAX_JOBS: ${{ matrix.cenv_MAX_JOBS }}
+        COMPILE_CUSTOM_KERNELS: ${{ matrix.cenv_COMPILE_CUSTOM_KERNELS }}
+        HCCL_BUFFSIZE: ${{ matrix.cenv_HCCL_BUFFSIZE }}
+        MODELSCOPE_HUB_FILE_LOCK: ${{ matrix.cenv_MODELSCOPE_HUB_FILE_LOCK }}
+        UV_INDEX_URL: ${{ matrix.cenv_UV_INDEX_URL }}
+        UV_EXTRA_INDEX_URL: ${{ matrix.cenv_UV_EXTRA_INDEX_URL }}
+        UV_INDEX_STRATEGY: ${{ matrix.cenv_UV_INDEX_STRATEGY }}
+        UV_NO_CACHE: ${{ matrix.cenv_UV_NO_CACHE }}
+        UV_SYSTEM_PYTHON: ${{ matrix.cenv_UV_SYSTEM_PYTHON }}
+        UV_PYTHON: ${{ matrix.cenv_UV_PYTHON }}
+    steps:
+      - name: Checkout vllm-benchmarks repo
+        uses: actions/checkout@v6
+        with:
+          path: ./vllm-ascend
+          fetch-depth: 0
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info || echo "npu-smi not available (expected on CPU runners)"
+          if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
+            cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          fi
+
+      - name: Install system dependencies
+        working-directory: ./vllm-ascend
+        run: ${{ matrix.sys_deps }}
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.bad_commit }}
+          path: ./vllm-empty
+          fetch-depth: 500
+
+      - name: Install vllm from source
+        working-directory: ./vllm-empty
+        run: ${{ matrix.vllm_install }}
+
+      - name: Install vllm-benchmarks
+        working-directory: ./vllm-ascend
+        run: ${{ matrix.ascend_install }}
+
+      - name: Run bisect
+        working-directory: ./vllm-ascend
+        run: |
+          RUNTIME_ENV='${{ matrix.runtime_env }}'
+          for key in $(echo "${RUNTIME_ENV}" | python3 -c "import sys,json; [print(k) for k in json.load(sys.stdin)]" 2>/dev/null); do
+            val=$(echo "${RUNTIME_ENV}" | python3 -c "import sys,json; print(json.load(sys.stdin)['${key}'])")
+            export "${key}=${val}"
+          done
+
+          chmod +x .github/workflows/scripts/bisect_vllm.sh
+          echo "${{ matrix.test_cmds }}" > /tmp/bisect_cmds.txt
+
+          .github/workflows/scripts/bisect_vllm.sh \
+            --vllm-repo ../vllm-empty \
+            --ascend-repo . \
+            --test-cmds-file /tmp/bisect_cmds.txt \
+            ${{ inputs.good_commit && format('--good {0}', inputs.good_commit) || '' }} \
+            ${{ inputs.bad_commit && format('--bad {0}', inputs.bad_commit) || '' }}
+
+      - name: Upload bisect results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bisect-result-${{ matrix.group }}
+          path: /tmp/bisect_summary.md
+          retention-days: 30
+
+  upload-all-results:
+    name: Upload all results
+    needs: bisect
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: bisect-result-*
+          path: /tmp/bisect_results
+
+      - name: Combine summaries and emit bisect_result.json
+        run: |
+          true > /tmp/bisect_summary.md
+          for f in /tmp/bisect_results/*/bisect_summary.md; do
+            if [ -f "$f" ]; then
+              cat "$f" >> /tmp/bisect_summary.md
+              echo "" >> /tmp/bisect_summary.md
+            fi
+          done
+
+          python3 .github/workflows/scripts/bisect_helper.py result-json \
+            --caller-type "${{ inputs.caller_type }}" \
+            --caller-run-id "${{ inputs.caller_run_id }}" \
+            --bisect-run-id "${{ github.run_id }}" \
+            --good-commit "${{ inputs.good_commit }}" \
+            --bad-commit "${{ inputs.bad_commit }}" \
+            --test-cmd "${{ inputs.test_cmd }}" \
+            --results-dir /tmp/bisect_results \
+            --summary-file /tmp/bisect_summary.md \
+            --output /tmp/bisect_result.json
+
+      - name: Upload combined summary and JSON result
+        uses: actions/upload-artifact@v7
+        with:
+          name: bisect-summary
+          path: |
+            /tmp/bisect_summary.md
+            /tmp/bisect_result.json
+          retention-days: 30
+
+  callback-main2main:
+    if: ${{ always() && inputs.caller_type == 'main2main' }}
+    needs: upload-all-results
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+    steps:
+      - name: Dispatch reconcile for main2main caller
+        run: |
+          gh workflow run main2main_reconcile.yaml \
+            --repo vllm-project/vllm-ascend \
+            -f pr_number="${{ inputs.main2main_pr_number }}"
