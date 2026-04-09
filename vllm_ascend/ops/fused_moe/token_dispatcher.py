@@ -40,7 +40,12 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchOutput,
     TMoECombineMetadata,
 )
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, is_hierarchical_communication_enabled
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+    is_hierarchical_communication_enabled,
+    should_skip_allreduce_across_dp_group,
+)
 
 
 class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
@@ -115,7 +120,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         else:
             max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
+        _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
+
+        # When allreduce across DP is not skipped, tokens are uniform across ranks:
+        # use global_bs=0 (uniform mode) and pass mc2_mask.
+        # When allreduce is skipped, tokens may differ per rank:
+        # use the real global_bs and do NOT pass mc2_mask.
+        self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
 
         # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
         self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
@@ -159,6 +170,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
+        if self.global_bs == 0:
+            kwargs_mc2["x_active_mask"] = token_dispatch_input.routing.mc2_mask
 
         stage1_kwargs = {
             "scales": None,
@@ -242,6 +255,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 assist_info_for_combine=assist_info_for_combine,
                 expand_scales=expand_scales,
                 dispatch_with_quant=token_dispatch_input.quant.dispatch_with_quant,
+                mc2_mask=token_dispatch_input.routing.mc2_mask if self.global_bs == 0 else None,
             ),
         )
 
@@ -265,6 +279,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "moe_expert_num": self.moe_expert_num,
             "global_bs": self.global_bs,
         }
+        if self.global_bs == 0:
+            kwargs_mc2["x_active_mask"] = combine_metadata.mc2_mask
 
         if combine_metadata.dispatch_with_quant:
             tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
