@@ -116,7 +116,7 @@ jobs:
           # Append 6-char random suffix to avoid conflicts; total length capped at 63 chars.
 
           config_file="${{ inputs.config_file_path }}"
-          config_stem=$(echo "$config_file" | sed 's/\.yaml$//')
+          config_stem="${config_file%.yaml}"
           lws_suffix=$(echo "$config_stem" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
           rand_suffix=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-6)
           LWS_NAME="vllm-${lws_suffix}-${rand_suffix}"
@@ -128,13 +128,22 @@ jobs:
             ARTIFACT_NAME="${config_stem}-ascend-logs"
           fi
 
+          job_name="${{ inputs.name }}"
+          if [ -z "$job_name" ]; then
+            job_name="$config_stem"
+          fi
+          BENCHMARK_JOB_NAME="${branch}-${job_name}"
+
           {
             echo "LWS_NAME=${LWS_NAME}"
             echo "LEADER_POD=${LWS_NAME}-0"
             echo "LOG_PREFIX=${{ inputs.ascend_log_prefix }}/${LWS_NAME}"
           } >> $GITHUB_ENV
 
-          echo "artifact_name=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
+          {
+            echo "artifact_name=${ARTIFACT_NAME}"
+            echo "benchmark_job_name=${BENCHMARK_JOB_NAME}"
+          } >> $GITHUB_OUTPUT
 
       - name: Prepare scripts
         run: |
@@ -180,7 +189,6 @@ jobs:
           config_file_path="${{ inputs.config_file_path }}"
           fail_tag="FAIL_TAG_${{ inputs.config_file_path }}"
           is_pr_test="${{ github.event_name == 'pull_request' }}"
-          vllm_version="${{ inputs.vllm_version }}"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
           runner="${{ inputs.soc_version }}"
@@ -194,10 +202,7 @@ jobs:
             pvc_name=vllm-project-hk001
           fi
 
-          benchmark_job_name="${{ inputs.name }}"
-          if [ -z "$benchmark_job_name" ]; then
-            benchmark_job_name="${config_file_path%.yaml}"
-          fi
+          benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
 
           jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
             -D lws_name="$LWS_NAME" \
@@ -209,7 +214,6 @@ jobs:
             -D npu_per_node="$npu_per_node" \
             -D fail_tag="$fail_tag" \
             -D is_pr_test="$is_pr_test" \
-            -D vllm_version="$vllm_version" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
             -D pvc_name="$pvc_name" \
@@ -303,9 +307,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/benchmark_results
-          echo "Fetching benchmark results from PVC at /root/.cache/benchmark_results/${{ inputs.name }}..."
+          echo "Fetching benchmark results from PVC at /root/.cache/benchmark_results/${{ steps.vars.outputs.benchmark_job_name }}..."
           # Copy from PVC mounted directory (persists after pod termination)
-          SRC="/root/.cache/benchmark_results/${{ inputs.name }}"
+          SRC="/root/.cache/benchmark_results/${{ steps.vars.outputs.benchmark_job_name }}"
           if [ -d "$SRC" ] && [ "$(ls -A "$SRC" 2>/dev/null)" ]; then
             cp -r "$SRC"/. /tmp/benchmark_results/
             echo "Benchmark results fetched successfully from PVC:"
@@ -393,7 +397,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          name: nightly-test-benchmark-results-${{ steps.vars.outputs.benchmark_job_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
           if-no-files-found: warn
           retention-days: 90

@@ -171,6 +171,7 @@ jobs:
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -362,13 +363,13 @@ jobs:
     needs: [parse-trigger, single-node-tests, multi-node-tests]
     if: >-
       always() &&
-      needs.parse-trigger.result == 'success' &&
-      (needs.single-node-tests.result != 'skipped' ||
-       needs.multi-node-tests.result != 'skipped')
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      needs.parse-trigger.result == 'success'
     runs-on: linux-aarch64-a2b3-0
     steps:
       - name: Merge all benchmark result artifacts
         uses: actions/upload-artifact/merge@v4
+        continue-on-error: true
         with:
           name: nightly-a2
           pattern: nightly-test-benchmark-results-*

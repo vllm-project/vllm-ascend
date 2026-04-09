@@ -138,9 +138,9 @@ checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
-    pip uninstall -y vllm vllm-ascend || true
+    pip uninstall -y vllm-ascend || true
     cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
-    rm -rf "$WORKSPACE/vllm" "$WORKSPACE/vllm-ascend"
+    rm -rf "$WORKSPACE/vllm-ascend"
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
@@ -155,16 +155,10 @@ checkout_src() {
             git checkout "$VLLM_ASCEND_REF"
         fi
     fi
-
-    if [ ! -d "$WORKSPACE/vllm" ]; then
-        echo "Cloning vllm version/ref: $VLLM_VERSION"
-        git clone --depth 1 --branch "$VLLM_VERSION" https://github.com/vllm-project/vllm.git "$WORKSPACE/vllm"
-    fi
 }
 
 install_vllm() {
-    echo "====> Install vllm and vllm-ascend"
-    VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
+    echo "====> Install vllm-ascend"
     pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
     pip install -e "$WORKSPACE/vllm-ascend"
 }
