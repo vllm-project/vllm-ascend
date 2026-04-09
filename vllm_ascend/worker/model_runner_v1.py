@@ -436,6 +436,9 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
 
+        # FIX for Issue #3128: Validate cudagraph_capture_sizes for DP scenarios
+        self._validate_cudagraph_config_for_dp()
+
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -521,6 +524,41 @@ class NPUModelRunner(GPUModelRunner):
         # requires MC2 or recompute-based scheduler is enabled.
         return decode_must_use_mc2 and (prefill_must_use_mc2 or self.ascend_config.recompute_scheduler_enable)
 
+
+    def _validate_cudagraph_config_for_dp(self):
+        """
+        Validate and warn about problematic cudagraph_capture_sizes configurations
+        when using Data Parallel (DP).
+
+        Issue #3128: Single-request hangs with dp+tp+aclgraph when capture_sizes
+        includes small batch sizes (e.g., 1) that cause synchronization issues.
+        """
+        if self.dp_size <= 1:
+            return
+
+        if not hasattr(self, 'cudagraph_batch_sizes') or not self.cudagraph_batch_sizes:
+            return
+
+        # Check if capture_sizes includes 1 (single batch)
+        if 1 in self.cudagraph_batch_sizes:
+            logger.warning(
+                "[Issue #3128 Fix] Detected cudagraph_capture_sizes includes 1 "
+                "with DP size %d. This may cause single-request hangs. "
+                "Consider removing 1 from capture_sizes or use eager mode fallback.",
+                self.dp_size
+            )
+
+        # Check if capture_sizes has gaps that might cause issues
+        sorted_sizes = sorted(self.cudagraph_batch_sizes)
+        if len(sorted_sizes) >= 2:
+            # If there's a large gap between smallest and next size
+            if sorted_sizes[1] > sorted_sizes[0] * 2 and sorted_sizes[0] <= 2:
+                logger.warning(
+                    "[Issue #3128 Fix] Large gap in cudagraph_capture_sizes: %s. "
+                    "This may cause batch size mismatch issues with DP.",
+                    sorted_sizes
+                )
+
     def _sync_metadata_across_dp(
         self, num_tokens: int, with_prefill: bool = False, is_draft_model: bool = False
     ) -> tuple[int, torch.Tensor | None, bool]:
@@ -536,6 +574,13 @@ class NPUModelRunner(GPUModelRunner):
         if self._skip_all_reduce_across_dp_group(is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, with_prefill
+
+        # FIX for Issue #3128: Add barrier before sync when using ACLGraph
+        # This ensures all DP ranks are at the same point before communication
+        if self.use_aclgraph and self.dp_size > 1:
+            torch.npu.synchronize()
+            if dist.is_initialized():
+                dist.barrier(group=get_dp_group().device_group)
 
         # Sync num_tokens, with_prefill across dp ranks
         num_tokens_tensor = torch.tensor(
