@@ -316,8 +316,10 @@ class AscendSFACPImpl(AscendSFAImpl):
     def gather_block_table(self, block_num: int, block_tables: torch.Tensor, block_arange: torch.Tensor):
         new_block_tables = torch.arange(block_tables.numel(), device=block_tables.device).view(block_tables.shape)
         block_tables = (
-            new_block_tables.unsqueeze(-1) + (block_arange * block_num).view(1, 1, -1).to(block_tables)
-        ).reshape(block_tables.shape[0], -1).to(block_tables.dtype)
+            (new_block_tables.unsqueeze(-1) + (block_arange * block_num).view(1, 1, -1).to(block_tables))
+            .reshape(block_tables.shape[0], -1)
+            .to(block_tables.dtype)
+        )
         return block_tables
 
     def indexer_select_post_process(
