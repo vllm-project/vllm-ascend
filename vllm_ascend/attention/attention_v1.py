@@ -305,7 +305,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         # Prioritize existing `actual_seq_lengths_q` from `common_attn_metadata`.
-        if len(common_attn_metadata.actual_seq_lengths_q) == 0:
+        if len(common_attn_metadata.actual_seq_lengths_q) > 0:
             actual_seq_lengths_q = common_attn_metadata.actual_seq_lengths_q[:num_reqs]
         else:
             actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
