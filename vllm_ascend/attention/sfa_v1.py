@@ -240,7 +240,15 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+
+        # Prefer _seq_lens_cpu (always available, updated during draft
+        # iterations) over seq_lens_cpu (None in async spec decode mode).
+        if common_attn_metadata._seq_lens_cpu is not None:
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif common_attn_metadata.seq_lens_cpu is not None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        else:
+            seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
 
         cos, sin = get_cos_and_sin_mla(input_positions, True)
 
