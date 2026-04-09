@@ -1470,10 +1470,9 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        kv_connector_output = self.kv_connector_output
-        self.kv_connector_output = None
-
         if self.execute_model_state is None:
+            kv_connector_output = self.kv_connector_output
+            self.kv_connector_output = None
             # Nothing to do (PP non-final rank case), output isn't used.
             # receive sampled token ids from the last PP rank when using
             # async scheduling + pipeline parallelism so downstream code
@@ -1582,6 +1581,10 @@ class NPUModelRunner(GPUModelRunner):
             # draft model runs so KV pool save/put can complete.
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
+
+        # self.kv_connector_output may be modified during drafting.
+        kv_connector_output = self.kv_connector_output
+        self.kv_connector_output = None
 
         if self.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
