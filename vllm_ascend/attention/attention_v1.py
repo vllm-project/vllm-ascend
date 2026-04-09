@@ -303,13 +303,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
-        
+
         # Prioritize existing `actual_seq_lengths_q` from `common_attn_metadata`.
         if common_attn_metadata.actual_seq_lengths_q:
             actual_seq_lengths_q = common_attn_metadata.actual_seq_lengths_q[:num_reqs]
         else:
             actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
-
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
