@@ -519,6 +519,18 @@ class KVPoolWorker:
                     req_id
                 )
 
+        finished_sending |= self.register_finished_requests(finished_req_ids)
+        return finished_sending
+
+    def register_finished_requests(self, finished_req_ids: set[str]) -> set[str]:
+        """Replay finished request IDs after wait_for_save publishes store jobs.
+
+        When deferred KV connector finalization is enabled, get_finished() runs
+        before wait_for_save(). At that point the just-finished requests are not
+        yet present in stored_requests, so they would never enter
+        finished_store_req and their delay-free blocks would never be released.
+        """
+        finished_sending = set()
         for req_id in finished_req_ids:
             req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
                 req_id

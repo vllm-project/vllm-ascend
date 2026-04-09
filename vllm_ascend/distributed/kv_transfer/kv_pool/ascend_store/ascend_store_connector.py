@@ -84,6 +84,8 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self.sended_but_unfinished_reqs: set[str] = set()
+        self._finished_req_ids_waiting_for_save: set[str] = set()
+        self._late_finished_sending: set[str] = set()
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise)
@@ -192,14 +194,24 @@ class AscendStoreConnector(KVConnectorBase_V1):
         if self.use_layerwise:
             return
 
-        self.connector_worker.wait_for_save(self._get_connector_metadata())
+        connector_metadata = self._get_connector_metadata()
+        self.connector_worker.wait_for_save(connector_metadata)
+        if self._finished_req_ids_waiting_for_save:
+            self._late_finished_sending |= self.connector_worker.register_finished_requests(
+                self._finished_req_ids_waiting_for_save
+            )
+            self._finished_req_ids_waiting_for_save = set()
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
+        self._finished_req_ids_waiting_for_save = set(finished_req_ids)
         done_sending, done_recving = self.connector_worker.get_finished(
             finished_req_ids, self._get_connector_metadata()
         )
+        if self._late_finished_sending:
+            done_sending |= self._late_finished_sending
+            self._late_finished_sending = set()
         return done_sending, done_recving
 
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
