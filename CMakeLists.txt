@@ -115,6 +115,15 @@ set(
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 
+# Prefer the CANN ACL headers over torch_npu's bundled third_party ACL copy.
+# torch_npu 2.9.0 ships an older acl_rt.h that does not declare
+# aclrtLaunchHostFunc, which breaks host-print compilation.
+target_include_directories(vllm_ascend_C BEFORE PRIVATE
+  ${ASCEND_HOME_PATH}/include
+  ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
+  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
+)
+
 if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
 endif()
