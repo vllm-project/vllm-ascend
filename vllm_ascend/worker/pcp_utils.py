@@ -968,6 +968,142 @@ class PCPManager:
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
 
+    def generate_mtp_attention_mask_for_decode(
+        self,
+        query_lens: torch.Tensor,
+        input_batch: "NPUInputBatch",
+    ) -> list[torch.Tensor | None]:
+        """
+        Generate MTP attention masks for decode requests in PCP mode.
+
+        This function handles the case where decode requests with MTP (speculative decoding)
+        need attention masks computed based on the local sequence after load balancing.
+
+        The MTP token allocation logic:
+        1. History tokens are already split via DualChunkSwap
+        2. MTP tokens are added sequentially to shorter rank
+        3. If lengths are equal, the rank with longer history gets priority
+
+        Example:
+            - History [a,b,c,d,e] split via DualChunkSwap:
+              - cp0: [a,c,e] (positions 0,2,4) -> 3 tokens
+              - cp1: [b,d] (positions 1,3) -> 2 tokens
+            - MTP tokens [f,g,h,i] allocation:
+              - f: cp1 shorter -> f to cp1 -> cp0=3, cp1=3
+              - g: equal -> even rank (cp0) has longer history -> g to cp0 -> cp0=4, cp1=3
+              - h: cp1 shorter -> h to cp1 -> cp0=4, cp1=4
+              - i: equal -> even rank priority -> i to cp0 -> cp0=5, cp1=4
+            - Final:
+              - cp0: [a,c,e,g,i] positions [0,2,4,6,8] -> mask 4x5
+              - cp1: [b,d,f,h] positions [1,3,5,7] -> mask 4x4
+
+        Constraints:
+        - cp_rank = pcp_rank * dcp_size + dcp_rank
+        - cp_size = pcp_size * dcp_size
+        - Only applies to decode requests (where query_len = 1 + num_speculative_tokens)
+
+        Args:
+            query_lens: Query lengths for all requests, shape [num_reqs]
+                       For decode requests: query_len = 1 + num_spec_tokens (e.g., 4 for MTP=3)
+            input_batch: NPUInputBatch containing num_computed_tokens_cpu
+
+        Returns:
+            List of attention mask tensors for decode requests, one per request
+            Each mask has shape [num_mtp_tokens, num_local_tokens]
+            Returns None for non-decode requests or when no decode requests exist
+        """
+        if self.num_decode_reqs == 0:
+            return [None] * len(query_lens)
+
+        # Calculate combined CP rank and size
+        cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_rank
+        cp_size = self.pcp_world_size * self.dcp_world_size
+        assert cp_size > 0, "cp_size must be greater than 0"
+
+        # Extract decode request info
+        decode_query_lens = query_lens[: self.num_decode_reqs]
+        decode_num_computed = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs]
+
+        # MTP token count (query_len - 1, since query_len includes the actual token)
+        mtp_len = decode_query_lens - 1
+
+        mtp_masks = []
+
+        for req_idx in range(self.num_decode_reqs):
+            history_len = decode_num_computed[req_idx].item()
+            mtp_token_len = mtp_len[req_idx].item()
+
+            if mtp_token_len <= 0 or history_len <= 0:
+                mtp_masks.append(None)
+                continue
+
+            # Step 1: Get history token distribution on each rank (DualChunkSwap)
+            # History positions: 0 to history_len-1
+            if cp_rank % 2 == 0:
+                # Even rank: positions 0, 2, 4, ...
+                local_history_positions = [p for p in range(history_len) if p % 2 == 0]
+            else:
+                # Odd rank: positions 1, 3, 5, ...
+                local_history_positions = [p for p in range(history_len) if p % 2 == 1]
+
+            # Calculate history length on each rank
+            if history_len % 2 == 0:
+                even_rank_history = history_len // 2
+                odd_rank_history = history_len // 2
+            else:
+                even_rank_history = history_len // 2 + 1
+                odd_rank_history = history_len // 2
+
+            # Current and other rank lengths
+            if cp_rank % 2 == 0:
+                current_rank_len = even_rank_history
+                other_rank_len = odd_rank_history
+            else:
+                current_rank_len = odd_rank_history
+                other_rank_len = even_rank_history
+
+            # Step 2: Sequentially add MTP tokens
+            local_all_positions = list(local_history_positions)
+
+            for mtp_idx in range(mtp_token_len):
+                if current_rank_len < other_rank_len:
+                    # Current rank is shorter, add here
+                    local_all_positions.append(history_len + mtp_idx)
+                    current_rank_len += 1
+                elif current_rank_len > other_rank_len:
+                    # Other rank is shorter, skip this token for current rank
+                    other_rank_len += 1
+                else:
+                    # Equal length: rank with longer history gets priority
+                    # Even rank has longer history when history_len is odd
+                    if cp_rank % 2 == 0:
+                        # Current rank (even) has longer history
+                        local_all_positions.append(history_len + mtp_idx)
+                        current_rank_len += 1
+                    else:
+                        # Other rank (even) has longer history
+                        other_rank_len += 1
+
+            local_len = len(local_all_positions)
+
+            # MTP token global positions: history_len to history_len + mtp_token_len - 1
+            mtp_positions = list(range(history_len, history_len + mtp_token_len))
+
+            # Generate mask: MTP token at global position m can attend to
+            # local token at global position k if m >= k
+            mask = np.zeros((mtp_token_len, local_len), dtype=bool)
+            for m_idx, mtp_global_pos in enumerate(mtp_positions):
+                for k_idx, local_global_pos in enumerate(local_all_positions):
+                    mask[m_idx, k_idx] = (mtp_global_pos >= local_global_pos)
+
+            mtp_masks.append(torch.from_numpy(mask))
+
+        # Fill remaining slots with None for prefill requests
+        for _ in range(self.num_prefill_reqs):
+            mtp_masks.append(None)
+
+        return mtp_masks
+
     def _list_to_tensor(self, lst, device, dtype=torch.int32):
         tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)
         tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
@@ -1060,3 +1196,89 @@ class PCPManager:
 
         merged_split_kv_len_2d = reshape_kv_len_to_time_first(split_kv_len_2d)
         return merged_split_kv_idx_3d, merged_split_kv_len_2d
+
+    def generate_mtp_attention_mask(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        num_mtp_tokens: np.ndarray,
+        arange_np: np.ndarray,
+    ) -> list[torch.Tensor]:
+        """
+        Generate attention masks for MTP (Multi-Token Prediction) tokens in PCP mode.
+
+        In PCP mode with MTP, the full sequence (history + MTP) is first combined,
+        then split using DualChunkSwap load balancing. MTP tokens can only attend
+        to local tokens on the same rank.
+
+        Example:
+            - Input: history=[a,b,c,d,e], mtp=[f,g,h,i]
+            - Combined: [a,b,c,d,e,f,g,h,i] (9 tokens)
+            - After load balancing:
+                - rank0: [a,c,e,g,i] (positions 0,2,4,6,8)
+                - rank1: [b,d,f,h] (positions 1,3,5,7)
+            - MTP mask for rank0 (4x5):
+                [[1,1,1,0,0],   # f can attend to a,c,e (pos 0,2,4 <= 5)
+                 [1,1,1,1,0],   # g can attend to a,c,e,g (pos 0,2,4,6 <= 6)
+                 [1,1,1,1,0],   # h can attend to a,c,e,g (pos 0,2,4,6 <= 7)
+                 [1,1,1,1,1]]   # i can attend to all (pos 0,2,4,6,8 <= 8)
+            - MTP mask for rank1 (4x4):
+                [[1,1,1,0],    # f can attend to b,d (pos 1,3 <= 5)
+                 [1,1,1,0],    # g can attend to b,d (pos 1,3 <= 6)
+                 [1,1,1,1],    # h can attend to b,d,f (pos 1,3,5 <= 7)
+                 [1,1,1,1]]    # i can attend to all (pos 1,3,5,7 <= 8)
+
+        Args:
+            num_scheduled_tokens: Number of history tokens per request
+                                  Shape: [num_reqs]
+            num_mtp_tokens: Number of MTP draft tokens per request
+                           Shape: [num_reqs]
+            arange_np: Pre-allocated array for arange operations
+
+        Returns:
+            List of attention mask tensors, one per request
+            Each mask has shape [num_mtp_tokens_i, num_local_tokens_i]
+            where num_local_tokens_i = number of tokens on this rank after load balancing
+        """
+        num_reqs = len(num_scheduled_tokens)
+        mtp_masks = []
+
+        for req_idx in range(num_reqs):
+            history_len = num_scheduled_tokens[req_idx]
+            mtp_len = num_mtp_tokens[req_idx]
+
+            if mtp_len == 0 or history_len == 0:
+                mtp_masks.append(None)
+                continue
+
+            # Combined sequence length
+            total_len = history_len + mtp_len
+
+            # Load balancing: split combined sequence using odd/even pattern
+            # rank0: positions 0,2,4,6,... (even indices)
+            # rank1: positions 1,3,5,7,... (odd indices)
+            if self.pcp_world_rank == 0:
+                local_indices = list(range(0, total_len, 2))
+            else:
+                local_indices = list(range(1, total_len, 2))
+
+            local_len = len(local_indices)
+
+            # Global positions for history (0 to history_len-1)
+            history_positions = list(range(history_len))
+            # Global positions for MTP (history_len to history_len + mtp_len - 1)
+            mtp_positions = list(range(history_len, history_len + mtp_len))
+
+            # Local positions (global positions that exist on this rank)
+            local_history_positions = [p for p in history_positions if p in local_indices]
+            local_all_positions = sorted(local_indices)
+
+            # Generate mask: MTP token at global position m can attend to
+            # local token at global position k if m >= k
+            mask = np.zeros((mtp_len, local_len), dtype=bool)
+            for m_idx, mtp_global_pos in enumerate(mtp_positions):
+                for k_idx, local_global_pos in enumerate(local_all_positions):
+                    mask[m_idx, k_idx] = (mtp_global_pos >= local_global_pos)
+
+            mtp_masks.append(torch.from_numpy(mask))
+
+        return mtp_masks
