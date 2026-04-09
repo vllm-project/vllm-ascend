@@ -243,6 +243,17 @@ class TestUtils(TestBase):
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count,
                          len(REGISTERED_ASCEND_OPS))
+
+    @mock.patch("vllm.model_executor.custom_op.CustomOp")
+    @mock.patch("vllm_ascend.utils.is_310p", return_value=True)
+    def test_register_ascend_customop_310p_includes_mrotary(self, _mock_is_310p, mock_customop):
+        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
+        utils.REGISTERED_ASCEND_OPS = {}
+
+        utils.register_ascend_customop()
+
+        registered_names = [call.kwargs["name"] for call in mock_customop.register_oot.mock_calls]
+        self.assertIn("MRotaryEmbedding", registered_names)
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
