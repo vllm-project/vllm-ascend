@@ -1001,9 +1001,8 @@ class PCPManager:
               - rank1: [d,e,f,h] positions [3,4,5,7] -> mask 4x4
 
         Args:
-            scheduler_output: SchedulerOutput containing:
-                - num_computed_tokens: tensor of shape [num_reqs], number of history tokens
-                - num_scheduled_tokens: tensor of shape [num_reqs], number of new tokens (MTP tokens + 1)
+            scheduler_output: SchedulerOutput containing scheduled_cached_reqs with
+                num_computed_tokens and num_scheduled_tokens
 
         Returns:
             List of attention mask tensors for decode requests, one per request
@@ -1018,16 +1017,24 @@ class PCPManager:
         cp_size = self.pcp_world_size * self.dcp_world_size
         assert cp_size > 0, "cp_size must be greater than 0"
 
-        # Extract decode request info from scheduler_output
-        num_computed_tokens = scheduler_output.num_computed_tokens[: self.num_decode_reqs]
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens[: self.num_decode_reqs]
+        # Extract decode request info from scheduler_output.scheduled_cached_reqs
+        cached_req_data = scheduler_output.scheduled_cached_reqs
+        decode_num_computed_tokens = cached_req_data.num_computed_tokens[: self.num_decode_reqs]
+        decode_req_ids = cached_req_data.req_ids[: self.num_decode_reqs]
+
+        # Get num_scheduled_tokens from scheduler_output using req_ids
+        decode_num_scheduled_tokens = np.array(
+            [scheduler_output.num_scheduled_tokens[req_id] for req_id in decode_req_ids],
+            dtype=np.int32,
+        )
 
         # MTP token count (scheduled_tokens includes the actual token, so mtp_len = scheduled_tokens - 1)
-        mtp_len = num_scheduled_tokens - 1
+        mtp_len = decode_num_scheduled_tokens - 1
 
         # Get local history tokens on each rank using _get_cp_local_seq_lens
+        num_computed_tokens_tensor = torch.from_numpy(decode_num_computed_tokens)
         local_seq_lens = self._get_cp_local_seq_lens(
-            num_computed_tokens,
+            num_computed_tokens_tensor,
             self.pcp_world_size,
             self.dcp_world_size,
             self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
@@ -1047,7 +1054,7 @@ class PCPManager:
                 continue
 
             # Get global history length (before splitting) for position calculation
-            global_history_len = num_computed_tokens[req_idx].item()
+            global_history_len = decode_num_computed_tokens[req_idx]
 
             # Build local history positions ( DualChunkSwap pattern)
             if cp_rank % 2 == 0:
