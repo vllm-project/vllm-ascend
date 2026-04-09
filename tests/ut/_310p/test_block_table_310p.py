@@ -35,8 +35,8 @@ class TestBlockTable310(TestBase):
 
     def _create_block_table(self, dcp_world_size, dcp_rank, pcp_world_size, pcp_rank, cp_kv_cache_interleave_size):
         with (
-            patch("vllm_ascend._310p.block_table.get_dcp_group") as mock_get_dcp_group,
-            patch("vllm_ascend._310p.block_table.get_pcp_group") as mock_get_pcp_group,
+            patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group,
+            patch("vllm_ascend.worker.block_table.get_pcp_group") as mock_get_pcp_group,
         ):
             mock_dcp_group = MagicMock(spec=GroupCoordinator)
             mock_dcp_group.world_size = dcp_world_size

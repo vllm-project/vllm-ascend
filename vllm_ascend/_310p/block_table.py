@@ -1,122 +1,14 @@
 import numpy as np
 import torch
-from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
+from vllm_ascend.worker.block_table import BlockTable as AscendBlockTable
+from vllm_ascend.worker.block_table import MultiGroupBlockTable as AscendMultiGroupBlockTable
 
-class BlockTable:
-    def __init__(
-        self,
-        block_size: int,
-        max_num_reqs: int,
-        max_num_blocks_per_req: int,
-        max_num_batched_tokens: int,
-        pin_memory: bool,
-        device: torch.device,
-        kernel_sizes: list[int] | None = None,
-        cp_kv_cache_interleave_size: int = 1,
-        num_speculative_tokens: int = 0,
-    ):
-        self.max_num_reqs = max_num_reqs
-        self.max_num_blocks_per_req = max_num_blocks_per_req
-        self.max_num_batched_tokens = max_num_batched_tokens
-        self.pin_memory = pin_memory
-        self.device = device
-        self.physical_block_size = block_size
 
-        try:
-            self.pcp_world_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP/PCP might not be initialized in testing.
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
-            self.pcp_world_size = 1
-            self.pcp_rank = 0
-
-        if kernel_sizes is None or kernel_sizes == [0]:
-            self.block_size = block_size
-            self.logical_block_size = block_size
-            self.blocks_per_phys_block = 1
-            self.use_hybrid_blocks = False
-        else:
-            selected_kernel_size = None
-            for kernel_size in kernel_sizes:
-                if kernel_size > 0 and self.physical_block_size % kernel_size == 0:
-                    selected_kernel_size = kernel_size
-                    break
-
-            if selected_kernel_size is None:
-                raise ValueError(
-                    f"None of the kernel sizes {kernel_sizes} can divide "
-                    f"physical block size {self.physical_block_size} evenly"
-                )
-
-            self.block_size = selected_kernel_size
-            self.logical_block_size = selected_kernel_size
-            self.blocks_per_phys_block = self.physical_block_size // self.logical_block_size
-            self.use_hybrid_blocks = self.blocks_per_phys_block > 1
-
-        if self.use_hybrid_blocks:
-            logical_table_size = max_num_blocks_per_req * self.blocks_per_phys_block
-        else:
-            logical_table_size = max_num_blocks_per_req
-
-        duplicate_size = 1
-        if self.pcp_world_size * self.dcp_world_size > 1:
-            duplicate_size += num_speculative_tokens
-        self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
-        self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
-        self.slot_mapping = self._make_buffer(
-            self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32
-        )
-
-        self.kernel_sizes = kernel_sizes
-        self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
-
-    def append_row(
-        self,
-        block_ids,
-        row_idx: int,
-    ) -> None:
-        if not block_ids:
-            return
-        block_ids = np.asarray(block_ids, dtype=np.int32)
-        if self.use_hybrid_blocks:
-            block_ids = self._convert_physical_to_logical_blocks(block_ids)
-
-        num_blocks = len(block_ids)
-        start = self.num_blocks_per_row[row_idx]
-        self.block_table.np[row_idx, start : start + num_blocks] = block_ids
-        self.num_blocks_per_row[row_idx] += num_blocks
-
-    def add_row(self, block_ids: list[int], row_idx: int) -> None:
-        self.num_blocks_per_row[row_idx] = 0
-        self.append_row(block_ids, row_idx)
-
-    def clear_row(self, row_idx: int) -> None:
-        num_blocks = self.num_blocks_per_row[row_idx]
-        if num_blocks > 0:
-            self.block_table.np[row_idx, :num_blocks] = 0
-        self.num_blocks_per_row[row_idx] = 0
-
-    def move_row(self, src: int, tgt: int) -> None:
-        num_blocks = self.num_blocks_per_row[src]
-        self.block_table.np[tgt, :num_blocks] = self.block_table.np[src, :num_blocks]
-        self.num_blocks_per_row[tgt] = num_blocks
-
-    def swap_row(self, src: int, tgt: int) -> None:
-        num_blocks_src = self.num_blocks_per_row[src]
-        num_blocks_tgt = self.num_blocks_per_row[tgt]
-        self.num_blocks_per_row[src] = num_blocks_tgt
-        self.num_blocks_per_row[tgt] = num_blocks_src
-        self.block_table.np[[src, tgt]] = self.block_table.np[[tgt, src]]
-
+class BlockTable(AscendBlockTable):
     def compute_slot_mapping(self, *args) -> None:
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
         num_tokens = positions.shape[0]
@@ -152,15 +44,8 @@ class BlockTable:
 
         self.commit_slot_mapping(num_tokens)
 
-    def commit_block_table(self, num_reqs: int) -> None:
-        self.block_table.copy_to_gpu(num_reqs)
-
     def commit_slot_mapping(self, num_tokens: int) -> None:
         self.slot_mapping.copy_to_gpu(num_tokens)
-
-    def clear(self) -> None:
-        self.block_table.fill_(0)
-        self.block_table.cpu.fill_(0)
 
     def _get_block_table_indices(self, req_indices: np.ndarray, logical_block_idx: np.ndarray) -> np.ndarray:
         row_stride = self.max_num_blocks_per_req * self.blocks_per_phys_block
@@ -169,14 +54,12 @@ class BlockTable:
     def _normalize_slot_mapping_inputs(self, *args) -> tuple[np.ndarray, np.ndarray]:
         if len(args) == 2:
             req_indices, positions = args
-            req_indices_np = self._to_numpy(req_indices, dtype=np.int64)
-            positions_np = self._to_numpy(positions, dtype=np.int64)
-            return req_indices_np, positions_np
+            return self._to_numpy(req_indices), self._to_numpy(positions)
 
         if len(args) == 3:
             num_reqs, query_start_loc, positions = args
-            query_start_loc_np = self._to_numpy(query_start_loc, dtype=np.int64)[: num_reqs + 1]
-            positions_np = self._to_numpy(positions, dtype=np.int64)
+            query_start_loc_np = self._to_numpy(query_start_loc)[: num_reqs + 1]
+            positions_np = self._to_numpy(positions)
             counts = np.diff(query_start_loc_np)
             req_indices_np = np.repeat(np.arange(num_reqs, dtype=np.int64), counts)
             if req_indices_np.shape[0] != positions_np.shape[0]:
@@ -189,40 +72,15 @@ class BlockTable:
         raise TypeError("compute_slot_mapping expects either 2 or 3 positional arguments")
 
     @staticmethod
-    def _to_numpy(value, dtype: np.dtype) -> np.ndarray:
+    def _to_numpy(value) -> np.ndarray:
         if isinstance(value, np.ndarray):
-            return value.astype(dtype, copy=False)
+            return value.astype(np.int64, copy=False)
         if isinstance(value, torch.Tensor):
-            return value.detach().cpu().numpy().astype(dtype, copy=False)
-        return np.asarray(value, dtype=dtype)
-
-    def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
-        if not self.use_hybrid_blocks:
-            return physical_blocks
-
-        logical_blocks: list[int] = []
-        for phys_block in physical_blocks:
-            base_logical = phys_block * self.blocks_per_phys_block
-            logical_blocks.extend(range(base_logical, base_logical + self.blocks_per_phys_block))
-
-        return np.asarray(logical_blocks, dtype=np.int32)
-
-    def get_device_tensor(self) -> torch.Tensor:
-        return self.block_table.gpu
-
-    def get_cpu_tensor(self) -> torch.Tensor:
-        return self.block_table.cpu
-
-    def get_numpy_array(self) -> np.ndarray:
-        return self.block_table.np
-
-    def _make_buffer(self, *size: int | torch.SymInt, dtype: torch.dtype) -> CpuGpuBuffer:
-        return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)
+            return value.detach().cpu().numpy().astype(np.int64, copy=False)
+        return np.asarray(value, dtype=np.int64)
 
 
-class MultiGroupBlockTable:
-    """The BlockTables for each KV cache group."""
-
+class MultiGroupBlockTable(AscendMultiGroupBlockTable):
     def __init__(
         self,
         max_num_reqs: int,
@@ -269,41 +127,10 @@ class MultiGroupBlockTable:
             for block_size, kernel_size_list, max_num_blocks_per_req in zip(block_sizes, kernel_sizes, max_num_blocks)
         ]
 
-    def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
-        for i, block_table in enumerate(self.block_tables):
-            block_table.append_row(block_ids[i], row_idx)
-
-    def add_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
-        for i, block_table in enumerate(self.block_tables):
-            block_table.add_row(block_ids[i], row_idx)
-
-    def clear_row(self, row_idx: int) -> None:
-        for block_table in self.block_tables:
-            block_table.clear_row(row_idx)
-
-    def move_row(self, src: int, tgt: int) -> None:
-        for block_table in self.block_tables:
-            block_table.move_row(src, tgt)
-
-    def swap_row(self, src: int, tgt: int) -> None:
-        for block_table in self.block_tables:
-            block_table.swap_row(src, tgt)
-
     def compute_slot_mapping(self, *args) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(*args)
 
-    def commit_block_table(self, num_reqs: int) -> None:
-        for block_table in self.block_tables:
-            block_table.commit_block_table(num_reqs)
-
     def commit_slot_mapping(self, num_tokens: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_slot_mapping(num_tokens)
-
-    def clear(self) -> None:
-        for block_table in self.block_tables:
-            block_table.clear()
-
-    def __getitem__(self, idx: int) -> "BlockTable":
-        return self.block_tables[idx]
