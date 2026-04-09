@@ -50,7 +50,7 @@ def expand_block_ids(
     # Skip the first skip_count elements (only affects first block)
     if skip_count > 0:
         all_ids = all_ids[skip_count:]
-    output[:len(all_ids)] = all_ids
+    output[: len(all_ids)] = all_ids
 
 
 class CpuNpuOffloadingHandler(OffloadingHandler):
@@ -125,15 +125,11 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
                 npu_base_ptrs.append(npu_t.data_ptr())
                 cpu_base_ptrs.append(cpu_t.data_ptr())
                 # block size in bytes = stride of dim 0 (elements) * element size
-                block_sizes_in_bytes.append(
-                    npu_t.stride(0) * npu_t.element_size()
-                )
+                block_sizes_in_bytes.append(npu_t.stride(0) * npu_t.element_size())
 
         self._npu_base_ptrs = np.array(npu_base_ptrs, dtype=np.int64)
         self._cpu_base_ptrs = np.array(cpu_base_ptrs, dtype=np.int64)
-        self._block_size_in_bytes_arr = np.array(
-            block_sizes_in_bytes, dtype=np.int64
-        )
+        self._block_size_in_bytes_arr = np.array(block_sizes_in_bytes, dtype=np.int64)
         # Total bytes per block across all sub-tensors (for transfer stats)
         self._total_bytes_per_block = int(self._block_size_in_bytes_arr.sum())
 
@@ -224,9 +220,7 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
             start_event.record(stream)
             if total > 0:
                 direction = 0 if not is_d2h else 1
-                torch.ops._C_ascend.swap_blocks_batch(
-                    batch_src, batch_dst, batch_sizes, direction
-                )
+                torch.ops._C_ascend.swap_blocks_batch(batch_src, batch_dst, batch_sizes, direction)
             end_event.record(stream)
 
         transfers.append(
@@ -249,10 +243,7 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         ]:
             while transfers and transfers[0].end_event.query():
                 transfer = transfers.popleft()
-                transfer_time = (
-                    transfer.start_event.elapsed_time(transfer.end_event)
-                    * 1e-3
-                )
+                transfer_time = transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
                 results.append(
                     TransferResult(
                         job_id=transfer.job_id,
