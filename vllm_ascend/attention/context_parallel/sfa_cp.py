@@ -310,7 +310,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         if self.pcp_size > 1:
             req_kv_cache = get_pcp_group().all_gather(req_kv_cache, 0)
             return req_kv_cache, block_num
-    
+
     def gather_block_table(self, block_num: int, block_tables: torch.Tensor, block_arange: torch.Tensor):
         new_block_tables = torch.arange(block_tables.numel(), device=block_tables.device).view(block_tables.shape)
         block_tables = (
