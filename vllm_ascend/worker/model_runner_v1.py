@@ -1350,7 +1350,7 @@ class NPUModelRunner(GPUModelRunner):
                         if num_tokens_padded == num_tokens_unpadded:
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
-                        else:
+                        if num_tokens_padded != num_tokens_unpadded and not self.speculative_config:
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
                             self.query_start_loc.np[num_reqs_padded] = num_tokens_padded
@@ -2305,12 +2305,6 @@ class NPUModelRunner(GPUModelRunner):
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
-            # revert spec_decode_common_attn_metadata.actual_seq_lengths_q to unpadded version
-            if not spec_decode_common_attn_metadata.actual_seq_lengths_q:
-                spec_decode_common_attn_metadata.actual_seq_lengths_q = [num_tokens]
-            else:
-                spec_decode_common_attn_metadata.actual_seq_lengths_q[-1] = num_tokens
-
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
