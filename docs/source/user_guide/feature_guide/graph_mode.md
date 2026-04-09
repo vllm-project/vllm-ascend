@@ -134,6 +134,25 @@ For more details about Xlite, see the [Xlite README](https://atomgit.com/openeul
 - ACLGraph and XliteGraph have different support coverage. XliteGraph should be treated as an alternative backend, not as a drop-in replacement for all ACLGraph scenarios.
 - Model and backend coverage is still evolving, so a configuration that works for one model family may not yet be recommended for another.
 
+## Fallback to Eager Mode
+
+If you encounter issues with graph mode, you can temporarily fall back to eager mode by setting `enforce_eager=True`.
+
+**Offline example:**
+
+```python
+from vllm import LLM
+
+llm = LLM(model="path/to/your/model", enforce_eager=True)
+outputs = llm.generate("Hello, how are you?")
+```
+
+**Online example:**
+
+```bash
+vllm serve path/to/your/model --enforce-eager
+```
+
 ## References
 
 - [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/)
