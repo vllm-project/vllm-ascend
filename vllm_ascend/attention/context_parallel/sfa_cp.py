@@ -301,7 +301,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         )
         return attn_output
 
-    def gather_kv_cross_cp(self, kv_cache: torch.Tensor,block_tables: torch.Tensor) -> torch.Tensor:
+    def gather_kv_cross_cp(self, kv_cache: torch.Tensor, block_tables: torch.Tensor) -> torch.Tensor:
         # Note(qcs): we need set kv_cache_interleave_size = block_size for sfa!!!
         req_kv_cache = torch.index_select(kv_cache, 0, block_tables.flatten())
         block_num = req_kv_cache.shape[0]
@@ -355,7 +355,6 @@ class AscendSFACPImpl(AscendSFAImpl):
         block_table = attn_metadata.block_table
         assert attn_metadata.sfa_cp_metadata is not None
         block_arange = attn_metadata.sfa_cp_metadata.block_arange
-
         key, block_num = self.gather_kv_cross_cp(key, block_table)
         block_table = self.gather_block_table(block_num, block_table, block_arange)
 
