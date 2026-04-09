@@ -48,7 +48,7 @@ RUN pip config set global.index-url ${PIP_INDEX_URL} && \
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_COMMIT=14acf429ac08b6d538ca6feb3e06b6d13895804d
+ARG VLLM_COMMIT=v0.19.0
 RUN git init /vllm-workspace/vllm && \
     git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO $VLLM_COMMIT && \
     git -C /vllm-workspace/vllm checkout FETCH_HEAD
