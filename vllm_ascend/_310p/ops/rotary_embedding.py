@@ -183,9 +183,6 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         if offsets is not None:
             raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
 
-        is_neox_style = self.is_neox_style
-        if is_neox_style_override is not None:
-            is_neox_style = is_neox_style_override
         # For MRoPE, upstream Ascend path (`npu_mrope`) always uses rotary_mode="half".
         # Interleaved behavior is encoded by mrope_section/cos-sin re-layout, not by
         # switching rotary kernel mode.
