@@ -2,12 +2,39 @@ import torch
 import pytest
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+
+def torch_min_p_torch(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    min_p: torch.Tensor,
+):
+
+    num_tokens, _ = logits.shape
+    out = logits.clone()
+    
+    for token_idx in range(num_tokens):
+        req_state_idx = expanded_idx_mapping[token_idx].item()
+        
+        min_p_val = min_p[req_state_idx].item()
+        if min_p_val == 0.0:
+            continue
+        
+        token_logits = out[token_idx]
+        max_val = token_logits.max()
+        threshold = max_val + torch.log(torch.tensor(min_p_val, device=logits.device))
+        token_logits = torch.where(token_logits < threshold, -torch.inf, token_logits)
+        out[token_idx] = token_logits
+    
+    return out
+
 @pytest.mark.parametrize("num_reqs,vocab_size", [
     (48, 102400),
     (96, 102400),
     (24, 151936),
     (1, 32000),
 ])
+
 def test_apply_min_p_kernel(num_reqs, vocab_size):
 
     """Test apply_min_p for computing Min-P sampling mask
@@ -28,20 +55,22 @@ def test_apply_min_p_kernel(num_reqs, vocab_size):
     triton_logits = original_logits.clone()
     ref_logits = original_logits.clone()
 
+    expanded_idx_mapping = torch.arange(num_reqs-1, -1, -1, device=device, dtype=torch.int32)
+
     # Generate random min_p values (valid range is typically (0, 1.0])
     min_p = torch.empty(num_reqs, device=device, dtype=torch.float32).uniform_(0.01, 0.5)
 
     # ========== Execute test ==========
     # 1. Invoke your Triton kernel wrapper
-    apply_min_p(triton_logits, min_p)
+    apply_min_p(triton_logits, expanded_idx_mapping, min_p)
     torch.npu.synchronize()
 
     # 2. Compute reference values using PyTorch
-    max_vals = ref_logits.max(dim=-1, keepdim=True).values
-
-    thresholds = max_vals + torch.log(min_p.unsqueeze(1))
-
-    ref_logits[ref_logits < thresholds] = float("-inf")
+    ref_logits = torch_min_p_torch(
+        ref_logits,
+        expanded_idx_mapping,
+        min_p,
+    )
 
     # ========== Verify results ==========
     triton_inf_mask = torch.isinf(triton_logits)
