@@ -1,5 +1,4 @@
 import torch
-
 from vllm.v1.sample.logits_processor import LogitsProcessors
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable
