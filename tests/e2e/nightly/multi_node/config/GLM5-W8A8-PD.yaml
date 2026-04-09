@@ -22,6 +22,9 @@ env_common:
   HCCL_INTRA_ROCE_ENABLE: 0
   VLLM_ASCEND_ENABLE_FUSED_MC2: 1
 
+special_dependencies:
+  transformers: "5.2.0"
+
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0, 1]
@@ -33,29 +36,29 @@ deployment:
     envs:
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5-w8a8 \
-          --host 0.0.0.0 \
-          --port $SERVER_PORT \
-          --data-parallel-size 4 \
-          --data-parallel-rank 0 \
-          --data-parallel-size-local 2 \
-          --data-parallel-address $LOCAL_IP \
-          --data-parallel-rpc-port 10521 \
-          --tensor-parallel-size 8 \
-          --enable-expert-parallel \
-          --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-          --seed 1024 \
-          --max-model-len 131072 \
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-          --max-num-batched-tokens 4096 \
-          --trust-remote-code \
-          --max-num-seqs 64 \
-          --quantization ascend \
-          --gpu-memory-utilization 0.95 \
-          --enforce-eager \
-          --enable-auto-tool-choice \
-          --tool-call-parser glm47 \
-          --reasoning-parser glm45 \
+      vllm serve Eco-Tech/GLM-5-w8a8
+          --host 0.0.0.0
+          --port $SERVER_PORT
+          --data-parallel-size 4
+          --data-parallel-size-local 2
+          --data-parallel-start-rank 0
+          --data-parallel-address $LOCAL_IP
+          --data-parallel-rpc-port 10521
+          --tensor-parallel-size 8
+          --enable-expert-parallel
+          --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+          --seed 1024
+          --max-model-len 131072
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --max-num-batched-tokens 4096
+          --trust-remote-code
+          --max-num-seqs 64
+          --quantization ascend
+          --gpu-memory-utilization 0.95
+          --enforce-eager
+          --enable-auto-tool-choice
+          --tool-call-parser glm47
+          --reasoning-parser glm45
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
@@ -79,29 +82,29 @@ deployment:
     envs:
       VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5-w8a8 \
-          --host 0.0.0.0 \
-          --port $SERVER_PORT \
-          --data-parallel-size 4 \
-          --data-parallel-rank 2 \
-          --data-parallel-size-local 2 \
-          --data-parallel-address $MASTER_IP \
-          --data-parallel-rpc-port 10521 \
-          --tensor-parallel-size 8 \
-          --enable-expert-parallel \
-          --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-          --seed 1024 \
-          --max-model-len 131072 \
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-          --max-num-batched-tokens 4096 \
-          --trust-remote-code \
-          --max-num-seqs 64 \
-          --quantization ascend \
-          --gpu-memory-utilization 0.95 \
-          --enforce-eager \
-          --enable-auto-tool-choice \
-          --tool-call-parser glm47 \
-          --reasoning-parser glm45 \
+      vllm serve Eco-Tech/GLM-5-w8a8
+          --host 0.0.0.0
+          --port $SERVER_PORT
+          --data-parallel-size 4
+          --data-parallel-size-local 2
+          --data-parallel-start-rank 2
+          --data-parallel-address $MASTER_IP
+          --data-parallel-rpc-port 10521
+          --tensor-parallel-size 8
+          --enable-expert-parallel
+          --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+          --seed 1024
+          --max-model-len 131072
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --max-num-batched-tokens 4096
+          --trust-remote-code
+          --max-num-seqs 64
+          --quantization ascend
+          --gpu-memory-utilization 0.95
+          --enforce-eager
+          --enable-auto-tool-choice
+          --tool-call-parser glm47
+          --reasoning-parser glm45
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
@@ -124,29 +127,30 @@ deployment:
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5-w8a8 \
-          --host 0.0.0.0 \
-          --port $SERVER_PORT \
-          --data-parallel-size 8 \
-          --data-parallel-rank 0 \
-          --data-parallel-address $MASTER_IP \
-          --data-parallel-rpc-port 10543 \
-          --tensor-parallel-size 4 \
-          --enable-expert-parallel \
-          --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
-          --seed 1024 \
-          --max-model-len 202752 \
-          --max-num-batched-tokens 32 \
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-          --trust-remote-code \
-          --max-num-seqs 8 \
-          --gpu-memory-utilization 0.92 \
-          --async-scheduling \
-          --quantization ascend \
-          --enable-auto-tool-choice \
-          --tool-call-parser glm47 \
-          --reasoning-parser glm45 \
+      vllm serve Eco-Tech/GLM-5-w8a8
+          --host 0.0.0.0
+          --port $SERVER_PORT
+          --data-parallel-size 8
+          --data-parallel-size-local 4
+          --data-parallel-start-rank 0
+          --data-parallel-address $LOCAL_IP
+          --data-parallel-rpc-port 10543
+          --tensor-parallel-size 4
+          --enable-expert-parallel
+          --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}'
+          --seed 1024
+          --max-model-len 202752
+          --max-num-batched-tokens 32
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --trust-remote-code
+          --max-num-seqs 8
+          --gpu-memory-utilization 0.92
+          --async-scheduling
+          --quantization ascend
+          --enable-auto-tool-choice
+          --tool-call-parser glm47
+          --reasoning-parser glm45
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
@@ -170,29 +174,31 @@ deployment:
       VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5-w8a8 \
-          --host 0.0.0.0 \
-          --port $SERVER_PORT \
-          --data-parallel-size 8 \
-          --data-parallel-rank 4 \
-          --data-parallel-address $MASTER_IP \
-          --data-parallel-rpc-port 10543 \
-          --tensor-parallel-size 4 \
-          --enable-expert-parallel \
-          --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}' \
-          --seed 1024 \
-          --max-model-len 202752 \
-          --max-num-batched-tokens 32 \
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}' \
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
-          --trust-remote-code \
-          --max-num-seqs 8 \
-          --gpu-memory-utilization 0.92 \
-          --async-scheduling \
-          --quantization ascend \
-          --enable-auto-tool-choice \
-          --tool-call-parser glm47 \
-          --reasoning-parser glm45 \
+      vllm serve Eco-Tech/GLM-5-w8a8
+          --host 0.0.0.0
+          --port $SERVER_PORT
+          --data-parallel-size 8
+          --data-parallel-size-local 4
+          --data-parallel-start-rank 4
+          --headless        
+          --data-parallel-address $MASTER_IP
+          --data-parallel-rpc-port 10543
+          --tensor-parallel-size 4
+          --enable-expert-parallel
+          --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp"}'
+          --seed 1024
+          --max-model-len 202752
+          --max-num-batched-tokens 32
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
+          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --trust-remote-code
+          --max-num-seqs 8
+          --gpu-memory-utilization 0.92
+          --async-scheduling
+          --quantization ascend
+          --enable-auto-tool-choice
+          --tool-call-parser glm47
+          --reasoning-parser glm45
           --kv-transfer-config 
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
