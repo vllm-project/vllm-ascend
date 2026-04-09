@@ -105,32 +105,6 @@ void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
     return;
 }
 
-// inline bool is_device_pointer(const void* ptr) {
-//     aclrtMemAttr mem_type = ACL_DDR_MEM; 
-//     aclError ret = aclrtPointerGetAttr(
-//         &mem_type, ACL_POINTER_ATTR_MEMORY_TYPE, const_cast<void*>(ptr));
-//     if (ret != ACL_SUCCESS) {
-//         return false;
-//     }
-//     return (mem_type == ACL_HBM_MEM);
-// }
-
-// inline aclrtMemcpyKind determine_memcpy_kind(const void* src, const void* dst) {
-//     bool src_on_device = is_device_pointer(src);
-//     bool dst_on_device = is_device_pointer(dst);
-
-//     if (src_on_device && dst_on_device) {
-//         return ACL_MEMCPY_DEVICE_TO_DEVICE;
-//     } else if (src_on_device && !dst_on_device) {
-//         return ACL_MEMCPY_DEVICE_TO_HOST;
-//     } else if (!src_on_device && dst_on_device) {
-//         return ACL_MEMCPY_HOST_TO_DEVICE;
-//     }
-//     TORCH_CHECK(false, "swap_blocks_batch: invalid device combination, "
-//                 "both src and dst appear to be on Host");
-//     return ACL_MEMCPY_HOST_TO_DEVICE;  // unreachable, suppress warning
-// }
-
 void swap_blocks_batch(const torch::Tensor& src_ptrs,
                        const torch::Tensor& dst_ptrs,
                        const torch::Tensor& sizes,
@@ -155,8 +129,6 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-    torch::Device src_device = src_ptrs.device();
-    torch::Device dst_device = dst_ptrs.device();
     aclrtMemcpyKind memcpy_kind;
     switch (direction) {
         case 0:
@@ -173,17 +145,6 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
                         "swap_blocks_batch: invalid direction ", direction,
                         " (expected 0=H2D, 1=D2H, 2=D2D)");
     }
-    // if ((!src_device.is_cpu()) && (!dst_device.is_cpu())) {
-    //     TORCH_CHECK(src_device.index() == dst_device.index(),
-    //                 "src and dst must be on the same npu");
-    //     memcpy_kind = ACL_MEMCPY_DEVICE_TO_DEVICE;
-    // } else if ((!src_device.is_cpu()) && dst_device.is_cpu()) {
-    //     memcpy_kind = ACL_MEMCPY_DEVICE_TO_HOST;
-    // } else if (src_device.is_cpu() && (!dst_device.is_cpu())) {
-    //     memcpy_kind = ACL_MEMCPY_HOST_TO_DEVICE;
-    // } else {
-    //     TORCH_CHECK(false, "Invalid device combination, src tensor device: ", src_device, ", dst tensor device: ", dst_device);
-    // }
 
     // =========================================================================
     // 路径 1: aclrtMemcpyBatchAsync (CANN 8.5+, 试验特性)

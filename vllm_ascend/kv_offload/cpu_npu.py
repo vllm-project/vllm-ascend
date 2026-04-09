@@ -1,3 +1,6 @@
+from collections import deque
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 from vllm.logger import init_logger
@@ -7,6 +10,15 @@ from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class Transfer:
+    job_id: int
+    stream: torch.npu.Stream
+    start_event: torch.npu.Event
+    end_event: torch.npu.Event
+    num_bytes: int
 
 
 def expand_block_ids(
@@ -30,16 +42,15 @@ def expand_block_ids(
     """
     assert skip_count < block_size_factor
 
-    first_range = np.arange(skip_count, block_size_factor)
-    full_range = np.arange(0, block_size_factor)
-
-    output_idx = 0
-    for i, block_id in enumerate(block_ids):
-        base_block_id = block_id * block_size_factor
-        indices = first_range if i == 0 else full_range
-        output_end_idx = output_idx + len(indices)
-        output[output_idx:output_end_idx] = base_block_id + indices
-        output_idx = output_end_idx
+    # Vectorized: compute all sub-block IDs at once
+    bases = block_ids * block_size_factor
+    offsets = np.arange(block_size_factor)
+    # shape: (num_blocks, block_size_factor) -> ravel to 1D
+    all_ids = (bases[:, None] + offsets[None, :]).ravel()
+    # Skip the first skip_count elements (only affects first block)
+    if skip_count > 0:
+        all_ids = all_ids[skip_count:]
+    output[:len(all_ids)] = all_ids
 
 
 class CpuNpuOffloadingHandler(OffloadingHandler):
@@ -58,10 +69,12 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         self.d2h_stream = torch.npu.Stream()
         self.h2d_stream = torch.npu.Stream()
 
-        # job_id -> transfer npu event
-        self.transfer_events: dict[int, torch.npu.Event] = {}
-        # list of npu events available for reuse
-        self.events_pool: list[torch.npu.Event] = []
+        # Ordered queue of in-flight transfers per direction
+        self._d2h_transfers: deque[Transfer] = deque()
+        self._h2d_transfers: deque[Transfer] = deque()
+
+        # Reusable event pool to avoid allocation overhead
+        self._event_pool: list[torch.npu.Event] = []
 
         pin_memory = is_pin_memory_available()
 
@@ -121,9 +134,18 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         self._block_size_in_bytes_arr = np.array(
             block_sizes_in_bytes, dtype=np.int64
         )
+        # Total bytes per block across all sub-tensors (for transfer stats)
+        self._total_bytes_per_block = int(self._block_size_in_bytes_arr.sum())
+
+    def _get_event(self) -> torch.npu.Event:
+        if self._event_pool:
+            return self._event_pool.pop()
+        return torch.npu.Event(enable_timing=True)
+
+    def _recycle_event(self, event: torch.npu.Event) -> None:
+        self._event_pool.append(event)
 
     def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
-        logger.info("start transfer_async...")
         src_spec, dst_spec = spec
         if isinstance(src_spec, CPULoadStoreSpec):
             assert isinstance(dst_spec, GPULoadStoreSpec)
@@ -132,6 +154,8 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
             dst_base_ptrs = self._npu_base_ptrs
             src_block_size_factor = self.block_size_factor
             dst_block_size_factor = 1
+            is_d2h = False
+            transfers = self._h2d_transfers
         else:
             assert isinstance(src_spec, GPULoadStoreSpec)
             assert isinstance(dst_spec, CPULoadStoreSpec)
@@ -140,6 +164,8 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
             dst_base_ptrs = self._cpu_base_ptrs
             src_block_size_factor = 1
             dst_block_size_factor = self.block_size_factor
+            is_d2h = True
+            transfers = self._d2h_transfers
 
         src_blocks = src_spec.block_ids
         dst_blocks = dst_spec.block_ids
@@ -183,35 +209,68 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         batch_dst = torch.from_numpy(all_dst)
         batch_sizes = torch.from_numpy(all_sizes)
 
-        event = self.events_pool.pop() if self.events_pool else torch.npu.Event()
+        start_event = self._get_event()
+        end_event = self._get_event()
+
+        if is_d2h:
+            # Wait for model computation to finish before reading NPU data
+            stream.wait_stream(torch.npu.current_stream())
+        if transfers:
+            # Ensure this transfer starts only after the previous one completes
+            last_transfer = transfers[-1]
+            stream.wait_event(last_transfer.end_event)
+
         with torch.npu.stream(stream):
+            start_event.record(stream)
             if total > 0:
+                direction = 0 if not is_d2h else 1
                 torch.ops._C_ascend.swap_blocks_batch(
-                    batch_src, batch_dst, batch_sizes, 0 if isinstance(src_spec, CPULoadStoreSpec) else 1
+                    batch_src, batch_dst, batch_sizes, direction
                 )
-            event.record(stream)
+            end_event.record(stream)
 
-        self.transfer_events[job_id] = event
+        transfers.append(
+            Transfer(
+                job_id=job_id,
+                stream=stream,
+                start_event=start_event,
+                end_event=end_event,
+                num_bytes=src_sub_block_count * self._total_bytes_per_block,
+            )
+        )
 
-        # success
         return True
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        for job_id, event in self.transfer_events.items():
-            if event.query():
-                results.append((job_id, True))
-                self.events_pool.append(event)
-        for job_id, _ in results:
-            del self.transfer_events[job_id]
+        for transfers, transfer_type in [
+            (self._d2h_transfers, ("NPU", "CPU")),
+            (self._h2d_transfers, ("CPU", "NPU")),
+        ]:
+            while transfers and transfers[0].end_event.query():
+                transfer = transfers.popleft()
+                transfer_time = (
+                    transfer.start_event.elapsed_time(transfer.end_event)
+                    * 1e-3
+                )
+                results.append(
+                    TransferResult(
+                        job_id=transfer.job_id,
+                        success=True,
+                        transfer_size=transfer.num_bytes,
+                        transfer_time=transfer_time,
+                        transfer_type=transfer_type,
+                    )
+                )
+                self._recycle_event(transfer.start_event)
+                self._recycle_event(transfer.end_event)
         return results
 
     def wait(self, job_ids: set[int]) -> None:
         """
         Wait (block) until all specified transfer jobs are completed.
         """
-        for job_id in job_ids:
-            event = self.transfer_events.get(job_id)
-            if event is not None:
-                # This will block until the NPU event is complete
-                event.synchronize()
+        for transfers in (self._d2h_transfers, self._h2d_transfers):
+            for transfer in transfers:
+                if transfer.job_id in job_ids:
+                    transfer.end_event.synchronize()
