@@ -15,7 +15,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from tests.e2e.conftest import VllmRunner
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 
 def test_qwen3_moe_tp4_fp16():
@@ -33,6 +34,7 @@ def test_qwen3_moe_tp4_fp16():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_qwen3_moe_ep4_fp16():
     example_prompts = [
         "Hello, my name is",
