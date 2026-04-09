@@ -60,7 +60,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | Triton Ascend |
 |-------------|--------------|------------------|-------------|--------------------|---------------|
-|     main    | {{main_vllm_commit}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |
+|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |
 
 ## Release cadence
 
@@ -176,4 +176,4 @@ Notes:
 - `torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable version to [PyPi](https://pypi.org/project/torch-npu)
   every 3 months, a development version (aka the POC version) every month, and a nightly version every day.
   The PyPi stable version **CAN** be used in vLLM Ascend final version, the monthly dev version **ONLY CAN** be used in
-  vLLM Ascend RC version for rapid iteration, and the nightly version **CANNOT** be used in vLLM Ascend any version and branch.
+  vLLM Ascend RC version for rapid iteration, and the nightly version **CANNOT** be used in vLLM Ascend any version or branch.

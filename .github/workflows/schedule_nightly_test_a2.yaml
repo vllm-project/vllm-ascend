@@ -84,7 +84,7 @@ jobs:
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2b3-0
     outputs:
       cann_image: ${{ steps.export.outputs.cann_image }}
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
@@ -172,7 +172,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 5
       matrix:
         vllm_ascend_branch: [releases-v0.18.0]
         test_config:
@@ -190,6 +190,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
       should_run: >-
         ${{
@@ -327,7 +328,7 @@ jobs:
           /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
 
   clear-pre-logs:
-    needs: [multi-node-tests]
+    needs: [parse-trigger, multi-node-tests]
     runs-on: linux-aarch64-a2b3-0
     if: github.event_name == 'schedule' && needs.multi-node-tests.result != 'skipped'
     steps:
@@ -335,3 +336,21 @@ jobs:
         run: |
           # Clear logs generated before the test to avoid confusion
           rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+
+  merge-benchmark-artifacts:
+    name: Merge benchmark artifacts into nightly-a2.zip
+    needs: [parse-trigger, single-node-tests, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.result == 'success' &&
+      (needs.single-node-tests.result != 'skipped' ||
+       needs.multi-node-tests.result != 'skipped')
+    runs-on: linux-aarch64-a2b3-0
+    steps:
+      - name: Merge all benchmark result artifacts
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: nightly-a2
+          pattern: nightly-test-benchmark-results-*
+          compression-level: 0
+          delete-merged: true
