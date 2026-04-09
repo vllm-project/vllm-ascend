@@ -37,12 +37,11 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 
-from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
+from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
@@ -54,9 +53,22 @@ class NPUModelRunner310(NPUModelRunner):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._replace_input_batch_block_table(
+        self.input_batch = NPUInputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=max(self.model_config.max_model_len, self.max_encoder_len),
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
             kernel_block_sizes=[[self.cache_config.block_size]],
+            is_spec_decode=bool(self.vllm_config.speculative_config),
+            logitsprocs=self.input_batch.logitsprocs,
+            is_pooling_model=self.is_pooling_model,
+            num_speculative_tokens=(
+                self.vllm_config.speculative_config.num_speculative_tokens if self.vllm_config.speculative_config else 0
+            ),
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
         self.sampler = AscendSampler310()
@@ -66,27 +78,6 @@ class NPUModelRunner310(NPUModelRunner):
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
             self.cudagraph_dispatcher.uniform_decode_query_len = _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN
-
-    def _replace_input_batch_block_table(
-        self,
-        block_sizes: list[int],
-        kernel_block_sizes: list[list[int]],
-        max_num_blocks_per_req: list[int] | None = None,
-    ) -> None:
-        self.input_batch.block_table = MultiGroupBlockTable310(
-            max_num_reqs=self.input_batch.max_num_reqs,
-            max_model_len=self.input_batch.max_model_len,
-            max_num_batched_tokens=self.input_batch.max_num_batched_tokens,
-            pin_memory=self.pin_memory,
-            device=self.device,
-            block_sizes=block_sizes,
-            max_num_blocks=max_num_blocks_per_req,
-            num_speculative_tokens=(
-                self.vllm_config.speculative_config.num_speculative_tokens if self.vllm_config.speculative_config else 0
-            ),
-            kernel_sizes=kernel_block_sizes,
-            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-        )
 
     @contextmanager
     def temporary_modify_uniform_decode_query_len(self):
@@ -504,10 +495,5 @@ class NPUModelRunner310(NPUModelRunner):
                     if self.vllm_config.speculative_config
                     else 0
                 ),
-                kernel_block_sizes=self.kernel_block_sizes,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-            )
-            self._replace_input_batch_block_table(
-                block_sizes=block_sizes,
                 kernel_block_sizes=self.kernel_block_sizes,
             )

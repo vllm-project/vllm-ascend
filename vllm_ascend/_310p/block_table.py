@@ -13,7 +13,7 @@ class BlockTable(AscendBlockTable):
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
         num_tokens = positions.shape[0]
         if num_tokens == 0:
-            self.commit_slot_mapping(0)
+            self.slot_mapping.copy_to_gpu(0)
             return
 
         if self.dcp_world_size * self.pcp_world_size > 1:
@@ -42,9 +42,6 @@ class BlockTable(AscendBlockTable):
             block_offsets = positions % self.block_size
             np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[:num_tokens])
 
-        self.commit_slot_mapping(num_tokens)
-
-    def commit_slot_mapping(self, num_tokens: int) -> None:
         self.slot_mapping.copy_to_gpu(num_tokens)
 
     def _get_block_table_indices(self, req_indices: np.ndarray, logical_block_idx: np.ndarray) -> np.ndarray:
@@ -130,7 +127,3 @@ class MultiGroupBlockTable(AscendMultiGroupBlockTable):
     def compute_slot_mapping(self, *args) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(*args)
-
-    def commit_slot_mapping(self, num_tokens: int) -> None:
-        for block_table in self.block_tables:
-            block_table.commit_slot_mapping(num_tokens)
