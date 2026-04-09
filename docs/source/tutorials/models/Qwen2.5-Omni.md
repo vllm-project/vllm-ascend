@@ -16,8 +16,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen2.5-Omni-3B`(BF16): [Download model weight](https://huggingface.co/Qwen/Qwen2.5-Omni-3B)
-- `Qwen2.5-Omni-7B`(BF16): [Download model weight](https://huggingface.co/Qwen/Qwen2.5-Omni-7B)
+- `Qwen2.5-Omni-3B`(BF16): [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-3B)
+- `Qwen2.5-Omni-7B`(BF16): [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B)
 
 Following examples use the 7B version by default.
 
@@ -69,7 +69,9 @@ docker run --rm \
 #### Single NPU (Qwen2.5-Omni-7B)
 
 :::{note}
-The env `LOCAL_MEDIA_PATH` which allowing API requests to read local images or videos from directories specified by the server file system. Please note this is a security risk. Should only be enabled in trusted environments.
+The **environment variable** `LOCAL_MEDIA_PATH` which **allows** API requests to read local images or videos from directories specified by the server file system. Please note this is a security risk. Should only be enabled in trusted environments.
+
+:::
 
 ```bash
 export VLLM_USE_MODELSCOPE=true
@@ -82,7 +84,7 @@ vllm serve "${MODEL_PATH}" \
 --served-model-name Qwen-Omni \
 --allowed-local-media-path ${LOCAL_MEDIA_PATH} \
 --trust-remote-code \
---compilation-config '{"full_cuda_graph": 1}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --no-enable-prefix-caching
 ```
 
@@ -97,23 +99,23 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 
 `--allowed-local-media-path` is optional, only set it if you need infer model with local media file.
 
-`--gpu-memory-utilization` should not be set manually only if you know what this parameter aims to.
+`--gpu-memory-utilization` should not be set manually unless you know what this parameter does.
 
 #### Multiple NPU (Qwen2.5-Omni-7B)
 
 ```bash
 export VLLM_USE_MODELSCOPE=true
 export MODEL_PATH=Qwen/Qwen2.5-Omni-7B
-export LOCAL_MEDIA_PATH=/local_path/to_media/
+export LOCAL_MEDIA_PATH=$HOME/.cache/vllm/assets/vllm_public_assets/
 export DP_SIZE=8
 
-vllm serve ${MODEL_PATH}\
+vllm serve ${MODEL_PATH} \
 --host 0.0.0.0 \
 --port 8000 \
 --served-model-name Qwen-Omni \
 --allowed-local-media-path ${LOCAL_MEDIA_PATH} \
 --trust-remote-code \
---compilation-config {"full_cuda_graph": 1} \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --data-parallel-size ${DP_SIZE} \
 --no-enable-prefix-caching
 ```
@@ -126,7 +128,7 @@ Not supported yet.
 
 ## Functional Verification
 
-If your service start successfully, you can see the info shown below:
+If your service **starts** successfully, you can see the info shown below:
 
 ```bash
 INFO:     Started server process [2736]
@@ -137,7 +139,7 @@ INFO:     Application startup complete.
 Once your server is started, you can query the model with input prompts:
 
 ```bash
-curl http://127.0.0.1:8000/v1/chat/completions   -H "Content-Type: application/json"   -H "Authorization: Bearer EMPTY"   -d '{
+curl http://localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -H "Authorization: Bearer EMPTY"   -d '{
     "model": "Qwen-Omni",
     "messages": [
       {
@@ -193,7 +195,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen2.5-Omni-7B` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 

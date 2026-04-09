@@ -27,7 +27,7 @@ from unittest.mock import patch
 import pytest
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
@@ -91,6 +91,7 @@ def test_qwen3_w4a8_dynamic_tp2(model):
         vllm_model.generate_greedy(prompts, max_tokens)
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_qwen3_moe_sp_tp2() -> None:
     example_prompts = [
         "Hello, my name is",
@@ -111,6 +112,7 @@ def test_qwen3_moe_sp_tp2() -> None:
 
 @pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "2048"})
+@wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_deepseek_w4a8_accuracy_tp2(model):
     prompts = [
         "Hello, my name is",
@@ -243,6 +245,7 @@ def test_qwen3_dense_prefetch_mlp_weight_tp2(model):
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free()
 def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
     short_example_prompts = [
         "Hello ",
@@ -261,6 +264,36 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
         additional_config={"layer_sharding": ["q_b_proj", "o_proj"]},
         reasoning_parser="deepseek_v3",
         tokenizer_mode="deepseek_v32",
+        gpu_memory_utilization=0.8,
+    ) as vllm_model:
+        vllm_model.generate_greedy(short_example_prompts, max_tokens)
+        vllm_model.generate_greedy(long_example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"HCCL_OP_EXPANSION_MODE": "AIV"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+@patch.dict(os.environ, {"ASCEND_AGGREGATE_ENABLE": "1"})
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@wait_until_npu_memory_free()
+def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
+    short_example_prompts = [
+        "Hello ",
+    ]
+    # "max_position_embeddings": 163840,
+    long_example_prompts = ["Hello " * (163839 - 500) + "Hello"]
+    max_tokens = 500
+    with VllmRunner(
+        "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+        tensor_parallel_size=2,
+        quantization="ascend",
+        enable_expert_parallel=True,
+        max_model_len=163840,
+        compilation_config={"cudagraph_capture_sizes": [2, 4, 6, 8, 10, 12], "cudagraph_mode": "FULL_DECODE_ONLY"},
+        speculative_config={"num_speculative_tokens": 1, "method": "deepseek_mtp"},
+        additional_config={"layer_sharding": ["q_b_proj", "o_proj"], "enable_sparse_c8": True},
+        reasoning_parser="deepseek_v3",
+        tokenizer_mode="deepseek_v32",
+        gpu_memory_utilization=0.8,
     ) as vllm_model:
         vllm_model.generate_greedy(short_example_prompts, max_tokens)
         vllm_model.generate_greedy(long_example_prompts, max_tokens)

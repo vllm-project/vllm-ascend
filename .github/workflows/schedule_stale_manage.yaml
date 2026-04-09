@@ -1,0 +1,66 @@
+name: "Close stale resolved/awaiting-feedback issues"
+on:
+  schedule:
+    - cron: '0 2 * * *' 
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      issues: write
+    steps:
+      - uses: actions/stale@v10
+        with:
+          # Process issues with the 'resolved' label
+          any-of-labels: 'resolved'
+
+          # Mark as stale after a period of inactivity
+          days-before-stale: 7
+          stale-issue-label: 'stale'
+          stale-issue-message: |
+            This issue has been marked as `resolved` but has not received any feedback for some time, so it is now labeled as `stale`. 
+            If you feel this was a mistake, please leave a comment to have the `stale` label removed. 
+            `Stale` issues will automatically be closed after 14 days of inactivity.
+
+          # Close stale issues after a period of inactivity
+          days-before-close: 14
+          close-issue-message: |
+            This issue is being closed due to a lack of recent activity. 
+            If you have any further questions or requirements, please feel free to reopen this issue or create a new one.
+
+          # Automatically remove the 'stale' label when the issue is updated (default is true)
+          remove-stale-when-updated: true
+          # Also remove the 'resolved' label
+          labels-to-remove-when-unstale: 'resolved'
+
+          # Avoid accidental PR processing (PRs can be handled if needed; this is issue-only)
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+      - uses: actions/stale@v10
+        with:
+          # Process issues with the 'awaiting-feedback' label
+          any-of-labels: 'awaiting-feedback'
+
+          # Mark as stale after a period of inactivity
+          days-before-stale: 7
+          stale-issue-label: 'stale'
+          stale-issue-message: |
+            This issue has been marked as `awaiting-feedback` but has not received any feedback for some time, so it is now labeled as `stale`. 
+            To more accurately locate and resolve the issue, we need you to provide the relevant information mentioned above. 
+            `Stale` issues will automatically be closed after 14 days of inactivity.
+
+          # Close stale issues after a period of inactivity
+          days-before-close: 14
+          close-issue-message: |
+            This issue is being closed due to a lack of recent activity. 
+            If you have any further questions or requirements, please feel free to reopen this issue or create a new one.
+
+          # Automatically remove the 'stale' label when the issue is updated (default is true)
+          remove-stale-when-updated: true
+          # Also remove the 'awaiting-feedback' label
+          labels-to-remove-when-unstale: 'awaiting-feedback'
+
+          # Avoid accidental PR processing (PRs can be handled if needed; this is issue-only)
+          days-before-pr-stale: -1
+          days-before-pr-close: -1

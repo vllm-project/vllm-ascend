@@ -19,13 +19,16 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
+import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
-from vllm.forward_context import get_forward_context
 
 from vllm_ascend._310p.fused_moe.experts_selector import select_experts
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
+from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.quantization.methods.base import AscendLinearScheme, AscendMoEScheme, QuantType
+from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
 
@@ -95,7 +98,9 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         log2phy: torch.Tensor | None = None,
         global_redundant_expert_num: int = 0,
         pertoken_scale: Any | None = None,
-        **kwargs,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -125,18 +130,22 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
 
         topk_weights = topk_weights.to(self.in_dtype)
 
-        moe_comm_method = get_forward_context().moe_comm_method
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
 
         final_hidden_states = moe_comm_method.fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale,
-            w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            expert_map=expert_map,
-            use_int8_w8a8=True,
+            fused_experts_input=build_fused_experts_input(
+                hidden_states=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                quant_type=self.quant_type,
+                dynamic_eplb=False,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            ),
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
@@ -147,3 +156,66 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
+
+
+@register_scheme("W8A8_DYNAMIC", "linear")
+class AscendW8A8DynamicLinearMethod310(AscendLinearScheme):
+    """310P-only W8A8 dynamic linear scheme.
+
+    Notes:
+      - This scheme is discovered via 310P local registry.
+    """
+
+    def get_weight(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype = torch.float16,
+    ) -> dict[str, Any]:
+        return {"weight": torch.empty(output_size, input_size, dtype=torch.int8)}
+
+    def get_perchannel_param(
+        self,
+        output_size: int,
+        params_dtype: torch.dtype,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        params["weight_scale"] = torch.empty(output_size, 1, dtype=torch.float32)
+        params["weight_offset"] = torch.empty(output_size, 1, dtype=torch.float32)
+        return params
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
+    ) -> torch.Tensor:
+        # NOTE(310P):
+        # - There is an accuracy issue currently, which is expected to be fixed in the next version.
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+        need_unsqz = False
+        if pertoken_scale.dim() == 2:
+            need_unsqz = True
+            quantized_x = quantized_x.squeeze(dim=1)
+            pertoken_scale = pertoken_scale.squeeze(dim=1)
+
+        # NOTE(310P):
+        # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
+        output = torch_npu.npu_quant_matmul(
+            quantized_x,
+            layer.weight.data,
+            layer.weight_scale,
+            pertoken_scale=pertoken_scale,
+            bias=bias,
+            output_dtype=x.dtype,
+        )
+        if need_unsqz:
+            output = output.unsqueeze(dim=1)
+        return output
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # cast quantized weight tensors in NZ format for higher inference speed
+        layer.weight.data = maybe_trans_nz(layer.weight.data).transpose(0, 1)
+        layer.weight_scale.data = layer.weight_scale.data.flatten()
+        layer.weight_offset.data = layer.weight_offset.data.flatten()

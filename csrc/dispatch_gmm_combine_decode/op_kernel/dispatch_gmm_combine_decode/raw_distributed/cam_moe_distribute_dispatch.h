@@ -253,7 +253,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
         selfDataStatusTensor[aivId_ * UB_ALIGN]);
     __asm__ __volatile__("");
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
     axisBS_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.bs;
     axisH_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.h;
     epWorldSize_ = tilingData->disGmmDeqSwigluQuantGmmDeqComInfo.epRankSize;
@@ -568,7 +568,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Allto
             }
             tableLocalTensor_((tokenIndex / axisK_ + 1) * moeExpertRankNumAligned_ + expertId) = 1;
         }
-        pipe_barrier(PIPE_ALL);
+        AscendC::PipeBarrier<PIPE_ALL>();
 
         uint32_t sendTokenNum = expertIdsCnt / moeUsedAivNum_;
         uint32_t remainderTokenNum = expertIdsCnt % moeUsedAivNum_;
@@ -587,7 +587,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Allto
             Add(tableInt16LocalTensor_[row * moeExpertRankNumInt16Aligned_],
                 tableInt16LocalTensor_[row * moeExpertRankNumInt16Aligned_],
                 tableInt16LocalTensor_[(row - 1) * moeExpertRankNumInt16Aligned_], moeExpertRankNumInt16Aligned_);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
         }
 
         // row-i of tableLocalTensor_ is index of token
@@ -655,7 +655,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Allto
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::SetStatus()
 {
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
     SyncAll<true>();
     totalExpertNum_ = sharedExpertRankNum_ + moeExpertNum_;
     sendExpertNum_ = totalExpertNum_ / aivNum_;
@@ -695,7 +695,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Quant
     floatLocalTemp = receiveDataCastFloatBuf_.Get<float>();
     Cast(floatLocalTemp, xInTensor_, RoundMode::CAST_NONE, axisH_);
     xInQueue_.FreeTensor<XType>(xInTensor_);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     if constexpr (IsSmoothScaleExist) {
         if constexpr (DynamicQuant) {
             SyncFunc<AscendC::HardEvent::V_MTE2>();
@@ -703,28 +703,28 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Quant
         DataCopy(smoothScalesTensor_, scalesGMTensor_[expertIndex * axisH_], axisH_);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
         Mul(floatLocalTemp, floatLocalTemp, smoothScalesTensor_, axisH_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
     }
     if constexpr (DynamicQuant) {
         LocalTensor<float> floatLocalAbsTemp = smoothScalesBuf_.Get<float>();
         rowMaxTensor_ = rowMaxBuf_.Get<float>();
         Abs(floatLocalAbsTemp, floatLocalTemp, axisH_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         ReduceMax(rowMaxTensor_, floatLocalAbsTemp, floatLocalAbsTemp, axisH_, false);
         SyncFunc<AscendC::HardEvent::V_S>();
         dynamicScale = float(127.0) / rowMaxTensor_.GetValue(0);
         SyncFunc<AscendC::HardEvent::S_V>();
         Muls(floatLocalTemp, floatLocalTemp, dynamicScale, axisH_);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
     }
     LocalTensor<half> halfLocalTemp = floatLocalTemp.ReinterpretCast<half>();
     LocalTensor<int32_t> int32LocalTemp = floatLocalTemp.ReinterpretCast<int32_t>();
     Cast(int32LocalTemp, floatLocalTemp, RoundMode::CAST_RINT, axisH_);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     SetDeqScale((half)1.000000e+00f);
     PipeBarrier<PIPE_V>();
     Cast(halfLocalTemp, int32LocalTemp, RoundMode::CAST_ROUND, axisH_);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
     Cast(xOutTensor_, halfLocalTemp, RoundMode::CAST_TRUNC, axisH_);
     floatLocalTemp = xOutTensor_.template ReinterpretCast<float>();
     floatLocalTemp.SetValue(axisH_ / sizeof(float), float(1.0) / dynamicScale);  // int8->float32
@@ -742,10 +742,10 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
     xQueue_.EnQue(xTmpTensor_);
     xTmpTensor_ = xQueue_.DeQue<ExpandXOutType>();
     if constexpr (DynamicQuant || StaticQuant) {
-        pipe_barrier(PIPE_ALL);
+        AscendC::PipeBarrier<PIPE_ALL>();
         xOutFp32Tensor_ = xTmpTensor_.template ReinterpretCast<float>();
         dynamicScalesTensor_.SetValue(dynamicScalesLocalIdx++, xOutFp32Tensor_.GetValue(axisH_ / sizeof(float)));
-        pipe_barrier(PIPE_ALL);
+        AscendC::PipeBarrier<PIPE_ALL>();
     }
     if constexpr (IsNeedAllgater) {
         DataCopy(winTpGatherOutGMTensor_[tokenOffset * axisH_], xTmpTensor_, axisH_);
@@ -791,7 +791,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::WaitD
         SyncFunc<AscendC::HardEvent::MTE2_V>();
         GatherMask(gatherMaskOutTensor, statusFp32Tensor_, gatherTmpTensor, true, mask,
                    {1, (uint16_t)recStatusNumPerCore, 1, 0}, rsvdCnt);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         Sum(statusSumOutTensor, gatherMaskOutTensor, sumParams);
         SyncFunc<AscendC::HardEvent::V_S>();
         sumOfFlag = statusSumOutTensor.GetValue(0);
@@ -929,11 +929,11 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
             xQueue_.EnQue(xTmpTensor_);
             xTmpTensor_ = xQueue_.DeQue<ExpandXOutType>();
             if constexpr (DynamicQuant || StaticQuant) {
-                pipe_barrier(PIPE_ALL);
+                AscendC::PipeBarrier<PIPE_ALL>();
                 xOutFp32Tensor_ = xTmpTensor_.template ReinterpretCast<float>();
                 DataCopyPad(dynamicScalesOutGMTensor_[beginIdx + j], xOutFp32Tensor_[axisH_ / sizeof(float)],
                             dataCopyParamsFloat);
-                pipe_barrier(PIPE_ALL);
+                AscendC::PipeBarrier<PIPE_ALL>();
             }
             if constexpr (IsNeedAllgater) {
                 DataCopy(winTpGatherOutGMTensor_[(beginIdx + j) * axisHCommu_], xTmpTensor_, axisHCommu_);
@@ -963,7 +963,7 @@ __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Local
 template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::AllGatherSetStatusAndWait()
 {
-    pipe_barrier(PIPE_ALL);
+    AscendC::PipeBarrier<PIPE_ALL>();
     if (startExpertId_ >= totalExpertNum_) {
         return;
     }

@@ -120,6 +120,12 @@ class AscendPrefillContextParallelMetadata:
     # the number of tokens padded in linear-attn per rank
     pcp_padded_tokens_fla: int = 0
 
+    # the max number of unpadded tokens in all ranks
+    max_num_tokens_across_pcp: int = 0
+
+    # the number of scheduled tokens on the current rank before padding
+    total_num_scheduled_tokens: int = 0
+
 
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
@@ -169,8 +175,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
-            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
-            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs] if self.seq_lens_cpu is not None else None,
+            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs]
+            if self.num_computed_tokens_cpu is not None
+            else None,
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,

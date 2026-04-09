@@ -21,7 +21,6 @@ import os
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     MRotaryEmbedding,
@@ -31,8 +30,9 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, has_rope, is_vl_model
+from vllm_ascend.utils import has_rope, is_vl_model
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -222,8 +222,9 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
+        init_cache: bool = True,
     ) -> None:
-        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype, init_cache)
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
@@ -240,8 +241,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        is_draft_model = get_forward_context().is_draft_model
-        flash_comm_v1_enabled = get_forward_context().flash_comm_v1_enabled
+        is_draft_model = _EXTRA_CTX.is_draft_model
+        flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
             positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
         return torch.ops.vllm.npu_rotary_embedding(
@@ -264,6 +265,7 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        apply_yarn_scaling: bool = True,
         truncate: bool = False,
     ) -> None:
         extra_kwargs = {
@@ -271,6 +273,7 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
             "attn_factor": attn_factor,
             "beta_fast": beta_fast,
             "beta_slow": beta_slow,
+            "apply_yarn_scaling": apply_yarn_scaling,
             # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
             "truncate": truncate,
         }
@@ -519,7 +522,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             # todo: need cann update in 8.5.0
             return self.forward_triton(positions, query, key)
 
-        if self.mrope_section != [16, 24, 24] or get_ascend_device_type() == AscendDeviceType.A5:
+        if self.mrope_section != [16, 24, 24]:
             return super().forward_oot(positions, query, key)
 
         import torch_npu

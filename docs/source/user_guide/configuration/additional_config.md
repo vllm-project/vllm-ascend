@@ -38,13 +38,14 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `multistream_overlap_gate`          | bool | `False` | Whether to enable multi-stream overlap gate. This option only takes effect on MoE models with shared experts.  |
 | `recompute_scheduler_enable`        | bool | `False` | Whether to enable recompute scheduler.                                                                    |
-| `enable_cpu_binding`                | bool | `True`  | Whether to enable CPU binding. Only takes effect on ARM CPUs; when enabled, A3 uses NUMA-balanced binding strategy and other device types use NUMA-affinity's. |
+| `enable_cpu_binding`                | bool | `True`  | Whether to enable CPU binding. Only takes effect on ARM CPUs; A3 uses the global-slicing CPU allocation strategy and other device types use the topo-affinity CPU allocation strategy. |
 | `SLO_limits_for_dynamic_batch`      | int  | `-1`    | SLO limits for dynamic batch. This is new scheduler to support dynamic batch feature                            |
 | `enable_npugraph_ex`                | bool | `False` | Whether to enable npugraph_ex graph mode.                                                                 |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
 | `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
-| `layer_sharding` | dict | `{}` | Configuration options for Layer Sharding Linear |
-| `sp_threshold` | int | `1000` | For dense models, only num_tokens > threshold will enable sequence parallelism. |
+| `layer_sharding`                    | dict | `{}`    | Configuration options for Layer Sharding Linear |
+| `enable_sparse_c8`                  | bool | `False` | Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and GLM5). Not supported on A5 devices now |
+| `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
 
 The details of each configuration option are as follows:
 

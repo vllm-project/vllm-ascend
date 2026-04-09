@@ -11,7 +11,39 @@ permissions:
   contents: read
 
 jobs:
+  validate-pr-title:
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    steps:
+    - name: Validate PR title prefix
+      env:
+        PR_TITLE: ${{ github.event.pull_request.title }}
+      run: |
+        # Fail if PR title is empty
+        if [ -z "$PR_TITLE" ]; then
+          echo "::error::PR title cannot be empty"
+          exit 1
+        fi
+
+        echo "Checking PR title: $PR_TITLE"
+
+        # Define valid prefixes (case-sensitive)
+        # Check if PR title contains any valid prefix (not necessarily at the start)
+        VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
+
+        # Check if PR title contains a valid prefix
+        if ! echo "$PR_TITLE" | grep -qE "$VALID_PREFIXES"; then
+          echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
+          echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
+          exit 1
+        fi
+
+        echo "✓ PR title prefix is valid"
+
   pre-commit:
+    needs: [validate-pr-title]
     runs-on: linux-amd64-cpu-8-hk
     container:
       # Build it from https://github.com/nv-action/vllm-benchmarks/blob/main/Dockerfile
@@ -50,9 +82,17 @@ jobs:
 
     - name: Install vllm-ascend dev (conditional)
       if: steps.filter.outputs.lint_tracker == 'true'
+      env:
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
       run: |
+        pip install uv
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-        pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+        pip install uc-manager
+        uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
     - name: Run pre-commit
       env:
@@ -68,7 +108,6 @@ jobs:
       run: |
         PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
         export PYTHONPATH
-        env
         git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
         # Run mypy for Python 3.10, 3.11, 3.12 manually
         # Note: We are now separating mypy from pre-commit hooks for performance reasons.

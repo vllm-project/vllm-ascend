@@ -90,6 +90,7 @@ def gumbel_sample(
     seed: torch.Tensor,  # [num_reqs]
     pos: torch.Tensor,  # [num_reqs]
     apply_temperature: bool,
+    processed_logits_out: torch.Tensor | None = None,  # [num_reqs, vocab_size]
 ) -> torch.Tensor:
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 1024

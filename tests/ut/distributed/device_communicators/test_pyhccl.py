@@ -6,6 +6,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from tests.ut.base import TestBase
 from vllm_ascend.distributed.device_communicators.pyhccl import \
     PyHcclCommunicator
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
 class MockHcclLib:
@@ -46,9 +47,8 @@ class TestPyHcclCommunicator(TestBase):
            return_value=MagicMock(npu_stream=5678))
     def test_stateless_group(self, *_):
         group = StatelessProcessGroup(rank=3,
-                                      world_size=4,
-                                      store=None,
-                                      socket=None)
+                                    world_size=4,
+                                    store=None)
 
         comm = PyHcclCommunicator(group=group, device=3)
 

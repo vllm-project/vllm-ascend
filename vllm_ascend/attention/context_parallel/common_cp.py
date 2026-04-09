@@ -34,6 +34,8 @@ class AscendPCPMetadata:
     block_table_cp: torch.Tensor = None
     valid_block_ids: torch.Tensor = None
     prefill_q_cum_seqlens: torch.Tensor = None
+    max_num_tokens_across_pcp: int = 0
+    total_num_scheduled_tokens: int = 0
     block_arange: torch.Tensor = None
 
 
@@ -53,6 +55,7 @@ class CPChunkedContextMetadata:
     workspace: torch.Tensor
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
+    chunk_actual_seq_lengths_kv_list: list[list[int]]
     # for mla DCP & PCP
     padded_chunk_seq_lens_npu: torch.Tensor = None
     padded_local_chunk_seq_lens: list[list[int]] | None = None
