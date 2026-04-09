@@ -361,24 +361,17 @@ class KVPoolWorker:
         my_key_index = (self.pcp_rank * self.dcp_size * (self.tp_size//self.put_step) +
                         self.dcp_rank * (self.tp_size//self.put_step) +
                         self.head_or_tp_rank)
-        logger.info(f">>>>>>>>>>>>>> blocks_to_process: {blocks_to_process} num_blocks {num_blocks} processed_count {processed_count}")
+
         for block_idx in range(blocks_to_process):
-            # chunk_keys = keys_multi_chunk[(processed_count + block_idx) * num_keys_per_block : (processed_count + block_idx + 1) * num_keys_per_block]
             key = keys_multi_blocks[(processed_count + block_idx) * num_keys_per_block + my_key_index]
             start = (processed_count + block_idx) * self.block_size
             end = start + self.block_size
-            # TODO这里有问题，不同的key
-            # for key in chunk_keys:
-            logger.info(f">>>>>>>>>>>>>> block_idx: {block_idx}, key: {key} ,start: {start}, end: {end}， block_ids {block_ids}, layer_id: {layer_id}")
             addr, size = self.token_database.prepare_value_layer(
                 start, end, block_ids, layer_id)
-            # TODO 这里是全部层的addr和size？需要按层分开
             tracker['chunk_addr_list'].extend(addr)
             tracker['chunk_size_list'].extend(size)
             if key_gva_mapping is not None:
-                logger.info(f">>>>>>>>>>>>>> key in key_gva_mapping: {key in list(key_gva_mapping.keys())}")
                 gva = key_gva_mapping.get(key)
-                logger.info(f">>>>>>>>>>>>>> gva: {gva}")
                 if gva is not None:
                     offset = 0
                     for s in size:
@@ -397,10 +390,6 @@ class KVPoolWorker:
         num_blocks: int,
         has_last_block: bool,
     ) -> None:
-        # total_keys = len(keys_multi_chunk)
-        # has_last_block = total_keys > num_blocks * num_keys_per_block
-        # has_last_block = len(block_ids) > num_blocks
-        # logger.info(f">>>>>>>>>>>>>> keys_multi_chunk: {keys_multi_chunk} num_blocks {num_blocks} num_keys_per_block {num_keys_per_block}")
         if not has_last_block:
             tracker['last_block_addr'] = []
             tracker['last_block_size'] = []
@@ -447,8 +436,7 @@ class KVPoolWorker:
         final_addr_list = tracker['chunk_addr_list'] + tracker['last_block_addr']
         final_size_list = tracker['chunk_size_list'] + tracker['last_block_size']
         final_gvas_list = tracker['chunk_gvas_list'] + tracker['last_block_gvas']
-        logger.info(f">>>>>>>>>>>>>>>> final_addr_list {final_addr_list} final_size_list {final_size_list} final_gvas_list {final_gvas_list}")
-        logger.info(f">>>>>>>>>>>>>>>> tracker['chunk_gvas_list'] {tracker['chunk_gvas_list']} tracker['last_block_gvas'] {tracker['last_block_gvas']}")
+
         all_keys = block_keys + last_block_keys
         req_meta = LasyerMultiBlockReqMeta(
             request.req_id, all_keys, [], [],
@@ -478,11 +466,9 @@ class KVPoolWorker:
 
         tracker = self._get_or_init_layer_tracker(request.req_id, layer_id)
         num_blocks = request.token_len_chunk // self.block_size
-        logger.info(f">>>>>>>>>>>>>>>>>>> token_len_chunk {request.token_len_chunk}  num_blocks {num_blocks}")
         # TODO 这里的判断逻辑需要优化
         # has_last_block = len(request.block_ids) > num_blocks
         has_last_block = request.token_len_chunk % self.block_size != 0
-        logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> request.block_ids {request.block_ids} has_last_block {has_last_block}")
         self._process_chunks_incremental(
             tracker, block_keys, request.block_ids, layer_id,
             request.key_gva_mapping, num_keys_per_block, num_blocks)
@@ -514,8 +500,7 @@ class KVPoolWorker:
         my_key_index = (self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step) +
                         self.dcp_rank * (self.tp_size // self.put_step) +
                         self.head_or_tp_rank)
-        load_keys = [block_keys[block_idx * num_keys_per_block + my_key_index] for block_idx in range(num_saved_blocks)]
-
+        load_keys = block_keys[my_key_index: my_key_index + num_saved_blocks * num_keys_per_block: num_keys_per_block]
         if has_load_last_block:
             load_keys = load_keys + last_block_keys
 
@@ -534,15 +519,11 @@ class KVPoolWorker:
         self.layer_load_tasks[layer_id].append(req_meta)
 
     def process_layer_data(self, request: ReqMeta) -> None:
-        logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>> process layer data")
-        logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>> key_gva_mapping {request.key_gva_mapping}")
         # TODO 是否可以在这里对不同线程的key做区分？
         block_keys_by_layer = request.block_keys_by_layer or []
         last_block_keys_by_layer = request.last_block_keys_by_layer or [[] for _ in range(len(self.num_layers))]
         num_keys_per_block = self.tp_size // self.put_step * self.pcp_size * self.dcp_size
-        logger.info(f">>>>>>>>>>>>>>>>>>>> num_keys_per_block {num_keys_per_block}")
         for layer_id, (block_keys, last_block_keys) in enumerate(zip(block_keys_by_layer, last_block_keys_by_layer)):
-            logger.info(f">>>>>>>>>>>>>>>>>>>> layer id {layer_id} block_keys {block_keys} last_block_keys {last_block_keys}")
             if layer_id in self.independent_layers:
                 continue
 

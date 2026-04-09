@@ -64,7 +64,6 @@ class KVPoolScheduler:
         else:
             self.store_scheduler = None
         model_config = vllm_config.model_config
-        # TODO 这里只需要申请，不需要读取，这里各种并行是不存在的，这里需要对并行size进行循环，访问每一个并行
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.use_mla = False
@@ -75,10 +74,8 @@ class KVPoolScheduler:
         else:
             self.num_kv_head = model_config.get_total_num_kv_heads()
         if self.num_kv_head < self.tp_size:
-            logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>> num_kv_head {self.num_kv_head}")
             self.put_step = self.tp_size // self.num_kv_head
         else:
-            logger.info(f">>>>>>>>>>>>>>>>>>>>>>>>>> !!!!!!!!!! num_kv_head {self.num_kv_head}")
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model_name = model_config.model.split('/')[-1]
@@ -97,7 +94,7 @@ class KVPoolScheduler:
                                                     [self.page_size_bytes for _ in range(len(all_keys))])
         else:
             gvas = [None] * len(all_keys)
-        key_gva_mapping = dict[str, None](zip[tuple[str, None]](all_keys, gvas))
+        key_gva_mapping: dict[str, Any] = dict(zip(all_keys, gvas))
         return block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping
 
     def generate_keys(self, chunk_hashes, req_id=''):
@@ -125,7 +122,7 @@ class KVPoolScheduler:
             return chunk_keys, last_block_keys
         results = [_build_layer_keys(layer_id) for layer_id in range(self.num_layers)]
         block_keys_by_layer = [r[0] for r in results]
-        last_block_keys_by_layer = [r[0] for r in results]
+        last_block_keys_by_layer = [r[1] for r in results]
         return block_keys_by_layer, last_block_keys_by_layer
 
     def get_num_new_matched_tokens(
@@ -231,7 +228,6 @@ class KVPoolScheduler:
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
-        logger.info(f">>>>>>>>>>>>>>>>>>>> scheduler bind connector meta")
         force_skip_save = self.kv_role == "kv_consumer" and not self.consumer_is_to_put
 
         for finished_req_id in scheduler_output.finished_req_ids:
@@ -388,7 +384,6 @@ class KVPoolScheduler:
                     # if num_computed_token >= len(request.prompt_token_ids):
                     #     continue
                     if new_block_ids is not None:
-                        # TODO 这里是否有问题？
                         start_idx = len(request_tracker.allocated_block_ids)
                         end_idx = start_idx + len(new_block_ids)
                         new_block_hashes = request.block_hashes[start_idx : end_idx]
