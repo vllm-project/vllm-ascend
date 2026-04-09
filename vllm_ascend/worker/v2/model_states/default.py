@@ -53,7 +53,9 @@ class AscendModelState(DefaultModelState):
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
-        attn_metadata = build_attn_metadata(
+        # attn_metadata is needed when update_full_graph_params, but no way can get it now.
+        # Temporarily store it in model_state.
+        self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
@@ -70,4 +72,4 @@ class AscendModelState(DefaultModelState):
             seq_lens_np=input_batch.seq_lens_np,
             attn_state=input_batch.attn_state,
         )
-        return attn_metadata
+        return self.attn_metadata
