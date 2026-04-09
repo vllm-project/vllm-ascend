@@ -1014,7 +1014,7 @@ class PCPManager:
             return [None] * (self.num_decode_reqs + self.num_prefill_reqs)
 
         # Calculate combined CP rank and size
-        cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_rank
+        cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_world_rank
         cp_size = self.pcp_world_size * self.dcp_world_size
         assert cp_size > 0, "cp_size must be greater than 0"
 
@@ -1034,7 +1034,7 @@ class PCPManager:
         )
         # Shape: [num_decode_reqs, pcp_world_size, dcp_world_size]
         # Get local history length for current rank
-        local_history_lens = local_seq_lens[:, self.pcp_world_rank, self.dcp_rank]
+        local_history_lens = local_seq_lens[:, self.pcp_world_rank, self.dcp_world_rank]
 
         mtp_masks = []
 
