@@ -126,6 +126,12 @@ class AscendPrefillContextParallelMetadata:
     # the number of scheduled tokens on the current rank before padding
     total_num_scheduled_tokens: int = 0
 
+    # Because the sequence shard in linear attention layers does not include padding,
+    # the full attention layers cannot obtain the correct query_lens with pcp pad for
+    # chunked prefill calculation. Therefore, this value needs to be passed to the backend.
+    # TODO:To be refactored.
+    attn_chunk_seqlens: torch.Tensor = None
+
 
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
