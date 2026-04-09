@@ -1696,7 +1696,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             and attn_metadata.num_decode_tokens is not None
         )
 
-        has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
