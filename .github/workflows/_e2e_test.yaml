@@ -66,11 +66,6 @@ env:
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
-  AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
-  AWS_REGION: ap-southeast-1
-  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
 
 jobs:
   e2e-light:
@@ -136,6 +131,12 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         uses: runs-on/cache@v4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -266,6 +267,12 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         uses: runs-on/cache@v4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -401,6 +408,12 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         uses: runs-on/cache@v4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -529,6 +542,12 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         uses: runs-on/cache@v4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -684,6 +703,12 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         uses: runs-on/cache@v4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -813,6 +838,12 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         uses: runs-on/cache@v4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
         with:
           path: |
             vllm_ascend/_cann_ops_custom
@@ -920,6 +951,12 @@ jobs:
 
       - name: Cache vllm-ascend csrc
         uses: runs-on/cache@v4
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
         with:
           path: |
             vllm_ascend/_cann_ops_custom
