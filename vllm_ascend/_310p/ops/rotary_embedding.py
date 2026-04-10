@@ -212,8 +212,7 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         num_tokens = query.shape[0]
         if _mrope_cos_slice is None or _mrope_sin_slice is None:
             raise RuntimeError(
-                "MRoPE cos/sin slices are not initialized. "
-                "Call set_mrope_apply_rotary_slices before forward."
+                "MRoPE cos/sin slices are not initialized. Call set_mrope_apply_rotary_slices before forward."
             )
         cos, sin = _mrope_cos_slice[:, :num_tokens], _mrope_sin_slice[:, :num_tokens]
 
