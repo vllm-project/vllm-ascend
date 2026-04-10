@@ -9,12 +9,15 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# WITHOUT WARRANTIES OR ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
 
+from __future__ import annotations
+
+from typing import Any
 
 import torch
 import torch_npu
@@ -26,19 +29,77 @@ from vllm_ascend.ops.rotary_embedding import (
     get_cos_and_sin_slice,
 )
 
+# Filled once per model forward in NPUModelRunner310._model_forward; read by every MRoPE layer.
 _mrope_cos_slice: torch.Tensor | None = None
 _mrope_sin_slice: torch.Tensor | None = None
-_mrope_forward_id: int = 0
-_prepared_mrope_forward_id: int = -1
-_prepared_mrope_dtype: torch.dtype | None = None
-_prepared_mrope_device: torch.device | None = None
-_prepared_mrope_interleaved: bool | None = None
-_prepared_mrope_section: tuple[int, ...] | None = None
 
 
-def begin_mrope_forward_310():
-    global _mrope_forward_id
-    _mrope_forward_id += 1
+def merge_mrope_cos_sin_for_apply(
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    mrope_section: list[int],
+    mrope_interleaved: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if mrope_interleaved:
+        return (
+            apply_interleaved_rope(cos, mrope_section),
+            apply_interleaved_rope(sin, mrope_section),
+        )
+    return (
+        torch.cat([m[i] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1),
+        torch.cat([m[i] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1),
+    )
+
+
+def set_mrope_apply_rotary_slices(
+    emb: AscendMRotaryEmbedding,
+    positions: torch.Tensor,
+    target_dtype: torch.dtype,
+    target_device: torch.device,
+) -> None:
+    """Build cos/sin views for `npu_apply_rotary_pos_emb` from positions; must run once per forward before layers."""
+    global _mrope_cos_slice
+    global _mrope_sin_slice
+
+    assert emb.mrope_section is not None
+    if emb.cos_sin_cache.device != target_device:
+        emb.cos_sin_cache = emb.cos_sin_cache.to(target_device)
+    if emb.cos_sin_cache.dtype != target_dtype:
+        emb.cos_sin_cache = emb.cos_sin_cache.to(target_dtype)
+
+    assert positions.ndim in (1, 2), "M-RoPE positions must be [num_tokens] or [3, num_tokens]."
+    cos_sin = emb.cos_sin_cache[positions]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    if positions.ndim == 2:
+        assert positions.shape[0] == 3, "MRoPE expects positions [3, num_tokens] (T/H/W)."
+        cos, sin = merge_mrope_cos_sin_for_apply(
+            cos,
+            sin,
+            list(emb.mrope_section),
+            emb.mrope_interleaved,
+        )
+    # `npu_apply_rotary_pos_emb` follows ApplyRotaryPosEmbV2 semantics:
+    # q_embed = q * cos + rotate(q) * sin, where cos/sin have full rotary dim.
+    # MRoPE merge above gives half-dim cos/sin, so expand to full dim here.
+    cos = torch.cat((cos, cos), dim=-1)
+    sin = torch.cat((sin, sin), dim=-1)
+    num_tokens = positions.shape[-1]
+    _mrope_cos_slice = cos.contiguous().view(1, num_tokens, 1, -1)
+    _mrope_sin_slice = sin.contiguous().view(1, num_tokens, 1, -1)
+
+
+def prepare_mrope_cos_sin_slices_from_runner(runner: Any, positions: torch.Tensor) -> None:
+    """Resolve MRoPE embedding from the runner and populate `_mrope_cos_slice` / `_mrope_sin_slice`."""
+    emb = getattr(runner, "_cached_mrope_emb310", None)
+    if emb is None:
+        for module in runner.model.modules():
+            if isinstance(module, AscendMRotaryEmbedding310):
+                emb = module
+                runner._cached_mrope_emb310 = emb
+                break
+    if emb is None:
+        raise RuntimeError("uses_mrope is True but no AscendMRotaryEmbedding310 was found in the model.")
+    set_mrope_apply_rotary_slices(emb, positions, runner.dtype, runner.device)
 
 
 def _rope_forward_oot(
@@ -104,67 +165,14 @@ def _rope_forward_oot(
 
 
 class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
-    def _merge_mrope_cos_sin(
-        self,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.mrope_section is not None
-        if self.mrope_interleaved:
-            return (
-                apply_interleaved_rope(cos, self.mrope_section),
-                apply_interleaved_rope(sin, self.mrope_section),
-            )
-        return (
-            torch.cat([m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))], dim=-1),
-            torch.cat([m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))], dim=-1),
-        )
-
-    def _get_or_prepare_mrope_cos_sin(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _get_mrope_cos_sin_for_apply(self) -> tuple[torch.Tensor, torch.Tensor]:
         global _mrope_cos_slice
         global _mrope_sin_slice
-        global _prepared_mrope_forward_id
-        global _prepared_mrope_dtype
-        global _prepared_mrope_device
-        global _prepared_mrope_interleaved
-        global _prepared_mrope_section
-
-        current_section = tuple(self.mrope_section or [])
-        cache_hit = (
-            _prepared_mrope_forward_id == _mrope_forward_id
-            and _mrope_cos_slice is not None
-            and _mrope_sin_slice is not None
-            and _prepared_mrope_dtype == query.dtype
-            and _prepared_mrope_device == query.device
-            and _prepared_mrope_interleaved == self.mrope_interleaved
-            and _prepared_mrope_section == current_section
-        )
-        if cache_hit:
-            return _mrope_cos_slice, _mrope_sin_slice
-
-        assert positions.ndim in (1, 2), "M-RoPE positions must be [num_tokens] or [3, num_tokens]."
-        cos_sin = self.cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        if positions.ndim == 2:
-            assert positions.shape[0] == 3, "MRoPE expects positions [3, num_tokens] (T/H/W)."
-            cos, sin = self._merge_mrope_cos_sin(cos, sin)
-        # `npu_apply_rotary_pos_emb` follows ApplyRotaryPosEmbV2 semantics:
-        # q_embed = q * cos + rotate(q) * sin, where cos/sin have full rotary dim.
-        # MRoPE merge above gives half-dim cos/sin, so expand to full dim here.
-        cos = torch.cat((cos, cos), dim=-1)
-        sin = torch.cat((sin, sin), dim=-1)
-        num_tokens = positions.shape[-1]
-        _mrope_cos_slice = cos.contiguous().view(1, num_tokens, 1, -1)
-        _mrope_sin_slice = sin.contiguous().view(1, num_tokens, 1, -1)
-        _prepared_mrope_forward_id = _mrope_forward_id
-        _prepared_mrope_dtype = query.dtype
-        _prepared_mrope_device = query.device
-        _prepared_mrope_interleaved = self.mrope_interleaved
-        _prepared_mrope_section = current_section
+        if _mrope_cos_slice is None or _mrope_sin_slice is None:
+            raise RuntimeError(
+                "MRoPE cos/sin slices are not prepared. "
+                "Expected NPUModelRunner310._model_forward after positions are ready for each forward."
+            )
         return _mrope_cos_slice, _mrope_sin_slice
 
     def forward_oot(
@@ -184,7 +192,7 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         # switching rotary kernel mode.
         rotary_mode = "half"
         num_tokens = query.shape[0]
-        cos, sin = self._get_or_prepare_mrope_cos_sin(positions, query)
+        cos, sin = self._get_mrope_cos_sin_for_apply()
 
         # Keep branch layout aligned with rope implementation for better numerical consistency.
         if self.head_size == 128 and self.rotary_dim == self.head_size:
