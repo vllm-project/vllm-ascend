@@ -44,7 +44,7 @@ jobs:
       # Each version should be tested
       fail-fast: false
       matrix:
-        vllm_version: [releases-v0.13.0, releases-v0.13.0-openeuler, main, main-openeuler]
+        vllm_version: [nightly-releases-v0.18.0, nightly-releases-v0.18.0-openeuler, nightly-main, nightly-main-openeuler]
     name: vLLM Ascend test
     runs-on: linux-aarch64-a2b3-1
     container:
@@ -76,6 +76,8 @@ jobs:
           # Overwrite e2e and examples
           cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
           cp -r examples /vllm-workspace/vllm-ascend/
+          # We are now maintain version policy in the main, so we need to copy docs to make sure the doctest can be run successfully.
+          cp -r docs /vllm-workspace/vllm-ascend/
 
           # Simulate container to enter directory
           cd /workspace
