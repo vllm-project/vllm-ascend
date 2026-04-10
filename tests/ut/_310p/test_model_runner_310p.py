@@ -7,13 +7,15 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# WITHOUT WARRANTIES OR ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
 
 from unittest.mock import patch
+
+import torch
 
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 
@@ -24,41 +26,29 @@ def _build_runner(uses_mrope: bool) -> NPUModelRunner310:
     return runner
 
 
-@patch("vllm_ascend._310p.model_runner_310p.begin_mrope_forward_310")
-@patch("vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run")
-def test_dummy_run_calls_begin_mrope_when_enabled(mock_parent_dummy_run, mock_begin_mrope):
+@patch("vllm_ascend.worker.model_runner_v1.NPUModelRunner._model_forward")
+@patch("vllm_ascend._310p.model_runner_310p.prepare_mrope_cos_sin_slices_from_runner")
+def test_model_forward_calls_prepare_when_mrope_enabled(mock_prepare, mock_parent_forward):
     runner = _build_runner(uses_mrope=True)
+    positions = torch.zeros(3, 2, dtype=torch.long)
     expected = object()
-    mock_parent_dummy_run.return_value = expected
+    mock_parent_forward.return_value = expected
 
-    result = runner._dummy_run(num_tokens=1)
+    result = runner._model_forward(num_tokens_padded=2, positions=positions)
 
-    mock_begin_mrope.assert_called_once()
-    mock_parent_dummy_run.assert_called_once()
+    mock_prepare.assert_called_once_with(runner, positions)
+    mock_parent_forward.assert_called_once()
     assert result is expected
 
 
-@patch("vllm_ascend._310p.model_runner_310p.begin_mrope_forward_310")
-@patch("vllm_ascend.worker.model_runner_v1.NPUModelRunner._dummy_run")
-def test_dummy_run_skips_begin_mrope_when_disabled(mock_parent_dummy_run, mock_begin_mrope):
+@patch("vllm_ascend.worker.model_runner_v1.NPUModelRunner._model_forward")
+@patch("vllm_ascend._310p.model_runner_310p.prepare_mrope_cos_sin_slices_from_runner")
+def test_model_forward_skips_prepare_when_mrope_disabled(mock_prepare, mock_parent_forward):
     runner = _build_runner(uses_mrope=False)
-    mock_parent_dummy_run.return_value = object()
+    positions = torch.zeros(3, 2, dtype=torch.long)
+    mock_parent_forward.return_value = object()
 
-    runner._dummy_run(num_tokens=1)
+    runner._model_forward(num_tokens_padded=2, positions=positions)
 
-    mock_begin_mrope.assert_not_called()
-    mock_parent_dummy_run.assert_called_once()
-
-
-@patch("vllm_ascend._310p.model_runner_310p.begin_mrope_forward_310")
-@patch("vllm_ascend.worker.model_runner_v1.NPUModelRunner.execute_model")
-def test_execute_model_calls_begin_mrope_when_enabled(mock_parent_execute_model, mock_begin_mrope):
-    runner = _build_runner(uses_mrope=True)
-    expected = object()
-    mock_parent_execute_model.return_value = expected
-
-    result = runner.execute_model("arg", key="value")
-
-    mock_begin_mrope.assert_called_once()
-    mock_parent_execute_model.assert_called_once_with("arg", key="value")
-    assert result is expected
+    mock_prepare.assert_not_called()
+    mock_parent_forward.assert_called_once()
