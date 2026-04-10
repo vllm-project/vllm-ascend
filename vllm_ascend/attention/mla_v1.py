@@ -1638,13 +1638,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
-        attn_metadata.reshape_cache_event = torch.npu.Event()
+        if self.is_kv_producer:
+            attn_metadata.reshape_cache_event = torch.npu.Event()
         if has_decode:
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
         # Preprocess for prefill tokens
         if has_prefill:
             prefill_preprocess_res = self.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, attn_metadata)
-        attn_metadata.reshape_cache_event.record()
+        if self.is_kv_producer:
+            attn_metadata.reshape_cache_event.record()
         return decode_preprocess_res, prefill_preprocess_res
 
     def get_num_actual_tokens(self, attn_metadata: M):
@@ -1754,6 +1756,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
         del o_proj_input
-
-        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        if self.is_kv_producer:
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded
