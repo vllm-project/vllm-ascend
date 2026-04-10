@@ -118,12 +118,8 @@ class ServerState:
         self.port = port
         self.url = f"http://{host}:{port}/v1"
         # Auto-completion for ipv6
-        try:
-            ip = ipaddress.ip_address(self.host)
-            if isinstance(ip, ipaddress.IPv6Address):
-                self.url = f"http://[{host}]:{port}/v1"
-        except Exception:
-            pass
+        if is_ipv6(host):
+            self.url = f"http://[{host}]:{port}/v1"
         self.client = httpx.AsyncClient(
             timeout=None,
             base_url=self.url,
@@ -255,6 +251,15 @@ class ProxyState:
 
 proxy_state = None
 
+def is_ipv6(host: str):
+    try:
+        ip = ipaddress.ip_address(host)
+        if isinstance(ip, ipaddress.IPv6Address):
+            return True
+    except Exception:
+        pass
+    return False
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -285,6 +290,10 @@ def parse_args():
         raise ValueError("Number of decoder hosts must match number of decoder ports")
     args.prefiller_instances = list(zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
+    if is_ipv6(args.host):
+        args.metaserver = f"http://[{args.host}]:{args.port}/v1/metaserver"
+    else:
+        args.metaserver = f"http://{args.host}:{args.port}/v1/metaserver"
     return args
 
 
@@ -429,7 +438,7 @@ async def _handle_completions(api: str, request: Request):
         req_data["kv_transfer_params"] = {
             "do_remote_decode": False,
             "do_remote_prefill": True,
-            "metaserver": f"http://{global_args.host}:{global_args.port}/v1/metaserver",
+            "metaserver": global_args.metaserver,
         }
         # Select decoder
         decoder_score = proxy_state.calculate_decode_scores(request_length)
