@@ -2347,7 +2347,7 @@ class NPUModelRunner(GPUModelRunner):
             if self._has_gdn:
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
-                if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
+                if isinstance(builder, GDNAttentionMetadataBuilder):
                     cm.query_start_loc_cpu = self.gdn_query_start_loc.cpu[: num_reqs_padded + 1]
                     cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
 

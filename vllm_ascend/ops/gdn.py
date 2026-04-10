@@ -174,10 +174,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
-        if not enable_sp():
-            mixed_qkv = mixed_qkv[:num_actual_tokens]
-            b = b[:num_actual_tokens]
-            a = a[:num_actual_tokens]
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
