@@ -128,10 +128,12 @@ jobs:
 
           [ $count -eq 0 ] && echo "No files processed" && exit 1
           echo "Processed $count file(s)"
-          echo "file_count=$count" >> $GITHUB_OUTPUT
-          echo "file_list<<EOF" >> $GITHUB_OUTPUT
-          echo "$file_list" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          {
+            echo "file_count=$count"
+            echo "file_list<<EOF"
+            echo "$file_list"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Commit and push
         if: steps.detect.outputs.has_changes == 'true'
