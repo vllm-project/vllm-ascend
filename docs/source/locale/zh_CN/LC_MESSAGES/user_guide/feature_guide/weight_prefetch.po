@@ -1,0 +1,174 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:1
+msgid "Weight Prefetch Guide"
+msgstr "权重预取指南"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:3
+msgid ""
+"Weight prefetching optimizes memory usage by preloading weights into the "
+"cache before they are needed, minimizing delays caused by memory access "
+"during model execution. Linear layers sometimes exhibit relatively high "
+"MTE utilization. To address this, we create a separate pipeline "
+"specifically for weight prefetching, which runs in parallel with the "
+"original vector computation pipeline, such as quantize, MoE gating top_k,"
+" RMSNorm and SwiGlu. This approach allows the weights to be preloaded to "
+"L2 cache ahead of time, reducing MTE utilization during the linear layer "
+"computations and indirectly improving Cube computation efficiency by "
+"minimizing resource contention and optimizing data flow."
+msgstr ""
+"权重预取通过在需要之前将权重预加载到缓存中来优化内存使用，最小化模型执行期间内存访问引起的延迟。"
+"线性层有时表现出较高的 MTE 利用率。为了解决这个问题，我们创建了一个专门用于权重预取的独立流水线，"
+"它与原始向量计算流水线（如量化、MoE 门控 top_k、RMSNorm 和 SwiGlu）并行运行。"
+"这种方法允许权重提前预加载到 L2 缓存中，减少了线性层计算期间的 MTE 利用率，"
+"并通过最小化资源争用和优化数据流间接提高了 Cube 计算效率。"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:5
+msgid ""
+"Since we use vector computations to hide the weight prefetching pipeline,"
+" this has an effect on computation. If you prioritize low latency over "
+"high throughput, it is best not to enable prefetching."
+msgstr ""
+"由于我们使用向量计算来隐藏权重预取流水线，这会对计算产生影响。如果您优先考虑低延迟而非高吞吐量，最好不要启用预取。"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:7
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:9
+#, python-brace-format
+msgid ""
+"With `--additional-config '{\"weight_prefetch_config\": {\"enabled\": "
+"true}}'` to open weight prefetch."
+msgstr "使用 `--additional-config '{\"weight_prefetch_config\": {\"enabled\": true}}'` 开启权重预取。"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:11
+msgid "Fine-tune Prefetch Ratio"
+msgstr "微调预取比例"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:13
+msgid ""
+"Since weight prefetch use vector computations to hide the weight "
+"prefetching pipeline, the setting of the prefetch size is crucial. If the"
+" size is too small, the optimization benefits will not be fully realized,"
+" while a larger size may lead to resource contention, resulting in "
+"performance degradation. To accommodate different scenarios, we have "
+"added `prefetch_ratio` to allow for flexible size configuration based on "
+"the specific workload, details as follows:"
+msgstr ""
+"由于权重预取使用向量计算来隐藏权重预取流水线，预取大小的设置至关重要。"
+"如果大小太小，优化收益将无法充分发挥；而如果大小太大，可能导致资源争用，从而造成性能下降。"
+"为了适应不同的场景，我们添加了 `prefetch_ratio`，以便根据具体工作负载灵活配置大小，详情如下："
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:15
+msgid ""
+"With `prefetch_ratio` in `\"weight_prefetch_config\"` to custom the "
+"weight prefetch ratio for specific linear layers."
+msgstr "通过 `\"weight_prefetch_config\"` 中的 `prefetch_ratio` 为特定的线性层自定义权重预取比例。"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:17
+msgid ""
+"The “attn” and “moe” configuration options are used for MoE model, "
+"details as follows:"
+msgstr "“attn” 和 “moe” 配置选项用于 MoE 模型，详情如下："
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:19
+#, python-brace-format
+msgid "`\"attn\": { \"qkv\": 1.0,  \"o\": 1.0},  \"moe\": {\"gate_up\": 0.8}`"
+msgstr "`\"attn\": { \"qkv\": 1.0,  \"o\": 1.0},  \"moe\": {\"gate_up\": 0.8}`"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:21
+msgid ""
+"The “mlp” configuration option is used to optimize the performance of the"
+" Dense model, details as follows:"
+msgstr "“mlp” 配置选项用于优化稠密模型的性能，详情如下："
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:23
+#, python-brace-format
+msgid "`\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}`"
+msgstr "`\"mlp\": {\"gate_up\": 1.0, \"down\": 1.0}`"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:25
+msgid ""
+"Above value are the default config, the default value has a good "
+"performance for Qwen3-235B-A22B-W8A8 when `--max-num-seqs` is 144, for "
+"Qwen3-32B-W8A8 when `--max-num-seqs` is 72."
+msgstr ""
+"以上值为默认配置，对于 Qwen3-235B-A22B-W8A8，当 `--max-num-seqs` 为 144 时具有良好的性能；"
+"对于 Qwen3-32B-W8A8，当 `--max-num-seqs` 为 72 时具有良好的性能。"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:27
+msgid ""
+"However, this may not be the optimal configuration for your scenario. For"
+" higher concurrency, you can try increasing the prefetch size. For lower "
+"concurrency, prefetching may not offer any advantages, so you can "
+"decrease the size or disable prefetching. Determine if the prefetch size "
+"is appropriate by collecting profiling data. Specifically, check if the "
+"time required for the prefetch operation (e.g., MLP Down Proj weight "
+"prefetching) overlaps with the time required for parallel vector "
+"computation operators (e.g., SwiGlu computation), and whether the "
+"prefetch operation is no later than the completion time of the vector "
+"computation operator. In the profiling timeline, a prefetch operation "
+"appears as a CMO operation on a single stream; this CMO operation is the "
+"prefetch operation."
+msgstr ""
+"然而，这可能不是您场景下的最佳配置。对于更高的并发，您可以尝试增加预取大小。"
+"对于较低的并发，预取可能没有任何优势，因此您可以减小大小或禁用预取。"
+"通过收集性能分析数据来确定预取大小是否合适。具体来说，检查预取操作（例如 MLP Down Proj 权重预取）所需的时间"
+"是否与并行向量计算算子（例如 SwiGlu 计算）所需的时间重叠，以及预取操作是否不晚于向量计算算子的完成时间。"
+"在性能分析时间线中，预取操作表现为单个流上的 CMO 操作；这个 CMO 操作就是预取操作。"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:29
+msgid "Notes:"
+msgstr "说明："
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:31
+msgid ""
+"Weight prefetch of MLP `down` project prefetch depends on sequence "
+"parallel, if you want to open for mlp `down` please also enable sequence "
+"parallel."
+msgstr "MLP `down` 投影的权重预取依赖于序列并行，如果希望为 MLP `down` 开启预取，请同时启用序列并行。"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:32
+msgid ""
+"Due to the current size of the L2 cache, the maximum prefetch cannot "
+"exceed 18MB. If `prefetch_ratio * linear_layer_weight_size >= 18 * 1024 *"
+" 1024` bytes, the backend will only prefetch 18MB."
+msgstr "由于当前 L2 缓存的大小，最大预取量不能超过 18MB。如果 `prefetch_ratio * linear_layer_weight_size >= 18 * 1024 * 1024` 字节，后端将仅预取 18MB。"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:34
+msgid "Example"
+msgstr "示例"
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:36
+msgid "For MoE model:"
+msgstr "对于 MoE 模型："
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:56
+msgid "For dense model:"
+msgstr "对于稠密模型："
+
+#: ../../source/user_guide/feature_guide/weight_prefetch.md:58
+msgid ""
+"Following is the default configuration that can get a good performance "
+"for `--max-num-seqs` is 72 for Qwen3-32B-W8A8"
+msgstr "以下是默认配置，对于 Qwen3-32B-W8A8，当 `--max-num-seqs` 为 72 时可以获得良好的性能："

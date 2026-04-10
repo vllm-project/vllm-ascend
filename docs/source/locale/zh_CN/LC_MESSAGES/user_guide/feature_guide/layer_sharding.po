@@ -1,0 +1,181 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"PO-Revision-Date: 2026-01-22 16:35+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:1
+msgid "Layer Sharding Linear Guide"
+msgstr "层间线性层分片"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:5
+msgid ""
+"**Layer Shard Linear** is a memory-optimization feature designed for "
+"large language model (LLM) inference. It addresses the high memory "
+"pressure caused by **repeated linear operators across many layers** that "
+"share identical structure but have distinct weights."
+msgstr ""
+"**Layer Shard Linear** 是一种专为大语言模型 (LLM) 推理设计的内存优化特性。"
+"它旨在解决由于**跨多层的重复线性算子**（结构相同但权重不同）所带来的巨大内存压力。"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:7
+msgid ""
+"Instead of replicating all weights on every device, **Layer Shard Linear "
+"shards the weights of a \"series\" of such operators across the NPU "
+"devices in a communication group**:"
+msgstr ""
+"Layer Shard Linear 不再在每个设备上复制所有权重，而是**将一系列此类算子的权重分片存储在通信组内的各个 NPU 设备上**："
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:8
+msgid ""
+"The **i-th layer's linear weight** is stored **only on device `i % K`**, "
+"where `K` is the number of devices in the group."
+msgstr "**第 i 层的线性层权重**仅存储在**设备 `i % K`** 上，其中 `K` 是组内的设备数量。"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:9
+msgid ""
+"Other devices hold a lightweight **shared dummy tensor** during "
+"initialization and fetch the real weight **on-demand via asynchronous "
+"broadcast** during the forward pass."
+msgstr ""
+"其他设备在初始化期间持有一个轻量级的**共享虚拟张量 (dummy tensor)**，"
+"并在前向传播过程中通过**异步广播 (asynchronous broadcast)** 按需获取真实权重。"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:11
+msgid ""
+"As illustrated in the figure below, this design enables broadcast to "
+"reach weights: while the current layer (e.g., MLA or MOE) is being "
+"computed, the system **asynchronously broadcasts the next layer's "
+"weight** in the background. Because the attention computation in the MLA "
+"module is sufficiently latency-bound, the weight transfer for `o_proj` is"
+" **fully overlapped with computation**, making the communication "
+"**latency-free from the perspective of end-to-end inference**."
+msgstr ""
+"如下图所示，该设计实现了权重的预取：在计算当前层（例如 MLA 或 MOE）时，系统会在后台**异步广播下一层的权重**。"
+"由于 MLA 模块中的 Attention 计算具有足够的延迟带宽，`o_proj` 的权重传输可以**完全与计算重叠**，"
+"从端到端推理的角度来看，通信达到了**零延迟**的效果。"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:13
+msgid ""
+"This approach **preserves exact computational semantics** while "
+"**significantly reducing NPU memory footprint**, especially critical for:"
+msgstr "这种方法在**保持完全一致的计算语义**的同时，**显著降低了 NPU 显存占用**，这对于以下情况至关重要："
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:14
+msgid "Extremely deep architectures (e.g., DeepSeek-V3/R1 with 61 layers);"
+msgstr "极深的模型架构（例如拥有 61 层的 DeepSeek-V3/R1）；"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:15
+msgid ""
+"Models using **[DSA-CP](https://github.com/vllm-project/vllm-"
+"ascend/pull/4702)** or **[FlashComm2](https://github.com/vllm-project"
+"/vllm-ascend/pull/4188)**, where the full `O` (output) projection matrix "
+"must reside in memory per layer;"
+msgstr ""
+"使用 **[DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702)** 或 "
+"**[FlashComm2](https://github.com/vllm-project/vllm-ascend/pull/4188)** 的模型，"
+"这些场景要求每一层的完整 `O` (输出) 投影矩阵必须驻留在内存中；"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:16
+msgid ""
+"Scenarios where **attention computation latency fully overlaps** (hides) "
+"the communication cost of weight broadcasting."
+msgstr "Attention 计算延迟能够完全覆盖（隐藏）权重广播通信开销的场景。"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:20
+msgid "Flowchart"
+msgstr "流程图"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:21
+msgid "![layer shard](./images/layer_sharding.png)"
+msgstr "![层间分片](./images/layer_sharding.png)"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:21
+msgid "layer shard"
+msgstr "层间分片"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:23
+msgid ""
+"**Figure.** Layer Shard Linear workflow: weights are sharded by layer "
+"across devices (top), and during forward execution (bottom), asynchronous"
+" broadcast pre-fetches the next layer's weight while the current layer "
+"computes—enabling zero-overhead weight loading."
+msgstr ""
+"**图示：** Layer Shard Linear 工作流。上方显示权重按层分片存储在不同设备上；下方显示在前向执行期间，"
+"异步广播在当前层计算时预取下一层的权重，从而实现零开销的权重加载。"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:27
+msgid "Getting Started"
+msgstr "快速上手"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:29
+msgid ""
+"To enable **Layer Shard Linear**, specify the target linear layers using "
+"the `--additional-config` argument when launching your inference job. For"
+" example, to shard the `o_proj` and `q_b_proj` layers, use:"
+msgstr ""
+"要启用 **Layer Shard Linear**，请在启动推理任务时使用 `--additional-config` 参数指定目标线性层。"
+"例如，要对 `o_proj` 和 `q_b_proj` 层进行分片，请使用："
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:39
+msgid "Supported Scenarios"
+msgstr "支持的场景"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:41
+msgid ""
+"This feature can be enabled in any scenario, but delivers the greatest "
+"benefit in the following cases:"
+msgstr "该特性可以在任何场景下启用，但在以下情况下收益最大："
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:43
+msgid "FlashComm2-enabled"
+msgstr "启用 FlashComm2 时"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:45
+msgid ""
+"When using [FlashComm2](https://github.com/vllm-project/vllm-"
+"ascend/pull/4188), the full output projection (`o_proj`) matrix must be "
+"resident in memory for each layer. Layer sharding significantly reduces "
+"memory pressure by distributing these weights across devices."
+msgstr ""
+"在使用 [FlashComm2](https://github.com/vllm-project/vllm-ascend/pull/4188) 时，"
+"每一层的完整输出投影 (`o_proj`) 矩阵必须驻留在内存中。层间分片通过将这些权重分布到不同设备上，显著减轻了显存压力。"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:47
+#: ../../source/user_guide/feature_guide/layer_sharding.md:62
+msgid "**Example configuration:**"
+msgstr "**配置示例：**"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:58
+msgid "DSA-CP-enabled"
+msgstr "启用 DSA-CP 时"
+
+#: ../../source/user_guide/feature_guide/layer_sharding.md:60
+msgid ""
+"With [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702), "
+"both `q_b_proj` and `o_proj` layers require large weight matrices to be "
+"stored per layer. Sharding these layers across NPUs helps fit extremely "
+"deep models (e.g., 61-layer architectures) into limited device memory."
+msgstr ""
+"在使用 [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702) 时，"
+"`q_b_proj` 和 `o_proj` 层都要求在每一层存储巨大的权重矩阵。通过在 NPU 之间对这些层进行分片，"
+"有助于将极深的模型（如 61 层架构）加载到有限的设备显存中。"
