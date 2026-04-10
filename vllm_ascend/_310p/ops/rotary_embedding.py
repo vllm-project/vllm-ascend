@@ -172,16 +172,12 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-        offsets: torch.Tensor | None = None,
-        is_neox_style_override: bool | None = None,
     ):
         query_shape, key_shape = query.shape, key.shape
         if self.cos_sin_cache.device != query.device:
             self.cos_sin_cache = self.cos_sin_cache.to(query.device)
         if self.cos_sin_cache.dtype != query.dtype:
             self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
-        if offsets is not None:
-            raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
 
         # For MRoPE, upstream Ascend path (`npu_mrope`) always uses rotary_mode="half".
         # Interleaved behavior is encoded by mrope_section/cos-sin re-layout, not by
