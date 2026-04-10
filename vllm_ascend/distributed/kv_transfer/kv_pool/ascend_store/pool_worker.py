@@ -438,7 +438,7 @@ class KVPoolWorker:
 
         all_keys = block_keys + last_block_keys
         req_meta = LasyerMultiBlockReqMeta(
-            request.req_id, all_keys, [], [],
+            request.req_id, all_keys,
             request.block_ids, layer_id, is_last_chunk
         )
         req_meta.key_gva_mapping = request.key_gva_mapping
