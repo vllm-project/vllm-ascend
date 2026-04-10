@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import json
-import shutil
 import subprocess
 import sys
 from collections import defaultdict
@@ -22,6 +22,7 @@ Examples:
 REPO = "vllm-project/vllm-ascend"
 _RUN_SUITE_START_RE = re.compile(r"\[\d+/\d+\]\s+START\s+(tests/\S+)")
 _RUN_SUITE_END_RE = re.compile(r"\[\d+/\d+\]\s+(?:PASSED|FAILED \(exit code \d+\))\s+(tests/\S+)")
+_RUN_SUITE_FAILED_TARGET_RE = re.compile(r"\[\d+/\d+\]\s+FAILED \(exit code \d+\)\s+(tests/\S+)")
 _PYTEST_FAILURE_HEADER_RE = re.compile(r"^_+\s+test_\S+.*_+$")
 _PYTEST_FAILURES_BANNER_RE = re.compile(r"^=+\s+FAILURES\s+=+$")
 _PYTEST_SUMMARY_BANNER_RE = re.compile(r"^=+\s+short test summary info\s+=+$", re.IGNORECASE)
@@ -29,6 +30,9 @@ _PYTEST_SUMMARY_FAILED_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)")
 _FAILED_SUMMARY_PAYLOAD_RE = re.compile(r"^FAILED\s+(tests/\S+\.py::\S+)\s+-\s+(.+)")
 _EXTENDED_ERROR_RE = re.compile(r"((?:[A-Za-z_][\w]*\.)*[A-Za-z_][\w]*(?:Error|Exception)):\s*(.+)")
 _SUMMARY_NAMED_ERROR_RE = re.compile(r"((?:[A-Za-z_][\w]*\.)*[A-Z][\w]+):\s*(.+)")
+_ERROR_BLOCK_START_RE = re.compile(
+    r"^(Traceback \(most recent call last\):|ImportError while loading conftest |ERROR collecting )"
+)
 
 _ENV_FLAKE_PATTERNS = [
     r"OSError:.*Stale file handle",
@@ -68,29 +72,34 @@ _WORKER_PID_PREFIX_RE = re.compile(r"^\([^)]*pid=\d+\)\s*")
 _MAX_CONTEXT_LINES = 50
 
 
+def _run_gh_api(url: str, *, warn_only: bool) -> str:
+    last_error = ""
+    for attempt in range(3):
+        try:
+            result = subprocess.run(["gh", "api", url], capture_output=True, text=True, check=True)
+            return result.stdout
+        except FileNotFoundError:
+            print("ERROR: 'gh' CLI not found. Install it or run 'gh auth login'.", file=sys.stderr)
+            sys.exit(1)
+        except subprocess.CalledProcessError as exc:
+            last_error = exc.stderr.strip()
+            if "EOF" in last_error and attempt < 2:
+                continue
+            if warn_only:
+                print(f"WARNING: Failed to download {url}: {last_error}", file=sys.stderr)
+                return ""
+            print(f"ERROR: gh api {url} failed: {last_error}", file=sys.stderr)
+            sys.exit(1)
+    return ""
+
+
 def gh_api_json(endpoint: str, **params) -> Any:
-    url = endpoint
-    if params:
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
-        url = f"{endpoint}?{qs}"
-    try:
-        result = subprocess.run(["gh", "api", url], capture_output=True, text=True, check=True)
-    except FileNotFoundError:
-        print("ERROR: 'gh' CLI not found. Install it or run 'gh auth login'.", file=sys.stderr)
-        sys.exit(1)
-    except subprocess.CalledProcessError as exc:
-        print(f"ERROR: gh api {url} failed: {exc.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    return json.loads(result.stdout)
+    url = endpoint if not params else f"{endpoint}?" + "&".join(f"{k}={v}" for k, v in params.items())
+    return json.loads(_run_gh_api(url, warn_only=False))
 
 
 def gh_api_raw(endpoint: str) -> str:
-    try:
-        result = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, check=True)
-    except subprocess.CalledProcessError as exc:
-        print(f"WARNING: Failed to download {endpoint}: {exc.stderr.strip()}", file=sys.stderr)
-        return ""
-    return result.stdout
+    return _run_gh_api(endpoint, warn_only=True)
 
 
 def clean_line(line: str) -> str:
@@ -169,6 +178,26 @@ def extract_failed_test_cases(log_text: str) -> list[str]:
         match = _PYTEST_SUMMARY_FAILED_RE.match(line)
         if match:
             failed.add(match.group(1))
+    for raw_line in log_text.splitlines():
+        line = clean_line(raw_line)
+        match = _RUN_SUITE_FAILED_TARGET_RE.search(line)
+        if match and "::" in match.group(1):
+            failed.add(match.group(1))
+    return sorted(failed)
+
+
+def extract_failed_test_files(log_text: str, failed_test_cases: list[str]) -> list[str]:
+    failed = {test_case.split("::")[0] for test_case in failed_test_cases}
+    for raw_line in log_text.splitlines():
+        line = clean_line(raw_line)
+        match = _RUN_SUITE_FAILED_TARGET_RE.search(line)
+        if not match:
+            continue
+        target = match.group(1)
+        if "::" in target:
+            failed.add(target.split("::")[0])
+        else:
+            failed.add(target)
     return sorted(failed)
 
 
@@ -324,11 +353,13 @@ def _is_tracebackish_line(line: str) -> bool:
     stripped = _strip_worker_prefix(line)
     if not stripped:
         return True
-    if stripped.startswith("Traceback (most recent call last):"):
+    if _ERROR_BLOCK_START_RE.match(stripped):
         return True
     if stripped.startswith("During handling of the above exception"):
         return True
     if stripped.startswith("  File ") or stripped.startswith('File "'):
+        return True
+    if ": in <" in stripped:
         return True
     if stripped.startswith(" ") or stripped.startswith("^"):
         return True
@@ -348,7 +379,7 @@ def _iter_traceback_blocks(lines: list[str], start: int, end: int) -> list[tuple
     idx = start
     while idx < end:
         cleaned = _clean_context_line(lines[idx])
-        if "Traceback (most recent call last):" not in cleaned:
+        if not _ERROR_BLOCK_START_RE.match(cleaned):
             idx += 1
             continue
         block_end = idx + 1
@@ -370,7 +401,8 @@ def _build_error(
     *,
     line_number: int,
     source: str,
-    test_case: str,
+    test_file: str,
+    test_case: str | None = None,
 ) -> dict[str, Any]:
     return {
         "error_type": error_type,
@@ -379,9 +411,39 @@ def _build_error(
         "context": _compress_context(context),
         "line_number": line_number,
         "source": source,
-        "failed_test_files": [test_case.split("::")[0]],
-        "failed_test_cases": [test_case],
+        "failed_test_files": [test_file],
+        "failed_test_cases": [test_case] if test_case else [],
     }
+
+
+def _find_first_error_in_range(
+    lines: list[str], start: int, end: int, *, source: str, test_file: str, test_case: str | None = None
+) -> dict[str, Any] | None:
+    wrapper_candidate = None
+    for idx in range(start, end):
+        line = _clean_context_line(lines[idx])
+        matched = _match_error_line(line)
+        if not matched:
+            continue
+        error_type, raw_error_message = matched
+        error_message, category = _normalize_error_match(error_type, raw_error_message)
+        context = [_clean_context_line(lines[j]) for j in range(start, idx + 1)]
+        candidate = _build_error(
+            error_type,
+            error_message,
+            category,
+            context,
+            line_number=idx,
+            source=source,
+            test_file=test_file,
+            test_case=test_case,
+        )
+        if _is_wrapper_error(error_type, error_message):
+            if wrapper_candidate is None:
+                wrapper_candidate = candidate
+            continue
+        return candidate
+    return wrapper_candidate
 
 
 def _first_traceback_candidate(
@@ -429,6 +491,7 @@ def _find_traceback_error_for_case(
                 candidate["context"],
                 line_number=candidate["line_number"],
                 source="case_traceback",
+                test_file=test_case.split("::")[0],
                 test_case=test_case,
             )
         if wrapper_fallback is None and block_wrapper is not None:
@@ -443,6 +506,7 @@ def _find_traceback_error_for_case(
         wrapper_fallback["context"],
         line_number=wrapper_fallback["line_number"],
         source="case_traceback",
+        test_file=test_case.split("::")[0],
         test_case=test_case,
     )
 
@@ -518,6 +582,7 @@ def _find_summary_payload_error_for_case(
         context,
         line_number=line_number,
         source="case_summary_payload",
+        test_file=test_case.split("::")[0],
         test_case=test_case,
     )
 
@@ -557,6 +622,7 @@ def _find_summary_fallback_error_for_case(test_case: str, entry: dict[str, Any] 
             [f"{error_type}: {error_message}"],
             line_number=0,
             source="case_summary_fallback",
+            test_file=test_case.split("::")[0],
             test_case=test_case,
         )
 
@@ -575,6 +641,7 @@ def _find_summary_fallback_error_for_case(test_case: str, entry: dict[str, Any] 
             [f"{error_type}: {error_message}"],
             line_number=0,
             source="case_summary_fallback",
+            test_file=test_case.split("::")[0],
             test_case=test_case,
         )
 
@@ -587,6 +654,7 @@ def _find_summary_fallback_error_for_case(test_case: str, entry: dict[str, Any] 
             [f"{error_type}: {error_message}"],
             line_number=0,
             source="case_summary_fallback",
+            test_file=test_case.split("::")[0],
             test_case=test_case,
         )
 
@@ -597,6 +665,7 @@ def _find_summary_fallback_error_for_case(test_case: str, entry: dict[str, Any] 
         [line],
         line_number=0,
         source="case_summary_fallback",
+        test_file=test_case.split("::")[0],
         test_case=test_case,
     )
 
@@ -611,69 +680,124 @@ def _extract_case_first_errors(log_text: str, failed_test_cases: list[str]) -> l
         section, start, end = _find_section_for_case(sections, len(lines), test_case)
         error = _find_traceback_error_for_case(lines, test_case, section, start, end)
         if error is None:
+            error = _find_first_error_in_range(
+                lines,
+                start,
+                end,
+                source="case_section",
+                test_file=test_case.split("::")[0],
+                test_case=test_case,
+            )
+        if error is None:
             error = _find_summary_payload_error_for_case(
                 test_case, summary_entries.get(test_case), lines, section, start, end
             )
         if error is None:
             error = _find_summary_fallback_error_for_case(test_case, summary_entries.get(test_case))
-        if error is not None:
+        if error:
             errors.append(error)
 
     return errors
 
 
+def _extract_file_first_errors(
+    log_text: str, failed_test_files: list[str], failed_test_cases: list[str]
+) -> list[dict[str, Any]]:
+    lines = log_text.splitlines()
+    sections = _build_invocation_sections(log_text)
+    covered_files = {test_case.split("::")[0] for test_case in failed_test_cases}
+    errors: list[dict[str, Any]] = []
+
+    for test_file in failed_test_files:
+        if test_file in covered_files:
+            continue
+        section = next((item for item in sections if item["test_name"] == test_file), None)
+        error = _find_first_error_in_range(
+            lines,
+            section["start_line"] if section else 0,
+            section["end_line"] if section else len(lines),
+            source="file_section",
+            test_file=test_file,
+        )
+        if error:
+            errors.append(error)
+
+    return errors
+
+
+def _fetch_pr_test_full_vllm_commit(ref: str) -> str | None:
+    commit_re = re.compile(r"^[0-9a-f]{7,40}$")
+
+    try:
+        workflow_data = gh_api_json(
+            "/repos/vllm-project/vllm-ascend/contents/.github/workflows/pr_test_full.yaml",
+            ref=ref,
+        )
+        encoded_content = workflow_data.get("content", "")
+        if encoded_content:
+            content = base64.b64decode(encoded_content).decode("utf-8")
+            match = re.search(r"vllm_version:\s*\[([^\]]+)\]", content)
+            if not match:
+                return None
+            entries = [entry.strip().strip("'\"") for entry in match.group(1).split(",")]
+            for entry in entries:
+                if commit_re.match(entry):
+                    return entry
+    except (SystemExit, ValueError):
+        pass
+
+    return None
+
+
 def extract_bad_commit(log_text: str, *, resolve_remote: bool = True) -> str | None:
-    match = _VLLM_VERSION_RE.search(log_text)
-    if match:
-        short_sha = match.group(1)
-        if not resolve_remote or shutil.which("gh") is None:
-            return short_sha
-        try:
-            data = gh_api_json(f"/repos/vllm-project/vllm/commits/{short_sha}")
-            return data.get("sha")
-        except SystemExit:
-            return short_sha
+    commit_re = re.compile(r"^[0-9a-f]{40}$")
+    checkout_vllm_repo_re = re.compile(r"^\S+\s+repository:\s+vllm-project/vllm\s*$")
+
+    input_vllm = None
+    input_match = re.search(r"^\S+\s+vllm:\s*(\S+)", log_text, re.MULTILINE)
+    if input_match:
+        input_vllm = input_match.group(1).strip()
+        if commit_re.match(input_vllm):
+            return input_vllm
+
+    lines = log_text.splitlines()
+    if input_vllm is not None:
+        for idx, line in enumerate(lines):
+            if "##[group]Run actions/checkout@v6" not in line:
+                continue
+            block_end = len(lines)
+            for end_idx in range(idx + 1, len(lines)):
+                if "##[group]Run actions/checkout@v6" in lines[end_idx]:
+                    block_end = end_idx
+                    break
+
+            block_lines = lines[idx:block_end]
+            if not any(checkout_vllm_repo_re.match(block_line) for block_line in block_lines):
+                continue
+
+            for block_idx, block_line in enumerate(block_lines):
+                if "[command]/usr/bin/git log -1 --format=%H" not in block_line:
+                    continue
+                if block_idx + 1 >= len(block_lines):
+                    break
+                candidate = clean_line(block_lines[block_idx + 1]).strip()
+                if commit_re.match(candidate):
+                    return candidate
+                break
+
+    uses_match = re.search(
+        r"Uses:\s+vllm-project/vllm-ascend/\.github/workflows/_e2e_test\.yaml@(\S+)\s+\(([0-9a-f]{40})\)",
+        log_text,
+    )
+    if uses_match:
+        workflow_ref = uses_match.group(2) or uses_match.group(1)
+        return _fetch_pr_test_full_vllm_commit(workflow_ref)
+
     return None
 
 
 def get_good_commit() -> str | None:
-    commit_re = re.compile(r"^[0-9a-f]{7,40}$")
-    yaml_files = [
-        ".github/workflows/pr_test_full.yaml",
-        ".github/workflows/pr_test_light.yaml",
-    ]
-
-    for yaml_rel in yaml_files:
-        try:
-            repo_root = subprocess.check_output(
-                ["git", "rev-parse", "--show-toplevel"], text=True, stderr=subprocess.DEVNULL
-            ).strip()
-            disk_path = Path(repo_root) / yaml_rel
-            if disk_path.exists():
-                content = disk_path.read_text()
-                match = re.search(r"vllm_version:\s*\[([^\]]+)\]", content)
-                if match:
-                    entries = [entry.strip().strip("'\"") for entry in match.group(1).split(",")]
-                    for entry in entries:
-                        if commit_re.match(entry):
-                            return entry
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-            pass
-
-        try:
-            result = subprocess.run(
-                ["git", "show", f"origin/main:{yaml_rel}"], capture_output=True, text=True, check=True
-            )
-            match = re.search(r"vllm_version:\s*\[([^\]]+)\]", result.stdout)
-            if match:
-                entries = [entry.strip().strip("'\"") for entry in match.group(1).split(",")]
-                for entry in entries:
-                    if commit_re.match(entry):
-                        return entry
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-
-    return None
+    return _fetch_pr_test_full_vllm_commit("main")
 
 
 def _dedupe_errors_by_scope(errors: list[dict]) -> list[dict]:
@@ -765,11 +889,12 @@ def _suppress_wrapper_assertions(errors: list[dict]) -> list[dict]:
 
 def process_local_log(log_text: str, job_name: str = "local-log") -> dict:
     failed_test_cases = extract_failed_test_cases(log_text)
-    failed_test_files = sorted({test_case.split("::")[0] for test_case in failed_test_cases})
+    failed_test_files = extract_failed_test_files(log_text, failed_test_cases)
+    errors = []
     if failed_test_cases:
-        errors = _extract_case_first_errors(log_text, failed_test_cases)
-    else:
-        errors = []
+        errors.extend(_extract_case_first_errors(log_text, failed_test_cases))
+    if failed_test_files:
+        errors.extend(_extract_file_first_errors(log_text, failed_test_files, failed_test_cases))
 
     errors = _suppress_wrapper_assertions(errors)
     job_errors = _dedupe_errors_by_scope(errors)
@@ -871,45 +996,72 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
     }
 
 
-def _extend_code_block(lines: list[str], content: str | list[str], info_string: str = "text") -> None:
-    if isinstance(content, str):
-        block_lines = content.splitlines() or [content]
-    else:
-        block_lines = content or [""]
-    lines.extend([f"```{info_string}", *block_lines, "```"])
-
-
 def _format_error_block(index: int, error: dict) -> list[str]:
-    lines = [f"#### {index}. `{error['error_type']}`", ""]
-
-    error_message = error.get("error_message", "")
-    if error_message:
-        lines.extend(["**Message**", ""])
-        _extend_code_block(lines, error_message)
-        lines.append("")
-
-    lines.append(f"**Category:** `{error['category']}`")
+    lines = [
+        f"{index}. `{error['error_type']}`: {error['error_message']}",
+        f"   Category: `{error['category']}`",
+    ]
 
     failed_test_files = error.get("failed_test_files", [])
     if failed_test_files:
-        lines.extend(["", "**Failed test files**", ""])
-        lines.extend(f"- `{test}`" for test in failed_test_files)
+        lines.append("   Failed test files:")
+        lines.extend(f"   - `{test}`" for test in failed_test_files)
 
     failed_test_cases = error.get("failed_test_cases", [])
     if failed_test_cases:
-        lines.extend(["", "**Failed test cases**", ""])
-        lines.extend(f"- `{test}`" for test in failed_test_cases)
+        lines.append("   Failed test cases:")
+        lines.extend(f"   - `{test}`" for test in failed_test_cases)
 
     context = error.get("context", [])
     if context:
-        lines.extend(["", "**Context**", ""])
-        _extend_code_block(lines, context)
+        lines.extend(["   Context:", "   ```text", *[f"   {line}" for line in context], "   ```"])
 
     return lines
 
 
 def render_json(result: dict) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+
+
+def select_representative_test_cases(distinct_errors: list[dict]) -> list[str]:
+    representatives: list[str] = []
+    used_cases: set[str] = set()
+
+    for error in distinct_errors:
+        cases = [_base_case_name(test_case) for test_case in error.get("failed_test_cases", []) if test_case]
+        if not cases:
+            continue
+
+        selected = next((test_case for test_case in cases if test_case not in used_cases), None)
+        if selected is None:
+            continue
+        representatives.append(selected)
+        used_cases.add(selected)
+
+    return representatives
+
+
+def build_bisect_payload(result: dict) -> dict:
+    representative_test_cases = select_representative_test_cases(result.get("distinct_errors", []))
+    test_cmds = [f"pytest -sv {test_case}" for test_case in representative_test_cases]
+    run_id = result.get("run_id")
+
+    return {
+        "run_id": run_id,
+        "run_url": result.get("run_url"),
+        "caller_run_id": str(run_id) if run_id is not None else "manual",
+        "good_commit": result.get("good_commit"),
+        "bad_commit": result.get("bad_commit"),
+        "representative_test_cases_count": len(representative_test_cases),
+        "representative_test_cases": representative_test_cases,
+        "test_cmds": test_cmds,
+        "test_cmd": "; ".join(test_cmds),
+        "skip_reason": None if test_cmds else "No representative failed test cases found",
+    }
+
+
+def render_bisect_json(result: dict) -> str:
+    return json.dumps(build_bisect_payload(result), ensure_ascii=False, indent=2) + "\n"
 
 
 def render_llm_json(result: dict) -> str:
@@ -982,7 +1134,10 @@ def main() -> None:
         "--step-name", default="Run test", help="Workflow step name shown in the summary (default: Run test)."
     )
     parser.add_argument(
-        "--format", choices=("summary", "json", "llm-json"), default="summary", help="Output format (default: summary)."
+        "--format",
+        choices=("summary", "json", "llm-json", "bisect-json"),
+        default="summary",
+        help="Output format (default: summary).",
     )
     parser.add_argument(
         "--output", type=Path, default=None, help="Optional output file path. If omitted, prints to stdout."
@@ -1001,6 +1156,8 @@ def main() -> None:
         rendered_output = render_json(result)
     elif args.format == "llm-json":
         rendered_output = render_llm_json(result)
+    elif args.format == "bisect-json":
+        rendered_output = render_bisect_json(result)
     else:
         if not (result["failed_test_files"] or result["failed_test_cases"] or result["distinct_errors"]):
             return
