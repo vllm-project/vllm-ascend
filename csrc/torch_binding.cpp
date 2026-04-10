@@ -924,8 +924,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 
+    // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
+    // tensors, so dispatch must be registered on the CPU backend. The function
+    // internally submits async memcpy on the current NPU stream.
     ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
-    ops.impl("swap_blocks_batch", torch::kPrivateUse1, &vllm_ascend::swap_blocks_batch);
+    ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
