@@ -277,7 +277,6 @@ class RequestTracker:
 
     sizes_per_chunk: list[list[int]] | None = None
 
-    processed_block_count: int = 0
     last_block_keys_by_layer: list[list[str]] | None = None
 
     @staticmethod
@@ -359,8 +358,6 @@ class ReqMeta:
     ends: list[int] | None = None
 
     sizes_per_chunk: list[list[int]] | None = None
-
-    processed_block_count: int = 0
 
     @staticmethod
     def from_request_tracker(

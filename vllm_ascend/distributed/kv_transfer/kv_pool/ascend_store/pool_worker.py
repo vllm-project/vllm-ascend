@@ -361,7 +361,6 @@ class KVPoolWorker:
         my_key_index = (self.pcp_rank * self.dcp_size * (self.tp_size//self.put_step) +
                         self.dcp_rank * (self.tp_size//self.put_step) +
                         self.head_or_tp_rank)
-
         for block_idx in range(blocks_to_process):
             key = keys_multi_blocks[(processed_count + block_idx) * num_keys_per_block + my_key_index]
             start = (processed_count + block_idx) * self.block_size
@@ -466,8 +465,7 @@ class KVPoolWorker:
 
         tracker = self._get_or_init_layer_tracker(request.req_id, layer_id)
         num_blocks = request.token_len_chunk // self.block_size
-        # TODO 这里的判断逻辑需要优化
-        # has_last_block = len(request.block_ids) > num_blocks
+
         has_last_block = request.token_len_chunk % self.block_size != 0
         self._process_chunks_incremental(
             tracker, block_keys, request.block_ids, layer_id,
@@ -501,8 +499,6 @@ class KVPoolWorker:
                         self.dcp_rank * (self.tp_size // self.put_step) +
                         self.head_or_tp_rank)
         load_keys = block_keys[my_key_index: my_key_index + num_saved_blocks * num_keys_per_block: num_keys_per_block]
-        if has_load_last_block:
-            load_keys = load_keys + last_block_keys
 
         load_tracker_key = f"{request.req_id}_load"
         tracker = self._get_or_init_layer_tracker(request.req_id, layer_id, load_tracker_key)
@@ -526,12 +522,11 @@ class KVPoolWorker:
         for layer_id, (block_keys, last_block_keys) in enumerate(zip(block_keys_by_layer, last_block_keys_by_layer)):
             if layer_id in self.independent_layers:
                 continue
-
             self._process_save_for_layer(request, block_keys, last_block_keys, layer_id, num_keys_per_block)
             self._process_load_for_layer(request, block_keys, last_block_keys, layer_id, num_keys_per_block)
 
     def wait_for_layer_load(self) -> None:
-        is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=5)  #try---cache
+        is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)  #try---cache
         if not is_finish:
             logger.info(f"Layerwise {self.current_layer} load failed")
         self.layer_load_finished_events[self.current_layer].clear()
@@ -556,7 +551,7 @@ class KVPoolWorker:
         else:
             self.sync_save_events[self.current_layer].record()
             self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
-            is_finish = self.layer_save_finished_events[self.current_layer].wait(timeout=5)  # try---cache
+            is_finish = self.layer_save_finished_events[self.current_layer].wait(timeout=10)  # try---cache
             if not is_finish:
                 logger.info(f"Layerwise {self.current_layer} save failed")
             self.layer_save_finished_events[self.current_layer].clear()
