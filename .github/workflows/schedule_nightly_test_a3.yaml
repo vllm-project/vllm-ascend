@@ -119,6 +119,9 @@ jobs:
           - name: multi-node-deepseek-v3.2-W8A8-EP
             config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
             size: 4
+          - name: multi-node-deepseek-v3.2-W8A8-EP-aime2025
+            config_file_path: DeepSeek-V3_2-W8A8-EP-aime2025.yaml
+            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
