@@ -47,7 +47,8 @@ msgstr "vLLM"
 msgid ""
 "vLLM Ascend plugin (vllm-ascend) is a community maintained hardware "
 "plugin for running vLLM on the Ascend NPU."
-msgstr "vLLM Ascend 插件（vllm-ascend）是一个由社区维护的硬件插件，用于在 Ascend NPU 上运行 vLLM。"
+msgstr ""
+"vLLM Ascend 插件（vllm-ascend）是一个由社区维护的硬件插件，用于在 Ascend NPU 上运行 vLLM。"
 
 #: ../../source/index.md:26
 msgid ""
