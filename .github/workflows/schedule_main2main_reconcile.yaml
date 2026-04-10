@@ -38,7 +38,7 @@ concurrency:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  CONTROL_REPO_DIR: vllm-benchmarks
+  CONTROL_REPO_DIR: vllm-ascend
 
 jobs:
   reconcile:
@@ -48,7 +48,7 @@ jobs:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
     defaults:
       run:
-        working-directory: vllm-benchmarks
+        working-directory: vllm-ascend
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

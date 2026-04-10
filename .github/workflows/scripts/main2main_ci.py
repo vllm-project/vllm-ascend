@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 import uuid
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 STATE_MARKER = "main2main-state:v1"
 REGISTER_MARKER = "main2main-register"
@@ -266,7 +267,9 @@ def check_registration_consistency(
     if state.branch != registration.branch:
         return GuardResult(False, f"registration branch mismatch: expected {state.branch}, got {registration.branch}")
     if state.head_sha != registration.head_sha:
-        return GuardResult(False, f"registration head_sha mismatch: expected {state.head_sha}, got {registration.head_sha}")
+        return GuardResult(
+            False, f"registration head_sha mismatch: expected {state.head_sha}, got {registration.head_sha}"
+        )
     if state.old_commit != registration.old_commit or state.new_commit != registration.new_commit:
         return GuardResult(False, "registration commit range mismatch")
     if state.phase != registration.phase:
@@ -386,9 +389,7 @@ def normalize_conclusion(conclusion: str) -> str:
 def is_merge_conflict(*, merge_state_status: str | None = None, mergeable: str | None = None) -> bool:
     if mergeable and mergeable.upper() in _CONFLICT_MERGEABLES:
         return True
-    if merge_state_status and merge_state_status.upper() in _CONFLICT_MERGE_STATE_STATUSES:
-        return True
-    return False
+    return bool(merge_state_status and merge_state_status.upper() in _CONFLICT_MERGE_STATE_STATUSES)
 
 
 def decide_reconcile_action(
@@ -1045,9 +1046,7 @@ def _reconcile_pr(repo: str, pr_number: str) -> dict[str, Any]:
             f"repos/{repo}/issues/{pr_number}/comments",
             method="POST",
             payload={
-                "body": render_registration_comment(
-                    RegistrationMetadata(**_registration_payload_from_state(state))
-                )
+                "body": render_registration_comment(RegistrationMetadata(**_registration_payload_from_state(state)))
             },
         )
 

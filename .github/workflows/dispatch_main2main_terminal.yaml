@@ -54,7 +54,7 @@ concurrency:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  CONTROL_REPO_DIR: vllm-benchmarks
+  CONTROL_REPO_DIR: vllm-ascend
   MAIN2MAIN_MODEL: ${{ vars.MAIN2MAIN_MODEL || 'qwen3.6-plus' }}
 
 jobs:
@@ -68,7 +68,7 @@ jobs:
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
     defaults:
       run:
-        working-directory: vllm-benchmarks
+        working-directory: vllm-ascend
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -133,14 +133,6 @@ jobs:
           print(state.get("e2e_run_id", ""))
           PY
           )
-          FIX_RUN_ID=$(python3 - <<'PY'
-          import json
-          from pathlib import Path
-          state = json.loads(Path("/tmp/main2main_state.json").read_text(encoding="utf-8"))
-          print(state.get("fix_run_id", ""))
-          PY
-          )
-
           if [ -n "${E2E_RUN_ID}" ]; then
             python3 "$GITHUB_WORKSPACE/${{ env.CONTROL_REPO_DIR }}/.github/workflows/scripts/ci_log_summary.py" \
               --repo "${{ env.UPSTREAM_REPO }}" \

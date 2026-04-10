@@ -61,9 +61,9 @@ permissions:
 
 env:
   UPSTREAM_REPO: vllm-project/vllm-ascend
-  FORK_OWNER: Meihan-chen
-  CONTROL_REPO_DIR: vllm-benchmarks
-  WORK_REPO_DIR: vllm-benchmarks-work
+  FORK_OWNER: vllm-ascend-ci
+  CONTROL_REPO_DIR: vllm-ascend
+  WORK_REPO_DIR: vllm-ascend-work
   MAIN2MAIN_MODEL: ${{ vars.MAIN2MAIN_MODEL || 'qwen3.6-plus' }}
 
 jobs:
@@ -76,33 +76,27 @@ jobs:
       cancel-in-progress: false
     defaults:
       run:
-        working-directory: vllm-benchmarks-work
+        working-directory: vllm-ascend-work
     env:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
       API_TIMEOUT_MS: 3000000
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
     steps:
-      - name: Checkout vLLM-benchmarks repo
+      - name: Checkout vllm-ascend repo
         uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm-ascend
-          token: ${{ secrets.PAT_TOKEN }}
           path: ${{ env.CONTROL_REPO_DIR }}
           fetch-depth: 0
 
-      - name: Checkout vLLM-benchmarks fork repo
+      - name: Checkout vllm-ascend fork repo
         uses: actions/checkout@v6
         with:
-          repository: Meihan-chen/vllm-benchmarks
+          repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
           path: ${{ env.WORK_REPO_DIR }}
           fetch-depth: 0
-
-      - name: Configure git identity
-        run: |
-          git config user.name "Meihan-chen"
-          git config user.email "jcccx.cmh@gmail.com"
 
       - name: Validate GitHub token scopes
         run: |
@@ -111,6 +105,8 @@ jobs:
 
       - name: Validate Claude gateway configuration
         run: |
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
           test -n "$ANTHROPIC_BASE_URL" || { echo "::error::ANTHROPIC_BASE_URL is empty"; exit 1; }
           test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "::error::ANTHROPIC_AUTH_TOKEN is empty"; exit 1; }
 
@@ -190,7 +186,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           prompt: |
-            Use the main2main skill to adapt vllm-benchmarks to the latest vLLM main branch.
+            Use the main2main skill to adapt vllm-ascend to the latest vLLM main branch.
             The NEW_COMMIT environment variable is set to ${{ steps.detect.outputs.new_commit }}.
             The upstream vLLM source is checked out at ../vllm-upstream.
             Analyze the upstream diff, apply adaptation fixes, and update all commit references.
@@ -221,12 +217,14 @@ jobs:
 
           Automated adaptation to upstream vLLM main branch changes.
           BODY_EOF
-          echo "" >> /tmp/pr_body.md
-          echo "**Commit range:** \`${{ steps.detect.outputs.old_commit }}\`...\`${{ steps.detect.outputs.new_commit }}\`" >> /tmp/pr_body.md
-          echo "### Phase 1: detect-and-adapt" >> /tmp/pr_body.md
-          echo "**Pipeline:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> /tmp/pr_body.md
-          echo "" >> /tmp/pr_body.md
-          git log -1 --pretty=%B >> /tmp/pr_body.md
+          {
+            echo ""
+            echo "**Commit range:** \`${{ steps.detect.outputs.old_commit }}\`...\`${{ steps.detect.outputs.new_commit }}\`"
+            echo "### Phase 1: detect-and-adapt"
+            echo "**Pipeline:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            git log -1 --pretty=%B
+          } >> /tmp/pr_body.md
 
           HEAD_REF="${{ env.FORK_OWNER }}:${{ steps.branch.outputs.name }}"
           PR_URL=$(gh pr create \
@@ -284,20 +282,19 @@ jobs:
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
     defaults:
       run:
-        working-directory: vllm-benchmarks-work
+        working-directory: vllm-ascend-work
     steps:
-      - name: Checkout vLLM-benchmarks repo
+      - name: Checkout vllm-ascend repo
         uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm-ascend
-          token: ${{ secrets.PAT_TOKEN }}
           path: ${{ env.CONTROL_REPO_DIR }}
           fetch-depth: 0
 
       - name: Checkout working repository
         uses: actions/checkout@v6
         with:
-          repository: Meihan-chen/vllm-benchmarks
+          repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
           path: ${{ env.WORK_REPO_DIR }}
           fetch-depth: 0
@@ -338,8 +335,8 @@ jobs:
       - name: Configure git and validate Claude gateway
         if: steps.ctx.outputs.stale != 'true'
         run: |
-          git config user.name "main2main-bot"
-          git config user.email "main2main-bot@noreply.github.com"
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
           test -n "$ANTHROPIC_BASE_URL" || { echo "::error::ANTHROPIC_BASE_URL is empty"; exit 1; }
           test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "::error::ANTHROPIC_AUTH_TOKEN is empty"; exit 1; }
           rm -f .claude/settings.json .claude/settings.local.json
@@ -488,13 +485,12 @@ jobs:
       API_TIMEOUT_MS: 3000000
     defaults:
       run:
-        working-directory: vllm-benchmarks
+        working-directory: vllm-ascend
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          repository: vllm-project/vllm-ascend
-          token: ${{ secrets.PAT_TOKEN }}
+          repository: vllm-project/vllm-ascend、
           path: ${{ env.CONTROL_REPO_DIR }}
           fetch-depth: 0
 
@@ -554,7 +550,7 @@ jobs:
             -f main2main_dispatch_token="${{ github.event.inputs.dispatch_token }}"
 
           BISECT_RUN_ID=""
-          for attempt in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             gh run list \
               --repo "${{ env.UPSTREAM_REPO }}" \
               --workflow dispatch_main2main_bisect.yaml \
@@ -637,20 +633,19 @@ jobs:
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
     defaults:
       run:
-        working-directory: vllm-benchmarks-work
+        working-directory: vllm-ascend-work
     steps:
-      - name: Checkout vLLM-benchmarks repo
+      - name: Checkout vllm-ascend repo
         uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm-ascend
-          token: ${{ secrets.PAT_TOKEN }}
           path: ${{ env.CONTROL_REPO_DIR }}
           fetch-depth: 0
 
       - name: Checkout working repository
         uses: actions/checkout@v6
         with:
-          repository: Meihan-chen/vllm-benchmarks
+          repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
           path: ${{ env.WORK_REPO_DIR }}
           fetch-depth: 0
@@ -720,8 +715,8 @@ jobs:
       - name: Configure git and validate Claude gateway
         if: steps.ctx.outputs.stale != 'true'
         run: |
-          git config user.name "main2main-bot"
-          git config user.email "main2main-bot@noreply.github.com"
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
           test -n "$ANTHROPIC_BASE_URL" || { echo "::error::ANTHROPIC_BASE_URL is empty"; exit 1; }
           test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "::error::ANTHROPIC_AUTH_TOKEN is empty"; exit 1; }
           rm -f .claude/settings.json .claude/settings.local.json
