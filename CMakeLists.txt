@@ -133,9 +133,17 @@ if(DEFINED ENV{VLLM_ASCEND_ENABLE_BATCH_MEMCPY})
     message(STATUS "aclrtMemcpyBatchAsync: force disabled via VLLM_ASCEND_ENABLE_BATCH_MEMCPY=0")
   endif()
 else()
+  # Test the full code pattern we actually use, including struct member access.
+  # This ensures the macro is only defined when the API is fully compatible.
   check_cxx_source_compiles("
     #include <acl/acl_rt.h>
     int main() {
+      aclrtMemLocation loc = {};
+      loc.type = ACL_MEM_LOCATION_TYPE_HOST;
+      loc.id = 0;
+      aclrtMemcpyBatchAttr attr = {};
+      attr.srcLoc = loc;
+      attr.dstLoc = loc;
       (void)aclrtMemcpyBatchAsync;
       return 0;
     }

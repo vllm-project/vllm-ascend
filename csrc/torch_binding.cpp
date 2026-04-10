@@ -149,10 +149,11 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
     }
 
     // =========================================================================
-    // 路径 1: aclrtMemcpyBatchAsync (CANN 8.5+, 试验特性)
+    // 路径 1: aclrtMemcpyBatchAsync (CANN 8.5+)
     //
+    // 单次驱动调用提交所有拷贝，摊薄逐条提交的开销。
     // 约束：仅支持 H2D / D2H，不支持 D2D。
-    // 通过宏 CANN_MEMCPY_BATCH_ASYNC 控制是否启用。
+    // 通过宏 CANN_MEMCPY_BATCH_ASYNC 在编译期控制是否启用。
     // =========================================================================
 #if defined(CANN_MEMCPY_BATCH_ASYNC)
     if (memcpy_kind != ACL_MEMCPY_DEVICE_TO_DEVICE) {
@@ -169,29 +170,43 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
             const_cast<int64_t*>(size_data));
         size_t* dest_maxs = size_arr;
 
+        // aclrtMemcpyBatchAttr uses srcLoc/dstLoc (aclrtMemLocation)
+        // to specify memory locations, not aclrtMemcpyKind.
+        int32_t device_id = 0;
+        aclrtGetDevice(&device_id);
+
+        aclrtMemLocation host_loc = {};
+        host_loc.type = ACL_MEM_LOCATION_TYPE_HOST;
+        host_loc.id = 0;
+
+        aclrtMemLocation device_loc = {};
+        device_loc.type = ACL_MEM_LOCATION_TYPE_DEVICE;
+        device_loc.id = device_id;
+
         aclrtMemcpyBatchAttr attr = {};
-        attr.memcpyKind = memcpy_kind;
-        size_t attrs_index = 0;  
+        if (memcpy_kind == ACL_MEMCPY_HOST_TO_DEVICE) {
+            attr.srcLoc = host_loc;
+            attr.dstLoc = device_loc;
+        } else {  // ACL_MEMCPY_DEVICE_TO_HOST
+            attr.srcLoc = device_loc;
+            attr.dstLoc = host_loc;
+        }
+
+        size_t attrs_index = 0;
         size_t fail_index = 0;
 
         aclError result = aclrtMemcpyBatchAsync(
-            dst_arr,                          
-            dest_maxs,                        
-            src_arr,                          
-            size_arr,                         
-            static_cast<size_t>(n),           
-            &attr,                            
-            &attrs_index,                     
-            1,                                
-            &fail_index,                      
-            stream);                         
+            dst_arr, dest_maxs, src_arr, size_arr,
+            static_cast<size_t>(n),
+            &attr, &attrs_index, 1,
+            &fail_index, stream);
 
         TORCH_CHECK(result == ACL_SUCCESS,
                     "aclrtMemcpyBatchAsync failed at index ", fail_index,
                     " with error code ", result);
         return;
     }
-#endif  
+#endif
 
     // =========================================================================
     // 路径 2: 逐条 aclrtMemcpyAsync（兼容所有 CANN 版本和所有拷贝方向）
@@ -909,7 +924,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 
-    ops.def("swap_blocks_batch(Tensor! x, Tensor! y, Tensor z, int direction) -> ()");    
+    ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
     ops.impl("swap_blocks_batch", torch::kPrivateUse1, &vllm_ascend::swap_blocks_batch);
 
     ops.def(
