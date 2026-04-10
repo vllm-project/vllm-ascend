@@ -8,3 +8,4 @@ myst-parser
 msgspec
 sphinx-substitution-extensions
 sphinx-intl
+openai
