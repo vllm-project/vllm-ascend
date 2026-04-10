@@ -1778,8 +1778,6 @@ class MooncakeLayerwiseConnectorWorker:
                     return
                 if ack != b"ACK":
                     raise ValueError(f"Unexpected ACK response: {ack}")
-                if ack != b"ACK":
-                    raise ValueError(f"Unexpected ACK response: {ack}")
         except Exception as e:
             logger.error(
                 f"Sending done sending signal for request {external_req_id} to "
