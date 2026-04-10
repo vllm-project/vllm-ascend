@@ -1,0 +1,152 @@
+/*
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+//  #include "../aclnn_torch_adapter/op_api_common.h"
+
+#ifndef RESHAPE_AND_CACHE_BY_GROUP_TORCH_ADPT_H
+#define RESHAPE_AND_CACHE_BY_GROUP_TORCH_ADPT_H
+
+namespace vllm_ascend {
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> cache_by_group_pre(
+    const at::Tensor &slot_mapping_npu,
+    at::IntArrayRef slot_mapping_list,
+    int64_t block_size)
+{
+
+    int64_t slot_mapping_len =  slot_mapping_list.size();
+
+    std::vector<int32_t> length(16, 0);
+    std::vector<int32_t> key_idx(16, 0);
+    std::vector<int32_t> key_cache_idx(16, 0);
+    int32_t idx_slotmap = 0;
+    int32_t idx_groups = 0;
+
+    while (idx_slotmap < slot_mapping_len) {
+
+        // 1. 获取当前起始元素的索引和所属block信息
+        int32_t current_idx = slot_mapping_list[idx_slotmap];
+        if(current_idx <0){
+            while(idx_slotmap<slot_mapping_len){
+                if(slot_mapping_list[idx_slotmap++] >=0){
+                    TORCH_CHECK(0>1, "cache_by_group_pre find slot_mapping_list err ");
+                    at::Tensor group_len = at::empty_like({slot_mapping_npu});
+                    at::Tensor group_key_idx = at::empty_like({slot_mapping_npu});
+                    at::Tensor group_key_cache_idx = at::empty_like({slot_mapping_npu});
+                    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(group_len, group_key_idx, group_key_cache_idx);
+                }
+            }
+            break;
+        }
+        // 检测slotMapping有小于0的异常值
+        // if(slot_mapping_list[idx_slotmap]<0){
+        //     OP_LOGE(context_->GetNodeName(), "slot_mapping_list < 0");
+        //     return ge::GRAPH_FAILED;
+        // }
+
+        int32_t block_id = current_idx / block_size;       // 所属block编号
+        int32_t y= current_idx % block_size;
+        // 检测有无重复且非连续的block,暂时不处理直接抛出错误
+        // if((++blockCount[allGroups[idx_groups].quotient])>1){
+        //     // OP_LOGE(context_->GetNodeName(), "Exited discontinuous and repeated Block");
+        //     std::cout<<context_->GetNodeName()<<"  Exited discontinuous and repeated Block"<<current_idx<<std::endl;
+        //     // return ge::GRAPH_FAILED;
+        // }
+
+        key_idx[idx_groups] = idx_slotmap;                          // 该组起始位置
+        key_cache_idx[idx_groups] = current_idx;    
+        // 计算该block理论上的最后一个元素值及其索引跳block计算
+        int32_t j = idx_slotmap;
+        // 如果无序
+        if(j+1 < slot_mapping_len &&slot_mapping_list[j+1]!=slot_mapping_list[j]+1 ) {
+            j++;
+
+        }else{//如果有序
+            int32_t idx_stride = std::min(block_size-y,slot_mapping_len-idx_slotmap)-1;
+            int32_t expected_last =  current_idx + idx_stride;
+            int32_t expected_last_idx = idx_slotmap + (expected_last-current_idx);
+            //如果是完整block
+            if (expected_last == slot_mapping_list[expected_last_idx]){
+                j = expected_last_idx+1;
+            }else{
+                // 3. 找该组实际的最后一个元素位置
+                // 循环条件：不越界 + 当前元素属于当前block + 未超过理论最后元素; 
+                while (j < slot_mapping_len && slot_mapping_list[j] / block_size == block_id && slot_mapping_list[j] <= expected_last) {
+                    j++;
+                }
+            }
+        }
+
+        // 4. 计算该组长度
+        length[idx_groups] = (j - idx_slotmap);
+        // 5. 直接跳到下一组起始位置（核心：跳过中间元素，降低时间复杂度）
+        idx_slotmap = j;
+        idx_groups++;
+        // 6. 超了扩容
+
+        if(idx_groups>=length.capacity()){
+            int32_t new_capacity = length.capacity() * 2;
+            length.reserve(new_capacity);
+            key_idx.reserve(new_capacity);
+            key_cache_idx.reserve(new_capacity);
+
+            for (int32_t k = idx_groups; k < new_capacity; ++k){
+                length.emplace_back(0);
+                key_idx.emplace_back(0);
+                key_cache_idx.emplace_back(0);
+            } 
+        }
+    }
+
+    at::Tensor group_len = at::empty({idx_groups},
+        at::TensorOptions(slot_mapping_npu.options().device()).dtype(torch::kInt32)
+        );
+    void* group_len_addr = group_len.data_ptr();
+
+    at::Tensor group_key_idx = at::empty({idx_groups},
+        at::TensorOptions(slot_mapping_npu.options().device()).dtype(torch::kInt32)
+        );
+    void* group_key_idx_addr = group_key_idx.data_ptr();
+    
+    at::Tensor group_key_cache_idx = at::empty({idx_groups},
+        at::TensorOptions(slot_mapping_npu.options().device()).dtype(torch::kInt32)
+        );
+    void* group_key_cache_idx_addr = group_key_cache_idx.data_ptr();
+
+    uint32_t device_size=idx_groups*sizeof(length[0]);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+        aclrtMemcpyKind memcpy_type=ACL_MEMCPY_HOST_TO_DEVICE;
+        // int ret =aclrtMemcpy(devAddr, device_size, &length[0], device_size,  memcpy_type);
+        aclrtMemcpyAsync(group_len_addr, device_size, &length[0], device_size, ACL_MEMCPY_HOST_TO_DEVICE, stream); 
+        aclrtMemcpyAsync(group_key_idx_addr, device_size, &key_idx[0], device_size, ACL_MEMCPY_HOST_TO_DEVICE, stream);  
+        aclrtMemcpyAsync(group_key_cache_idx_addr, device_size, &key_cache_idx[0], device_size, ACL_MEMCPY_HOST_TO_DEVICE, stream);   
+
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(group_len, group_key_idx, group_key_cache_idx);
+
+}
+void reshape_and_cache_by_group(
+    const at::Tensor &key_in,
+    const at::Tensor &key_cache_in,
+    const at::Tensor &group_len,
+    const at::Tensor &group_key_idx,
+    const at::Tensor &group_key_cache_idx,
+    int64_t block_size)
+{
+    EXEC_NPU_CMD(aclnnReshapeAndCacheByGroup, key_in, key_cache_in,group_len, group_key_idx, group_key_cache_idx, block_size);
+}
+
+}
+#endif
