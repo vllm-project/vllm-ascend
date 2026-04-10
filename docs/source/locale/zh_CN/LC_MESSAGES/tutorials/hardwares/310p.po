@@ -1,0 +1,151 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/hardwares/310p.md:1
+msgid "Atlas 300I"
+msgstr "Atlas 300I"
+
+#: ../../source/tutorials/hardwares/310p.md:4
+msgid ""
+"This Atlas 300I series is currently experimental. In future versions, "
+"there may be behavioral changes related to model coverage and performance"
+" improvement."
+msgstr ""
+"Atlas 300I 系列当前处于实验阶段。在未来的版本中，可能会发生与模型覆盖范围和性能提升相关的行为变化。"
+
+#: ../../source/tutorials/hardwares/310p.md:5
+msgid ""
+"Currently, the Atlas 300I series only supports eager mode and the float16"
+" data type."
+msgstr ""
+"目前，Atlas 300I 系列仅支持 eager 模式和 float16 数据类型。"
+
+#: ../../source/tutorials/hardwares/310p.md:8
+msgid "Run vLLM on Atlas 300I Series"
+msgstr "在 Atlas 300I 系列上运行 vLLM"
+
+#: ../../source/tutorials/hardwares/310p.md:10
+msgid "Run docker container:"
+msgstr "运行 Docker 容器："
+
+#: ../../source/tutorials/hardwares/310p.md:40
+msgid "Set up environment variables:"
+msgstr "设置环境变量："
+
+#: ../../source/tutorials/hardwares/310p.md:50
+msgid "Online Inference on NPU"
+msgstr "NPU 在线推理"
+
+#: ../../source/tutorials/hardwares/310p.md:53
+msgid ""
+"For Atlas 300I (310P), do not rely on `max-model-len` auto detection "
+"(omit `--max-model-len`), because it may cause OOM."
+msgstr ""
+"对于 Atlas 300I（310P），请不要依赖 `max-model-len` 的自动检测（省略 `--max-model-len`），因为这可能导致 OOM。"
+
+#: ../../source/tutorials/hardwares/310p.md:56
+msgid "Reason (current 310P attention path):"
+msgstr "原因（当前 310P 注意力路径）："
+
+#: ../../source/tutorials/hardwares/310p.md:57
+msgid ""
+"`AscendAttentionMetadataBuilder310` passes `model_config.max_model_len` "
+"to `AttentionMaskBuilder310`."
+msgstr ""
+"`AscendAttentionMetadataBuilder310` 将 `model_config.max_model_len` 传递给 `AttentionMaskBuilder310`。"
+
+#: ../../source/tutorials/hardwares/310p.md:59
+msgid ""
+"`AttentionMaskBuilder310` builds a full causal mask with shape "
+"`[max_model_len, max_model_len]` in float16, then casts it to FRACTAL_NZ."
+msgstr ""
+"`AttentionMaskBuilder310` 构建一个形状为 `[max_model_len, max_model_len]` 的完整因果掩码（使用 float16），然后将其转换为 FRACTAL_NZ 格式。"
+
+#: ../../source/tutorials/hardwares/310p.md:61
+msgid ""
+"In 310P `attention_v1` prefill/chunked-prefill (`_npu_flash_attention` / "
+"`_npu_paged_attention_splitfuse`), this explicit mask tensor is consumed "
+"directly, and there is no compressed-mask path."
+msgstr ""
+"在 310P 的 `attention_v1` 预填充/分块预填充（`_npu_flash_attention` / `_npu_paged_attention_splitfuse`）中，"
+"此显式掩码张量被直接使用，并且没有压缩掩码路径。"
+
+#: ../../source/tutorials/hardwares/310p.md:66
+msgid ""
+"So if auto resolves to a large context length, the mask allocation "
+"(`O(max_model_len^2)`) can exceed NPU memory and trigger OOM. Always set "
+"a conservative explicit value, for example `--max-model-len 4096`."
+msgstr ""
+"因此，如果自动解析出的上下文长度较大，掩码分配（`O(max_model_len^2)`）可能会超出 NPU 内存并触发 OOM。"
+"请始终设置一个保守的显式值，例如 `--max-model-len 4096`。"
+
+#: ../../source/tutorials/hardwares/310p.md:71
+msgid ""
+"Run the following script to start the vLLM server on NPU (Qwen3-0.6B:1 "
+"card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):"
+msgstr ""
+"运行以下脚本在 NPU 上启动 vLLM 服务器（Qwen3-0.6B：1 卡，Qwen2.5-7B-Instruct：2 卡，Pangu-Pro-MoE-72B：8 卡）："
+
+#: ../../source/tutorials/hardwares/310p.md
+msgid "Qwen3-0.6B"
+msgstr "Qwen3-0.6B"
+
+#: ../../source/tutorials/hardwares/310p.md:81
+#: ../../source/tutorials/hardwares/310p.md:111
+#: ../../source/tutorials/hardwares/310p.md:141
+msgid "Run the following command to start the vLLM server:"
+msgstr "运行以下命令启动 vLLM 服务器："
+
+#: ../../source/tutorials/hardwares/310p.md:92
+#: ../../source/tutorials/hardwares/310p.md:122
+#: ../../source/tutorials/hardwares/310p.md:152
+msgid "Once your server is started, you can query the model with input prompts."
+msgstr "服务器启动后，您可以使用输入提示词查询模型。"
+
+#: ../../source/tutorials/hardwares/310p.md
+msgid "Qwen2.5-7B-Instruct"
+msgstr "Qwen2.5-7B-Instruct"
+
+#: ../../source/tutorials/hardwares/310p.md
+msgid "Qwen2.5-VL-3B-Instruct"
+msgstr "Qwen2.5-VL-3B-Instruct"
+
+#: ../../source/tutorials/hardwares/310p.md:168
+msgid "If you run this script successfully, you can see the results."
+msgstr "如果您成功运行此脚本，将看到结果。"
+
+#: ../../source/tutorials/hardwares/310p.md:170
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/tutorials/hardwares/310p.md:172
+msgid ""
+"Run the following script (`example.py`) to execute offline inference on "
+"NPU:"
+msgstr "运行以下脚本（`example.py`）在 NPU 上执行离线推理："
+
+#: ../../source/tutorials/hardwares/310p.md:307
+msgid "Run script:"
+msgstr "运行脚本："
+
+#: ../../source/tutorials/hardwares/310p.md:313
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果您成功运行此脚本，将看到如下所示的信息："

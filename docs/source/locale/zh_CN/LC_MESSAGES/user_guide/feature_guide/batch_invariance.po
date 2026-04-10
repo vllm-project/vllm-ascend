@@ -1,0 +1,222 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:1
+msgid "Batch Invariance"
+msgstr "批次不变性"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:4
+msgid ""
+"Batch invariance is currently in beta. Some features are still under "
+"active development. Track progress and planned improvements at "
+"<https://github.com/vllm-project/vllm-ascend/issues/5487>"
+msgstr ""
+"批次不变性目前处于测试阶段。部分功能仍在积极开发中。请通过 "
+"<https://github.com/vllm-project/vllm-ascend/issues/5487> 跟踪进展和计划中的改进。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:8
+msgid ""
+"This document shows how to enable batch invariance in vLLM-Ascend. Batch "
+"invariance ensures that the output of a model is deterministic and "
+"independent of the batch size or the order of requests in a batch."
+msgstr ""
+"本文档介绍如何在 vLLM-Ascend 中启用批次不变性。批次不变性确保模型的输出是确定性的，并且与批次大小或批次中请求的顺序无关。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:10
+msgid "Motivation"
+msgstr "动机"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:12
+msgid "Batch invariance is crucial for several use cases:"
+msgstr "批次不变性在以下几个用例中至关重要："
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:14
+msgid ""
+"**Framework debugging**: Deterministic outputs make it easier to debug "
+"issues in the inference framework, as the same input will always produce "
+"the same output regardless of batching."
+msgstr ""
+"**框架调试**：确定性的输出使得推理框架中的问题更容易调试，因为相同的输入无论批次如何，都会产生相同的输出。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:15
+msgid ""
+"**Model debugging**: Helps identify issues in model implementations by "
+"ensuring consistent behavior across different batch configurations."
+msgstr ""
+"**模型调试**：通过确保不同批次配置下的行为一致性，帮助识别模型实现中的问题。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:16
+msgid ""
+"**Reinforcement Learning (RL)**: RL training often requires deterministic"
+" rollouts for reproducibility and stable training."
+msgstr ""
+"**强化学习（RL）**：RL 训练通常需要确定性的推演以确保可复现性和稳定的训练。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:17
+msgid ""
+"**Large-scale inference systems**: Systems that use vLLM as a component "
+"benefit from deterministic behavior for testing, validation, and "
+"consistency guarantees."
+msgstr ""
+"**大规模推理系统**：将 vLLM 作为组件的系统受益于确定性的行为，便于测试、验证和一致性保证。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:19
+msgid "Hardware Requirements"
+msgstr "硬件要求"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:21
+msgid ""
+"Batch invariance currently requires Ascend 910B NPUs, because only the "
+"910B supports batch invariance with HCCL communication for now. We will "
+"support other NPUs in the future."
+msgstr ""
+"批次不变性目前需要 Ascend 910B NPU，因为目前只有 910B 支持带有 HCCL 通信的批次不变性。未来我们将支持其他 NPU。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:24
+msgid "Software Requirements"
+msgstr "软件要求"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:26
+msgid ""
+"Batch invariance requires a customed operator library for 910B. We will "
+"release the customed operator library in future versions."
+msgstr ""
+"批次不变性需要 910B 的自定义算子库。我们将在未来版本中发布该自定义算子库。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:29
+msgid "Enabling Batch Invariance"
+msgstr "启用批次不变性"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:31
+msgid ""
+"Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` "
+"environment variable to `1`:"
+msgstr "通过将环境变量 `VLLM_BATCH_INVARIANT` 设置为 `1` 来启用批次不变性："
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:37
+msgid "Online Inference (Server Mode)"
+msgstr "在线推理（服务器模式）"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:39
+msgid "To start a vLLM server with batch invariance enabled:"
+msgstr "启用批次不变性启动 vLLM 服务器："
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:45
+msgid "Then use the OpenAI-compatible client:"
+msgstr "然后使用 OpenAI 兼容的客户端："
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:68
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:70
+msgid "For offline batch inference with batch invariance:"
+msgstr "启用批次不变性进行离线批处理推理："
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:105
+msgid "Tested Models"
+msgstr "已测试的模型"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:107
+msgid "Batch invariance has been tested and verified on the following models:"
+msgstr "批次不变性已在以下模型上完成测试和验证："
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:109
+msgid "**Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`"
+msgstr "**Qwen3（稠密模型）**：`Qwen/Qwen3-1.7B`、`Qwen/Qwen3-8B`"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:110
+msgid "**Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`"
+msgstr "**Qwen3（MoE）**：`Qwen/Qwen3-30B-A3B`"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:112
+msgid ""
+"Other models may also work, but these have been explicitly validated. If "
+"you encounter issues with a specific model, please report them on the "
+"[GitHub issue tracker](https://github.com/vllm-project/vllm-"
+"ascend/issues/new/choose)."
+msgstr ""
+"其他模型也可能适用，但以上是经过明确验证的模型。如果在特定模型上遇到问题，请在 "
+"[GitHub issue 跟踪器](https://github.com/vllm-project/vllm-"
+"ascend/issues/new/choose) 上报告。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:114
+msgid "Implementation Details"
+msgstr "实现细节"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:116
+msgid "When batch invariance is enabled, vLLM:"
+msgstr "启用批次不变性后，vLLM 会："
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:118
+msgid ""
+"Uses deterministic kernel implementations for attention and other "
+"operations"
+msgstr "对注意力和其他操作使用确定性的内核实现"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:119
+msgid "Ensures consistent numerical behavior across different batch sizes"
+msgstr "确保不同批次大小下的数值行为一致"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:120
+msgid "Disables certain optimizations that may introduce non-determinism"
+msgstr "禁用某些可能引入非确定性的优化"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:123
+msgid ""
+"Enabling batch invariance may impact performance compared to the default "
+"non-deterministic mode. This trade-off is intentional to guarantee "
+"reproducibility."
+msgstr ""
+"与默认的非确定性模式相比，启用批次不变性可能会影响性能。这种权衡是为了保证可复现性。"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:126
+msgid "Future Improvements"
+msgstr "未来改进"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:128
+msgid ""
+"The batch invariance feature is under active development. Planned "
+"improvements include:"
+msgstr "批次不变性功能正在积极开发中。计划中的改进包括："
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:130
+msgid "Support for additional NPUs series"
+msgstr "支持更多 NPU 系列"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:131
+msgid "Expanded model coverage"
+msgstr "扩展模型覆盖范围"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:132
+msgid "Performance optimizations"
+msgstr "性能优化"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:133
+msgid "Additional testing and validation"
+msgstr "额外的测试和验证"
+
+#: ../../source/user_guide/feature_guide/batch_invariance.md:135
+msgid ""
+"For the latest status and to contribute ideas, see the [tracking "
+"issue](https://github.com/vllm-project/vllm-ascend/issues/5487)."
+msgstr ""
+"有关最新状态和贡献想法，请参见[跟踪 issue](https://github.com/vllm-project/vllm-ascend/issues/5487)。"
