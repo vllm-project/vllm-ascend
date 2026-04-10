@@ -19,8 +19,8 @@ ARG VLLM_ASCEND_BRANCH=""
 FROM quay.io/ascend/vllm-ascend:nightly-${VLLM_ASCEND_BRANCH}-a3
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-ARG AIS_BENCH_TAG="v3.0-20250930-master"
-ARG AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
+ARG AIS_BENCH_TAG="v3.1-20260330-master"
+ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 ARG GITEE_USERNAME=""
 ARG GITEE_TOKEN=""
 
