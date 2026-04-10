@@ -80,11 +80,6 @@ class KVPoolScheduler:
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model_name = model_config.model.split('/')[-1]
 
-    def compute_block_offsets(self, num_blocks: int) -> tuple[list[int], list[int]]:
-        starts = [chunk_id * self._block_size for chunk_id in range(num_blocks)]
-        ends = [start + self._block_size for start in starts]
-        return starts, ends
-
     def _generate_keys_and_alloc(self, block_hashes, req_id='') -> tuple[list[list[str]], list[list[str]], dict[str, int | None]]:
         block_keys_by_layer, last_block_keys_by_layer = self.generate_keys(block_hashes, req_id=req_id)
         all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
@@ -269,15 +264,12 @@ class KVPoolScheduler:
             )
 
             num_blocks = len(unfolded_block_ids)
-            starts, ends = self.compute_block_offsets(num_blocks)
 
             block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
                 request_real.block_hashes[:num_blocks], req_id=request.req_id)
             request_tracker.key_gva_mapping = key_gva_mapping
             request_tracker.block_keys_by_layer = block_keys_by_layer
             request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
-            request_tracker.starts = starts
-            request_tracker.ends = ends
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -293,8 +285,6 @@ class KVPoolScheduler:
                 req_meta.key_gva_mapping = key_gva_mapping
                 req_meta.block_keys_by_layer = block_keys_by_layer
                 req_meta.last_block_keys_by_layer = last_block_keys_by_layer
-                req_meta.starts = starts
-                req_meta.ends = ends
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -333,14 +323,11 @@ class KVPoolScheduler:
                     self._request_trackers[req_id] = request_tracker
 
                     num_blocks = len(new_block_ids)
-                    starts, ends = self.compute_block_offsets(num_blocks)
                     block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
                         request_real.block_hashes[:num_blocks], req_id=req_id)
 
                     request_tracker.block_keys_by_layer = block_keys_by_layer
                     request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
-                    request_tracker.starts = starts
-                    request_tracker.ends = ends
 
                     last_chunk_tokens_num = (
                         (len(request_real.prompt_token_ids) // self._block_size * self._block_size)
@@ -361,8 +348,6 @@ class KVPoolScheduler:
                         req_meta.key_gva_mapping = key_gva_mapping
                         req_meta.block_keys_by_layer = block_keys_by_layer
                         req_meta.last_block_keys_by_layer = last_block_keys_by_layer
-                        req_meta.starts = starts
-                        req_meta.ends = ends
 
                 # decode/chunked request
                 else:
@@ -387,17 +372,9 @@ class KVPoolScheduler:
                         block_keys_by_layer, _, key_gva_mapping = self._generate_keys_and_alloc(new_block_hashes)
                         request_tracker.key_gva_mapping.update(key_gva_mapping)
 
-                        existing_chunk_count = len(request_tracker.starts) if request_tracker.starts else 0
-                        base_offset = existing_chunk_count * self._block_size
-                        new_starts = [base_offset + chunk_id * self._block_size for chunk_id in range(new_hash_count)]
-                        new_ends = [start + self._block_size for start in new_starts]
-                        if request_tracker.starts is None:
-                            request_tracker.starts = new_starts
-                            request_tracker.ends = new_ends
+                        if request_tracker.block_keys_by_layer is None:
                             request_tracker.block_keys_by_layer = block_keys_by_layer
                         else:
-                            request_tracker.starts.extend(new_starts)
-                            request_tracker.ends.extend(new_ends)
                             for layer_id, layer_keys in enumerate(block_keys_by_layer):
                                 request_tracker.block_keys_by_layer[layer_id].extend(layer_keys)
 
@@ -426,8 +403,6 @@ class KVPoolScheduler:
                         original_block_size=self.original_block_size,
                     )
                     req_meta.key_gva_mapping = request_tracker.key_gva_mapping
-                    req_meta.starts = request_tracker.starts
-                    req_meta.ends = request_tracker.ends
                     req_meta.block_keys_by_layer = request_tracker.block_keys_by_layer
                     req_meta.last_block_keys_by_layer = request_tracker.last_block_keys_by_layer
                 if req_meta is not None:

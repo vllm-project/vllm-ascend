@@ -453,8 +453,6 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 class LasyerMultiBlockReqMeta:
     req_id: str
     keys: list[str]
-    starts: list[int]
-    ends: list[int]
     block_ids: list[int]
     layer_id: int
     is_last_chunk: bool | None = True

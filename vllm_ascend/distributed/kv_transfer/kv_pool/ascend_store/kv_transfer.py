@@ -340,9 +340,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         layer_id = req_metas[0].layer_id
         # key_list_remove = []
         for req_meta in req_metas:
-            # starts = req_meta.starts
-            # ends = req_meta.ends
-            # keys = req_meta.keys
             is_last_chunk = req_meta.is_last_chunk
             # if not self.dcp_size > 1:
             #     starts = starts[self.tp_rank % self.put_step::self.put_step]
