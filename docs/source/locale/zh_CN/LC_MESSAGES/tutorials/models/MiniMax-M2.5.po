@@ -1,0 +1,531 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:1
+msgid "MiniMax-M2.5"
+msgstr "MiniMax-M2.5"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:5
+msgid ""
+"MiniMax‑M2.5 is MiniMax’s flagship large language model, reinforced for "
+"high‑value scenarios such as code generation, agentic tool "
+"calling/search, and complex office workflows, with an emphasis on "
+"reasoning efficiency and end‑to‑end speed on challenging tasks."
+msgstr ""
+"MiniMax‑M2.5 是 MiniMax 的旗舰大语言模型，针对代码生成、智能体工具调用/搜索、复杂办公工作流等高价值场景进行了强化，"
+"重点在于推理效率和在具有挑战性任务上的端到端速度。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:7
+msgid ""
+"This document provides a unified deployment guide for `MiniMax-M2.5` on "
+"vLLM Ascend, covering both:"
+msgstr "本文档提供了 `MiniMax-M2.5` 在 vLLM Ascend 上的统一部署指南，涵盖以下两种场景："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:9
+msgid "**A3 single-node** deployment (Atlas 800 A3)"
+msgstr "**A3 单节点**部署（Atlas 800 A3）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:10
+msgid "**A2 dual-node** deployment (2× Atlas 800I A2)"
+msgstr "**A2 双节点**部署（2× Atlas 800I A2）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:12
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:14
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:16
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:18
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:20
+msgid "Model Weights"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:22
+msgid ""
+"`MiniMax-M2.5` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** "
+"or **2× Atlas 800I A2** nodes. Download the model weights from "
+"[MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5)."
+msgstr ""
+"`MiniMax-M2.5`（fp8 检查点）：推荐使用 **1× Atlas 800 A3** 或 **2× Atlas 800I A2** 节点。"
+"从 [MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5) 下载模型权重。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:23
+msgid ""
+"`MiniMax-M2.5-w8a8-QuaRot` : Download the model weights from [Eco-"
+"Tech/MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-"
+"Tech/MiniMax-M2.5-w8a8-QuaRot)."
+msgstr "`MiniMax-M2.5-w8a8-QuaRot`：从 [Eco-Tech/MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) 下载模型权重。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:24
+msgid ""
+"`Eagle3` : Download the model weights from [vllm-ascend/MiniMax-M2.5"
+"-eagel-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5"
+"-eagel-model-0318)."
+msgstr "`Eagle3`：从 [vllm-ascend/MiniMax-M2.5-eagel-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagel-model-0318) 下载模型权重。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:26
+msgid ""
+"It is recommended to download the model weights to a shared directory, "
+"such as `/mnt/sfs_turbo/.cache/`. The current release automatically "
+"detects the MiniMax-M2 fp8 checkpoint, disables fp8 quantization kernels "
+"on NPU, and loads the weights by dequantizing to bf16. This behavior may "
+"be removed once public bf16 weights are available."
+msgstr ""
+"建议将模型权重下载到共享目录，例如 `/mnt/sfs_turbo/.cache/`。"
+"当前版本会自动检测 MiniMax-M2 fp8 检查点，在 NPU 上禁用 fp8 量化内核，并通过反量化为 bf16 来加载权重。"
+"一旦公开的 bf16 权重可用，此行为可能会被移除。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:28
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:30
+msgid "You can use the official docker image to run `MiniMax-M2.5` directly."
+msgstr "您可以使用官方 Docker 镜像直接运行 `MiniMax-M2.5`。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:32
+msgid ""
+"Select an image based on your machine type and start the container on "
+"your node. See [using docker](../../installation.md#set-up-using-docker)."
+msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动容器。请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:34
+msgid "Run with Docker"
+msgstr "使用 Docker 运行"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:36
+#: ../../source/tutorials/models/MiniMax-M2.5.md:123
+#: ../../source/tutorials/models/MiniMax-M2.5.md:325
+msgid "A3 (single node)"
+msgstr "A3（单节点）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:79
+msgid "A2 (dual node, run on both nodes)"
+msgstr "A2（双节点，在两个节点上运行）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:81
+msgid "Create and run `minimax25-docker-run.sh` on **both** A2 nodes."
+msgstr "在**两个** A2 节点上创建并运行 `minimax25-docker-run.sh`。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:83
+#: ../../source/tutorials/models/MiniMax-M2.5.md:127
+msgid "Notes:"
+msgstr "说明："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:85
+msgid ""
+"The default configuration assumes an **Atlas 800I A2 8-NPU** node and "
+"sets `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`. Update it based on your"
+" hardware."
+msgstr "默认配置假设使用 **Atlas 800I A2 8-NPU** 节点，并设置 `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`。请根据您的硬件进行更新。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:86
+msgid ""
+"Map your model weight directory into the container (the example maps it "
+"to `/opt/data/verification/`)."
+msgstr "将模型权重目录映射到容器中（示例中映射到 `/opt/data/verification/`）。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:121
+msgid "Online Inference on Multi-NPU"
+msgstr "多 NPU 在线推理"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:125
+msgid ""
+"Below is a recommended startup configuration for short-context condition "
+"like 3.5k/1.5k to reach a good performance."
+msgstr "以下是在短上下文（如 3.5k/1.5k）条件下达到良好性能的推荐启动配置。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:129
+msgid ""
+"If you only care about short-context low latency, you can explicitly set "
+"`--max-model-len 32768`. You may also set `tensor-parallel-size` to 16 "
+"and set `data-parallel-size` to 1."
+msgstr "如果只关心短上下文低延迟，可以显式设置 `--max-model-len 32768`。也可以将 `tensor-parallel-size` 设置为 16，将 `data-parallel-size` 设置为 1。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:130
+msgid ""
+"`export VLLM_ASCEND_BALANCE_SCHEDULING=1` is used to enhance scheduling "
+"capacity between prefill and decode. This will work remarkably with a "
+"lager `data-parallel-size`. This can increace performance when "
+"cuncurrency gets closer to values equals to `data-parallel-size` times "
+"`max-num-seqs`."
+msgstr ""
+"`export VLLM_ASCEND_BALANCE_SCHEDULING=1` 用于增强预填充和解码之间的调度能力。"
+"这在使用较大的 `data-parallel-size` 时效果显著。当并发数接近 `data-parallel-size` 乘以 `max-num-seqs` 时，可以提升性能。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:167
+msgid "Remarks:"
+msgstr "备注："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:169
+msgid "`minimax_m2_append_think` keeps `<think>...</think>` inside `content`."
+msgstr "`minimax_m2_append_think` 将 `<think>...</think>` 保留在 `content` 中。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:170
+msgid ""
+"If you mainly rely on the reasoning semantics of `/v1/responses`, it is "
+"recommended to use `--reasoning-parser minimax_m2` instead."
+msgstr "如果主要依赖 `/v1/responses` 的推理语义，建议使用 `--reasoning-parser minimax_m2` 代替。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:171
+msgid ""
+"To receive a better performance on long-context like 128k or 64k, we "
+"recommend to do changes as shown below, and you can remove `export "
+"VLLM_ASCEND_BALANCE_SCHEDULING=1`."
+msgstr "为了在 128k 或 64k 等长上下文场景下获得更好的性能，我们建议进行如下更改，并可以移除 `export VLLM_ASCEND_BALANCE_SCHEDULING=1`。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:186
+msgid ""
+"If you will to test with `curl` command, you can add following commands "
+"addition to start up command above."
+msgstr "如果要使用 `curl` 命令进行测试，可以在上述启动命令中添加以下命令。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:194
+msgid "A2 (dual node, tp=8 + dp=2)"
+msgstr "A2（双节点，tp=8 + dp=2）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:196
+msgid ""
+"Since cross-node tensor parallelism (TP) can be unstable, the dual-node "
+"guide uses a **tp=8 + dp=2** setup (8 NPUs per node, 16 NPUs total)."
+msgstr "由于跨节点张量并行（TP）可能不稳定，双节点指南使用 **tp=8 + dp=2** 的设置（每节点 8 个 NPU，共 16 个 NPU）。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:198
+msgid "Node0 (primary) startup script"
+msgstr "Node0（主节点）启动脚本"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:200
+msgid ""
+"Edit `minimax25_service_node0.sh` inside the node0 container, and replace"
+" the placeholders with your actual values:"
+msgstr "在 node0 容器中编辑 `minimax25_service_node0.sh`，并将占位符替换为实际值："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:202
+#, python-brace-format
+msgid "`{PrimaryNodeIP}`: the primary node's IP address (public/cluster network)"
+msgstr "`{PrimaryNodeIP}`：主节点的 IP 地址（公共/集群网络）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:203
+#, python-brace-format
+msgid ""
+"`{NIC}`: the NIC name for the public/cluster network (check via "
+"`ifconfig`, e.g., `enp67s0f0np0`)"
+msgstr "`{NIC}`：公共/集群网络的网卡名称（通过 `ifconfig` 查看，例如 `enp67s0f0np0`）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:204
+msgid "`VLLM_TORCH_PROFILER_DIR`: optional, directory to store profiling outputs"
+msgstr "`VLLM_TORCH_PROFILER_DIR`：可选，用于存储性能分析输出的目录"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:253
+msgid "Node1 (secondary) startup script"
+msgstr "Node1（从节点）启动脚本"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:255
+msgid "Edit `minimax25_service_node1.sh` inside the node1 container:"
+msgstr "在 node1 容器中编辑 `minimax25_service_node1.sh`："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:257
+#, python-brace-format
+msgid "`{SecondaryNodeIP}`: the secondary node's IP address"
+msgstr "`{SecondaryNodeIP}`：从节点的 IP 地址"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:258
+#, python-brace-format
+msgid "`{PrimaryNodeIP}`: the primary node's IP address (same as node0)"
+msgstr "`{PrimaryNodeIP}`：主节点的 IP 地址（与 node0 相同）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:259
+#, python-brace-format
+msgid "`{NIC}`: same as above"
+msgstr "`{NIC}`：同上"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:309
+msgid "Startup order"
+msgstr "启动顺序"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:311
+msgid "Start the service on both nodes:"
+msgstr "在两个节点上启动服务："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:321
+msgid "After node0 prints `service start` in logs, you can verify the service."
+msgstr "当 node0 在日志中打印 `service start` 后，您可以验证服务。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:323
+msgid "Verify the Service"
+msgstr "验证服务"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:327
+msgid "Test with an OpenAI-compatible client:"
+msgstr "使用 OpenAI 兼容客户端进行测试："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:342
+msgid "Or send a request using curl:"
+msgstr "或使用 curl 发送请求："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:371
+msgid "A2 (dual node)"
+msgstr "A2（双节点）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:373
+#, python-brace-format
+msgid ""
+"Run the following from any machine that can reach the primary node "
+"(replace `{PrimaryNodeIP}` with the real IP):"
+msgstr "在任意可以访问主节点的机器上运行以下命令（将 `{PrimaryNodeIP}` 替换为实际 IP）："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:389
+msgid "Performance Reference"
+msgstr "性能参考"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:391
+msgid "A3 (single node, tp=16, 4k/1k@bs16)"
+msgstr "A3（单节点，tp=16，4k/1k@bs16）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:393
+#: ../../source/tutorials/models/MiniMax-M2.5.md:439
+msgid "Results"
+msgstr "结果"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:395
+msgid "**Baseline** (`3.5k/1k@bs=217`)"
+msgstr "**基线**（`3.5k/1k@bs=217`）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "Metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "Result"
+msgstr "结果"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "Success/Failure"
+msgstr "成功/失败"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "`217/0`"
+msgstr "`217/0`"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "Mean TTFT"
+msgstr "平均 TTFT"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "`10316.56 ms`"
+msgstr "`10316.56 毫秒`"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "Mean TPOT"
+msgstr "平均 TPOT"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "`34.28 ms`"
+msgstr "`34.28 毫秒`"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "Output tok/s"
+msgstr "输出 token/秒"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "`4803.81`"
+msgstr "`4803.81`"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "Total tok/s"
+msgstr "总 token/秒"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "`16096.59`"
+msgstr "`16096.59`"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:405
+msgid "**Long-context reference** (`190k/1k@bs=4`)"
+msgstr "**长上下文参考**（`190k/1k@bs=4`）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "`37.12`"
+msgstr "`37.12`"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "`2002.37 ms`"
+msgstr "`2002.37 毫秒`"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "`105.54 ms`"
+msgstr "`105.54 毫秒`"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:375
+msgid "Mean ITL"
+msgstr "平均 ITL"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:414
+msgid "A2 (dual node, 190k/1k, concurrency=4, 16 prompts)"
+msgstr "A2（双节点，190k/1k，并发=4，16 个提示词）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:416
+msgid "Benchmark method"
+msgstr "基准测试方法"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:418
+msgid "Use vLLM bench for the **190k/1k, concurrency=4, 16 prompts** scenario:"
+msgstr "对 **190k/1k，并发=4，16 个提示词**的场景使用 vLLM bench："
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:441
+msgid "**190k/1k, concurrency=4, 16 prompts**"
+msgstr "**190k/1k，并发=4，16 个提示词**"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "TTFT (avg)"
+msgstr "TTFT（平均）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "3305.25 ms"
+msgstr "3305.25 毫秒"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "TPOT (avg)"
+msgstr "TPOT（平均）"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "109.83 ms"
+msgstr "109.83 毫秒"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "Output throughput"
+msgstr "输出吞吐量"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "35.29 tok/s"
+msgstr "35.29 token/秒"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "Prefix hit rate"
+msgstr "前缀命中率"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:420
+msgid "85%"
+msgstr "85%"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:450
+msgid "FAQ"
+msgstr "常见问题"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:452
+msgid "**Q: What should I do if the output is garbled in EP mode?**"
+msgstr "**问：在 EP 模式下输出乱码怎么办？**"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:454
+msgid ""
+"A: It is recommended to keep `--enable-expert-parallel` and "
+"`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`."
+msgstr "答：建议保持 `--enable-expert-parallel` 和 `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:456
+msgid ""
+"**Q: Why is the `reasoning` field often empty after using "
+"`minimax_m2_append_think`?**"
+msgstr "**问：为什么使用 `minimax_m2_append_think` 后 `reasoning` 字段经常为空？**"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:458
+msgid ""
+"A: This is expected. The parser keeps `<think>...</think>` inside "
+"`content`. If you mainly rely on the reasoning semantics of "
+"`/v1/responses`, use `--reasoning-parser minimax_m2` instead."
+msgstr "答：这是预期行为。解析器将 `<think>...</think>` 保留在 `content` 中。如果主要依赖 `/v1/responses` 的推理语义，请使用 `--reasoning-parser minimax_m2`。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:460
+msgid ""
+"**Q: Startup fails with HCCL port conflicts (address already bound). What"
+" should I do?**"
+msgstr "**问：启动失败，出现 HCCL 端口冲突（地址已被绑定）。该怎么办？**"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:462
+msgid ""
+"A: Clean up old processes and restart: `pkill -f \"vllm serve "
+"/models/MiniMax-M2.5\"`."
+msgstr "答：清理旧进程并重启：`pkill -f \"vllm serve /models/MiniMax-M2.5\"`。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:464
+msgid "**Q: How to handle OOM or unstable startup?**"
+msgstr "**问：如何处理 OOM 或启动不稳定的问题？**"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:466
+msgid ""
+"A: Reduce `--max-num-seqs` and `--max-num-batched-tokens` first. If "
+"needed, reduce concurrency and load-testing pressure (e.g., `max-"
+"concurrency` / `num-prompts`)."
+msgstr "答：首先减小 `--max-num-seqs` 和 `--max-num-batched-tokens`。如有必要，降低并发和压测压力（例如 `max-concurrency` / `num-prompts`）。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:468
+msgid "**Q: Why not use cross-node tp=16?**"
+msgstr "**问：为什么不使用跨节点 tp=16？**"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:470
+msgid ""
+"A: The referenced practice noted that cross-node TP may be unstable, so "
+"`tp=8, dp=2` is recommended for dual-node deployment."
+msgstr "答：参考实践表明跨节点 TP 可能不稳定，因此双节点部署推荐使用 `tp=8, dp=2`。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:472
+msgid "**Q: How should I choose `--reasoning-parser`?**"
+msgstr "**问：如何选择 `--reasoning-parser`？**"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:474
+msgid ""
+"A: This guide uses `minimax_m2_append_think` so that `<think>...</think>`"
+" is kept in `content`. If you mainly rely on the reasoning semantics of "
+"`/v1/responses`, consider using `--reasoning-parser minimax_m2`."
+msgstr "答：本指南使用 `minimax_m2_append_think`，以便将 `<think>...</think>` 保留在 `content` 中。如果主要依赖 `/v1/responses` 的推理语义，请考虑使用 `--reasoning-parser minimax_m2`。"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:476
+msgid "**Q: Which ports must be accessible?**"
+msgstr "**问：哪些端口必须可访问？**"
+
+#: ../../source/tutorials/models/MiniMax-M2.5.md:478
+msgid ""
+"A: At minimum, expose the serving port (e.g., `20004`) and the data-"
+"parallel RPC port (e.g., `2347`), and ensure the two nodes can reach each"
+" other over the network."
+msgstr "答：至少需要暴露服务端口（例如 `20004`）和数据并行 RPC 端口（例如 `2347`），并确保两个节点之间可以通过网络互相访问。"

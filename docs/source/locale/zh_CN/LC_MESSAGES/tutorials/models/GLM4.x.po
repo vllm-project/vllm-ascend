@@ -1,0 +1,544 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/GLM4.x.md:1
+msgid "GLM-4.5/4.6/4.7"
+msgstr "GLM-4.5/4.6/4.7"
+
+#: ../../source/tutorials/models/GLM4.x.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/GLM4.x.md:5
+msgid ""
+"GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are"
+" foundational models specifically designed for agent applications."
+msgstr "GLM-4.x 系列模型采用混合专家（MoE）架构，是专门为智能体应用设计的基础模型。"
+
+#: ../../source/tutorials/models/GLM4.x.md:7
+msgid "The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`."
+msgstr "`GLM-4.5` 模型从 `vllm-ascend:v0.10.0rc1` 版本开始首次支持。"
+
+#: ../../source/tutorials/models/GLM4.x.md:9
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr ""
+"本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度评估和性能评估。"
+
+#: ../../source/tutorials/models/GLM4.x.md:11
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/models/GLM4.x.md:13
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+
+#: ../../source/tutorials/models/GLM4.x.md:15
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+
+#: ../../source/tutorials/models/GLM4.x.md:17
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/GLM4.x.md:19
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/GLM4.x.md:21
+msgid ""
+"`GLM-4.5`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5)."
+msgstr "`GLM-4.5`（BF16 版本）：[下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:22
+msgid ""
+"`GLM-4.6`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6)."
+msgstr "`GLM-4.6`（BF16 版本）：[下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:23
+msgid ""
+"`GLM-4.7`(BF16 version): [Download model "
+"weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7)."
+msgstr "`GLM-4.7`（BF16 版本）：[下载模型权重](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:24
+msgid ""
+"`GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download "
+"model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8)."
+msgstr "`GLM-4.5-w8a8-with-float-mtp`（包含 MTP 的量化版本）：[下载模型权重](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:25
+msgid ""
+"`GLM-4.6-w8a8`(Quantized version without mtp): [Download model "
+"weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because "
+"vllm do not support GLM4.6 mtp in October, so we do not provide mtp "
+"version. And last month, it supported, you can use the following "
+"quantization scheme to add mtp weights to Quantized weights."
+msgstr ""
+"`GLM-4.6-w8a8`（不含 MTP 的量化版本）：[下载模型权重](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8)。"
+"由于 vLLM 在去年十月时还不支持 GLM4.6 的 MTP，因此我们没有提供 MTP 版本。上个月已支持，您可以使用以下量化方案将 MTP 权重添加到量化权重中。"
+
+#: ../../source/tutorials/models/GLM4.x.md:26
+msgid ""
+"`GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download "
+"model weight](https://modelscope.cn/models/Eco-"
+"Tech/GLM-4.7-W8A8-floatmtp)."
+msgstr "`GLM-4.7-w8a8-with-float-mtp`（包含 MTP 的量化版本）：[下载模型权重](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:27
+msgid ""
+"`Method of Quantify`: [quantization "
+"scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209)."
+" You can use these methods to quantify the model."
+msgstr "`量化方法`：[量化方案](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209)。您可以使用这些方法对模型进行量化。"
+
+#: ../../source/tutorials/models/GLM4.x.md:29
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/models/GLM4.x.md:31
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/GLM4.x.md:33
+msgid "You can use our official docker image to run `GLM-4.x` directly."
+msgstr "您可以使用官方 Docker 镜像直接运行 `GLM-4.x`。"
+
+#: ../../source/tutorials/models/GLM4.x.md
+msgid "A3 series"
+msgstr "A3 系列"
+
+#: ../../source/tutorials/models/GLM4.x.md:42
+#: ../../source/tutorials/models/GLM4.x.md:85
+msgid "Start the docker image on your each node."
+msgstr "在每个节点上启动 Docker 镜像。"
+
+#: ../../source/tutorials/models/GLM4.x.md
+msgid "A2 series"
+msgstr "A2 系列"
+
+#: ../../source/tutorials/models/GLM4.x.md:118
+msgid ""
+"In addition, if you don't want to use the docker image as above, you can "
+"also build all from source:"
+msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码构建："
+
+#: ../../source/tutorials/models/GLM4.x.md:120
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../../installation.md)."
+msgstr "从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:122
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
+
+#: ../../source/tutorials/models/GLM4.x.md:124
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/GLM4.x.md:126
+msgid "**Notice:**"
+msgstr "**注意：**"
+
+#: ../../source/tutorials/models/GLM4.x.md:128
+msgid ""
+"We have optimized the FIA operator in CANN 8.5.1. Manual replacement of "
+"the files related to the FIA operator is required. Please execute the FIA"
+" operator replacement script: "
+"[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and"
+" [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh) "
+"The optimization of the FIA operator will be enabled by default in CANN "
+"9.x releases, and manual replacement will no longer be required. Please "
+"stay tuned for updates to this document."
+msgstr ""
+"我们在 CANN 8.5.1 中对 FIA 算子进行了优化。需要手动替换 FIA 算子相关文件。请执行 FIA 算子替换脚本："
+"[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) 和 "
+"[A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)。"
+"FIA 算子的优化将在 CANN 9.x 版本中默认启用，无需再手动替换。请关注本文档的更新。"
+
+#: ../../source/tutorials/models/GLM4.x.md:132
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/GLM4.x.md:134
+msgid "In low-latency scenarios, we recommend a single-machine deployment."
+msgstr "在低延迟场景下，我们推荐单机部署。"
+
+#: ../../source/tutorials/models/GLM4.x.md:135
+msgid ""
+"Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas "
+"800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8)."
+msgstr "量化模型 `glm4.7_w8a8_with_float_mtp` 可以部署在 1 台 Atlas 800 A3（64G × 16）或 1 台 Atlas 800 A2（64G × 8）上。"
+
+#: ../../source/tutorials/models/GLM4.x.md:137
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+#: ../../source/tutorials/models/GLM4.x.md:169
+msgid "**Notice:** The parameters are explained as follows:"
+msgstr "**注意：** 参数解释如下："
+
+#: ../../source/tutorials/models/GLM4.x.md:172
+msgid ""
+"`--async-scheduling` Asynchronous scheduling is a technique used to "
+"optimize inference efficiency. It allows non-blocking task scheduling to "
+"improve concurrency and throughput, especially when processing large-"
+"scale models."
+msgstr ""
+"`--async-scheduling` 异步调度是一种用于优化推理效率的技术。它允许非阻塞的任务调度以提高并发性和吞吐量，尤其是在处理大规模模型时。"
+
+#: ../../source/tutorials/models/GLM4.x.md:173
+msgid ""
+"`fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion "
+"operator tends to degrade when the total number of NPUs is ≤ 16."
+msgstr "`fusion_ops_gmmswigluquant` 当 NPU 总数 ≤ 16 时，GmmSwigluQuant 融合算子的性能往往会下降。"
+
+#: ../../source/tutorials/models/GLM4.x.md:175
+msgid "Multi-node Deployment"
+msgstr "多节点部署"
+
+#: ../../source/tutorials/models/GLM4.x.md:177
+msgid ""
+"Although the former tutorial said \"Not recommended to deploy multi-node "
+"on Atlas 800 A2 (64G × 8)\", but if you insist to deploy GLM-4.x model on"
+" multi-node like 2 × Atlas 800 A2 (64G × 8), run the following scripts on"
+" two nodes respectively."
+msgstr ""
+"虽然之前的教程提到“不建议在 Atlas 800 A2（64G × 8）上部署多节点”，但如果您坚持在多节点（例如 2 × Atlas 800 A2（64G × 8））上部署 GLM-4.x 模型，请分别在两个节点上运行以下脚本。"
+
+#: ../../source/tutorials/models/GLM4.x.md:179
+msgid "**Node 0**"
+msgstr "**节点 0**"
+
+#: ../../source/tutorials/models/GLM4.x.md:230
+msgid "**Node 1**"
+msgstr "**节点 1**"
+
+#: ../../source/tutorials/models/GLM4.x.md:283
+msgid "Prefill-Decode Disaggregation"
+msgstr "预填充-解码分离部署"
+
+#: ../../source/tutorials/models/GLM4.x.md:285
+msgid ""
+"We'd like to show the deployment guide of `GLM4.7` on multi-node "
+"environment with 2P1D for better performance."
+msgstr "我们将在多节点环境下以 2P1D 方式展示 `GLM4.7` 的部署指南，以获得更好的性能。"
+
+#: ../../source/tutorials/models/GLM4.x.md:287
+msgid "Before you start, please"
+msgstr "开始之前，请"
+
+#: ../../source/tutorials/models/GLM4.x.md:289
+msgid "prepare the script `launch_online_dp.py` on each node:"
+msgstr "在每个节点上准备脚本 `launch_online_dp.py`："
+
+#: ../../source/tutorials/models/GLM4.x.md:392
+msgid "prepare the script `run_dp_template.sh` on each node."
+msgstr "在每个节点上准备脚本 `run_dp_template.sh`。"
+
+#: ../../source/tutorials/models/GLM4.x.md:394
+#: ../../source/tutorials/models/GLM4.x.md:669
+msgid "Prefill node 0"
+msgstr "预填充节点 0"
+
+#: ../../source/tutorials/models/GLM4.x.md:460
+#: ../../source/tutorials/models/GLM4.x.md:676
+msgid "Prefill node 1"
+msgstr "预填充节点 1"
+
+#: ../../source/tutorials/models/GLM4.x.md:525
+#: ../../source/tutorials/models/GLM4.x.md:683
+msgid "Decode node 0"
+msgstr "解码节点 0"
+
+#: ../../source/tutorials/models/GLM4.x.md:596
+#: ../../source/tutorials/models/GLM4.x.md:690
+msgid "Decode node 1"
+msgstr "解码节点 1"
+
+#: ../../source/tutorials/models/GLM4.x.md:667
+msgid ""
+"Once the preparation is done, you can start the server with the following"
+" command on each node:"
+msgstr "准备工作完成后，您可以在每个节点上使用以下命令启动服务器："
+
+#: ../../source/tutorials/models/GLM4.x.md:697
+msgid "Request Forwarding"
+msgstr "请求转发"
+
+#: ../../source/tutorials/models/GLM4.x.md:699
+msgid ""
+"To set up request forwarding, run the following script on any machine. "
+"You can get the proxy program in the repository's examples: "
+"[load_balance_proxy_server_example.py](https://github.com/vllm-project"
+"/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的示例中获取代理程序："
+"[load_balance_proxy_server_example.py](https://github.com/vllm-project"
+"/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+
+#: ../../source/tutorials/models/GLM4.x.md:728
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/GLM4.x.md:730
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/models/GLM4.x.md:749
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/GLM4.x.md:751
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/GLM4.x.md:753
+#: ../../source/tutorials/models/GLM4.x.md:770
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/models/GLM4.x.md:755
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr ""
+"详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:757
+msgid ""
+"After execution, you can get the result, here is the result of `GLM4.7` "
+"in `vllm-ascend:main` (after `vllm-ascend:0.14.0rc1`) for reference only."
+msgstr ""
+"执行后即可获得结果，以下是 `GLM4.7` 在 `vllm-ascend:main`（`vllm-ascend:0.14.0rc1` 之后）上的结果，仅供参考。"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "note"
+msgstr "备注"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "GPQA"
+msgstr "GPQA"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "84.85"
+msgstr "84.85"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "1 Atlas 800 A3 (64G × 16)"
+msgstr "1 台 Atlas 800 A3（64G × 16）"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "MATH500"
+msgstr "MATH500"
+
+#: ../../source/tutorials/models/GLM4.x.md:87
+msgid "98.8"
+msgstr "98.8"
+
+#: ../../source/tutorials/models/GLM4.x.md:764
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用 Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/GLM4.x.md:766
+msgid "Not tested yet."
+msgstr "尚未测试。"
+
+#: ../../source/tutorials/models/GLM4.x.md:768
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/GLM4.x.md:772
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:774
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM 基准测试"
+
+#: ../../source/tutorials/models/GLM4.x.md:776
+msgid "Run performance evaluation of `GLM-4.x` as an example."
+msgstr "以 `GLM-4.x` 为例运行性能评估。"
+
+#: ../../source/tutorials/models/GLM4.x.md:778
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
+"for more details."
+msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+#: ../../source/tutorials/models/GLM4.x.md:780
+msgid "There are three `vllm bench` subcommands:"
+msgstr "有三个 `vllm bench` 子命令："
+
+#: ../../source/tutorials/models/GLM4.x.md:782
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/models/GLM4.x.md:783
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：基准测试在线服务的吞吐量。"
+
+#: ../../source/tutorials/models/GLM4.x.md:784
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：基准测试离线推理的吞吐量。"
+
+#: ../../source/tutorials/models/GLM4.x.md:786
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例，运行如下代码。"
+
+#: ../../source/tutorials/models/GLM4.x.md:808
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，即可获得性能评估结果。"
+
+#: ../../source/tutorials/models/GLM4.x.md:810
+msgid "Best Practices"
+msgstr "最佳实践"
+
+#: ../../source/tutorials/models/GLM4.x.md:812
+msgid "In this chapter, we recommend best practices for three scenarios:"
+msgstr "在本章中，我们针对三种场景推荐最佳实践："
+
+#: ../../source/tutorials/models/GLM4.x.md:814
+msgid ""
+"Long-context: For long sequences with low concurrency (≤ 4): set `dp1 "
+"tp16`; For long sequences with high concurrency (> 4): set `dp2 tp8`"
+msgstr ""
+"长上下文：对于低并发（≤ 4）的长序列：设置 `dp1 tp16`；对于高并发（> 4）的长序列：设置 `dp2 tp8`"
+
+#: ../../source/tutorials/models/GLM4.x.md:815
+msgid ""
+"Low-latency: For short sequences with low latency: we recommend setting "
+"`dp2 tp8`"
+msgstr "低延迟：对于短序列的低延迟场景：我们推荐设置 `dp2 tp8`"
+
+#: ../../source/tutorials/models/GLM4.x.md:816
+msgid ""
+"High-throughput: For short sequences with high throughput: we also "
+"recommend setting `dp2 tp8`"
+msgstr "高吞吐：对于短序列的高吞吐场景：我们也推荐设置 `dp2 tp8`"
+
+#: ../../source/tutorials/models/GLM4.x.md:818
+msgid ""
+"**Notice:** `max-model-len` and `max-num-seqs` need to be set according "
+"to the actual usage scenario. For other settings, please refer to the "
+"**[Deployment](#deployment)** chapter."
+msgstr ""
+"**注意：** `max-model-len` 和 `max-num-seqs` 需要根据实际使用场景进行设置。其他设置请参考**[部署](#deployment)**章节。"
+
+#: ../../source/tutorials/models/GLM4.x.md:821
+msgid "FAQ"
+msgstr "常见问题"
+
+#: ../../source/tutorials/models/GLM4.x.md:823
+msgid "**Q: Why is the TPOT performance poor in Long-context test?**"
+msgstr "**问：为什么长上下文测试中 TPOT 性能不佳？**"
+
+#: ../../source/tutorials/models/GLM4.x.md:825
+msgid ""
+"A: Please ensure that the FIA operator replacement script has been "
+"executed successfully to complete the replacement of FIA operators. Here "
+"is the script: "
+"[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) and"
+" [A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)"
+msgstr ""
+"答：请确保已成功执行 FIA 算子替换脚本以完成 FIA 算子的替换。脚本如下："
+"[A2](../../../../tools/install_flash_infer_attention_score_ops_a2.sh) 和 "
+"[A3](../../../../tools/install_flash_infer_attention_score_ops_a3.sh)"
+
+#: ../../source/tutorials/models/GLM4.x.md:827
+msgid ""
+"**Q: Startup fails with HCCL port conflicts (address already bound). What"
+" should I do?**"
+msgstr "**问：启动失败，出现 HCCL 端口冲突（地址已被绑定）。该怎么办？**"
+
+#: ../../source/tutorials/models/GLM4.x.md:829
+msgid "A: Clean up old processes and restart: `pkill -f VLLM*`."
+msgstr "答：清理旧进程并重启：`pkill -f VLLM*`。"
+
+#: ../../source/tutorials/models/GLM4.x.md:831
+msgid "**Q: How to handle OOM or unstable startup?**"
+msgstr "**问：如何处理 OOM 或启动不稳定的问题？**"
+
+#: ../../source/tutorials/models/GLM4.x.md:833
+msgid ""
+"A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce"
+" concurrency and load-testing pressure (e.g., `max-concurrency` / `num-"
+"prompts`)."
+msgstr ""
+"答：首先减小 `--max-num-seqs` 和 `--max-model-len`。如有必要，降低并发和压测压力（例如 `max-concurrency` / `num-prompts`）。"
