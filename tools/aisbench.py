@@ -180,7 +180,7 @@ class AisbenchRunner:
         result_msg = self.RESULT_MSG[self.task_type]
         while True:
             line = self.proc.stdout.readline().strip()
-            print(line)
+            print(f"line info: {line}")
             if result_msg in line:
                 self.result_line = line
                 return
