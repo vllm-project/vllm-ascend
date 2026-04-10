@@ -767,6 +767,24 @@ class NPUPlatform(Platform):
 
         # ==================== 5. Scheduler Config ====================
         if vllm_config.scheduler_config:
+            hf_text_config = getattr(model_config, "hf_text_config", None) if model_config else None
+
+            if hf_text_config is not None and getattr(hf_text_config, "model_type", None) in {"gemma4", "gemma4_text"}:
+                head_dim = getattr(hf_text_config, "head_dim", None)
+                global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+                if head_dim is not None and global_head_dim is not None and global_head_dim > head_dim:
+                    from vllm.config.compilation import CUDAGraphMode
+
+                    if model_config is not None and not getattr(model_config, "enforce_eager", False):
+                        logger.warning(
+                            "Gemma4 full-attention layers are not yet supported by Ascend ACLGraph/FIA kernels. "
+                            "Forcing eager mode for Gemma4."
+                        )
+                        model_config.enforce_eager = True
+
+                    if getattr(vllm_config.compilation_config, "cudagraph_mode", None) != CUDAGraphMode.NONE:
+                        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
             # Partial prefills are specific to ROCm optimization
             if getattr(vllm_config.scheduler_config, "max_num_partial_prefills", 1) != 1:
                 logger.warning(

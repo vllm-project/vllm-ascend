@@ -25,6 +25,16 @@ from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
 
 
+def _is_gemma4_text_model() -> bool:
+    try:
+        vllm_config = get_current_vllm_config()
+    except AssertionError:
+        return False
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    return getattr(hf_text_config, "model_type", None) in {"gemma4", "gemma4_text"}
+
+
 class AscendRMSNorm(RMSNorm):
     def __init__(
         self,
@@ -67,6 +77,15 @@ class AscendRMSNorm(RMSNorm):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         import torch_npu
 
+        if _is_gemma4_text_model():
+            return self.forward_native(x, residual)
+
+        if not self.has_weight or x.dim() > 2:
+            return self.forward_native(x, residual)
+
+        if self.weight.shape[0] != x.shape[-1]:
+            return self.forward_native(x, residual)
+
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
@@ -94,20 +113,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        import torch_npu
-
-        if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op():
-                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                    x, residual, 1.0 + self.weight, None, self.variance_epsilon
-                )
-            else:
-                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
-            return x, residual
-
-        x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
-        return x
+        return self.forward_native(x, residual)
 
 
 class LayerNormFn(torch.autograd.Function):

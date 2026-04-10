@@ -35,10 +35,13 @@ data = {
 headers = {"Accept": "application/json", "Content-Type": "application/json"}
 
 
-def send_image_request(model, server):
-    data["model"] = model
+def send_image_request(model, server, request_args=None):
+    request_data = dict(data)
+    request_data["model"] = model
+    if request_args:
+        request_data.update(request_args)
     url = server.url_for("v1", "chat", "completions")
-    response = requests.post(url, headers=headers, json=data)
+    response = requests.post(url, headers=headers, json=request_data)
     print("Status Code:", response.status_code)
     response_json = response.json()
     print("Response:", response_json)

@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import inspect
 from collections.abc import Callable
 
 import torch
@@ -308,10 +309,11 @@ def _native_select_experts(
         )
 
     if custom_routing_function is not None:
-        topk_weights, topk_ids = custom_routing_function(
+        topk_weights, topk_ids = _call_custom_routing_function(
+            custom_routing_function=custom_routing_function,
             hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=top_k,
+            router_logits=router_logits,
+            top_k=top_k,
             renormalize=renormalize,
             global_num_experts=global_num_experts,
         )
@@ -327,6 +329,28 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
+
+def _call_custom_routing_function(
+    custom_routing_function: Callable,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    top_k: int,
+    renormalize: bool,
+    global_num_experts: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    kwargs = {
+        "hidden_states": hidden_states,
+        "gating_output": router_logits,
+        "topk": top_k,
+        "renormalize": renormalize,
+    }
+    signature = inspect.signature(custom_routing_function)
+    supports_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+    if supports_kwargs or "global_num_experts" in signature.parameters:
+        kwargs["global_num_experts"] = global_num_experts
+
+    return custom_routing_function(**kwargs)
 
 
 def zero_experts_compute(

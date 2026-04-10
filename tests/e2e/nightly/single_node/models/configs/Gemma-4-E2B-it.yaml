@@ -1,0 +1,28 @@
+test_cases:
+  - name: "Gemma-4-E2B-it"
+    model: "google/gemma-4-E2B-it"
+    envs:
+      SERVER_PORT: "DEFAULT_PORT"
+      TASK_QUEUE_ENABLE: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    prompts:
+      - "3*3等于几？只回答数字。"
+    api_keyword_args:
+      max_tokens: 32
+      temperature: 0
+      top_k: -1
+      top_p: 1
+    server_cmd:
+      - "--no-enable-prefix-caching"
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-model-len"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.8"
+      - "--enforce-eager"
+    test_content:
+      - "chat_completion"
+      - "image"

@@ -17,6 +17,7 @@
 #
 import torch
 import torch_npu
+from vllm.config import get_current_vllm_config
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT4_E2M1FN_X2_DTYPE,
@@ -46,17 +47,49 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
-            hidden_states,
-            topk_ids,
-            scale=scale,
-            active_num=active_num,
-            expert_num=expert_num,
-            expert_tokens_num_type=expert_tokens_num_type,
-            expert_tokens_num_flag=expert_tokens_num_flag,
-            active_expert_range=active_expert_range,
-            quant_mode=quant_mode,
-        )
+        if _should_use_v2_moe_init_routing():
+            return torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+
+        try:
+            return torch.ops._C_ascend.npu_moe_init_routing_custom(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+        except RuntimeError as err:
+            message = str(err)
+            if "MoeInitRoutingCustom" not in message or (
+                "does not has any binary" not in message and "Parse dynamic kernel config fail" not in message
+            ):
+                raise
+
+            return torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
 
     @staticmethod
     def maybe_normalize_mxfp_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
@@ -461,6 +494,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             key=key,
             value=value,
         )
+
+
+def _should_use_v2_moe_init_routing() -> bool:
+    try:
+        vllm_config = get_current_vllm_config()
+    except AssertionError:
+        return False
+
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    return getattr(hf_text_config, "model_type", None) in {"gemma4", "gemma4_text"}
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:

@@ -24,7 +24,11 @@ from pytest_mock import MockerFixture
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.ops.fused_moe.fused_moe import (
+    AscendFusedMoE,
+    AscendMoERunner,
+    AscendUnquantizedFusedMoEMethod,
+)
 from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -258,6 +262,85 @@ def moe_method(mock_dist_env):
     moe.moe_parallel_config.use_ep = False
     moe.moe_parallel_config.dp_size = 1
     return AscendUnquantizedFusedMoEMethod(moe)
+
+
+def test_init_runner_uses_cached_raw_gate_and_shared_experts():
+    layer = AscendFusedMoE.__new__(AscendFusedMoE)
+    layer.moe_config = MagicMock()
+    layer.router = MagicMock()
+    layer._routed_input_transform = MagicMock()
+    layer._raw_gate = MagicMock()
+    layer._raw_shared_experts = MagicMock()
+    layer.quant_method = MagicMock()
+    layer.reduce_results = False
+    layer.vllm_config = MagicMock(parallel_config=MagicMock(enable_dbo=False))
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.fused_moe.AscendMoERunner",
+        return_value=MagicMock(),
+    ) as mock_runner:
+        runner = layer._init_runner()
+
+    assert runner is mock_runner.return_value
+    mock_runner.assert_called_once_with(
+        layer=layer,
+        moe_config=layer.moe_config,
+        router=layer.router,
+        routed_input_transform=layer._routed_input_transform,
+        gate=layer._raw_gate,
+        shared_experts=layer._raw_shared_experts,
+        quant_method=layer.quant_method,
+        reduce_results=layer.reduce_results,
+        enable_dbo=False,
+    )
+
+
+def test_ascend_moe_runner_forward_impl_delegates_to_layer():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    layer = MagicMock()
+    hidden_states = torch.randn(2, 4)
+    router_logits = torch.randn(2, 8)
+    shared_input = torch.randn(2, 4)
+    expected = torch.randn(2, 4)
+    layer.forward_impl.return_value = expected
+
+    output = runner._forward_impl(
+        layer,
+        hidden_states,
+        router_logits,
+        shared_input,
+    )
+
+    assert output is expected
+    layer.forward_impl.assert_called_once_with(hidden_states, router_logits)
+
+
+def test_select_experts_supports_custom_routing_without_global_num_experts():
+    hidden_states = torch.randn(3, 4)
+    router_logits = torch.randn(3, 6)
+
+    def custom_routing_function(hidden_states, gating_output, topk, renormalize):
+        weights = gating_output.softmax(dim=-1).topk(topk, dim=-1).values
+        ids = gating_output.topk(topk, dim=-1).indices
+        return weights, ids
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method",
+        return_value=MagicMock(),
+    ):
+        topk_weights, topk_ids = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            custom_routing_function=custom_routing_function,
+            global_num_experts=6,
+        )
+
+    assert topk_weights.shape == (3, 2)
+    assert topk_ids.shape == (3, 2)
+    assert topk_ids.dtype == torch.int32
 
 
 class Device(TypedDict):

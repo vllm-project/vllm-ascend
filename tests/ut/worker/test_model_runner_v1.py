@@ -84,6 +84,37 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
+    def test_prepare_model_inputs_uses_raw_tokens_for_gemma4_multimodal(self):
+        runner = self._build_runner()
+        runner.is_multimodal_model = True
+        runner.model_config.is_encoder_decoder = False
+        runner.model = SimpleNamespace(requires_raw_input_tokens=True)
+        runner.mm_budget = None
+        runner.enable_prompt_embeds = False
+        runner.input_ids = SimpleNamespace(gpu=torch.arange(8))
+        runner.inputs_embeds = SimpleNamespace(gpu=torch.randn(8, 4))
+        runner._prepare_mm_inputs = MagicMock()
+
+        input_ids, inputs_embeds = runner._prepare_model_inputs(4)
+
+        self.assertTrue(torch.equal(input_ids, torch.arange(4)))
+        self.assertIsNone(inputs_embeds)
+        runner._prepare_mm_inputs.assert_not_called()
+
+    def test_prepare_model_inputs_falls_back_to_mm_embeds_when_budget_exists(self):
+        runner = self._build_runner()
+        runner.is_multimodal_model = True
+        runner.model_config.is_encoder_decoder = False
+        runner.model = SimpleNamespace(requires_raw_input_tokens=True)
+        runner.mm_budget = object()
+        runner.enable_prompt_embeds = False
+        runner._prepare_mm_inputs = MagicMock(return_value=("ids", "embeds"))
+
+        input_ids, inputs_embeds = runner._prepare_model_inputs(4)
+
+        self.assertEqual((input_ids, inputs_embeds), ("ids", "embeds"))
+        runner._prepare_mm_inputs.assert_called_once_with(4)
+
 
 if __name__ == "__main__":
     unittest.main()
