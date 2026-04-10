@@ -210,6 +210,11 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         # switching rotary kernel mode.
         rotary_mode = "half"
         num_tokens = query.shape[0]
+        if _mrope_cos_slice is None or _mrope_sin_slice is None:
+            raise RuntimeError(
+                "MRoPE cos/sin slices are not initialized. "
+                "Call set_mrope_apply_rotary_slices before forward."
+            )
         cos, sin = _mrope_cos_slice[:, :num_tokens], _mrope_sin_slice[:, :num_tokens]
 
         # Keep branch layout aligned with rope implementation for better numerical consistency.
