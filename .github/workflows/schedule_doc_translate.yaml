@@ -33,9 +33,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  translate:
+  check:
     runs-on: linux-amd64-cpu-8-hk
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      pr_title: ${{ steps.check.outputs.pr_title }}
+    steps:
+      - name: Check for existing open PR
+        id: check
+        uses: actions/github-script@v8
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch || 'main' }}
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            const base = process.env.TARGET_BRANCH;
+            const branchLabel = base.split('/').pop();
+            const prTitle = '[' + branchLabel + '][Doc] Translated Doc files';
+            core.setOutput('pr_title', prTitle);
+
+            const existingPRs = await github.rest.pulls.list({
+              owner: 'vllm-project', repo: 'vllm-ascend',
+              base: base, state: 'open', per_page: 100
+            });
+            const duplicate = existingPRs.data.find(pr => pr.title === prTitle);
+            if (duplicate) {
+              core.notice('PR #' + duplicate.number + ' for base "' + base + '" is still open, skipping this run.');
+              core.setOutput('skip', 'true');
+            } else {
+              core.setOutput('skip', 'false');
+            }
+
+  translate:
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: linux-amd64-cpu-8-hk
+    timeout-minutes: 400
     permissions:
       contents: read
     env:
@@ -154,6 +188,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           PR_HEAD: vllm-ascend-ci:${{ env.BRANCH_NAME }}
           PR_BASE: ${{ env.TARGET_BRANCH }}
+          PR_TITLE: ${{ needs.check.outputs.pr_title }}
         with:
           github-token: ${{ secrets.PAT_TOKEN }}
           script: |
@@ -165,7 +200,7 @@ jobs:
               const pr = await github.rest.pulls.create({
                 owner: 'vllm-project', repo: 'vllm-ascend',
                 head: process.env.PR_HEAD, base: process.env.PR_BASE,
-                title: '[Doc] Translated Doc files', body: prBody
+                title: process.env.PR_TITLE, body: prBody
               });
               core.info('Created PR #' + pr.data.number);
             } catch (error) {
