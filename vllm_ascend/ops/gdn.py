@@ -33,13 +33,41 @@ from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
+from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
 from vllm_ascend.utils import enable_sp
 
 
-def to_int64_tuple(tensor: torch.Tensor) -> tuple:
-    return tuple(tensor.to(torch.int64).tolist())
+def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
+    tensor = tensor.to(torch.int64)
+    if tensor.dim() == 0:
+        return (tensor.item(),)
+    return tuple(tensor.tolist())
+
+
+def _require_non_spec_prefill_fallback_meta(attn_metadata, field_name: str):
+    fallback_meta = getattr(attn_metadata, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is None:
+        raise RuntimeError(
+            f"Expected attn_metadata.non_spec_prefill_fallback_meta.{field_name} for patched GDN non-spec prefill path."
+        )
+    return fallback_meta
+
+
+def get_non_spec_causal_conv1d_host_args(attn_metadata) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    fallback_meta = _require_non_spec_prefill_fallback_meta(attn_metadata, "causal_conv1d")
+    causal_conv1d_meta = fallback_meta.causal_conv1d
+    return (
+        to_int64_tuple(causal_conv1d_meta.query_start_loc_cpu),
+        to_int64_tuple(causal_conv1d_meta.cache_indices_cpu),
+        to_int64_tuple(causal_conv1d_meta.has_initial_state_cpu),
+    )
+
+
+def get_non_spec_chunked_prefill_meta(attn_metadata):
+    fallback_meta = _require_non_spec_prefill_fallback_meta(attn_metadata, "chunk")
+    return fallback_meta.chunk
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -184,14 +212,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             if mixed_qkv_non_spec is not None:
                 conv_weights_T = conv_weights.transpose(0, 1)
                 activation_num = 1 if self.activation else 0
+                (
+                    query_start_loc_opt,
+                    cache_indices_opt,
+                    initial_state_mode_opt,
+                ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
                 mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=to_int64_tuple(non_spec_query_start_loc),
-                    cache_indices_opt=to_int64_tuple(non_spec_state_indices_tensor),
-                    initial_state_mode_opt=to_int64_tuple(has_initial_state),
+                    query_start_loc_opt=query_start_loc_opt,
+                    cache_indices_opt=cache_indices_opt,
+                    initial_state_mode_opt=initial_state_mode_opt,
                     num_accepted_tokens_opt=[],
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
@@ -259,8 +292,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # 2.2: Process the remaining part
             if attn_metadata.num_prefills > 0:
                 initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
-                initial_state[~has_initial_state, ...] = 0
-                non_spec_chunked_prefill_meta = getattr(attn_metadata, "non_spec_chunked_prefill_meta", None)
+                clear_ssm_states(initial_state, has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
@@ -270,7 +302,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     output_final_state=True,
                     cu_seqlens=non_spec_query_start_loc,
-                    prebuilt_meta=non_spec_chunked_prefill_meta,
+                    prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
@@ -338,8 +370,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # 2.2: Process the remaining part
                 if attn_metadata.num_prefills > 0:
                     initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-                    initial_state[~has_initial_state, ...] = 0
-                    non_spec_chunked_prefill_meta = getattr(attn_metadata, "non_spec_chunked_prefill_meta", None)
+                    clear_ssm_states(initial_state, has_initial_state)
                     (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                         q=query_non_spec,
                         k=key_non_spec,
@@ -349,7 +380,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         initial_state=initial_state,
                         output_final_state=True,
                         cu_seqlens=non_spec_query_start_loc,
-                        prebuilt_meta=non_spec_chunked_prefill_meta,
+                        prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
                         head_first=False,
                         use_qk_l2norm_in_kernel=True,
                     )

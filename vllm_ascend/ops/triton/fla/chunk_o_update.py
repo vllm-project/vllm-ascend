@@ -85,6 +85,7 @@ def chunk_fwd_o_update(
     updated_h_state: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_offsets: torch.Tensor | None = None,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
@@ -93,10 +94,9 @@ def chunk_fwd_o_update(
     if cu_seqlens is None:
         N, chunk_offsets = B, None
     else:
-        N, chunk_offsets = (
-            len(cu_seqlens) - 1,
-            prepare_chunk_offsets(cu_seqlens, BT),
-        )
+        N = len(cu_seqlens) - 1
+        if chunk_offsets is None:
+            chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
