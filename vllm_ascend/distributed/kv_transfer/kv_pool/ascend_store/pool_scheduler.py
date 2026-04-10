@@ -142,6 +142,7 @@ class KVPoolScheduler:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        return 0, False
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
@@ -294,7 +295,6 @@ class KVPoolScheduler:
                 req_meta.last_block_keys_by_layer = last_block_keys_by_layer
                 req_meta.starts = starts
                 req_meta.ends = ends
-                req_meta.processed_block_count = request_tracker.processed_block_count
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -363,7 +363,6 @@ class KVPoolScheduler:
                         req_meta.last_block_keys_by_layer = last_block_keys_by_layer
                         req_meta.starts = starts
                         req_meta.ends = ends
-                        req_meta.processed_block_count = request_tracker.processed_block_count
 
                 # decode/chunked request
                 else:
@@ -379,22 +378,18 @@ class KVPoolScheduler:
                         raise ValueError(
                             f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
                         )
-                    num_computed_token = cached_reqs.num_computed_tokens[i]
-                    # TODO 调试的时候，添加decode，为了验证精度
-                    # if num_computed_token >= len(request.prompt_token_ids):
-                    #     continue
-                    if new_block_ids is not None:
-                        start_idx = len(request_tracker.allocated_block_ids)
-                        end_idx = start_idx + len(new_block_ids)
-                        new_block_hashes = request.block_hashes[start_idx : end_idx]
+                    prev_token_count = request_tracker.token_len - num_new_tokens
+                    prev_hash_count = prev_token_count // self._block_size
+                    current_hash_count = request_tracker.token_len // self._block_size
+                    new_hash_count = current_hash_count - prev_hash_count
+                    if new_hash_count > 0:
+                        new_block_hashes = request.block_hashes[prev_hash_count : current_hash_count]
                         block_keys_by_layer, _, key_gva_mapping = self._generate_keys_and_alloc(new_block_hashes)
                         request_tracker.key_gva_mapping.update(key_gva_mapping)
-                        request_tracker.update(new_block_ids)
 
                         existing_chunk_count = len(request_tracker.starts) if request_tracker.starts else 0
-                        new_num_blocks = len(new_block_hashes)
                         base_offset = existing_chunk_count * self._block_size
-                        new_starts = [base_offset + chunk_id * self._block_size for chunk_id in range(new_num_blocks)]
+                        new_starts = [base_offset + chunk_id * self._block_size for chunk_id in range(new_hash_count)]
                         new_ends = [start + self._block_size for start in new_starts]
                         if request_tracker.starts is None:
                             request_tracker.starts = new_starts
@@ -405,6 +400,9 @@ class KVPoolScheduler:
                             request_tracker.ends.extend(new_ends)
                             for layer_id, layer_keys in enumerate(block_keys_by_layer):
                                 request_tracker.block_keys_by_layer[layer_id].extend(layer_keys)
+
+                    if new_block_ids is not None:
+                        request_tracker.update(new_block_ids)
                     last_chunk_tokens_num = (
                         (len(request.prompt_token_ids) // self._block_size * self._block_size)
                         if self._discard_partial_chunks
@@ -432,7 +430,6 @@ class KVPoolScheduler:
                     req_meta.ends = request_tracker.ends
                     req_meta.block_keys_by_layer = request_tracker.block_keys_by_layer
                     req_meta.last_block_keys_by_layer = request_tracker.last_block_keys_by_layer
-                    req_meta.processed_block_count = request_tracker.processed_block_count
                 if req_meta is not None:
                     meta.add_request(req_meta)
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
