@@ -56,6 +56,8 @@ def set_mrope_apply_rotary_slices(
     positions: torch.Tensor,
     target_dtype: torch.dtype,
     target_device: torch.device,
+    *,
+    capacity_tokens: int | None = None,
 ) -> None:
     """Build cos/sin views for `npu_apply_rotary_pos_emb` from positions; must run once per forward before layers."""
     global _mrope_cos_slice
@@ -84,8 +86,52 @@ def set_mrope_apply_rotary_slices(
     cos = torch.cat((cos, cos), dim=-1)
     sin = torch.cat((sin, sin), dim=-1)
     num_tokens = positions.shape[-1]
-    _mrope_cos_slice = cos.contiguous().view(1, num_tokens, 1, -1)
-    _mrope_sin_slice = sin.contiguous().view(1, num_tokens, 1, -1)
+    cos_view = cos.contiguous().view(1, num_tokens, 1, -1)
+    sin_view = sin.contiguous().view(1, num_tokens, 1, -1)
+
+    # Keep stable storage across forwards for graph replay.
+    need_alloc = (
+        _mrope_cos_slice is None
+        or _mrope_sin_slice is None
+        or _mrope_cos_slice.device != cos_view.device
+        or _mrope_cos_slice.dtype != cos_view.dtype
+        or _mrope_cos_slice.shape[-1] != cos_view.shape[-1]
+    )
+    if need_alloc:
+        capacity = capacity_tokens if capacity_tokens is not None else num_tokens
+        if capacity < num_tokens:
+            capacity = num_tokens
+        _mrope_cos_slice = torch.empty(
+            (1, capacity, 1, cos_view.shape[-1]),
+            dtype=cos_view.dtype,
+            device=cos_view.device,
+        )
+        _mrope_sin_slice = torch.empty(
+            (1, capacity, 1, sin_view.shape[-1]),
+            dtype=sin_view.dtype,
+            device=sin_view.device,
+        )
+    elif _mrope_cos_slice.shape[1] < num_tokens:
+        if capacity_tokens is not None:
+            # Keep storage address stable for graph replay; fail-fast instead of reallocating.
+            raise RuntimeError(
+                f"Prepared MRoPE buffer capacity {_mrope_cos_slice.shape[1]} is smaller than required "
+                f"{num_tokens}. Please increase max_num_batched_tokens."
+            )
+        # Local/unit-test path without fixed capacity may still grow.
+        _mrope_cos_slice = torch.empty(
+            (1, num_tokens, 1, cos_view.shape[-1]),
+            dtype=cos_view.dtype,
+            device=cos_view.device,
+        )
+        _mrope_sin_slice = torch.empty(
+            (1, num_tokens, 1, sin_view.shape[-1]),
+            dtype=sin_view.dtype,
+            device=sin_view.device,
+        )
+
+    _mrope_cos_slice[:, :num_tokens].copy_(cos_view)
+    _mrope_sin_slice[:, :num_tokens].copy_(sin_view)
 
 
 def prepare_mrope_cos_sin_slices_from_runner(runner: Any, positions: torch.Tensor) -> None:
@@ -99,7 +145,13 @@ def prepare_mrope_cos_sin_slices_from_runner(runner: Any, positions: torch.Tenso
                 break
     if emb is None:
         raise RuntimeError("uses_mrope is True but no AscendMRotaryEmbedding310 was found in the model.")
-    set_mrope_apply_rotary_slices(emb, positions, runner.dtype, runner.device)
+    set_mrope_apply_rotary_slices(
+        emb,
+        positions,
+        runner.dtype,
+        runner.device,
+        capacity_tokens=runner.max_num_tokens,
+    )
 
 
 def _rope_forward_oot(
@@ -165,7 +217,7 @@ def _rope_forward_oot(
 
 
 class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
-    def _get_mrope_cos_sin_for_apply(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _get_mrope_cos_sin_for_apply(self, num_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
         global _mrope_cos_slice
         global _mrope_sin_slice
         if _mrope_cos_slice is None or _mrope_sin_slice is None:
@@ -173,7 +225,7 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
                 "MRoPE cos/sin slices are not prepared. "
                 "Expected NPUModelRunner310._model_forward after positions are ready for each forward."
             )
-        return _mrope_cos_slice, _mrope_sin_slice
+        return _mrope_cos_slice[:, :num_tokens], _mrope_sin_slice[:, :num_tokens]
 
     def forward_oot(
         self,
@@ -192,7 +244,7 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         # switching rotary kernel mode.
         rotary_mode = "half"
         num_tokens = query.shape[0]
-        cos, sin = self._get_mrope_cos_sin_for_apply()
+        cos, sin = self._get_mrope_cos_sin_for_apply(num_tokens)
 
         # Keep branch layout aligned with rope implementation for better numerical consistency.
         if self.head_size == 128 and self.rotary_dim == self.head_size:
