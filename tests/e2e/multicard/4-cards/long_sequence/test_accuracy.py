@@ -51,13 +51,17 @@ def test_models_long_sequence_output_between_tp_and_cp(
             "decode_context_parallel_size": 2,
             "prefill_context_parallel_size": 2,
             "enable_expert_parallel": True,
-            "enforce_eager": True,
+            "compilation_config": {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+            },
             "quantization": "ascend",
         }
         tp_kwargs = {
             "tensor_parallel_size": 4,
             "enable_expert_parallel": True,
-            "enforce_eager": True,
+            "compilation_config": {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+            },
             "quantization": "ascend",
         }
 
@@ -73,7 +77,9 @@ def test_models_long_sequence_output_between_tp_and_cp(
         }
         tp_kwargs = {
             "tensor_parallel_size": 2,
-            "enforce_eager": True,
+            "compilation_config": {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+            },
         }
 
     cp_full_kwargs = {}
@@ -150,14 +156,18 @@ def test_accuracy_dcp_only_eager(max_tokens: int, ) -> None:
         "decode_context_parallel_size": 2,
         "prefill_context_parallel_size": 1,
         "enable_expert_parallel": True,
-        "enforce_eager": True,
+        "compilation_config": {
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
         "quantization": "ascend",
         "max_model_len": 1024,
     }
     tp_kwargs = {
         "tensor_parallel_size": 4,
         "enable_expert_parallel": True,
-        "enforce_eager": True,
+        "compilation_config": {
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
         "quantization": "ascend",
         "max_model_len": 1024,
     }
@@ -186,14 +196,18 @@ def test_accuracy_pcp_only(max_tokens: int, ) -> None:
         "decode_context_parallel_size": 1,
         "prefill_context_parallel_size": 2,
         "enable_expert_parallel": True,
-        "enforce_eager": True,
+        "compilation_config": {
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
         "quantization": "ascend",
         "max_model_len": 1024,
     }
     tp_kwargs = {
         "tensor_parallel_size": 4,
         "enable_expert_parallel": True,
-        "enforce_eager": True,
+        "compilation_config": {
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
         "quantization": "ascend",
         "max_model_len": 1024,
     }
@@ -241,7 +255,9 @@ def test_models_long_sequence_cp_kv_interleave_size_output_between_tp_and_cp(
             "prefill_context_parallel_size": 2,
             "enable_expert_parallel": True,
             "cp_kv_cache_interleave_size": 128,
-            "enforce_eager": True,
+            "compilation_config": {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+            },
             "quantization": "ascend",
         }
 
@@ -266,7 +282,9 @@ def test_models_long_sequence_cp_kv_interleave_size_output_between_tp_and_cp(
             "decode_context_parallel_size": 1,
             "prefill_context_parallel_size": 2,
             "cp_kv_cache_interleave_size": 128,
-            "enforce_eager": True,
+            "compilation_config": {
+                "cudagraph_mode": "FULL_DECODE_ONLY",
+            },
         }
 
         cp_full_kwargs = {}
