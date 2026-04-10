@@ -110,7 +110,7 @@ from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
-from vllm_ascend.quantization.utils import enable_fa_quant
+from vllm_ascend.quantization.utils import enable_c8_quant, enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
@@ -2937,8 +2937,11 @@ class NPUModelRunner(GPUModelRunner):
                                 dsa_k_scale_tensor_size, dtype=torch.int8, device=self.device
                             )
                     else:
-                        k_tensor = torch.zeros(k_tensor_size + alignment, dtype=torch.int8, device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size + alignment, dtype=torch.int8, device=self.device)
+                        dtype  = torch.int8
+                        if self.is_kv_producer and enable_c8_quant:
+                            dtype = self.model_config.dtype
+                        k_tensor = torch.zeros(k_tensor_size + alignment, dtype=dtype, device=self.device)
+                        v_tensor = torch.zeros(v_tensor_size + alignment, dtype=dtype, device=self.device)
                         k_tensor = self._align_memory(k_tensor, alignment)[:k_tensor_size]
                         v_tensor = self._align_memory(v_tensor, alignment)[:v_tensor_size]
                         #### for deepseek sparse attention
@@ -3096,7 +3099,7 @@ class NPUModelRunner(GPUModelRunner):
                             v_dim,
                         )
                     k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-                    if self.is_kv_consumer and enable_fa_quant(self.vllm_config):
+                    if (self.is_kv_consumer and enable_fa_quant(self.vllm_config)) or (self.is_kv_producer and enable_c8_quant(self.vllm_config)):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )

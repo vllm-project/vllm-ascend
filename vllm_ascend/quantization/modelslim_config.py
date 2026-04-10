@@ -567,14 +567,16 @@ class AscendModelSlimConfig(QuantizationConfig):
         return False
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
+        ori_dtype = model_config.dtype
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
-            ori_dtype = model_config.dtype
             quant_dtype = torch.int8
             # For MLA models like deepseek, we only quantify K cache to ensure accuracy
             if model_config.use_mla:
                 return quant_dtype, ori_dtype
             else:
                 return quant_dtype, quant_dtype
+        elif self.enable_c8_quant:
+            return ori_dtype, ori_dtype
         return cache_dtype, cache_dtype
 
     def get_kv_quant_split_factor(self, layer_name, kv_head_dim_list):
@@ -701,6 +703,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
+        kv_quant_type = self.quant_description.get("kv_quant_type", "")
+        self.enable_c8_quant = kv_quant_type != ""
         if self.enable_fa_quant or self.enable_indexer_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
