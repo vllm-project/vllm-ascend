@@ -1,0 +1,14 @@
+model_name: "deepseek-ai/DeepSeek-OCR-2"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+trust_remote_code: true
+max_model_len: 2048
+gpu_memory_utilization: 0.9
+tasks:
+  - name: "doc_vqa"
+    metrics:
+      - name: "anls,none"
+        value: 0.0878  
+num_fewshot: 5
+apply_chat_template: False
+fewshot_as_multiturn: False

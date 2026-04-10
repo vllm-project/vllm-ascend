@@ -594,7 +594,6 @@
 #    Future Plan:
 #       Remove this patch when:
 #       design a dispatch mechanism for batch_memcpy_kernel.
-#
 # ** 23. File: worker/patch_weight_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.load_weights`
@@ -687,3 +686,27 @@
 #       when using mrope.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
+# ** 29. File: worker/patch_qwen3vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
+#    Why:
+#       support flash comm v1 for qwen3vl.
+#    How：
+#       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
+#    Future Plan:
+#       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
+# ** 30. File: platform/patch_transformers.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `transformers.models.llama.modeling_llama.LlamaFlashAttention2`
+#    Why:
+#       DeepSeek-V2 and DeepSeek-OCR-2 code (`modeling_deepseekv2.py`) imports
+#       `LlamaFlashAttention2`. However, transformers >= 4.43.0 removed this class,
+#       causing ImportError during model loading.
+#    How：
+#       Inject a dummy alias (`LlamaFlashAttention2 = LlamaAttention`) to bypass the
+#       import check. It won't affect Ascend execution since vLLM uses custom attention backend.
+#    Related PR:
+#       Issue #6692 Verify/Support DeepSeek-OCR-2
+#    Future Plan:
+#       Remove this patch when:
+#       DeepSeek updates their HuggingFace remote code.
