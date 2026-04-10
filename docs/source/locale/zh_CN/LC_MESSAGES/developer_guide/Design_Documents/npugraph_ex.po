@@ -1,0 +1,239 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-09 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:1
+msgid "Npugraph_ex"
+msgstr "Npugraph_ex"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:3
+msgid "How Does It Work?"
+msgstr "它是如何工作的？"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:5
+msgid ""
+"This is an optimization based on Fx graphs, which can be considered an "
+"acceleration solution for the aclgraph mode."
+msgstr ""
+"这是一个基于 Fx 图的优化，可视为 aclgraph 模式的一种加速方案。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:7
+msgid "You can get its code [code](https://gitcode.com/Ascend/torchair)"
+msgstr "你可以获取其代码 [code](https://gitcode.com/Ascend/torchair)"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:9
+msgid "Default Fx Graph Optimization"
+msgstr "默认 Fx 图优化"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:11
+msgid "Fx Graph pass"
+msgstr "Fx 图 pass"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:13
+msgid ""
+"For the intermediate nodes of the model, replace the non-in-place "
+"operators contained in the nodes with in-place operators to reduce memory"
+" movement during computation and improve performance."
+msgstr ""
+"对于模型的中间节点，将节点中包含的非就地操作符替换为就地操作符，以减少计算过程中的内存移动并提高性能。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:14
+msgid ""
+"For the original input parameters of the model, if they include in-place "
+"operators, Dynamo's Functionalize process will replace the in-place "
+"operators with a form of non-in-place operators + copy operators. "
+"npugraph_ex will reverse this process, restoring the in-place operators "
+"and reducing memory movement."
+msgstr ""
+"对于模型的原始输入参数，如果它们包含就地操作符，Dynamo 的 Functionalize 过程会将就地操作符替换为非就地操作符 + 拷贝操作符的形式。"
+"npugraph_ex 会逆转这个过程，恢复就地操作符并减少内存移动。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:16
+msgid "Fx fusion pass"
+msgstr "Fx 融合 pass"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:18
+msgid ""
+"npugraph_ex now provides three default operator fusion passes, and more "
+"will be added in the future."
+msgstr ""
+"npugraph_ex 目前提供了三个默认的算子融合 pass，未来会添加更多。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:20
+msgid ""
+"Operator combinations that meet the replacement rules can be replaced "
+"with the corresponding fused operators."
+msgstr ""
+"符合替换规则的算子组合可以被替换为对应的融合算子。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:22
+msgid ""
+"You can get the default [fusion pass "
+"list](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00017.html)"
+msgstr ""
+"你可以获取默认的[融合 pass 列表](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00017.html)"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:24
+msgid "Custom fusion pass"
+msgstr "自定义融合 pass"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:26
+msgid ""
+"Users can register a custom graph fusion pass in TorchAir to modify "
+"PyTorch FX graphs. The registration relies on the register_replacement "
+"API."
+msgstr ""
+"用户可以在 TorchAir 中注册自定义的图融合 pass 来修改 PyTorch FX 图。注册依赖于 register_replacement API。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:28
+msgid "Below is the declaration of this API and a demo of its usage."
+msgstr "以下是该 API 的声明及其使用示例。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "Parameter Name"
+msgstr "参数名"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "Input/Output"
+msgstr "输入/输出"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "Explanation"
+msgstr "说明"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "Is necessary"
+msgstr "是否必需"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "search_fn"
+msgstr "search_fn"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "Input"
+msgstr "输入"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid ""
+"This function is the operator combination or calculation logic that you "
+"want to recognize in the FX graph, such as the operator combination that "
+"needs to be fused"
+msgstr ""
+"该函数是你在 FX 图中想要识别的算子组合或计算逻辑，例如需要融合的算子组合"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "Yes"
+msgstr "是"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "replace_fn"
+msgstr "replace_fn"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid ""
+"When the combination corresponding to search_fn is found in the target "
+"graph, this function's computation logic will replace the original "
+"subgraph to achieve operator fusion or optimization."
+msgstr ""
+"当在目标图中找到与 search_fn 对应的组合时，该函数的计算逻辑将替换原始子图，以实现算子融合或优化。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "example_inputs"
+msgstr "example_inputs"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid ""
+"Example input tensors used to track search_fn and replace_fn. The shape "
+"and dtype of the input should match the actual scenario."
+msgstr ""
+"用于跟踪 search_fn 和 replace_fn 的示例输入张量。输入的形状和数据类型应与实际场景匹配。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "trace_fn"
+msgstr "trace_fn"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid ""
+"By default, only the forward computation graph is tracked, which is "
+"suitable for optimization during the inference phase; if training "
+"scenarios need to be supported, a function that supports backward "
+"tracking can be provided."
+msgstr ""
+"默认情况下，仅跟踪前向计算图，适用于推理阶段的优化；如果需要支持训练场景，可以提供支持反向跟踪的函数。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "No"
+msgstr "否"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "extra_check"
+msgstr "extra_check"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid ""
+"Find the extra verification function after operator fusion. The "
+"function's input parameter must be a Match object from "
+"torch._inductor.pattern_matcher, and it is used for further custom checks"
+" on the matching result, such as checking whether the fused operators are"
+" on the same stream, checking the device type, checking the input shapes,"
+" and so on."
+msgstr ""
+"算子融合后的额外验证函数。该函数的输入参数必须是 torch._inductor.pattern_matcher 中的 Match 对象，"
+"用于对匹配结果进行进一步的自定义检查，例如检查融合算子是否在同一流上、检查设备类型、检查输入形状等。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid "search_fn_pattern"
+msgstr "search_fn_pattern"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md
+msgid ""
+"A custom pattern object is generally unnecessary to provide. Its "
+"definition follows the rules of the native PyTorch MultiOutputPattern "
+"object. After passing this parameter, search_fn will no longer be used to"
+" match operator combinations; instead, this parameter will be used "
+"directly as the matching rule."
+msgstr ""
+"通常不需要提供自定义 pattern 对象。其定义遵循原生 PyTorch MultiOutputPattern 对象的规则。"
+"传入此参数后，将不再使用 search_fn 来匹配算子组合，而是直接使用此参数作为匹配规则。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:43
+msgid "Usage Example"
+msgstr "使用示例"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:97
+msgid ""
+"The default fusion pass in npugraph_ex is also implemented based on this "
+"API. You can see more examples of using this API in the vllm-ascend and "
+"npugraph_ex code repositories."
+msgstr ""
+"npugraph_ex 中的默认融合 pass 也是基于此 API 实现的。你可以在 vllm-ascend 和 npugraph_ex 代码仓库中看到更多使用此 API 的示例。"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:99
+msgid "DFX"
+msgstr "DFX"
+
+#: ../../source/developer_guide/Design_Documents/npugraph_ex.md:101
+msgid ""
+"By reusing the TORCH_COMPILE_DEBUG environment variable from the PyTorch "
+"community, when TORCH_COMPILE_DEBUG=1 is set, it will output the FX "
+"graphs throughout the entire process."
+msgstr ""
+"通过复用 PyTorch 社区的 TORCH_COMPILE_DEBUG 环境变量，当设置 TORCH_COMPILE_DEBUG=1 时，"
+"将输出整个过程中的 FX 图。"

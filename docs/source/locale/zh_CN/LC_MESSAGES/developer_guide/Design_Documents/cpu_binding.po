@@ -1,0 +1,840 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-09 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:1
+msgid "CPU Binding"
+msgstr "CPU 绑定"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:5
+msgid ""
+"CPU binding pins vLLM Ascend worker processes and key threads to specific"
+" CPU cores to reduce CPU–NPU cross‑NUMA traffic and stabilize latency "
+"under multi‑process workloads. It is designed for ARM servers running "
+"Ascend NPUs and is executed after worker warmup completes when enabled."
+msgstr ""
+"CPU 绑定将 vLLM Ascend 工作进程和关键线程固定到特定的 CPU 核心，以减少 CPU-NPU 跨 NUMA 流量，并在多进程负载下稳定延迟。"
+"该功能专为运行 Ascend NPU 的 ARM 服务器设计，启用后在工作进程预热完成后执行。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:7
+msgid "Background"
+msgstr "背景"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:9
+msgid ""
+"On multi‑socket ARM systems, the OS scheduler may place vLLM threads on "
+"CPUs far from the local NPU, causing NUMA cross‑traffic and jitter. CPU "
+"binding enforces a deterministic CPU placement strategy and optionally "
+"binds NPU IRQs to the same CPU pool. This is distinct from other "
+"performance features (e.g., graph mode or dynamic batch) because it is "
+"purely a host‑side affinity policy and does not change model execution "
+"logic."
+msgstr ""
+"在多插槽 ARM 系统上，操作系统调度器可能将 vLLM 线程放置到远离本地 NPU 的 CPU 上，导致 NUMA 跨片流量和抖动。"
+"CPU 绑定强制执行确定性的 CPU 放置策略，并可选择将 NPU 中断绑定到相同的 CPU 池。"
+"这与其他性能特性（如计算图模式或动态批处理）不同，因为它纯粹是主机侧的亲和性策略，不改变模型执行逻辑。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:11
+msgid "Design & How it works"
+msgstr "设计与工作原理"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:13
+msgid "Key concepts"
+msgstr "关键概念"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:15
+msgid ""
+"**Allowed CPU list**: The cpuset from /proc/self/status "
+"(Cpus_allowed_list). All allocations are constrained to this list."
+msgstr ""
+"**允许的 CPU 列表**：来自 /proc/self/status (Cpus_allowed_list) 的 cpuset。所有分配都受此列表约束。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:16
+msgid ""
+"**Running NPU list**: Logical NPU IDs extracted from npu‑smi process "
+"listing, optionally filtered by ASCEND_RT_VISIBLE_DEVICES."
+msgstr ""
+"**运行中的 NPU 列表**：从 npu-smi 进程列表中提取的逻辑 NPU ID，可选地由 ASCEND_RT_VISIBLE_DEVICES 过滤。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:17
+msgid ""
+"**CPU pool per NPU**: The CPU list assigned to each logical NPU ID based "
+"on the binding mode."
+msgstr ""
+"**每个 NPU 的 CPU 池**：根据绑定模式分配给每个逻辑 NPU ID 的 CPU 列表。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:18
+msgid "**Binding modes & Device behavior**:"
+msgstr "**绑定模式与设备行为**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "Device type"
+msgstr "设备类型"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "Default mode"
+msgstr "默认模式"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "A3 (No Affinity)"
+msgstr "A3（无亲和性）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`global_slice`"
+msgstr "`global_slice`"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid ""
+"Splits the allowed CPU list evenly based on the **total number of global "
+"logical NPUs**, ensuring each NPU is assigned a contiguous segment of CPU"
+" cores. This prevents CPU core overlap across multiple process groups."
+msgstr ""
+"基于**全局逻辑 NPU 的总数**均匀切分允许的 CPU 列表，确保每个 NPU 被分配一段连续的 CPU 核心。"
+"这可以防止跨多个进程组的 CPU 核心重叠。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "A2 / 310P / Others"
+msgstr "A2 / 310P / 其他"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`topo_affinity`"
+msgstr "`topo_affinity`"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid ""
+"Allocates CPUs based on NPU topology affinity (`npu‑smi info -t topo`). "
+"If multiple NPUs are assigned to a single NUMA node (which may cause "
+"bandwidth contention), the CPU allocation extends to adjacent NUMA nodes."
+msgstr ""
+"基于 NPU 拓扑亲和性（`npu-smi info -t topo`）分配 CPU。"
+"如果多个 NPU 被分配到一个 NUMA 节点（可能导致带宽争用），则 CPU 分配会扩展到相邻的 NUMA 节点。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:25
+msgid "**Default**: enabled (enable_cpu_binding = true)."
+msgstr "**默认**：启用（enable_cpu_binding = true）。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:26
+msgid "**Fallback**: If NPU topo affinity is unavailable, global_slice is used."
+msgstr "**回退**：如果 NPU 拓扑亲和性不可用，则使用 global_slice。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:27
+msgid ""
+"**Failure handling**: Any exception in binding is logged as a warning and"
+" **binding is skipped for that rank**."
+msgstr ""
+"**失败处理**：绑定过程中的任何异常都会记录为警告，并且**跳过该 rank 的绑定**。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:29
+msgid "Execution flow (simplified)"
+msgstr "执行流程（简化版）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:31
+msgid ""
+"**Feature entry**: `compile_or_warm_up_model()` calls "
+"`bind_cpus(local_rank)` after warmup, graph capture, and ATB warmup when "
+"`enable_cpu_binding` is true."
+msgstr ""
+"**功能入口**：当 `enable_cpu_binding` 为 true 时，`compile_or_warm_up_model()` 在预热、计算图捕获和 ATB 预热之后调用 `bind_cpus(local_rank)`。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:32
+msgid ""
+"**CPU architecture gate**: If the CPU is not ARM, binding is skipped with"
+" a log."
+msgstr ""
+"**CPU 架构检查**：如果 CPU 不是 ARM，则跳过绑定并记录日志。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:33
+msgid "**Collect device info**:"
+msgstr "**收集设备信息**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:34
+msgid "Map logical NPU IDs from `npu‑smi info -m`."
+msgstr "从 `npu-smi info -m` 映射逻辑 NPU ID。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:35
+msgid "Detect running NPU IDs from npu‑smi info process table."
+msgstr "从 npu-smi info 进程表中检测运行中的 NPU ID。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:36
+msgid "Read cpuset from /proc/self/status."
+msgstr "从 /proc/self/status 读取 cpuset。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:37
+msgid "Read topo affinity from `npu‑smi info -t topo`."
+msgstr "从 `npu-smi info -t topo` 读取拓扑亲和性。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:38
+msgid "**Build CPU pools**:"
+msgstr "**构建 CPU 池**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:39
+msgid "Use **global_slice** for A3 devices; **topo_affinity** for A2 and 310P."
+msgstr "A3 设备使用 **global_slice**；A2 和 310P 使用 **topo_affinity**。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:40
+msgid "If topo affinity is missing, fall back to global_slice."
+msgstr "如果拓扑亲和性缺失，回退到 global_slice。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:41
+msgid "Ensure each NPU has at least 5 CPUs."
+msgstr "确保每个 NPU 至少有 5 个 CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:42
+msgid "**Allocate per‑role CPUs**:"
+msgstr "**按角色分配 CPU**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:43
+msgid "Reserve the first two CPUs for IRQ binding."
+msgstr "保留前两个 CPU 用于中断绑定。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:44
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:62
+msgid "`main`: pool[2:-2]"
+msgstr "`main`：pool[2:-2]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:45
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:63
+msgid "`acl`: pool[-2]"
+msgstr "`acl`：pool[-2]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:46
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:64
+msgid "`release`: pool[-1]"
+msgstr "`release`：pool[-1]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:47
+msgid "**Bind threads**:"
+msgstr "**绑定线程**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:48
+msgid "Main process is pinned to `main` CPUs."
+msgstr "主进程固定到 `main` CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:49
+msgid "ACL threads (named with acl_thread) are pinned to `acl` CPU."
+msgstr "ACL 线程（名为 acl_thread）固定到 `acl` CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:50
+msgid "Release threads (named with release_thread) are pinned to `release` CPU."
+msgstr "Release 线程（名为 release_thread）固定到 `release` CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:51
+msgid "**Bind NPU IRQs (optional)**:"
+msgstr "**绑定 NPU 中断（可选）**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:52
+msgid ""
+"If /proc/irq is writable, bind SQ/CQ IRQs to the first two CPUs in the "
+"pool."
+msgstr "如果 /proc/irq 可写，将 SQ/CQ 中断绑定到池中的前两个 CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:53
+msgid "irqbalance may be stopped to prevent overrides."
+msgstr "可能会停止 irqbalance 以防止覆盖。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:54
+msgid "**Memory binding (optional)**:"
+msgstr "**内存绑定（可选）**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:55
+msgid ""
+"If migratepages is available, memory for ACL threads is migrated to the "
+"NPU’s NUMA node."
+msgstr "如果 migratepages 可用，将 ACL 线程的内存迁移到 NPU 的 NUMA 节点。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:57
+msgid "Allocation plan examples"
+msgstr "分配计划示例"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:59
+msgid ""
+"The allocation plan is derived directly from the CPU pool per NPU and "
+"then split into roles:"
+msgstr "分配计划直接来源于每个 NPU 的 CPU 池，然后按角色划分："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:61
+msgid "IRQ CPUs: pool[0], pool[1]"
+msgstr "中断 CPU：pool[0], pool[1]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:66
+msgid "Below are concrete examples that reflect the actual code paths."
+msgstr "以下是反映实际代码路径的具体示例。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:68
+msgid "Example 1: A3 inference server with 640 CPUs and 16 NPUs"
+msgstr "示例 1：具有 640 个 CPU 和 16 个 NPU 的 A3 推理服务器"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:70
+msgid "allowed_cpus = [0..639] (640 CPUs)"
+msgstr "allowed_cpus = [0..639]（640 个 CPU）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:71
+msgid "NUMA nodes = 0..7 (8 NUMA nodes, symmetric layout)"
+msgstr "NUMA 节点 = 0..7（8 个 NUMA 节点，对称布局）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:72
+msgid "total_npus = 16"
+msgstr "total_npus = 16"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:73
+msgid "running_npu_list = [0..15]"
+msgstr "running_npu_list = [0..15]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:74
+msgid "base = 640 // 16 = 40, extra = 0"
+msgstr "base = 640 // 16 = 40, extra = 0"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:75
+msgid "Each NPU gets a 40‑CPU pool."
+msgstr "每个 NPU 获得一个 40 个 CPU 的池。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "NPU ID"
+msgstr "NPU ID"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "Assigned CPU Cores (global_slice)"
+msgstr "分配的 CPU 核心（global_slice）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "Role Division (IRQ/Main/ACL/Release)"
+msgstr "角色划分（中断/主/ACL/Release）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "0"
+msgstr "0"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "0-39"
+msgstr "0-39"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 0-1, `Main`: 2-37, `ACL`: 38, `Release`: 39"
+msgstr "`IRQ`：0-1，`Main`：2-37，`ACL`：38，`Release`：39"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "1"
+msgstr "1"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "40-79"
+msgstr "40-79"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 40-41, `Main`: 42-77, `ACL`: 78, `Release`: 79"
+msgstr "`IRQ`：40-41，`Main`：42-77，`ACL`：78，`Release`：79"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "..."
+msgstr "..."
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "15"
+msgstr "15"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "600-639"
+msgstr "600-639"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 600-601, `Main`: 602-637, `ACL`: 638, `Release`: 639"
+msgstr "`IRQ`：600-601，`Main`：602-637，`ACL`：638，`Release`：639"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:84
+msgid ""
+"This layout remains deterministic even when multiple processes share the "
+"same cpuset, because slicing is based on the global logical NPU ID."
+msgstr ""
+"即使多个进程共享相同的 cpuset，此布局也保持确定性，因为切分是基于全局逻辑 NPU ID 的。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:86
+msgid "Example 2: A3 global_slice, even split"
+msgstr "示例 2：A3 global_slice，均匀切分"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:88
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:109
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:142
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:161
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:182
+msgid "**Inputs**:"
+msgstr "**输入**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:90
+msgid "allowed_cpus = [0..23] (24 CPUs)"
+msgstr "allowed_cpus = [0..23]（24 个 CPU）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:91
+msgid ""
+"NUMA nodes = 0..1 (2 NUMA nodes, symmetric layout; NUMA0 = 0..11, NUMA1 ="
+" 12..23)"
+msgstr ""
+"NUMA 节点 = 0..1（2 个 NUMA 节点，对称布局；NUMA0 = 0..11，NUMA1 = 12..23）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:92
+msgid "total_npus = 4 (from npu-smi info -m)"
+msgstr "total_npus = 4（来自 npu-smi info -m）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:93
+msgid "running_npu_list = [0, 1, 2, 3]"
+msgstr "running_npu_list = [0, 1, 2, 3]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:95
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:116
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:149
+msgid "**Global slice**:"
+msgstr "**全局切分**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:97
+msgid "base = 24 // 4 = 6, extra = 0"
+msgstr "base = 24 // 4 = 6, extra = 0"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:98
+msgid "Each NPU gets a 6‑CPU pool."
+msgstr "每个 NPU 获得一个 6 个 CPU 的池。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "0-5"
+msgstr "0-5"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 0-1, `Main`: 2-3, `ACL`: 4, `Release`: 5"
+msgstr "`IRQ`：0-1，`Main`：2-3，`ACL`：4，`Release`：5"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "6-11"
+msgstr "6-11"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 6-7, `Main`: 8-9, `ACL`: 10, `Release`: 11"
+msgstr "`IRQ`：6-7，`Main`：8-9，`ACL`：10，`Release`：11"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "2"
+msgstr "2"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "12-17"
+msgstr "12-17"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 12-13, `Main`: 14-15, `ACL`: 16, `Release`: 17"
+msgstr "`IRQ`：12-13，`Main`：14-15，`ACL`：16，`Release`：17"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "3"
+msgstr "3"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "18-23"
+msgstr "18-23"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 18-19, `Main`: 20-21, `ACL`: 22, `Release`: 23"
+msgstr "`IRQ`：18-19，`Main`：20-21，`ACL`：22，`Release`：23"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:107
+msgid "Example 3: A3 global_slice, remainder distribution"
+msgstr "示例 3：A3 global_slice，余数分配"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:111
+msgid "allowed_cpus = [0..16] (17 CPUs)"
+msgstr "allowed_cpus = [0..16]（17 个 CPU）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:112
+msgid ""
+"NUMA nodes = 0..1 (2 NUMA nodes, symmetric layout; NUMA0 = 0..7, NUMA1 = "
+"8..16)"
+msgstr ""
+"NUMA 节点 = 0..1（2 个 NUMA 节点，对称布局；NUMA0 = 0..7，NUMA1 = 8..16）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:113
+msgid "total_npus = 3"
+msgstr "total_npus = 3"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:114
+msgid "running_npu_list = [0, 1, 2]"
+msgstr "running_npu_list = [0, 1, 2]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:118
+msgid "base = 17 // 3 = 5, extra = 2"
+msgstr "base = 17 // 3 = 5, extra = 2"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:119
+msgid "NPU0 pool size = 6 (base+1)"
+msgstr "NPU0 池大小 = 6 (base+1)"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:120
+msgid "NPU1 pool size = 6 (base+1)"
+msgstr "NPU1 池大小 = 6 (base+1)"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:121
+msgid "NPU2 pool size = 5 (base)"
+msgstr "NPU2 池大小 = 5 (base)"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "12-16"
+msgstr "12-16"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 12-13, `Main`: 14, `ACL`: 15, `Release`: 16"
+msgstr "`IRQ`：12-13，`Main`：14，`ACL`：15，`Release`：16"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:129
+msgid ""
+"Note: When a pool size is exactly 5, `main` has a single CPU (pool[2]). "
+"If any pool is <5, binding raises an error."
+msgstr ""
+"注意：当池大小恰好为 5 时，`main` 只有一个 CPU（pool[2]）。"
+"如果任何池小于 5，绑定会引发错误。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:131
+msgid "**NUMA analysis**:"
+msgstr "**NUMA 分析**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:133
+msgid ""
+"With the symmetric NUMA layout above (NUMA0 = 0..7, NUMA1 = 8..16), NPU0 "
+"stays within NUMA0, NPU2 stays within NUMA1, but NPU1 spans both NUMA0 "
+"(6,7) and NUMA1 (8..11). This is a direct consequence of global slicing "
+"over the ordered cpuset; the remainder distribution does not enforce NUMA"
+" boundaries."
+msgstr ""
+"使用上述对称 NUMA 布局（NUMA0 = 0..7，NUMA1 = 8..16），NPU0 保持在 NUMA0 内，NPU2 保持在 NUMA1 内，但 NPU1 跨越 NUMA0（6,7）和 NUMA1（8..11）。"
+"这是对有序 cpuset 进行全局切分的直接结果；余数分配不强制 NUMA 边界。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:134
+msgid ""
+"If the cpuset numbering is interleaved across NUMA nodes (non‑symmetric "
+"layout), cross‑NUMA pools can happen even earlier. This is why symmetric "
+"NUMA layout is recommended for best locality."
+msgstr ""
+"如果 cpuset 编号在 NUMA 节点之间交错（非对称布局），跨 NUMA 池可能会更早出现。"
+"这就是为什么推荐使用对称 NUMA 布局以获得最佳局部性。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:136
+msgid "Known limitations and future improvements"
+msgstr "已知限制与未来改进"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:138
+msgid ""
+"With the current `global_slice` strategy, some CPU/NPU layouts cannot "
+"avoid cross‑NUMA pools. A future enhancement should incorporate NUMA node"
+" boundaries into the slicing logic so that pools remain within a single "
+"NUMA node whenever possible."
+msgstr ""
+"使用当前的 `global_slice` 策略，某些 CPU/NPU 布局无法避免跨 NUMA 池。"
+"未来的增强应将 NUMA 节点边界纳入切分逻辑，以便池尽可能保持在单个 NUMA 节点内。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:140
+msgid "Example 4: global_slice with visible subset of NPUs"
+msgstr "示例 4：使用 NPU 可见子集的 global_slice"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:144
+msgid "total_npus = 8 (from npu-smi info -m)"
+msgstr "total_npus = 8（来自 npu-smi info -m）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:145
+msgid "running_npu_list = [2, 3] (filtered by ASCEND_RT_VISIBLE_DEVICES)"
+msgstr "running_npu_list = [2, 3]（由 ASCEND_RT_VISIBLE_DEVICES 过滤）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:146
+msgid "allowed_cpus = [0..39] (40 CPUs)"
+msgstr "allowed_cpus = [0..39]（40 个 CPU）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:147
+msgid ""
+"NUMA nodes = 0..3 (4 NUMA nodes, symmetric layout; 0..9, 10..19, 20..29, "
+"30..39)"
+msgstr ""
+"NUMA 节点 = 0..3（4 个 NUMA 节点，对称布局；0..9，10..19，20..29，30..39）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:151
+msgid "base = 40 // 8 = 5, extra = 0"
+msgstr "base = 40 // 8 = 5, extra = 0"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:152
+msgid ""
+"Only the visible logical NPUs get pools, but slicing uses the global NPU "
+"ID so different processes do not overlap."
+msgstr ""
+"只有可见的逻辑 NPU 获得池，但切分使用全局 NPU ID，因此不同的进程不会重叠。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "10-14"
+msgstr "10-14"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 10-11, `Main`: 12, `ACL`: 13, `Release`: 14"
+msgstr "`IRQ`：10-11，`Main`：12，`ACL`：13，`Release`：14"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "15-19"
+msgstr "15-19"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 15-16, `Main`: 17, `ACL`: 18, `Release`: 19"
+msgstr "`IRQ`：15-16，`Main`：17，`ACL`：18，`Release`：19"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:159
+msgid "Example 5: A2/310P topo_affinity with NUMA extension"
+msgstr "示例 5：带 NUMA 扩展的 A2/310P topo_affinity"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:163
+#, python-brace-format
+msgid "npu_affinity = {0: [0..7], 1: [0..7]} (from `npu-smi info -t topo`)"
+msgstr "npu_affinity = {0: [0..7], 1: [0..7]}（来自 `npu-smi info -t topo`）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:164
+msgid "allowed_cpus = [0..15] (16 CPUs)"
+msgstr "allowed_cpus = [0..15]（16 个 CPU）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:165
+msgid "NUMA nodes = 0..1 (2 NUMA nodes; NUMA0 = 0..7, NUMA1 = 8..15)"
+msgstr "NUMA 节点 = 0..1（2 个 NUMA 节点；NUMA0 = 0..7，NUMA1 = 8..15）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:167
+msgid "**NUMA extension**:"
+msgstr "**NUMA 扩展**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:169
+msgid ""
+"Both NPUs are on NUMA0, so each pool extends to the nearest NUMA node to "
+"reduce contention."
+msgstr ""
+"两个 NPU 都在 NUMA0 上，因此每个池扩展到最近的 NUMA 节点以减少争用。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:170
+msgid "NPU0 extends to NUMA1 -> [0..15]"
+msgstr "NPU0 扩展到 NUMA1 -> [0..15]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:171
+msgid "NPU1 extends to NUMA1 -> [0..15]"
+msgstr "NPU1 扩展到 NUMA1 -> [0..15]"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:173
+msgid ""
+"Because both pools are identical, the allocator applies average "
+"distribution across NPUs to avoid overlap. With a pool [0..15] and 2 "
+"NPUs, the final pools become:"
+msgstr ""
+"由于两个池相同，分配器在 NPU 之间应用平均分配以避免重叠。使用池 [0..15] 和 2 个 NPU，最终池变为："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "Assigned CPU Cores (topo_affinity)"
+msgstr "分配的 CPU 核心（topo_affinity）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "0-7"
+msgstr "0-7"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 0-1, `Main`: 2-5, `ACL`: 6, `Release`: 7"
+msgstr "`IRQ`：0-1，`Main`：2-5，`ACL`：6，`Release`：7"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "8-15"
+msgstr "8-15"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "`IRQ`: 8-9, `Main`: 10-13, `ACL`: 14, `Release`: 15"
+msgstr "`IRQ`：8-9，`Main`：10-13，`ACL`：14，`Release`：15"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:180
+msgid "Example 6: Minimum CPUs per NPU"
+msgstr "示例 6：每个 NPU 的最小 CPU 数"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:184
+msgid "total_npus = 2"
+msgstr "total_npus = 2"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:185
+msgid "allowed_cpus = [0..7] (8 CPUs)"
+msgstr "allowed_cpus = [0..7]（8 个 CPU）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:186
+msgid ""
+"NUMA nodes = 0..1 (2 NUMA nodes, symmetric layout; NUMA0 = 0..3, NUMA1 = "
+"4..7)"
+msgstr ""
+"NUMA 节点 = 0..1（2 个 NUMA 节点，对称布局；NUMA0 = 0..3，NUMA1 = 4..7）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:188
+msgid "**Result**:"
+msgstr "**结果**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:190
+msgid ""
+"base = 4, which is < 5, so binding fails with: \"Insufficient CPUs for "
+"binding with IRQ/ACL/REL reservations...\""
+msgstr ""
+"base = 4，小于 5，因此绑定失败，错误信息：\"Insufficient CPUs for binding with IRQ/ACL/REL reservations...\""
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "Assigned CPU Cores"
+msgstr "分配的 CPU 核心"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "N/A"
+msgstr "不适用"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md
+msgid "Binding error (insufficient CPUs per NPU)"
+msgstr "绑定错误（每个 NPU 的 CPU 不足）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:197
+msgid ""
+"To resolve, either reduce total_npus or enlarge the cpuset so that each "
+"NPU has at least 5 CPUs."
+msgstr ""
+"要解决此问题，请减少 total_npus 或扩大 cpuset，使每个 NPU 至少有 5 个 CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:199
+msgid "Logging and verification"
+msgstr "日志记录与验证"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:201
+msgid "Logs show the selected binding mode and the allocation plan, for example:"
+msgstr "日志显示所选的绑定模式和分配计划，例如："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:202
+msgid "`[cpu_bind_mode] mode=global_slice rank=0 visible_npus=[...]`"
+msgstr "`[cpu_bind_mode] mode=global_slice rank=0 visible_npus=[...]`"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:203
+msgid "`The CPU allocation plan is as follows: ...`"
+msgstr "`The CPU allocation plan is as follows: ...`"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:204
+msgid "You can verify affinity via taskset or `/proc/<pid>/status` after startup."
+msgstr "启动后，可以通过 taskset 或 `/proc/<pid>/status` 验证亲和性。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:206
+msgid "Limitations & Notes"
+msgstr "限制与注意事项"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:208
+msgid "**ARM‑only**: Binding is skipped on non‑ARM CPUs."
+msgstr "**仅限 ARM**：在非 ARM CPU 上跳过绑定。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:209
+msgid ""
+"**Minimum CPU requirement**: Each logical NPU requires at least 5 CPUs. "
+"If the cpuset is smaller, binding fails with an error."
+msgstr ""
+"**最小 CPU 要求**：每个逻辑 NPU 至少需要 5 个 CPU。如果 cpuset 较小，绑定将失败并报错。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:210
+msgid ""
+"**NUMA symmetry assumption**: For best locality, the current strategies "
+"assume the cpuset is evenly distributed across NUMA nodes and CPU "
+"numbering aligns with NUMA layout; otherwise NUMA locality may be "
+"suboptimal."
+msgstr ""
+"**NUMA 对称性假设**：为获得最佳局部性，当前策略假设 cpuset 在 NUMA 节点之间均匀分布，且 CPU 编号与 NUMA 布局对齐；否则 NUMA 局部性可能不理想。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:211
+msgid ""
+"Example (symmetric layout): 2 NUMA nodes, 64 CPUs total. NUMA0 = CPUs "
+"0–31, NUMA1 = CPUs 32–63, and the cpuset is 0–63. With 4 logical NPUs, "
+"global slicing yields 16 CPUs per NPU (0–15, 16–31, 32–47, 48–63), so "
+"each NPU’s pool stays within a single NUMA node."
+msgstr ""
+"示例（对称布局）：2 个 NUMA 节点，共 64 个 CPU。NUMA0 = CPU 0–31，NUMA1 = CPU 32–63，cpuset 为 0–63。"
+"使用 4 个逻辑 NPU，全局切分产生每个 NPU 16 个 CPU（0–15、16–31、32–47、48–63），因此每个 NPU 的池保持在单个 NUMA 节点内。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:212
+msgid "**Runtime dependencies**:"
+msgstr "**运行时依赖**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:213
+msgid "Requires npu‑smi and lscpu commands."
+msgstr "需要 npu-smi 和 lscpu 命令。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:214
+msgid "IRQ binding requires write access to /proc/irq."
+msgstr "中断绑定需要对 /proc/irq 的写权限。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:215
+msgid "Memory binding requires migratepages; otherwise it is skipped."
+msgstr "内存绑定需要 migratepages；否则将被跳过。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:216
+msgid ""
+"**IRQ side effects**: irqbalance may be stopped to avoid overriding "
+"bindings."
+msgstr ""
+"**中断副作用**：可能会停止 irqbalance 以避免覆盖绑定。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:217
+msgid ""
+"**Per‑process behavior**: Only the current rank’s NPU is used for IRQ "
+"binding to avoid cross‑process overwrite."
+msgstr ""
+"**每进程行为**：仅当前 rank 的 NPU 用于中断绑定，以避免跨进程覆盖。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:219
+msgid "Debug logging"
+msgstr "调试日志"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:221
+msgid ""
+"Use the standard vLLM logging configuration to enable debug logs. The "
+"binding process emits debug messages (e.g., `[cpu_global_slice] ...`) "
+"when debug level is enabled."
+msgstr ""
+"使用标准的 vLLM 日志配置启用调试日志。当启用调试级别时，绑定过程会发出调试消息（例如 `[cpu_global_slice] ...`）。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:223
+msgid "References"
+msgstr "参考"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:225
+msgid ""
+"CPU binding implementation: vllm_ascend/cpu_binding.py (`DeviceInfo`, "
+"`CpuAlloc`, `bind_cpus`)"
+msgstr ""
+"CPU 绑定实现：vllm_ascend/cpu_binding.py（`DeviceInfo`，`CpuAlloc`，`bind_cpus`）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:226
+msgid ""
+"Worker integration: vllm_ascend/worker/worker.py "
+"(`NPUWorker.compile_or_warm_up_model`)"
+msgstr ""
+"Worker 集成：vllm_ascend/worker/worker.py（`NPUWorker.compile_or_warm_up_model`）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:227
+msgid ""
+"Additional config option: "
+"docs/source/user_guide/configuration/additional_config.md "
+"(`enable_cpu_binding`)"
+msgstr ""
+"附加配置选项：docs/source/user_guide/configuration/additional_config.md（`enable_cpu_binding`）"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:228
+msgid "Tests: tests/ut/device_allocator/test_cpu_binding.py"
+msgstr "测试：tests/ut/device_allocator/test_cpu_binding.py"
