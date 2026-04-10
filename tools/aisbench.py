@@ -241,6 +241,7 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
         if server_args:
             error_msg += f"\nserver_args are {server_args}"
         logging.error(error_msg)
+    print(f"aisbench_errors is {aisbench_errors}")
     assert not aisbench_errors, "some aisbench cases failed, info were shown above."
     return aisbench_results
 
