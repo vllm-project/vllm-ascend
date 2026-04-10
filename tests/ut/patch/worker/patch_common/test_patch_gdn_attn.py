@@ -8,9 +8,21 @@ import torch
 
 import vllm_ascend.patch.worker.patch_gdn_attn as patch_gdn_attn
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.fla.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import MambaSpec
+
+
+@pytest.fixture(autouse=True)
+def _patch_triton_cdiv(monkeypatch):
+    if not hasattr(_fla_index.triton, "cdiv"):
+        monkeypatch.setattr(
+            _fla_index.triton,
+            "cdiv",
+            lambda a, b: (a + b - 1) // b,
+            raising=False,
+        )
 
 
 @dataclass
