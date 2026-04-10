@@ -265,9 +265,6 @@ class CpuAlloc:
         else:
             total_npus = len(running)
 
-        if total_npus <= 0:
-            return
-
         # Compute global per-NPU slicing
         base = total_cpu // total_npus
         extra = total_cpu % total_npus
@@ -300,12 +297,6 @@ class CpuAlloc:
             if npu < 0 or npu >= total_npus:
                 raise RuntimeError(f"Invalid NPU id {npu}, total_npus={total_npus}.")
             cpus = _slice_for_npu(npu)
-            # Extra safety: should always be >= base >= 5
-            if len(cpus) < MIN_CPUS_PER_NPU:
-                raise RuntimeError(
-                    f"NPU{npu} got too few CPUs: {len(cpus)} (<5). "
-                    f"total_allowed={total_cpu}, total_npus={total_npus}, base={base}, extra={extra}"
-                )
             self.npu_cpu_pool[npu] = cpus
 
     @staticmethod
@@ -409,9 +400,10 @@ class CpuAlloc:
         self.bind(main_pid, self.assign_main[current_npu], True)
         for acl_thread in threads_map.get(main_pid, {}).get("acl_thread", []):
             self.bind(acl_thread, self.assign_acl[current_npu], False)
-            self.bind_memory(acl_thread, current_npu)
         for release_thread in threads_map.get(main_pid, {}).get("release_thread", []):
             self.bind(release_thread, self.assign_rel[current_npu], False)
+        # Migrate memory once for the whole process, after all threads are pinned.
+        self.bind_memory(main_pid, current_npu)
 
     def bind_npu_irq(self) -> None:
         if not os.access("/proc/irq", os.W_OK):
