@@ -143,7 +143,6 @@ class TestDispatchFFNCombine:
             out=out,
             expert_token_nums=expert_token_nums,
         )
-        print(f"[Rank {self.rank}] 算子执行成功，输出张量前5个元素：{out[:5, 0].cpu().tolist()}")
         return True
 
     def run_normal(self) -> bool:
