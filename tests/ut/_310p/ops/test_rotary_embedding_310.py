@@ -40,26 +40,43 @@ def test_set_mrope_apply_rotary_slices_populates_globals():
     _reset_mrope_globals()
     emb = _build_mrope_embedding()
     positions = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 4), dtype=torch.long)
-    set_mrope_apply_rotary_slices(emb, positions, torch.float32, torch.device("cpu"))
+    set_mrope_apply_rotary_slices(
+        emb.cos_sin_cache,
+        positions,
+        mrope_section=emb.mrope_section,
+        mrope_interleaved=emb.mrope_interleaved,
+    )
 
     assert rotary_310._mrope_cos_slice is not None
     assert rotary_310._mrope_sin_slice is not None
     assert rotary_310._mrope_cos_slice.shape[1] == positions.shape[-1]
 
 
-def test_set_mrope_apply_rotary_slices_second_call_replaces():
+def test_set_mrope_apply_rotary_slices_second_call_updates_contents():
     _reset_mrope_globals()
     emb = _build_mrope_embedding()
     positions_a = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 4), dtype=torch.long)
-    positions_b = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 5), dtype=torch.long)
+    positions_b = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 4), dtype=torch.long)
 
-    set_mrope_apply_rotary_slices(emb, positions_a, torch.float32, torch.device("cpu"))
+    set_mrope_apply_rotary_slices(
+        emb.cos_sin_cache,
+        positions_a,
+        mrope_section=emb.mrope_section,
+        mrope_interleaved=emb.mrope_interleaved,
+    )
     cos_a = rotary_310._mrope_cos_slice
-    set_mrope_apply_rotary_slices(emb, positions_b, torch.float32, torch.device("cpu"))
+    cos_a_snapshot = cos_a[:, :4].clone()
+    set_mrope_apply_rotary_slices(
+        emb.cos_sin_cache,
+        positions_b,
+        mrope_section=emb.mrope_section,
+        mrope_interleaved=emb.mrope_interleaved,
+    )
     cos_b = rotary_310._mrope_cos_slice
 
-    assert cos_a is not cos_b
-    assert cos_b.shape[1] == 5
+    assert cos_a is cos_b
+    assert cos_b.shape[1] == 4
+    assert not torch.equal(cos_a_snapshot, cos_b[:, :4])
 
 
 def test_set_mrope_apply_rotary_slices_reuses_buffer_address():
@@ -67,27 +84,31 @@ def test_set_mrope_apply_rotary_slices_reuses_buffer_address():
     emb = _build_mrope_embedding()
     positions = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 4), dtype=torch.long)
 
-    set_mrope_apply_rotary_slices(emb, positions, torch.float32, torch.device("cpu"))
+    set_mrope_apply_rotary_slices(
+        emb.cos_sin_cache,
+        positions,
+        mrope_section=emb.mrope_section,
+        mrope_interleaved=emb.mrope_interleaved,
+    )
     first_ptr = rotary_310._mrope_cos_slice.data_ptr()
 
-    set_mrope_apply_rotary_slices(emb, positions, torch.float32, torch.device("cpu"))
+    set_mrope_apply_rotary_slices(
+        emb.cos_sin_cache,
+        positions,
+        mrope_section=emb.mrope_section,
+        mrope_interleaved=emb.mrope_interleaved,
+    )
     second_ptr = rotary_310._mrope_cos_slice.data_ptr()
 
     assert first_ptr == second_ptr
 
 
-def test_get_mrope_cos_sin_for_apply_raises_when_unprepared():
+def test_forward_oot_raises_when_unprepared():
     _reset_mrope_globals()
     emb = _build_mrope_embedding()
-    with pytest.raises(RuntimeError, match="not prepared"):
-        emb._get_mrope_cos_sin_for_apply(num_tokens=4)
-
-
-def test_get_mrope_cos_sin_for_apply_after_prepare():
-    _reset_mrope_globals()
-    emb = _build_mrope_embedding()
-    positions = torch.randint(0, emb.cos_sin_cache.shape[0], (3, 4), dtype=torch.long)
-    set_mrope_apply_rotary_slices(emb, positions, torch.float32, torch.device("cpu"))
-    cos, sin = emb._get_mrope_cos_sin_for_apply(num_tokens=4)
-    assert cos.data_ptr() == rotary_310._mrope_cos_slice.data_ptr()
-    assert sin.data_ptr() == rotary_310._mrope_sin_slice.data_ptr()
+    emb.head_size = 128
+    emb.rotary_dim = 128
+    query = torch.randn(4, 2, 128, dtype=torch.float32)
+    key = torch.randn(4, 2, 128, dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="not initialized"):
+        emb.forward_oot(positions=torch.arange(4), query=query, key=key)
