@@ -171,14 +171,11 @@ class AisbenchRunner:
             line = self.proc.stdout.readline()
             if not line:
                 break
-
             line_stripped = line.strip()
             print(line_stripped)
-
             if "Current exp folder: " in line_stripped:
                 self.exp_folder = re.search(r"Current exp folder: (.*)", line_stripped)
                 return
-            
             if "ERROR" in line_stripped:
                 error_lines.append(line_stripped)
 
