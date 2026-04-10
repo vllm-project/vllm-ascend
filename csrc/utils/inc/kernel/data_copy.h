@@ -52,7 +52,7 @@ FORCE_INLINE_AICORE void CpGM2UB(__ubuf__ T *ubAddr, __gm__ T *gmAddr, uint32_t 
     DataCopyPad(ubTensor, gmTensor, dataCopyParams, padParams);
 }
 
-template<typename T>
+template <typename T>
 FORCE_INLINE_AICORE void CopyUB2UB(__ubuf__ T *dst, __ubuf__ T *src, const uint32_t calCount)
 {
     LocalTensor<T> srcTensor;
@@ -65,4 +65,4 @@ FORCE_INLINE_AICORE void CopyUB2UB(__ubuf__ T *dst, __ubuf__ T *src, const uint3
     DataCopy(dstTensor, srcTensor, calCount);
 }
 
-#endif // CAM_DATACOPY_GM2GM_H
+#endif  // CAM_DATACOPY_GM2GM_H

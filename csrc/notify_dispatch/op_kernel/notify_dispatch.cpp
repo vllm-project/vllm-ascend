@@ -9,15 +9,13 @@
 
 #define KERNEL_USE_WORKSPACE (1 * 1024 * 1024)
 
-extern "C" __global__ __aicore__ void notify_dispatch(
-    GM_ADDR sendData, GM_ADDR tokenPerExpertData, GM_ADDR sendDataOffset, GM_ADDR recvData, GM_ADDR workspace, GM_ADDR tiling)
+extern "C" __global__ __aicore__ void notify_dispatch(GM_ADDR sendData, GM_ADDR tokenPerExpertData,
+                                                      GM_ADDR sendDataOffset, GM_ADDR recvData, GM_ADDR totalRecvTokens,
+                                                      GM_ADDR recvCount, GM_ADDR recvOffset, GM_ADDR maxBs,
+                                                      GM_ADDR recvTokensPerExpert, GM_ADDR workspace, GM_ADDR tiling)
 {
     REGISTER_TILING_DEFAULT(NotifyDispatchTilingData);
     GET_TILING_DATA_WITH_STRUCT(NotifyDispatchTilingData, tilingData, tiling);
-
-    // hcomm will set magic later in init
-    uint32_t magic = 1;
-    GM_ADDR commArgs = nullptr;
 
     int localRank = tilingData.notifyDispatchInfo.localRankId;
     int localRankSize = tilingData.notifyDispatchInfo.localRankSize;

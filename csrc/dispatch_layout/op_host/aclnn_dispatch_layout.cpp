@@ -19,9 +19,12 @@ extern aclnnStatus aclnnInnerDispatchLayoutGetWorkspaceSize(
     int64_t numRanks,
     int64_t numExperts,
     int64_t numTopk,
+    int64_t localRankSize,
     const aclTensor *numTokensPerRank,
     const aclTensor *numTokensPerExpert,
     const aclTensor *isTokenInRank,
+    const aclTensor *notifySendData,
+    const aclTensor *sendTokenIdxSmall,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
@@ -31,27 +34,19 @@ extern aclnnStatus aclnnInnerDispatchLayout(
     aclOpExecutor *executor,
     aclrtStream stream);
 
-aclnnStatus aclnnDispatchLayoutGetWorkspaceSize(
-    const aclTensor *topkIdx,
-    int64_t numTokens,
-    int64_t numRanks,
-    int64_t numExperts,
-    int64_t numTopk,
-    const aclTensor *numTokensPerRank,
-    const aclTensor *numTokensPerExpert,
-    const aclTensor *isTokenInRank,
-    uint64_t *workspaceSize,
-    aclOpExecutor **executor)
+aclnnStatus aclnnDispatchLayoutGetWorkspaceSize(const aclTensor *topkIdx, int64_t numTokens, int64_t numRanks,
+                                                int64_t numExperts, int64_t numTopk, int64_t localRankSize,
+                                                const aclTensor *numTokensPerRank, const aclTensor *numTokensPerExpert,
+                                                const aclTensor *isTokenInRank, const aclTensor *notifySendData,
+                                                const aclTensor *sendTokenIdxSmall, uint64_t *workspaceSize,
+                                                aclOpExecutor **executor)
 {
-    return aclnnInnerDispatchLayoutGetWorkspaceSize(topkIdx, numTokens, numRanks, numExperts, numTopk, numTokensPerRank,
-                                                    numTokensPerExpert, isTokenInRank, workspaceSize, executor);
+    return aclnnInnerDispatchLayoutGetWorkspaceSize(topkIdx, numTokens, numRanks, numExperts, numTopk, localRankSize,
+                                                    numTokensPerRank, numTokensPerExpert, isTokenInRank, notifySendData,
+                                                    sendTokenIdxSmall, workspaceSize, executor);
 }
 
-aclnnStatus aclnnDispatchLayout(
-    void *workspace,
-    uint64_t workspaceSize,
-    aclOpExecutor *executor,
-    aclrtStream stream)
+aclnnStatus aclnnDispatchLayout(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream)
 {
     if (NnopbaseSetHcclServerType) {
         NnopbaseSetHcclServerType(executor, NNOPBASE_HCCL_SERVER_TYPE_MTE);
