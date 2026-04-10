@@ -2,7 +2,7 @@ test_name: "test Qwen3-235B-A22B disaggregated_prefill"
 model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_BUFFSIZE: 1024
@@ -21,6 +21,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
@@ -57,6 +59,8 @@ deployment:
         }'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0

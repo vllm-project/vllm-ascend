@@ -53,14 +53,20 @@ From the workflow perspective, we can see how the final test script is executed,
     # Add each node's vllm serve cli command just like you run locally
     # Add each node's individual envs like follow
     deployment:
-      - envs:
-          # fill with envs like: <key>:<value>
-        server_cmd: >
-          vllm serve ...
-      - envs:
-          # fill with envs like: <key>:<value>
-        server_cmd: >
-          vllm serve ...
+    - name: prefiller node # optional: just for description, not used in code
+      envs:
+        <<: *env_common
+        VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+        # Continue to add other envs if needed
+      server_cmd: >
+        vllm serve ...
+    - name: decoder node # optional: just for description, not used in code
+      envs:
+        <<: *env_common
+        VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+        # Continue to add other envs if needed
+      server_cmd: >
+        vllm serve ...
     benchmarks:
       perf:
         # fill with performance test kwargs

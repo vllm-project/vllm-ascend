@@ -2,6 +2,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
+from typing import Any
 
 import regex as re
 import yaml
@@ -27,7 +28,7 @@ class NodeInfo:
     index: int
     ip: str
     server_cmd: str
-    envs: dict | None = None
+    envs: dict[str, Any] | None = None
     headless: bool = False
 
     def __post_init__(self):
@@ -79,17 +80,12 @@ class DistEnvBuilder:
         *,
         cur_node: NodeInfo,
         master_ip: str,
-        common_envs: dict,
     ):
         self.cur_ip = cur_node.ip
         self.nic_name = get_net_interface(self.cur_ip)
         self.master_ip = master_ip
 
-        # envs
-        common_envs = common_envs
-        current_envs = cur_node.envs or {}
-        # Node-specific envs override common envs
-        self.base_envs = {**common_envs, **current_envs}
+        self.base_envs = dict(cur_node.envs or {})
 
     def build(self) -> dict:
         envs = dict(self.base_envs)
@@ -179,7 +175,6 @@ class MultiNodeConfig:
         test_name: str,
         nodes: list[NodeInfo],
         npu_per_node: int,
-        envs: dict,
         disaggregated_prefill: dict | None,
         benchmark_cases: list[dict],
     ):
@@ -202,7 +197,6 @@ class MultiNodeConfig:
         self.envs = DistEnvBuilder(
             cur_node=self.cur_node,
             master_ip=master_ip,
-            common_envs=envs,
         ).build()
         logger.info("Node %d envs: %s", self.cur_index, self.envs)
 
@@ -274,7 +268,6 @@ class MultiNodeConfigLoader:
             test_name=config.get("test_name", "untitled_test"),
             nodes=nodes,
             npu_per_node=config.get("npu_per_node", 16),
-            envs=config.get("env_common", {}),
             disaggregated_prefill=config.get("disaggregated_prefill"),
             benchmark_cases=list(benchmarks.values()),
         )
@@ -292,7 +285,7 @@ class MultiNodeConfigLoader:
 
     @staticmethod
     def _validate_root(cfg: dict):
-        required = ["model", "deployment", "num_nodes", "npu_per_node", "env_common", "benchmarks"]
+        required = ["model", "deployment", "num_nodes", "npu_per_node", "benchmarks"]
         missing = [k for k in required if k not in cfg]
         if missing:
             raise KeyError(f"Missing required config fields: {missing}")
@@ -305,12 +298,16 @@ class MultiNodeConfigLoader:
         if len(deployments) != num_nodes:
             raise AssertionError(f"deployment size ({len(deployments)}) != num_nodes ({num_nodes})")
 
+        for idx, deploy in enumerate(deployments):
+            if deploy.get("envs") is None:
+                raise KeyError(f"deployment[{idx}].envs is required for multi-node configs")
+
         cluster_ips = cls._resolve_cluster_ips(cfg, num_nodes)
 
         nodes: list[NodeInfo] = []
         for idx, deploy in enumerate(deployments):
             cmd = deploy.get("server_cmd", "")
-            envs = deploy.get("envs", {})
+            envs = deploy["envs"]
             nodes.append(
                 NodeInfo(
                     index=idx,

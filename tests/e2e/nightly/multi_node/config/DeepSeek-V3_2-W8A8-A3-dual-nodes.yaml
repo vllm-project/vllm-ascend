@@ -2,9 +2,8 @@ test_name: "test DeepSeek-V3.2-W8A8 on A3"
 model: "vllm-ascend/DeepSeek-V3.2-W8A8"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
-
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
@@ -19,6 +18,8 @@ env_common:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
       --host 0.0.0.0
@@ -44,6 +45,8 @@ deployment:
       --reasoning-parser deepseek_v3
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
       --headless

@@ -1,143 +1,175 @@
-# Documentation Authoring
+# Documentation writing guide
 
-This page explains how to write model tutorial docs that stay in sync with YAML test cases checked by
-`tools/check_docs_yaml_sync.py`.
+## Guide to Writing Model Tutorial Documentation
 
-## What The Checker Scans
+`docs/source/_templates/Model-Deployment-Tutorial-Template.md` is a template for writing model deployment tutorials. You can copy and modify it to create new docs.
 
-The `check-docs-yaml-sync` pre-commit hook currently runs on files that match:
+## Testable documentation code block generation (``model-code``)
 
-```text
-docs/source/tutorials/models/*.md
-```
+- For **documentation authors**: how to insert testable command blocks into docs
+- For **developers**: how to add a new converter
 
-The CLI itself can lint any markdown path that you pass in, but the hook only targets model tutorial
-docs.
+Built-in supported `converter_tag` values:
 
-Within a checked document, every MyST block whose opening fence matches ` ```{test} <lexer> ` is
-treated as a sync block. This means:
+| converter_tag |
+| --- |
+| `single_node` |
+| `multi_node` |
 
-- A checked file must contain at least one `{test}` block, or the linter reports an error.
-- Every `{test}` block in that file must include all required sync metadata.
-- If you want to show a shell example that should not be linted, use a normal fenced block such as
-  ` ```bash ` instead of ` ```{test} bash `.
-- If the whole document cannot be mapped to YAML test cases, add the markdown path to
-  `[tool.check_docs_yaml_sync].exclude` in `pyproject.toml`.
+### For authors: add a block
 
-## Required Metadata
+:::{important}
+By default, the generator scans only `.md` files under `docs/source/tutorials/models/` and produces artifacts.
+If you put ``model-code`` blocks in other directories, Sphinx builds will not automatically generate the corresponding scripts.
+:::
 
-Each sync block must provide all three metadata fields immediately after the opening fence and before
-the first blank line or script content:
+#### Single node (`single_node`)
+
+##### Template 1: minimal (metadata only)
 
 ````md
-```{test} bash
-:sync-yaml: path/to/config.yaml
-:sync-target: some.path
-:sync-class: env
-
-...
+```{model-code}
+:block_name: your_unique_block_name
+:converter_tag: single_node
+:test_case_path: tests/e2e/nightly/single_node/models/configs/your_model.yaml
 ```
 ````
 
-Rules:
-
-- `:sync-yaml:` is a repository-relative path to an existing YAML file.
-- `:sync-target:` uses dotted keys and bracket access, for example
-  `test_cases[0].envs` or `test_cases[0]["server_cmd"]`.
-- Multiple `:sync-target:` values are allowed only by separating targets with spaces.
-- `:sync-class:` must be one of the supported classes: `env` or `cmd`.
-
-## How To Write `env` Blocks
-
-Use `:sync-class: env` when the YAML target resolves to a mapping of environment variables.
-
-- `env` blocks must use exactly one `:sync-target:`.
-- The YAML target must resolve to a mapping such as `test_cases[0].envs`.
-- The checker only reads lines written as `export KEY=value`.
-- Blank lines and full-line comments are ignored.
-- Inline comments after the value are allowed, for example
-  `export SERVER_PORT=DEFAULT_PORT  # Replace with a real port.`
-- Non-`export` lines are ignored.
-- After quote normalization, the variable names and values must match the YAML mapping.
-- Order does not matter, but the final set of `KEY=value` entries must match YAML exactly.
-
-Example:
+##### Template 2: with text (use `{{ generated }}` placeholder)
 
 ````md
-```{test} bash
-:sync-yaml: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
-:sync-target: test_cases[0].envs
-:sync-class: env
+```{model-code}
+:block_name: your_unique_block_name
+:converter_tag: single_node
+:test_case_path: tests/e2e/nightly/single_node/models/configs/your_model.yaml
 
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
-export OMP_PROC_BIND=false
-export HCCL_OP_EXPANSION_MODE=AIV
-export SERVER_PORT=DEFAULT_PORT  # Replace DEFAULT_PORT with the actual port.
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+# You can add any extra content here, e.g. code, explanations, or comments.
+{{ generated }}
 ```
 ````
 
-## How To Write `cmd` Blocks
+##### Options
 
-Use `:sync-class: cmd` when the document contains a `vllm serve` launch command.
+| Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `block_name` | Yes | None | Block name; must be unique within the current document |
+| `converter_tag` | Yes | None | Must be `single_node` |
+| `test_case_path` | Yes | None | Repository-relative path; file must exist |
+| `case_index` | No | `0` | Use `test_cases[case_index]` from the YAML as the rendering source |
 
-- The document block must parse as a valid `vllm serve` command.
-- The third token must be the model name.
-- After the model, only options and option values are allowed.
-- Duplicate option tokens are rejected.
-- Inline shell comments are not stripped unless the whole line starts with `#`.
-- Backslash-continued multi-line commands are supported.
-- Command option order does not matter, but the parsed option set must match YAML exactly.
+##### YAML reference
 
-`cmd` sync targets have two modes:
+See existing files under `tests/e2e/nightly/single_node/models/configs/`.
 
-- One target: the YAML target must resolve to a full command fragment that already includes
-  `vllm serve <model> ...`, either as a string or as a flat scalar list.
-- Multiple targets: the checker prepends `vllm serve` automatically, then appends each resolved
-  fragment in the order listed in `:sync-target:`. A common pattern is
-  `test_cases[0].model test_cases[0].server_cmd`.
+`single_node` reads `test_cases[case_index]`. Common fields include:
 
-Example:
+- `model`: model name (ultimately renders `vllm serve <model> ...`)
+- `envs`: rendered as `export ...` (scalar values)
+- `server_cmd`: arguments appended to `vllm serve <model>` (shell string or token list)
+- `server_cmd_extra` (optional): extra appended arguments
+
+#### Multi node (`multi_node`)
+
+##### Template 1: minimal (metadata only)
 
 ````md
-```{test} bash
-:sync-yaml: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
-:sync-target: test_cases[0].model test_cases[0].server_cmd
-:sync-class: cmd
-
-vllm serve "moonshotai/Kimi-K2-Thinking" \
-  --tensor-parallel-size 16 \
-  --port $SERVER_PORT \
-  --max-model-len 8192 \
-  --max-num-batched-tokens 8192 \
-  --max-num-seqs 12 \
-  --gpu-memory-utilization 0.9 \
-  --trust-remote-code \
-  --enable-expert-parallel \
-  --no-enable-prefix-caching
+```{model-code}
+:block_name: your_unique_block_name
+:converter_tag: multi_node
+:test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
+:host_index: 0
 ```
 ````
 
-## When A Document Should Be Excluded
+##### Template 2: with text (use `{{ generated }}` placeholder)
 
-Exclusions are file-level only. If a markdown file under `docs/source/tutorials/models/` cannot be
-mapped cleanly to YAML test cases, add its repository-relative path to
-`[tool.check_docs_yaml_sync].exclude` in `pyproject.toml`.
+````md
+```{model-code}
+:block_name: your_unique_block_name
+:converter_tag: multi_node
+:test_case_path: tests/e2e/nightly/multi_node/config/your_model.yaml
+:host_index: 0
 
-Use this sparingly. Prefer keeping tutorial commands and env vars synchronized with executable test
-cases whenever possible.
+# You can add any extra content here, e.g. code, explanations, or comments.
+{{ generated }}
+```
+````
 
-## Local Validation
+##### Options
 
-Run the sync check directly on one or more markdown files:
+| Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `block_name` | Yes | None | Block name; must be unique within the current document |
+| `converter_tag` | Yes | None | Must be `multi_node` |
+| `test_case_path` | Yes | None | Repository-relative path; file must exist |
+| `host_index` | Yes | None | Use `deployment[host_index]` from the YAML as the rendering source |
+
+##### YAML reference
+
+See existing files under `tests/e2e/nightly/multi_node/config/`.
+
+`multi_node` reads `deployment[host_index]`. Common fields include:
+
+- `envs`: rendered as `export ...` (scalar values)
+- `server_cmd`: a complete command (must start with `vllm serve <model>`; shell multi-line string or token list)
+
+### Local debugging and generation
+
+#### Generate only (without building the full site)
 
 ```bash
-python3 tools/check_docs_yaml_sync.py docs/source/tutorials/models/<your_doc>.md
+# Generate all model-code artifacts under docs/source/tutorials/models/
+python3 tools/docs_codegen/cli.py
+
+# Generate artifacts for a single document
+python3 tools/docs_codegen/cli.py --doc docs/source/tutorials/models/Kimi-K2-Thinking.md
+
+# Generate a single block and print it (no files written)
+python3 tools/docs_codegen/cli.py \
+  --block docs/source/tutorials/models/Kimi-K2-Thinking.md::kimi_k2_thinking_single_node \
+  --dry-run --stdout
 ```
 
-Run the full formatting and lint workflow before pushing:
+By default, artifacts are written to: `docs/_build/doc_codegen/<doc_stem>/<block_name>.sh`.
+
+#### Build the site & preview locally
 
 ```bash
-bash format.sh
+# Install documentation build dependencies
+python3 -m pip install -r docs/requirements-docs.txt
+
+# Build the English site
+make -C docs html
+
+# (Optional) Build the Chinese site
+make -C docs intl
+
+# Preview locally
+python3 -m http.server -d docs/_build/html 8000
+
+# Then open in a browser:
+# http://localhost:8000
 ```
+
+### For developers: add a new converter
+
+The goal of adding a converter is to make `converter_tag: <name>` render a given YAML structure into a script (`GeneratedScript`).
+
+#### What to change
+
+1. In `tools/docs_codegen/converters.py`:
+
+   - Add a `BaseConverter` subclass that implements `convert(loaded_yaml, *, block) -> GeneratedScript`
+   - Give the converter a unique `name` (the value used by `converter_tag` in docs)
+   - Register it in `build_default_converters()`
+
+2. If your converter needs new directive options (e.g. `:foo_index:`):
+
+   - Add the option name to `MODEL_CODE_OPTION_NAMES` in `tools/docs_codegen/scanner.py`
+   - Add the option name to `ModelCodeDirective.option_spec` in `tools/docs_codegen/sphinx_extension.py`
+
+3. Add a real example snippet in any model doc (recommended under `docs/source/tutorials/models/`) and point it to a YAML file that exists (recommended under `tests/`).
+
+4. Minimal validation via CLI:
+
+   - `python3 tools/docs_codegen/cli.py --doc <your_doc>` or `--block <doc>::<block_name>`
