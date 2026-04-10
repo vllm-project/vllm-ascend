@@ -165,15 +165,26 @@ class AisbenchRunner:
             self.proc.kill()
 
     def _wait_for_exp_folder(self):
+        self.exp_folder = None
+        error_lines = []
         while True:
-            line = self.proc.stdout.readline().strip()
-            print(line)
-            if "Current exp folder: " in line:
-                self.exp_folder = re.search(r"Current exp folder: (.*)", line).group(1)
+            line = self.proc.stdout.readline()
+            if not line:
+                break
+
+            line_stripped = line.strip()
+            print(line_stripped)
+
+            if "Current exp folder: " in line_stripped:
+                self.exp_folder = re.search(r"Current exp folder: (.*)", line_stripped)
                 return
-            if "ERROR" in line:
-                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
-                raise RuntimeError(error_msg) from None
+            
+            if "ERROR" in line_stripped:
+                error_lines.append(line_stripped)
+
+        if error_lines:
+            error_msg = f"Aisbench运行时出错，错误日志：{'; '.join(error_lines)}"
+            raise RuntimeError(error_msg) from None
 
     def _wait_for_task(self):
         self._wait_for_exp_folder()
