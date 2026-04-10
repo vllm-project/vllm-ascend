@@ -8,6 +8,7 @@ import torch
 
 # Third Party
 from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
@@ -30,7 +31,6 @@ class MooncakeBackend(Backend):
             ) from e
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
-        self.rank = parallel_config.rank
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
@@ -67,7 +67,8 @@ class MooncakeBackend(Backend):
             raise RuntimeError(msg)
 
     def set_device(self):
-        device = torch.device(f"npu:{self.rank}")
+        local_rank = get_world_group().local_rank
+        device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
