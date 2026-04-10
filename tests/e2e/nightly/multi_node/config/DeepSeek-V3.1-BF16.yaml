@@ -2,7 +2,7 @@ test_name: "test DeepSeek-V3.1-BF16 on A3"
 model: "unsloth/DeepSeek-V3.1-BF16"
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 2048
   SERVER_PORT: 8080
@@ -17,6 +17,8 @@ env_common:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve unsloth/DeepSeek-V3.1-BF16
       --host 0.0.0.0
@@ -39,6 +41,8 @@ deployment:
       --additional_config '{"enable_multistream_moe": true}'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve unsloth/DeepSeek-V3.1-BF16
       --headless

@@ -25,12 +25,10 @@
 #
 import json
 import os
+import sys
+from pathlib import Path
 
-from docutils.parsers.rst import directives
-from sphinx.directives.code import CodeBlock
-
-# import sys
-# sys.path.insert(0, os.path.abspath('.'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # -- Project information -----------------------------------------------------
 
@@ -60,6 +58,7 @@ extensions = [
     "sphinx_design",
     "sphinx_togglebutton",
     "sphinx_substitution_extensions",
+    "tools.docs_codegen.sphinx_extension",
 ]
 
 myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
@@ -171,21 +170,6 @@ if READTHEDOCS_VERSION_TYPE == "tag":
     # (readthedocs build both HTML and PDF versions separately)
     if os.path.exists(header_file):
         os.remove(header_file)
-
-
-class SyncMetadataCodeBlock(CodeBlock):
-    """Code block supporting docs-to-YAML sync metadata."""
-
-    option_spec = CodeBlock.option_spec | {
-        "sync-yaml": directives.unchanged_required,
-        "sync-target": directives.unchanged_required,
-        "sync-class": directives.unchanged_required,
-    }
-
-
-def setup(app):
-    app.add_directive("test", SyncMetadataCodeBlock)
-
 
 if __name__ == "__main__":
     print(json.dumps(myst_substitutions))
