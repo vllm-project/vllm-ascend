@@ -47,8 +47,10 @@ def test_qwen3_dense_eager_mode(
 
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
-        temperature=0.0,
+        temperature=0.5,
         logprobs=2,
+        prompt_logprobs=2,
+        logit_bias={0: -1.0, 1: 0.5},
         min_p=0.01,
         bad_words=["the", " the"],
     )
@@ -56,6 +58,7 @@ def test_qwen3_dense_eager_mode(
         model,
         max_model_len=1024,
         enforce_eager=enforce_eager,
+        async_scheduling=True,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
 

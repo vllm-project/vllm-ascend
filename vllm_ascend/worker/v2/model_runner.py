@@ -55,7 +55,6 @@ class NPUModelRunner(GPUModelRunner):
         del self.cudagraph_manager
         del self.req_states
         del self.input_buffers
-        del self.sampler
         del self.speculator
 
         # NPU specific initializations can be added below.
