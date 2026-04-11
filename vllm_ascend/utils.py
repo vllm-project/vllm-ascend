@@ -318,14 +318,9 @@ def enable_custom_op():
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
-    # `enable_custom_op()` is called from model forward paths. Keep the runtime
-    # bootstrap out of Dynamo tracing and fall back to the non-custom-op path if
-    # the extension has not already been initialized before compilation starts.
-    if torch.compiler.is_compiling():
-        return False
-
     try:
-        bootstrap_custom_op_env()
+        if not torch.compiler.is_compiling():
+            bootstrap_custom_op_env()
         # isort: off
         # register custom ops into torch_library here
         import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
@@ -338,7 +333,7 @@ def enable_custom_op():
     except ImportError as e:
         # Prefer the extension's rpath for vendor op_api loading. Only fall back
         # to mutating LD_LIBRARY_PATH when the import proves it is still needed.
-        if "libcust_opapi.so" in str(e):
+        if (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(e):
             try:
                 bootstrap_custom_op_env(include_vendor_lib=True)
                 import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
