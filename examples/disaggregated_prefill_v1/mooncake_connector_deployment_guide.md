@@ -74,7 +74,7 @@ Set `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the co
 `/xxxxx/DeepSeek-V2-Lite-Chat` is configured as a model that requires run.<br>
 `--host`: indicates the IP address of the node to be started.<br>
 `--port`: indicates the port to be started, which corresponds to the port in step 4.<br>
-`--seed`, --max-model-len, and --max-num-batched-tokens model basic configuration. Set this parameter based on the site requirements.<br>
+`--seed`: `--max-model-len`, and `--max-num-batched-tokens` are part of the model's basic configuration. Set this parameter based on the site requirements.<br>
 `--tensor-parallel-size`: specifies the TP size.<br>
 `--data-parallel-size`: indicates the DP size.<br>
 `--data-parallel-address`: indicates the IP address of the DP. Set this parameter to the IP address of the node.--data-parallel-rpc-port: indicates the RPC port for communication in the DP group.<br>

@@ -112,7 +112,7 @@ Single-node deployment is recommended.
 
 ### Prefill-Decode Disaggregation
 
-We don't neel to Prefill-Decode disaggregation
+We don't need to Prefill-Decode disaggregation
 
 ## Functional Verification
 

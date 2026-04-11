@@ -23,7 +23,7 @@ This approach **preserves exact computational semantics** while **significantly 
 
 ![layer shard](./images/layer_sharding.png)
 
-> **Figure.** Layer Shard Linear workflow: weights are sharded by layer across devices (top), and during forward execution (bottom), asynchronous broadcast **pre-fetches** the next layer's weight while the current layer computes—enabling **zero-overhead** weight loading.
+> **Figure.** Layer Shard Linear workflow: weights are sharded by layer across devices (top), and during forward execution (bottom), asynchronous broadcast **pre-fetches** the next layer's weight while the current layer computes-enabling **zero-overhead** weight loading.
 
 ---
 

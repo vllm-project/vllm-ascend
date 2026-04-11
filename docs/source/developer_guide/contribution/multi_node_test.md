@@ -119,7 +119,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
 
     See <https://lws.sigs.k8s.io/docs/installation/> Which can be used as a reference
 
-- Step 2. Deploy the following yaml file `lws.yaml` as what you want
+- Step 2. Deploy the following yaml file `lws.yaml` as needed
 
     ```yaml
     apiVersion: leaderworkerset.x-k8s.io/v1

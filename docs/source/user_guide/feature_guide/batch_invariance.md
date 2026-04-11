@@ -23,7 +23,7 @@ We will support other NPUs in the future.
 
 ## Software Requirements
 
-Batch invariance requires a customed operator library for 910B.
+Batch invariance requires a custom operator library for 910B.
 We will release the customed operator library in future versions.
 
 ## Enabling Batch Invariance
