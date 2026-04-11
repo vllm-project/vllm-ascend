@@ -45,7 +45,13 @@ def test_qwen3_dense_eager_mode(
         "The future of AI is",
     ]
 
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=0.0,
+        logprobs=2,
+        min_p=0.01,
+        bad_words=["the", " the"],
+    )
     with VllmRunner(
         model,
         max_model_len=1024,
