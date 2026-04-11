@@ -1,0 +1,286 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:1
+msgid "DeepSeek-OCR-2"
+msgstr "DeepSeek-OCR-2"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:5
+msgid ""
+"DeepSeekOCR2 is a model to investigate the role of vision encoders from "
+"an LLM-centric viewpoint."
+msgstr ""
+"DeepSeekOCR2 是一个从以 LLM 为中心的视角研究视觉编码器作用的模型。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:7
+msgid "The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0`."
+msgstr "`DeepSeek-OCR-2` 模型从 `vllm-ascend:v0.16.0` 版本开始首次支持。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:9
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node deployment, accuracy and performance evaluation."
+msgstr ""
+"本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点部署、精度评估和性能评估。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:11
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:13
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:15
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:17
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:19
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:21
+msgid ""
+"`DeepSeek-OCR-2`: [Download model weight](https://huggingface.co"
+"/deepseek-ai/DeepSeek-OCR-2)."
+msgstr "`DeepSeek-OCR-2`：[下载模型权重](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2)。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:23
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:25
+msgid "Verify Multi-node Communication(Optional)"
+msgstr "验证多节点通信（可选）"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:27
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../../installation.md#verify-multi-node-communication)."
+msgstr ""
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:29
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:31
+msgid "You can use our official docker image to run `DeepSeek-OCR-2` directly."
+msgstr "您可以使用官方 Docker 镜像直接运行 `DeepSeek-OCR-2`。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:33
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:71
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:73
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:75
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:77
+msgid "`DeepSeek-OCR-2` can be deployed on 1 Atlas 800 A2."
+msgstr "`DeepSeek-OCR-2` 可以部署在 1 台 Atlas 800 A2 上。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:79
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:109
+msgid "Multi-node Deployment"
+msgstr "多节点部署"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:111
+msgid "Single-node deployment is recommended."
+msgstr "建议使用单节点部署。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:113
+msgid "Prefill-Decode Disaggregation"
+msgstr "预填充-解码分离部署"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:115
+msgid "We don't neel to Prefill-Decode disaggregation"
+msgstr "我们不需要预填充-解码分离部署"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:117
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:119
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果服务启动成功，您将看到如下所示的信息："
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:127
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:140
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:142
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:144
+#: ../../source/tutorials/models/DeepSeekOCR2.md:161
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:146
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr ""
+"详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:148
+msgid ""
+"After execution, you can get the result, here is the result of `DeepSeek-"
+"OCR-2` for reference only."
+msgstr ""
+"执行后即可获得结果，以下是 `DeepSeek-OCR-2` 的结果，仅供参考。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "note"
+msgstr "备注"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "textvqa"
+msgstr "textvqa"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "50.28"
+msgstr "50.28"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "1 Atlas 800 A2"
+msgstr "1 台 Atlas 800 A2"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "ominidocbench"
+msgstr "ominidocbench"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:35
+msgid "66.86"
+msgstr "66.86"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:155
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用 Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:157
+msgid "Not test yet."
+msgstr "尚未测试。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:159
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:163
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:165
+msgid "The performance result is:"
+msgstr "性能结果如下："
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:167
+msgid "**Hardware**: A2-313T, 1 node"
+msgstr "**硬件**：A2-313T，1 节点"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:169
+msgid "**Input/Output**: 1080P/256"
+msgstr "**输入/输出**：1080P/256"
+
+#: ../../source/tutorials/models/DeepSeekOCR2.md:171
+msgid ""
+"**Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each "
+"card is 864 TPS (Token Per Second)."
+msgstr "**性能**：TTFT = 2 秒，TPOT = 200 毫秒，每卡平均性能为 864 TPS（每秒处理 Token 数）。"

@@ -1,0 +1,762 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-09 22:15+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:1
+msgid "Nightly CI Test"
+msgstr "Nightly CI 测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:3
+msgid ""
+"This document explains how to trigger nightly hardware CI tests against "
+"your own PR code on Ascend NPU hardware (A2/A3), without waiting for the "
+"scheduled nightly run."
+msgstr ""
+"本文档说明如何在 Ascend NPU 硬件（A2/A3）上针对您自己的 PR 代码触发 nightly CI 测试，而无需等待计划中的 nightly 定时运行。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:6
+msgid "Background"
+msgstr "背景"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:8
+msgid ""
+"By default, nightly CI tests run on a fixed schedule using pre-built "
+"nightly images. Contributors can self-service trigger these tests "
+"directly against their PR changes by combining a GitHub label with a "
+"comment command."
+msgstr ""
+"默认情况下，nightly CI 测试使用预构建的 nightly 镜像按固定计划运行。贡献者可以通过组合 GitHub 标签和评论命令，直接针对其 PR 变更自助触发这些测试。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:12
+msgid "How to Trigger"
+msgstr "如何触发"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:14
+msgid "1. Post a comment"
+msgstr "1. 发布评论"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:16
+msgid ""
+"First, post one of the following comments in the PR to specify which "
+"tests to run:"
+msgstr "首先，在 PR 中发布以下评论之一，以指定要运行的测试："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md
+msgid "Comment"
+msgstr "评论"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md
+msgid "Effect"
+msgstr "效果"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md
+msgid "`/nightly`"
+msgstr "`/nightly`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md
+msgid "Run **all** nightly tests"
+msgstr "运行**所有** nightly 测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md
+msgid "`/nightly all`"
+msgstr "`/nightly all`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md
+msgid "Run **all** nightly tests (same as above)"
+msgstr "运行**所有** nightly 测试（与上同）"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md
+msgid "`/nightly test1 test2 ...`"
+msgstr "`/nightly test1 test2 ...`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md
+msgid "Run only the **named** tests"
+msgstr "仅运行**指定名称**的测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:24
+msgid "2. Add the label"
+msgstr "2. 添加标签"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:26
+msgid ""
+"After posting the comment, add the **`nightly-test`** label to your PR. "
+"Adding the label is what actually **triggers** the workflow — at that "
+"point the workflow reads the existing comments to find the `/nightly` "
+"command."
+msgstr ""
+"发布评论后，为 PR 添加 **`nightly-test`** 标签。添加标签才是实际**触发**工作流的操作——此时工作流会读取现有评论以找到 `/nightly` 命令。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:31
+msgid ""
+"Only repository **Contributors** (Triage role) and **Maintainers** (Write"
+" role) can add labels. If you do not have this permission, ask a "
+"maintainer to add the label for you. You can find the list of maintainers"
+" and contributors in the project's "
+"[Governance](../../community/governance.md) page or by checking the "
+"[CODEOWNERS](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/.github/CODEOWNERS) file."
+msgstr ""
+"只有仓库的**贡献者**（Triage 角色）和**维护者**（Write 角色）可以添加标签。如果您没有此权限，请让维护者为您添加标签。您可以在项目的[治理](../../community/governance.md)页面或通过查看 [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS) 文件找到维护者和贡献者列表。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:40
+msgid ""
+"The comment must be posted **before** the label is added. If you add the "
+"label first, the workflow will find no `/nightly` comment and skip all "
+"tests."
+msgstr ""
+"评论必须在添加标签**之前**发布。如果您先添加标签，工作流将找不到 `/nightly` 评论并跳过所有测试。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:44
+msgid "3. Wait for results"
+msgstr "3. 等待结果"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:46
+msgid ""
+"GitHub Actions will trigger the `Nightly-A2` or `Nightly-A3` workflow. "
+"Only tests matching the filter will be dispatched, which saves hardware "
+"resources."
+msgstr ""
+"GitHub Actions 将触发 `Nightly-A2` 或 `Nightly-A3` 工作流。只有与筛选条件匹配的测试会被分发，从而节省硬件资源。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:49
+msgid "Differences Between PR and Scheduled Runs"
+msgstr "PR 触发与定时运行的区别"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Scheduled / Manual Dispatch"
+msgstr "定时/手动触发"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "PR-triggered"
+msgstr "PR 触发"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Trigger"
+msgstr "触发方式"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Cron (daily) or `workflow_dispatch`"
+msgstr "Cron（每日）或 `workflow_dispatch`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Label `nightly-test` + `/nightly` comment"
+msgstr "标签 `nightly-test` + `/nightly` 评论"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Code tested"
+msgstr "测试的代码"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Pre-built nightly image"
+msgstr "预构建的 nightly 镜像"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Your PR's HEAD commit (source installed fresh)"
+msgstr "您的 PR 的 HEAD 提交（从源码全新安装）"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Test scope"
+msgstr "测试范围"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "All tests"
+msgstr "所有测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Configurable via `/nightly <names>`"
+msgstr "可通过 `/nightly <名称>` 配置"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "vLLM + vllm-ascend"
+msgstr "vLLM + vllm-ascend"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "From image"
+msgstr "来自镜像"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Checked out and installed from source"
+msgstr "从源码检出并安装"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:58
+msgid "When a PR run is detected (`is_pr_test: true`), the workflow additionally:"
+msgstr "当检测到 PR 运行时（`is_pr_test: true`），工作流还会执行以下额外步骤："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:60
+msgid "Uninstalls any existing vllm packages in the container."
+msgstr "卸载容器中任何已有的 vllm 包。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:61
+msgid ""
+"Checks out the specific vllm version and your PR's vllm-ascend commit "
+"from source."
+msgstr "从源码检出特定的 vllm 版本以及您 PR 中的 vllm-ascend 提交。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:62
+msgid "Installs all dependencies from source."
+msgstr "从源码安装所有依赖。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:63
+msgid "Installs the `aisbench` benchmark suite."
+msgstr "安装 `aisbench` 基准测试套件。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:65
+msgid "Available Test Names"
+msgstr "可用的测试名称"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:67
+msgid ""
+"The test names you can pass to `/nightly` correspond to the `name` fields"
+" in the workflow matrix."
+msgstr "您可以传递给 `/nightly` 的测试名称对应于工作流矩阵中的 `name` 字段。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:70
+msgid "A2 workflow (`.github/workflows/schedule_nightly_test_a2.yaml`)"
+msgstr "A2 工作流（`.github/workflows/schedule_nightly_test_a2.yaml`）"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:72
+msgid "**Single-node tests**:"
+msgstr "**单节点测试**："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Test name"
+msgstr "测试名称"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`test_custom_op`"
+msgstr "`test_custom_op`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Custom operator tests (single card)"
+msgstr "自定义算子测试（单卡）"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`test_custom_op_multi_card`"
+msgstr "`test_custom_op_multi_card`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Custom operator tests (multi card)"
+msgstr "自定义算子测试（多卡）"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`qwen3-32b`"
+msgstr "`qwen3-32b`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Qwen3-32B model test"
+msgstr "Qwen3-32B 模型测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`qwen3-next-80b-a3b-instruct`"
+msgstr "`qwen3-next-80b-a3b-instruct`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Qwen3-Next-80B-A3B-Instruct model test"
+msgstr "Qwen3-Next-80B-A3B-Instruct 模型测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen3-32b-int8`"
+msgstr "`qwen3-32b-int8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Qwen3-32B INT8 quantization test"
+msgstr "Qwen3-32B INT8 量化测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`accuracy-group-1`"
+msgstr "`accuracy-group-1`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Accuracy tests: Qwen3-VL-8B, Qwen3-8B, Qwen2-Audio-7B, etc."
+msgstr "精度测试：Qwen3-VL-8B、Qwen3-8B、Qwen2-Audio-7B 等。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`accuracy-group-2`"
+msgstr "`accuracy-group-2`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Accuracy tests: ERNIE-4.5, InternVL3_5-8B, Molmo-7B, Llama-3.2-3B, etc."
+msgstr "精度测试：ERNIE-4.5、InternVL3_5-8B、Molmo-7B、Llama-3.2-3B 等。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`accuracy-group-3`"
+msgstr "`accuracy-group-3`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Accuracy tests: Qwen3-30B-A3B, Qwen3-VL-30B-A3B, etc."
+msgstr "精度测试：Qwen3-30B-A3B、Qwen3-VL-30B-A3B 等。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`accuracy-group-4`"
+msgstr "`accuracy-group-4`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "Accuracy tests: Qwen3-Next-80B-A3B, Qwen3-Omni-30B-A3B, etc."
+msgstr "精度测试：Qwen3-Next-80B-A3B、Qwen3-Omni-30B-A3B 等。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:86
+msgid "**Multi-node tests**:"
+msgstr "**多节点测试**："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`multi-node-deepseek-dp`"
+msgstr "`multi-node-deepseek-dp`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "DeepSeek-R1-W8A8, 2-node DP"
+msgstr "DeepSeek-R1-W8A8，2 节点 DP"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+msgid "`multi-node-qwen3-235b-dp`"
+msgstr "`multi-node-qwen3-235b-dp`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:39
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-235B-A22B, 2-node DP"
+msgstr "Qwen3-235B-A22B，2 节点 DP"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:94
+msgid ""
+"The `doc-test` job in the A2 workflow only runs on `schedule` or "
+"`workflow_dispatch` events — it will **not** run on PR-triggered runs "
+"even with `/nightly all`."
+msgstr ""
+"A2 工作流中的 `doc-test` 任务仅在 `schedule` 或 `workflow_dispatch` 事件上运行——即使在 PR 触发的运行中使用 `/nightly all`，它也**不会**运行。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:98
+msgid "A3 workflow (`.github/workflows/schedule_nightly_test_a3.yaml`)"
+msgstr "A3 工作流（`.github/workflows/schedule_nightly_test_a3.yaml`）"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:100
+msgid ""
+"**Multi-node tests** (run first, single-node tests wait for these to "
+"complete):"
+msgstr ""
+"**多节点测试**（优先运行，单节点测试等待这些完成后执行）："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-deepseek-pd`"
+msgstr "`multi-node-deepseek-pd`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-V3, 2-node PD disaggregation"
+msgstr "DeepSeek-V3，2 节点 PD 分离"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-qwen3-dp`"
+msgstr "`multi-node-qwen3-dp`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-qwenw8a8-2node`"
+msgstr "`multi-node-qwenw8a8-2node`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-235B-W8A8, 2-node"
+msgstr "Qwen3-235B-W8A8，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-qwenw8a8-2node-eplb`"
+msgstr "`multi-node-qwenw8a8-2node-eplb`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-235B-W8A8 with EPLB, 2-node"
+msgstr "Qwen3-235B-W8A8 带 EPLB，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-dpsk3.2-2node`"
+msgstr "`multi-node-dpsk3.2-2node`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-V3.2-W8A8, 2-node"
+msgstr "DeepSeek-V3.2-W8A8，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-qwen3-dp-mooncake-layerwise`"
+msgstr "`multi-node-qwen3-dp-mooncake-layerwise`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-235B-A22B with Mooncake layerwise, 2-node"
+msgstr "Qwen3-235B-A22B 带 Mooncake 分层，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-deepseek-r1-w8a8-longseq`"
+msgstr "`multi-node-deepseek-r1-w8a8-longseq`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-R1-W8A8 long sequence, 2-node"
+msgstr "DeepSeek-R1-W8A8 长序列，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-qwenw8a8-2node-longseq`"
+msgstr "`multi-node-qwenw8a8-2node-longseq`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-235B-W8A8 long sequence, 2-node"
+msgstr "Qwen3-235B-W8A8 长序列，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-deepseek-V3_2-W8A8-cp`"
+msgstr "`multi-node-deepseek-V3_2-W8A8-cp`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-V3.2-W8A8 context parallel, 2-node"
+msgstr "DeepSeek-V3.2-W8A8 上下文并行，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-qwen-disagg-pd`"
+msgstr "`multi-node-qwen-disagg-pd`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-235B disaggregated PD, 2-node"
+msgstr "Qwen3-235B 分离式 PD，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-qwen-vl-disagg-pd`"
+msgstr "`multi-node-qwen-vl-disagg-pd`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-VL-235B disaggregated PD, 2-node"
+msgstr "Qwen3-VL-235B 分离式 PD，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-kimi-k2-instruct-w8a8`"
+msgstr "`multi-node-kimi-k2-instruct-w8a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Kimi-K2-Instruct-W8A8, 2-node"
+msgstr "Kimi-K2-Instruct-W8A8，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-deepseek-v3.1`"
+msgstr "`multi-node-deepseek-v3.1`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-V3.1-BF16, 2-node"
+msgstr "DeepSeek-V3.1-BF16，2 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`multi-node-deepseek-v3.2-W8A8-EP`"
+msgstr "`multi-node-deepseek-v3.2-W8A8-EP`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-V3.2-W8A8 with EP, 4-node"
+msgstr "DeepSeek-V3.2-W8A8 带 EP，4 节点"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:119
+msgid "**Single-node tests** (run after multi-node tests complete):"
+msgstr "**单节点测试**（在多节点测试完成后运行）："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen3-30b-acc`"
+msgstr "`qwen3-30b-acc`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-30B accuracy test"
+msgstr "Qwen3-30B 精度测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`deepseek-r1-0528-w8a8`"
+msgstr "`deepseek-r1-0528-w8a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-R1-0528-W8A8"
+msgstr "DeepSeek-R1-0528-W8A8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`deepseek-r1-w8a8-hbm`"
+msgstr "`deepseek-r1-w8a8-hbm`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-R1-W8A8 HBM"
+msgstr "DeepSeek-R1-W8A8 HBM"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`deepseek-v3-2-w8a8`"
+msgstr "`deepseek-v3-2-w8a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-V3.2-W8A8"
+msgstr "DeepSeek-V3.2-W8A8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`glm-5-w4a8`"
+msgstr "`glm-5-w4a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "GLM-5-W4A8"
+msgstr "GLM-5-W4A8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`glm-4.7-w8a8`"
+msgstr "`glm-4.7-w8a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "GLM-4.7-W8A8"
+msgstr "GLM-4.7-W8A8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`kimi-k2-thinking`"
+msgstr "`kimi-k2-thinking`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Kimi-K2-Thinking"
+msgstr "Kimi-K2-Thinking"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`kimi-k2.5`"
+msgstr "`kimi-k2.5`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Kimi-K2.5"
+msgstr "Kimi-K2.5"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`minimax-m2-5`"
+msgstr "`minimax-m2-5`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "MiniMax-M2.5"
+msgstr "MiniMax-M2.5"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`mtpx-deepseek-r1-0528-w8a8`"
+msgstr "`mtpx-deepseek-r1-0528-w8a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "MTP-X + DeepSeek-R1-0528-W8A8"
+msgstr "MTP-X + DeepSeek-R1-0528-W8A8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen3-235b-a22b-w8a8`"
+msgstr "`qwen3-235b-a22b-w8a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-235B-A22B-W8A8"
+msgstr "Qwen3-235B-A22B-W8A8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen3-30b-a3b-w8a8`"
+msgstr "`qwen3-30b-a3b-w8a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-30B-A3B-W8A8"
+msgstr "Qwen3-30B-A3B-W8A8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen3-next-80b-a3b-instruct-w8a8`"
+msgstr "`qwen3-next-80b-a3b-instruct-w8a8`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-Next-80B-A3B-Instruct-W8A8"
+msgstr "Qwen3-Next-80B-A3B-Instruct-W8A8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwq-32b`"
+msgstr "`qwq-32b`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "QwQ-32B"
+msgstr "QwQ-32B"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-32B-Int8"
+msgstr "Qwen3-32B-Int8"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen2-5-vl-7b`"
+msgstr "`qwen2-5-vl-7b`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen2.5-VL-7B-Instruct"
+msgstr "Qwen2.5-VL-7B-Instruct"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen2-5-vl-7b-epd`"
+msgstr "`qwen2-5-vl-7b-epd`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen2.5-VL-7B-Instruct EPD"
+msgstr "Qwen2.5-VL-7B-Instruct EPD"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen2-5-vl-32b`"
+msgstr "`qwen2-5-vl-32b`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen2.5-VL-32B-Instruct"
+msgstr "Qwen2.5-VL-32B-Instruct"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen3-32b-int8-a3-feature-stack3`"
+msgstr "`qwen3-32b-int8-a3-feature-stack3`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-32B-Int8 feature stack3"
+msgstr "Qwen3-32B-Int8 特性栈3"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`qwen3-32b-int8-prefix-cache`"
+msgstr "`qwen3-32b-int8-prefix-cache`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Qwen3-32B-Int8 prefix cache"
+msgstr "Qwen3-32B-Int8 前缀缓存"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`deepseek-r1-0528-w8a8-prefix-cache`"
+msgstr "`deepseek-r1-0528-w8a8-prefix-cache`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "DeepSeek-R1-0528-W8A8 prefix cache"
+msgstr "DeepSeek-R1-0528-W8A8 前缀缓存"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "`custom-multi-ops`"
+msgstr "`custom-multi-ops`"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:93
+msgid "Custom multi-card operator tests"
+msgstr "自定义多卡算子测试"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:147
+msgid ""
+"The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-"
+"node tests run with `max-parallel: 2` to avoid resource exhaustion. "
+"Running `/nightly all` on A3 will queue a large number of jobs — prefer "
+"targeting specific test names when possible."
+msgstr ""
+"A3 资源池的最大并发度为 **5×16 NPU**。多节点测试以 `max-parallel: 2` 运行，以避免资源耗尽。在 A3 上运行 `/nightly all` 会使大量任务排队——请尽可能优先指定具体的测试名称。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:153
+msgid "Examples"
+msgstr "示例"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:155
+msgid "Run all available nightly tests against your PR:"
+msgstr "针对您的 PR 运行所有可用的 nightly 测试："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:161
+msgid "Run only the custom operator single-card test:"
+msgstr "仅运行自定义算子单卡测试："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:167
+msgid "Run two specific tests at once:"
+msgstr "同时运行两个指定的测试："
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:173
+msgid ""
+"Re-trigger after fixing an issue: just push a new commit. The "
+"`synchronize` event re-runs the workflow and picks up the existing "
+"`/nightly` comment automatically — no need to post a new comment."
+msgstr ""
+"修复问题后重新触发：只需推送一个新的提交。`synchronize` 事件会重新运行工作流并自动获取现有的 `/nightly` 评论——无需发布新评论。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:177
+msgid "Troubleshooting"
+msgstr "故障排查"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:179
+msgid "**The workflow didn't start after I added the label.**"
+msgstr "**添加标签后工作流未启动。**"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:181
+msgid ""
+"Make sure the `/nightly` comment was posted **before** the label was "
+"added. If the label was added first, remove it and re-add it after "
+"posting the comment."
+msgstr ""
+"确保 `/nightly` 评论是在添加标签**之前**发布的。如果先添加了标签，请移除它，然后在发布评论后重新添加。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:183
+msgid ""
+"Check that the comment starts exactly with `/nightly` with no leading "
+"spaces or extra characters before the slash."
+msgstr ""
+"检查评论是否以 `/nightly` 精确开头，斜杠前没有前导空格或多余字符。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:185
+msgid ""
+"To re-trigger after fixing an issue, simply push a new commit — the "
+"workflow will reuse the existing `/nightly` comment automatically."
+msgstr ""
+"修复问题后重新触发，只需推送一个新的提交——工作流会自动重用现有的 `/nightly` 评论。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:188
+msgid "**Only some tests ran, not the ones I expected.**"
+msgstr "**只运行了部分测试，不是预期的那些。**"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:190
+msgid ""
+"Test names are case-sensitive and must match the `name` field in the "
+"workflow matrix exactly (see the table above)."
+msgstr ""
+"测试名称区分大小写，并且必须与工作流矩阵中的 `name` 字段完全一致（参见上表）。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:192
+msgid ""
+"Check the `parse-trigger` job output in GitHub Actions for the resolved "
+"`test_filter` value."
+msgstr ""
+"在 GitHub Actions 中检查 `parse-trigger` 任务的输出，查看解析后的 `test_filter` 值。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:195
+msgid "**The workflow ran with the scheduled image, not my PR code.**"
+msgstr "**工作流使用的是定时镜像，而不是我的 PR 代码。**"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:197
+msgid ""
+"Confirm the workflow was triggered by a `pull_request` event (label or "
+"push), not `workflow_dispatch`."
+msgstr ""
+"确认工作流是由 `pull_request` 事件（标签或推送）触发的，而不是 `workflow_dispatch`。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:199
+msgid "The `parse-trigger` job logs show `is_pr_event` — check its value."
+msgstr "`parse-trigger` 任务的日志中会显示 `is_pr_event`——请检查其值。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:201
+msgid ""
+"**How to obtain more detailed logs to pinpoint problems for multi-node "
+"tests**"
+msgstr ""
+"**如何获取更详细的日志以定位多节点测试的问题**"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:203
+msgid ""
+"For most issues, the stdout pop-up logs from GitHub actions are "
+"sufficient (this log always represents the logs from the first node)."
+msgstr ""
+"对于大多数问题，GitHub Actions 的标准输出弹出日志就足够了（该日志始终代表第一个节点的日志）。"
+
+#: ../../source/developer_guide/contribution/nightly_ci_test.md:204
+msgid ""
+"If the logs from a first node are no longer sufficient to provide "
+"effective logging information, see the summary of your jobs to download "
+"log archive for the corresponding test, which includes the framework-side"
+" logs and plog information for each node, structured as follows:"
+msgstr ""
+"如果第一个节点的日志不再足以提供有效的日志信息，请查看任务摘要以下载对应测试的日志归档，其中包含框架侧日志和每个节点的 plog 信息，结构如下："

@@ -1,0 +1,235 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:1
+msgid "Disaggregated-encoder"
+msgstr "分离式编码器"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:3
+msgid "Why disaggregated-encoder?"
+msgstr "为什么需要分离式编码器？"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:5
+msgid ""
+"A **disaggregated encoder** runs the vision-encoder stage of a multimodal"
+" LLM in a process that is separate from the pre-fill / decoder stage. "
+"Deploying these two stages in independent vLLM instances brings three "
+"practical benefits:"
+msgstr ""
+**分离式编码器**将多模态大语言模型的视觉编码器阶段运行在与预填充/解码阶段分离的进程中。将这两个阶段部署在独立的 vLLM 实例中会带来三个实际好处："
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:7
+msgid "**Independent, fine-grained scaling**"
+msgstr "**独立的细粒度扩展**"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:9
+msgid ""
+"Vision encoders are lightweight, while language models are orders of "
+"magnitude larger."
+msgstr "视觉编码器是轻量级的，而语言模型要大几个数量级。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:10
+msgid ""
+"The language model can be parallelised without affecting the encoder "
+"fleet."
+msgstr "语言模型可以并行化，而不会影响编码器集群。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:11
+msgid "Encoder nodes can be added or removed independently."
+msgstr "编码器节点可以独立地添加或移除。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:13
+msgid "**Lower time-to-first-token (TTFT)**"
+msgstr "**更低的首 token 时间（TTFT）**"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:15
+msgid "Language-only requests bypass the vision encoder entirely."
+msgstr "纯文本请求完全绕过视觉编码器。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:16
+msgid ""
+"Encoder output is injected only at required attention layers, shortening "
+"the pre-fill critical path."
+msgstr "编码器输出仅在需要的注意力层注入，缩短了预填充关键路径。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:18
+msgid "**Cross-process reuse and caching of encoder outputs**"
+msgstr "**编码器输出的跨进程复用和缓存**"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:20
+msgid "In-process encoders confine reuse to a single worker."
+msgstr "进程内编码器将复用限制在单个工作进程内。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:21
+msgid ""
+"A remote, shared cache lets any worker retrieve existing embeddings, "
+"eliminating redundant computation."
+msgstr "远程共享缓存允许任何工作进程检索现有的嵌入，消除冗余计算。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:23
+msgid ""
+"Design doc: <https://docs.google.com/document/d"
+"/1aed8KtC6XkXtdoV87pWT0a8OJlZ-CpnuLLzmR8l9BAE>"
+msgstr ""
+"设计文档：<https://docs.google.com/document/d"
+"/1aed8KtC6XkXtdoV87pWT0a8OJlZ-CpnuLLzmR8l9BAE>"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:27
+msgid "Usage"
+msgstr "使用方法"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:29
+msgid ""
+"The current reference pathway is **ExampleConnector**. The ready-to-run "
+"scripts below show the workflow:"
+msgstr "当前的参考路径是 **ExampleConnector**。下面的可直接运行的脚本展示了工作流程："
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:32
+msgid ""
+"1 Encoder instance + 1 PD instance: "
+"`examples/online_serving/disaggregated_encoder/disagg_1e1pd/`"
+msgstr "1 个编码器实例 + 1 个 PD 实例：`examples/online_serving/disaggregated_encoder/disagg_1e1pd/`"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:35
+msgid ""
+"1 Encoder instance + 1 Prefill instance + 1 Decode instance: "
+"`examples/online_serving/disaggregated_encoder/disagg_1e1p1d/`"
+msgstr "1 个编码器实例 + 1 个预填充实例 + 1 个解码实例：`examples/online_serving/disaggregated_encoder/disagg_1e1p1d/`"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:40
+msgid "Development"
+msgstr "开发"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:42
+msgid "![alt text](<./images/epd_disaggregation.jpg>)"
+msgstr "![示意图](<./images/epd_disaggregation.jpg>)"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:42
+msgid "alt text"
+msgstr "示意图"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:44
+msgid "Disaggregated encoding is implemented by running two parts:"
+msgstr "分离式编码通过运行两个部分来实现："
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:46
+msgid "**Encoder instance** – a vLLM instance to perform vision encoding."
+msgstr "**编码器实例** – 执行视觉编码的 vLLM 实例。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:47
+msgid "**Prefill/Decode (PD) instance(s)** – runs language pre-fill and decode."
+msgstr "**预填充/解码（PD）实例** – 运行语言的预填充和解码。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:48
+msgid ""
+"PD can be in either a single normal instance with (E + PD) or in "
+"disaggregated instances with (E + P + D)"
+msgstr "PD 可以是单一的普通实例（E + PD），也可以是分离式实例（E + P + D）"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:50
+msgid ""
+"A connector transfers encoder-cache (EC) embeddings from the encoder "
+"instance to the PD instance.   All related code is under "
+"`vllm/distributed/ec_transfer`."
+msgstr ""
+连接器将编码器缓存（EC）嵌入从编码器实例传输到 PD 实例。所有相关代码位于 `vllm/distributed/ec_transfer` 目录下。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:53
+msgid "Key abstractions"
+msgstr "关键抽象"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:55
+msgid ""
+"**ECConnector** – interface for retrieving EC caches produced by the "
+"encoder."
+msgstr "**ECConnector** – 用于检索编码器生成的 EC 缓存的接口。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:56
+msgid "*Scheduler role* – checks cache existence and schedules loads."
+msgstr "*调度器角色* – 检查缓存是否存在并调度加载。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:57
+msgid "*Worker role* – loads the embeddings into memory."
+msgstr "*工作器角色* – 将嵌入加载到内存中。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:59
+msgid "**EPD Load Balance Proxy** -"
+msgstr "**EPD 负载均衡代理** -"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:60
+msgid ""
+"*Multi-Path Scheduling Strategy* - dynamically diverts the multimodal "
+"request or text requests to the corresponding inference path"
+msgstr "*多路径调度策略* - 动态地将多模态请求或文本请求分流到相应的推理路径"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:61
+msgid ""
+"*Instance-Level Dynamic Load Balancing* -  dispatches multimodal requests"
+" based on a least-loaded strategy, using a priority queue to balance the "
+"active token workload across instances."
+msgstr "*实例级动态负载均衡* - 基于最少负载策略分发多模态请求，使用优先级队列来平衡各实例间的活跃 token 工作负载。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:63
+msgid ""
+"We create the example setup with the **MooncakeLayerwiseConnector** from "
+"`vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_layerwise_connector.py`"
+" and refer to the "
+"`examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py`"
+" to facilitate the kv transfer between P and D. For step-by-step "
+"deployment and configuration of Mooncake, refer to the following guide:"
+"   "
+"[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)"
+msgstr ""
+我们使用 `vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_layerwise_connector.py` 中的 **MooncakeLayerwiseConnector** 创建示例设置，"
+并参考 `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py` 来促进 P 和 D 之间的 KV 传输。"
+有关 Mooncake 的分步部署和配置，请参考以下指南："
+"[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:66
+msgid ""
+"For the PD disaggregation part, when using MooncakeLayerwiseConnector: "
+"The request first enters the Decoder instance,the Decoder triggers a "
+"remote prefill task in reverse via the Metaserver. The Prefill node then "
+"executes inference and pushes KV Cache layer-wise to the Decoder, "
+"overlapping computation with transmission. Once the transfer is complete,"
+" the Decoder seamlessly continues with the subsequent token generation. "
+"`docs/source/developer_guide/Design_Documents/disaggregated_prefill.md` "
+"shows the brief idea about the disaggregated prefill."
+msgstr ""
+关于 PD 分离部分，当使用 MooncakeLayerwiseConnector 时：请求首先进入解码器实例，解码器通过元服务器反向触发远程预填充任务。"
+"然后预填充节点执行推理，并将 KV 缓存逐层推送到解码器，实现计算与传输的重叠。传输完成后，解码器无缝地继续后续的 token 生成。"
+"`docs/source/developer_guide/Design_Documents/disaggregated_prefill.md` 展示了预填充分离的简要思路。"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:69
+msgid "Limitations"
+msgstr "限制"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:71
+msgid ""
+"Disable `--mm-processor-cache-gb 0` if you want to use cross-process "
+"caching"
+msgstr "如果要使用跨进程缓存，请禁用 `--mm-processor-cache-gb 0`"
+
+#: ../../source/user_guide/feature_guide/epd_disaggregation.md:73
+msgid ""
+"For the PD disaggregation part, refer to the limitations of PD "
+"decomposition"
+msgstr "关于 PD 分离部分，请参考 PD 分解的限制说明"
