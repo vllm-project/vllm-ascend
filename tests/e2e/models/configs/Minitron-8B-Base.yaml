@@ -1,0 +1,15 @@
+model_name: "nvidia/Minitron-8B-Base"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.149
+  - name: "exact_match,flexible-extract"
+    value: 0.29
+num_samples: 1000
+max_model_len: 4096
+apply_chat_template: False
+fewshot_as_multiturn: False
+gpu_memory_utilization: 0.9
+enforce_eager: True
