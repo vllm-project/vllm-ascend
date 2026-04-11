@@ -228,8 +228,7 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     runner = os.environ.get("VLLM_CI_RUNNER", "")
 
     # Filter out None benchmark cases; results align with the non-None ones in order
-    benchmark_items = [("acc", config.acc_cmd), ("perf", config.perf_cmd)]
-    valid_items = [(k, v) for k, v in benchmark_items if v is not None]
+    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
 
     tasks = [
         _build_task_entry(key, case_cfg, result)
@@ -286,11 +285,10 @@ async def test_multi_node() -> None:
             host, port = config.benchmark_endpoint
 
             if config.is_master:
-                aisbench_cases = [c for c in [config.acc_cmd, config.perf_cmd] if c is not None]
                 results = run_aisbench_cases(
                     model=config.model,
                     port=port,
-                    aisbench_cases=aisbench_cases,
+                    aisbench_cases=config.benchmark_cases,
                     host_ip=host,
                 )
                 _save_benchmark_results_json(config, results)
