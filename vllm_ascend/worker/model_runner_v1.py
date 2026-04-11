@@ -55,6 +55,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -2937,11 +2938,8 @@ class NPUModelRunner(GPUModelRunner):
                                 dsa_k_scale_tensor_size, dtype=torch.int8, device=self.device
                             )
                     else:
-                        dtype  = torch.int8
-                        if self.is_kv_producer and enable_c8_quant:
-                            dtype = self.model_config.dtype
-                        k_tensor = torch.zeros(k_tensor_size + alignment, dtype=dtype, device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size + alignment, dtype=dtype, device=self.device)
+                        k_tensor = torch.zeros(k_tensor_size + alignment, dtype=torch.int8, device=self.device)
+                        v_tensor = torch.zeros(v_tensor_size + alignment, dtype=torch.int8, device=self.device)
                         k_tensor = self._align_memory(k_tensor, alignment)[:k_tensor_size]
                         v_tensor = self._align_memory(v_tensor, alignment)[:v_tensor_size]
                         #### for deepseek sparse attention
@@ -3400,7 +3398,16 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    kv_cache_spec[layer_name] = spec
+                    if self.is_kv_producer and enable_c8_quant(self.vllm_config):
+                        dtype = self.model_config.dtype
+                    else:
+                        dtype = spec.dtype
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=spec.block_size,
+                        num_kv_heads=spec.num_kv_heads,
+                        head_size=spec.head_size,
+                        dtype=dtype
+                    )
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):

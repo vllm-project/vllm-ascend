@@ -1556,17 +1556,16 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
                     reshape_cache_event.wait()
-                    dtype = self.k_buffer.dtype  # type: ignore
                     device = self.k_buffer.device  # type: ignore
                     # Initialize buffers
                     keys = torch.empty(
                         (send_task.group_num_tokens[layer_group_idx], *kv_layer[0].size()[-2:]),
-                        dtype=dtype,
+                        dtype=kv_layer[0].dtype,
                         device=device,
                     )
                     values = torch.empty(
                         (send_task.group_num_tokens[layer_group_idx], *kv_layer[1].size()[-2:]),
-                        dtype=dtype,
+                        dtype=kv_layer[1].dtype,
                         device=device,
                     )
 
