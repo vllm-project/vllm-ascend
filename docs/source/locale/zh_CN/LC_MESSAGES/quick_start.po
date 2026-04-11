@@ -101,7 +101,7 @@ msgstr "离线批处理推理"
 msgid ""
 "With vLLM installed, you can start generating texts for list of input "
 "prompts (i.e. offline batch inference)."
-msgstr "安装 vLLM 后，即可对输入提示词列表执行文本生成（即离线批处理推理）。"
+msgstr "安装 vLLM 后，您可以针对一组输入提示（Prompts）开始生成文本（即离线批量推理）。"
 
 #: ../../source/quick_start.md:105
 msgid ""

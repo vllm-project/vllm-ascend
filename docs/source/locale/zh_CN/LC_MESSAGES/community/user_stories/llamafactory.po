@@ -38,7 +38,6 @@ msgstr ""
 "是一个易于使用且高效的大语言模型训练与微调平台。通过 LLaMA-Factory，您可以在本地对数百个预训练模型进行微调，无需编写任何代码。"
 
 #: ../../source/community/user_stories/llamafactory.md:7
-#, fuzzy
 msgid ""
 "LLaMA-Factory users need to evaluate the model and perform inference "
 "after fine-tuning."

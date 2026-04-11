@@ -65,7 +65,6 @@ msgid "Contributor:"
 msgstr "贡献者："
 
 #: ../../source/community/governance.md:17
-#, fuzzy
 msgid ""
 "**Responsibility:** Help new contributors onboarding, handle and respond "
 "to community questions, review RFCs and code."
@@ -157,7 +156,6 @@ msgid "The Principles"
 msgstr "核心原则"
 
 #: ../../source/community/governance.md:40
-#, fuzzy
 msgid ""
 "Membership in vLLM Ascend is given to individuals on a merit basis after "
 "they demonstrate their strong expertise in vLLM/vLLM Ascend through "
