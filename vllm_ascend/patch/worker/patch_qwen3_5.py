@@ -19,8 +19,8 @@
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
-from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5ForCausalLMBase
+from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextForCausalLM
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
@@ -137,3 +137,35 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
 
 Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+
+# Patch __init__ to bypass NotImplementedError for mamba_cache_mode == "all"
+# The upstream raises NotImplementedError because GDN all-mode APC is not
+# supported natively, but vllm-ascend implements it via patched ops.
+_original_qwen3next_init = Qwen3NextForCausalLM.__init__
+_original_qwen3_5_base_init = Qwen3_5ForCausalLMBase.__init__
+
+
+def _patched_qwen3next_init(self, *, vllm_config, prefix=""):
+    cache_config = vllm_config.cache_config
+    original_mode = cache_config.mamba_cache_mode
+    if original_mode == "all":
+        cache_config.mamba_cache_mode = "align"
+    try:
+        _original_qwen3next_init(self, vllm_config=vllm_config, prefix=prefix)
+    finally:
+        cache_config.mamba_cache_mode = original_mode
+
+
+def _patched_qwen3_5_base_init(self, *, vllm_config, prefix=""):
+    cache_config = vllm_config.cache_config
+    original_mode = cache_config.mamba_cache_mode
+    if original_mode == "all":
+        cache_config.mamba_cache_mode = "align"
+    try:
+        _original_qwen3_5_base_init(self, vllm_config=vllm_config, prefix=prefix)
+    finally:
+        cache_config.mamba_cache_mode = original_mode
+
+
+Qwen3NextForCausalLM.__init__ = _patched_qwen3next_init
+Qwen3_5ForCausalLMBase.__init__ = _patched_qwen3_5_base_init

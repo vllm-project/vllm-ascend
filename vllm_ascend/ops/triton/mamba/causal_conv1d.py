@@ -69,6 +69,11 @@ def causal_conv1d_fn(
     query_start_loc: torch.Tensor | None = None,
     metadata: Any | None = None,
     pad_slot_id: int = PAD_SLOT_ID,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    block_size_to_align: int = 0,
+    num_computed_tokens: torch.Tensor | None = None,
 ):
     """
     x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
@@ -117,6 +122,13 @@ def causal_conv1d_fn(
     seqlens = seqlens.tolist()
     splits = torch.split(x, seqlens, dim=-1)
     width = weight.shape[1]
+    state_len = width - 1
+    is_apc_enabled = (
+        block_idx_first_scheduled_token is not None
+        and block_idx_last_scheduled_token is not None
+        and initial_state_idx is not None
+        and num_computed_tokens is not None
+    )
     last_width_prefill_x = extract_last_width(x, query_start_loc[num_decodes:], conv_states.shape[-1])
 
     if get_pcp_group().world_size > 1:
@@ -127,19 +139,75 @@ def causal_conv1d_fn(
 
     for i in range(len(seqlens)):
         x_s = splits[i]
-        if cache_indices[i] == PAD_SLOT_ID:
-            continue
-        out_ref_b.append(
-            causal_conv1d_ref(
+        if is_apc_enabled:
+            # APC mode: cache_indices is 2D (batch, n_blocks)
+            init_idx = int(initial_state_idx[i].item())
+            last_idx = int(block_idx_last_scheduled_token[i].item())
+            cache_idx_init = int(cache_indices[i, init_idx].item())
+            cache_idx_last = int(cache_indices[i, last_idx].item())
+            if cache_idx_init == PAD_SLOT_ID:
+                continue
+            # Read initial state from the init block
+            init_state = conv_states[cache_idx_init][..., :state_len].unsqueeze(0)
+            if has_initial_state is not None and has_initial_state[i]:
+                initial_states = init_state
+            else:
+                initial_states = None
+            # Run conv1d
+            out_s, final_s = causal_conv1d_ref(
                 x_s,
                 weight,
                 bias,
                 activation=activation,
+                initial_states=initial_states,
                 return_final_states=True,
-                final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
-                initial_states=conv_states[cache_indices[i]][..., : (width - 1)],
+                final_states_out=conv_states[cache_idx_last][..., :state_len].unsqueeze(0),
             )
-        )
+            # Save intermediate conv states at block boundaries
+            if block_size_to_align > 0:
+                first_idx = int(block_idx_first_scheduled_token[i].item())
+                n_computed = int(num_computed_tokens[i].item())
+                seq_len_i = int(seqlens[i])
+                for blk in range(first_idx, last_idx):
+                    blk_cache_idx = int(cache_indices[i, blk].item())
+                    if blk_cache_idx == PAD_SLOT_ID:
+                        continue
+                    # Compute the token offset within this sequence where this block ends
+                    blk_end_token = (blk - first_idx + 1) * block_size_to_align - (n_computed % block_size_to_align)
+                    if blk_end_token <= 0 or blk_end_token > seq_len_i:
+                        continue
+                    # Extract the last state_len tokens up to blk_end_token
+                    start = max(0, blk_end_token - state_len)
+                    # Combine initial state and x tokens
+                    if initial_states is not None:
+                        full_x = torch.cat([initial_states.squeeze(0), x_s], dim=-1)
+                        blk_start = start + state_len
+                        blk_end = blk_end_token + state_len
+                    else:
+                        full_x = x_s
+                        blk_start = start
+                        blk_end = blk_end_token
+                    state_slice = full_x[..., blk_start:blk_end]
+                    if state_slice.shape[-1] < state_len:
+                        state_slice = torch.nn.functional.pad(
+                            state_slice, (state_len - state_slice.shape[-1], 0)
+                        )
+                    conv_states[blk_cache_idx][..., :state_len] = state_slice.to(conv_states.dtype)
+            out_ref_b.append((out_s, final_s))
+        else:
+            if cache_indices[i] == PAD_SLOT_ID:
+                continue
+            out_ref_b.append(
+                causal_conv1d_ref(
+                    x_s,
+                    weight,
+                    bias,
+                    activation=activation,
+                    return_final_states=True,
+                    final_states_out=conv_states[cache_indices[i]][..., : (width - 1)].unsqueeze(0),
+                    initial_states=conv_states[cache_indices[i]][..., : (width - 1)],
+                )
+            )
 
     if get_pcp_group().world_size > 1:
         conv_states[cache_indices[num_decodes:]] = all_last_width_prefill_x[-1, ...]

@@ -33,9 +33,11 @@ from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
-from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
+from vllm_ascend.ops.triton.mamba.causal_conv1d import (
+    causal_conv1d_fn as causal_conv1d_fn_local,
+    causal_conv1d_update_npu,
+)
 from vllm_ascend.utils import enable_sp
 
 
@@ -140,6 +142,70 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
+    def _write_apc_ssm_states(
+        self,
+        ssm_state: torch.Tensor,
+        varlen_states: torch.Tensor,
+        last_recurrent_state: torch.Tensor,
+        attn_metadata,
+        non_spec_query_start_loc: torch.Tensor,
+    ):
+        """Write intermediate SSM states to block table for APC all-mode.
+
+        Follows the same pattern as Mamba2's per-block state saving.
+        varlen_states: (num_total_chunks, H, K, V) or (num_total_chunks, H, V, K)
+        """
+        state_indices_tensor = attn_metadata.state_indices_tensor
+        block_idx_last_scheduled_token = attn_metadata.block_idx_last_scheduled_token
+        block_idx_first_scheduled_token_p = getattr(
+            attn_metadata, "block_idx_first_scheduled_token_p", None
+        )
+        block_idx_last_scheduled_token_p = block_idx_last_scheduled_token[
+            attn_metadata.num_decodes:attn_metadata.num_decodes + attn_metadata.num_prefills
+        ]
+        num_computed_tokens_p = getattr(attn_metadata, "num_computed_tokens_p", None)
+        last_chunk_indices_p = getattr(attn_metadata, "last_chunk_indices_p", None)
+        block_size = getattr(attn_metadata, "block_size", 64)
+        chunk_size = getattr(attn_metadata, "chunk_size", 64)
+        chunk_stride = block_size // chunk_size
+
+        num_decodes = attn_metadata.num_decodes
+        num_prefills = attn_metadata.num_prefills
+        state_indices_tensor_p = state_indices_tensor[num_decodes:num_decodes + num_prefills]
+
+        for seq_idx in range(num_prefills):
+            block_idx_first = block_idx_first_scheduled_token_p[seq_idx]
+            block_idx_last = block_idx_last_scheduled_token_p[seq_idx]
+            n_blocks_to_fill = block_idx_last - block_idx_first
+            if n_blocks_to_fill == 0:
+                continue
+            cache_blocks_to_fill = state_indices_tensor_p[
+                seq_idx, block_idx_first:block_idx_last
+            ]
+            if seq_idx == 0:
+                first_chunk = 0
+            else:
+                first_chunk = 1 + last_chunk_indices_p[seq_idx - 1]
+            first_aligned_chunk = first_chunk + chunk_stride - 1
+            num_unaligned_computed_tokens = (
+                num_computed_tokens_p[seq_idx] % block_size
+            )
+            if num_unaligned_computed_tokens > 0:
+                first_aligned_chunk -= (
+                    num_unaligned_computed_tokens // chunk_size
+                )
+            from_where = varlen_states[
+                first_aligned_chunk:first_aligned_chunk + n_blocks_to_fill * chunk_stride:chunk_stride
+            ]
+            ssm_state[cache_blocks_to_fill] = from_where.to(ssm_state.dtype)
+
+        # For all seqs, store the last state
+        ssm_state[
+            state_indices_tensor_p.gather(
+                1, block_idx_last_scheduled_token_p.unsqueeze(1)
+            ).squeeze(1)
+        ] = varlen_states[last_chunk_indices_p].to(ssm_state.dtype)
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -173,6 +239,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
+
+        # Detect APC all-mode from injected metadata
+        state_indices_tensor = getattr(attn_metadata, "state_indices_tensor", None)
+        block_idx_last_scheduled_token = getattr(attn_metadata, "block_idx_last_scheduled_token", None)
+        block_idx_last_computed_token = getattr(attn_metadata, "block_idx_last_computed_token", None)
+        prefix_caching_enabled = state_indices_tensor is not None
 
         if not enable_sp():
             mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -210,36 +282,86 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             if mixed_qkv_non_spec is not None:
-                conv_weights_T = conv_weights.transpose(0, 1)
-                activation_num = 1 if self.activation else 0
-                (
-                    query_start_loc_opt,
-                    cache_indices_opt,
-                    initial_state_mode_opt,
-                ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
-                mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    mixed_qkv_non_spec,
-                    conv_weights_T,
-                    conv_state=self_kv_cache[0],
-                    bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=query_start_loc_opt,
-                    cache_indices_opt=cache_indices_opt,
-                    initial_state_mode_opt=initial_state_mode_opt,
-                    num_accepted_tokens_opt=[],
-                    activation_mode=activation_num,
-                    pad_slot_id=PAD_SLOT_ID,
-                    run_mode=0,
-                )
+                if prefix_caching_enabled:
+                    # APC mode: use local causal_conv1d_fn with APC params
+                    block_idx_first_scheduled_token_p = getattr(
+                        attn_metadata, "block_idx_first_scheduled_token_p", None
+                    )
+                    num_computed_tokens_p = getattr(
+                        attn_metadata, "num_computed_tokens_p", None
+                    )
+                    block_size = getattr(attn_metadata, "block_size", 0)
+                    num_decodes = attn_metadata.num_decodes
+                    num_prefills = attn_metadata.num_prefills
+                    # non_spec_state_indices_tensor is 1D for non-APC,
+                    # but for APC we need the full 2D block table for prefills
+                    apc_cache_indices = state_indices_tensor[num_decodes:num_decodes + num_prefills]
+                    apc_block_idx_last = block_idx_last_scheduled_token[num_decodes:num_decodes + num_prefills]
+                    apc_block_idx_last_computed = block_idx_last_computed_token[num_decodes:num_decodes + num_prefills]
+                    mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
+                    mixed_qkv_non_spec = causal_conv1d_fn_local(
+                        mixed_qkv_non_spec_T,
+                        conv_weights,
+                        bias=self.conv1d.bias,
+                        activation=self.activation,
+                        conv_states=conv_state,
+                        has_initial_state=has_initial_state,
+                        cache_indices=apc_cache_indices,
+                        query_start_loc=non_spec_query_start_loc,
+                        block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
+                        block_idx_last_scheduled_token=apc_block_idx_last,
+                        initial_state_idx=apc_block_idx_last_computed,
+                        block_size_to_align=block_size,
+                        num_computed_tokens=num_computed_tokens_p,
+                    ).transpose(0, 1)
+                else:
+                    conv_weights_T = conv_weights.transpose(0, 1)
+                    activation_num = 1 if self.activation else 0
+                    (
+                        query_start_loc_opt,
+                        cache_indices_opt,
+                        initial_state_mode_opt,
+                    ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
+                    mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        mixed_qkv_non_spec,
+                        conv_weights_T,
+                        conv_state=self_kv_cache[0],
+                        bias_opt=self.conv1d.bias,
+                        query_start_loc_opt=query_start_loc_opt,
+                        cache_indices_opt=cache_indices_opt,
+                        initial_state_mode_opt=initial_state_mode_opt,
+                        num_accepted_tokens_opt=[],
+                        activation_mode=activation_num,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=0,
+                    )
         elif attn_metadata.num_decodes > 0:
-            mixed_qkv_non_spec = causal_conv1d_update_npu(
-                mixed_qkv_non_spec,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
-                validate_data=True,
-            )
+            if prefix_caching_enabled:
+                num_decodes = attn_metadata.num_decodes
+                decode_state_indices = state_indices_tensor[:num_decodes]
+                decode_block_idx_last = block_idx_last_scheduled_token[:num_decodes]
+                decode_block_idx_last_computed = block_idx_last_computed_token[:num_decodes]
+                mixed_qkv_non_spec = causal_conv1d_update_npu(
+                    mixed_qkv_non_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=decode_state_indices,
+                    block_idx_last_scheduled_token=decode_block_idx_last,
+                    initial_state_idx=decode_block_idx_last_computed,
+                    validate_data=False,
+                )
+            else:
+                mixed_qkv_non_spec = causal_conv1d_update_npu(
+                    mixed_qkv_non_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
+                    validate_data=True,
+                )
         else:
             mixed_qkv_non_spec = None
 
@@ -291,9 +413,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             # 2.2: Process the remaining part
             if attn_metadata.num_prefills > 0:
-                initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
-                clear_ssm_states(initial_state, has_initial_state)
-                (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
+                if prefix_caching_enabled:
+                    # APC: read initial state from the last computed block
+                    num_decodes_l = attn_metadata.num_decodes
+                    num_prefills_l = attn_metadata.num_prefills
+                    state_indices_tensor_p = state_indices_tensor[num_decodes_l:num_decodes_l + num_prefills_l]
+                    block_idx_last_computed_token_p = block_idx_last_computed_token[num_decodes_l:num_decodes_l + num_prefills_l]
+                    apc_init_indices = state_indices_tensor_p.gather(
+                        1, block_idx_last_computed_token_p.unsqueeze(1)
+                    ).squeeze(1)
+                    initial_state = ssm_state[apc_init_indices].transpose(-1, -2).contiguous()
+                else:
+                    initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
+                initial_state[~has_initial_state, ...] = 0
+                non_spec_chunked_prefill_meta = get_non_spec_chunked_prefill_meta(attn_metadata)
+                is_mamba_cache_all = prefix_caching_enabled
+                (core_attn_out_non_spec, last_recurrent_state, intermediate_states) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
@@ -302,18 +437,45 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     output_final_state=True,
                     cu_seqlens=non_spec_query_start_loc,
-                    prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
+                    prebuilt_meta=non_spec_chunked_prefill_meta,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
+                    return_intermediate_states=is_mamba_cache_all,
+                    state_dtype=ssm_state.dtype if is_mamba_cache_all else None,
                 )
-                ssm_state[non_spec_state_indices_tensor] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-                )
+                if is_mamba_cache_all and intermediate_states is not None:
+                    # intermediate_states: (num_total_chunks, H, V, K) for interleaved layout
+                    # Need to transpose to (num_total_chunks, H, K, V) to match ssm_state layout
+                    varlen_states = intermediate_states.transpose(-1, -2).contiguous()
+                    self._write_apc_ssm_states(
+                        ssm_state, varlen_states, last_recurrent_state.transpose(-1, -2).contiguous(),
+                        attn_metadata, non_spec_query_start_loc,
+                    )
+                else:
+                    ssm_state[non_spec_state_indices_tensor] = (
+                        last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                    )
             elif attn_metadata.num_decodes > 0:
                 cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
                 actual_seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
                 query_non_spec = l2norm_fwd(query_non_spec)
                 key_non_spec = l2norm_fwd(key_non_spec)
+                if prefix_caching_enabled:
+                    num_decodes_l = attn_metadata.num_decodes
+                    state_indices_tensor_d = state_indices_tensor[:num_decodes_l]
+                    decode_input_indices = state_indices_tensor_d.gather(
+                        1, block_idx_last_computed_token[:num_decodes_l].unsqueeze(1)
+                    ).squeeze(1)
+                    decode_output_indices = state_indices_tensor_d.gather(
+                        1, block_idx_last_scheduled_token[:num_decodes_l].unsqueeze(1)
+                    ).squeeze(1)
+                    # Copy state from input block to output block at boundaries
+                    boundary_mask = decode_input_indices != decode_output_indices
+                    if boundary_mask.any():
+                        ssm_state[decode_output_indices[boundary_mask]] = ssm_state[decode_input_indices[boundary_mask]]
+                    decode_ssm_indices = decode_output_indices
+                else:
+                    decode_ssm_indices = non_spec_state_indices_tensor
                 core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
                     query=query_non_spec.squeeze(0),
                     key=key_non_spec.squeeze(0),
@@ -323,7 +485,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     state=ssm_state,
                     scale=key_non_spec.shape[-1] ** -0.5,
                     actual_seq_lengths=actual_seq_lengths,
-                    ssm_state_indices=non_spec_state_indices_tensor,
+                    ssm_state_indices=decode_ssm_indices,
                 ).unsqueeze(0)
             else:
                 core_attn_out_non_spec, last_recurrent_state = None, None
@@ -369,9 +531,21 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
                 # 2.2: Process the remaining part
                 if attn_metadata.num_prefills > 0:
-                    initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-                    clear_ssm_states(initial_state, has_initial_state)
-                    (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
+                    if prefix_caching_enabled:
+                        num_decodes_l = attn_metadata.num_decodes
+                        num_prefills_l = attn_metadata.num_prefills
+                        state_indices_tensor_p = state_indices_tensor[num_decodes_l:num_decodes_l + num_prefills_l]
+                        block_idx_last_computed_token_p = block_idx_last_computed_token[num_decodes_l:num_decodes_l + num_prefills_l]
+                        apc_init_indices = state_indices_tensor_p.gather(
+                            1, block_idx_last_computed_token_p.unsqueeze(1)
+                        ).squeeze(1)
+                        initial_state = ssm_state[apc_init_indices].contiguous()
+                    else:
+                        initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
+                    initial_state[~has_initial_state, ...] = 0
+                    non_spec_chunked_prefill_meta = get_non_spec_chunked_prefill_meta(attn_metadata)
+                    is_mamba_cache_all = prefix_caching_enabled
+                    (core_attn_out_non_spec, last_recurrent_state, intermediate_states) = chunk_gated_delta_rule(
                         q=query_non_spec,
                         k=key_non_spec,
                         v=value_non_spec,
@@ -380,12 +554,36 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         initial_state=initial_state,
                         output_final_state=True,
                         cu_seqlens=non_spec_query_start_loc,
-                        prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
+                        prebuilt_meta=non_spec_chunked_prefill_meta,
                         head_first=False,
                         use_qk_l2norm_in_kernel=True,
+                        return_intermediate_states=is_mamba_cache_all,
+                        state_dtype=ssm_state.dtype if is_mamba_cache_all else None,
                     )
-                    ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
+                    if is_mamba_cache_all and intermediate_states is not None:
+                        # intermediate_states: (num_total_chunks, H, K, V) — no transpose needed
+                        self._write_apc_ssm_states(
+                            ssm_state, intermediate_states, last_recurrent_state,
+                            attn_metadata, non_spec_query_start_loc,
+                        )
+                    else:
+                        ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
                 elif attn_metadata.num_decodes > 0:
+                    if prefix_caching_enabled:
+                        num_decodes_l = attn_metadata.num_decodes
+                        state_indices_tensor_d = state_indices_tensor[:num_decodes_l]
+                        decode_input_indices = state_indices_tensor_d.gather(
+                            1, block_idx_last_computed_token[:num_decodes_l].unsqueeze(1)
+                        ).squeeze(1)
+                        decode_output_indices = state_indices_tensor_d.gather(
+                            1, block_idx_last_scheduled_token[:num_decodes_l].unsqueeze(1)
+                        ).squeeze(1)
+                        boundary_mask = decode_input_indices != decode_output_indices
+                        if boundary_mask.any():
+                            ssm_state[decode_output_indices[boundary_mask]] = ssm_state[decode_input_indices[boundary_mask]]
+                        decode_ssm_indices = decode_output_indices
+                    else:
+                        decode_ssm_indices = non_spec_state_indices_tensor
                     core_attn_out_non_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
                         q=query_non_spec,
                         k=key_non_spec,
@@ -395,13 +593,28 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         initial_state=ssm_state,
                         inplace_final_state=True,
                         cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
-                        ssm_state_indices=non_spec_state_indices_tensor,
+                        ssm_state_indices=decode_ssm_indices,
                         use_qk_l2norm_in_kernel=True,
                     )
                 else:
                     core_attn_out_non_spec, last_recurrent_state = None, None
             elif attn_metadata.num_decodes > 0:
                 core_attn_out_spec = None
+                if prefix_caching_enabled:
+                    num_decodes_l = attn_metadata.num_decodes
+                    state_indices_tensor_d = state_indices_tensor[:num_decodes_l]
+                    decode_input_indices = state_indices_tensor_d.gather(
+                        1, block_idx_last_computed_token[:num_decodes_l].unsqueeze(1)
+                    ).squeeze(1)
+                    decode_output_indices = state_indices_tensor_d.gather(
+                        1, block_idx_last_scheduled_token[:num_decodes_l].unsqueeze(1)
+                    ).squeeze(1)
+                    boundary_mask = decode_input_indices != decode_output_indices
+                    if boundary_mask.any():
+                        ssm_state[decode_output_indices[boundary_mask]] = ssm_state[decode_input_indices[boundary_mask]]
+                    decode_ssm_indices = decode_output_indices
+                else:
+                    decode_ssm_indices = non_spec_state_indices_tensor
                 core_attn_out_non_spec = fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log.contiguous(),
                     dt_bias=self.dt_bias.contiguous(),
@@ -411,7 +624,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     a=a.contiguous(),
                     b=b.contiguous(),
                     initial_state_source=ssm_state,
-                    initial_state_indices=non_spec_state_indices_tensor,
+                    initial_state_indices=decode_ssm_indices,
                     cu_seqlens=non_spec_query_start_loc,
                     use_qk_l2norm_in_kernel=True,
                     softplus_beta=1.0,
