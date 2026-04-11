@@ -26,6 +26,7 @@ from typing import Any
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
 from vllm.logger import logger
+from vllm_ascend.utils import bootstrap_custom_op_env
 
 
 def find_loaded_library(lib_name) -> str | None:
@@ -55,6 +56,7 @@ def find_loaded_library(lib_name) -> str | None:
 
 camem_available = False
 try:
+    bootstrap_custom_op_env()
     from vllm_ascend.vllm_ascend_C import (  # type: ignore # noqa: F401
         init_module,
         python_create_and_map,
