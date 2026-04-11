@@ -688,6 +688,13 @@ std::tuple<at::Tensor, at::Tensor, uint32_t> mla_preprocess_tiling(
     uint32_t kvLoraRank = wuk.sizes()[2];
     uint32_t qLoraRank = gamma1.sizes()[0];
     uint32_t qkRopeHeadDim = kv_cache_rope.sizes().back();
+    if (cacheMode == 2 || cacheMode == 3) {
+        TORCH_CHECK(
+            kv_cache_rope.dim() >= 3,
+            "kv_cache_rope must have at least 3 dims for nz cache modes, but got ",
+            kv_cache_rope.dim());
+        qkRopeHeadDim = kv_cache_rope.sizes()[kv_cache_rope.dim() - 3] * kv_cache_rope.sizes().back();
+    }
 
     OpParam opParam;
     opParam.hiddenStateDim = hiddenStateDim;
