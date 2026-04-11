@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 from vllm.utils.math_utils import cdiv
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 
 def get_kvcomp_config_path_for_model(vllm_config) -> str:
     model = vllm_config.model_config.model.lower()
@@ -525,7 +525,7 @@ class HashEncoder:
         # [N * hash_bits]
         xW_flat = xW.view(-1)
         # [N*hash_numbers], where hash_numbers = hash_bits // 8
-        packed_codes_flat = torch_npu.npu_sign_bits_pack(xW_flat, size=1)
+        packed_codes_flat = torch.ops._C_ascend.npu_sign_bits_pack(xW_flat, size=1)
 
         # e.g., [s1, s2, s3, hash_numbers]
         out_shape = orig_shape + (self.hash_numbers,)
@@ -582,6 +582,7 @@ class KVCompMetaData:
     topk_for_hamming_full_cpu: torch.Tensor 
     seq_lens_for_hamming: torch.Tensor 
     hamming_output: torch.Tensor 
+    seq_lens_from_hamming: torch.Tensor 
 
     # for GQA
     hash_encoder: Optional[HashEncoder] = None
@@ -592,6 +593,8 @@ class KVCompMetaData:
     hash_encoder_rope: Optional[HashEncoder] = None
     hashk_cache_nope: Optional[list[torch.Tensor]] = None
     hashk_cache_rope: Optional[list[torch.Tensor]] = None
+    seq_lens_for_reshape: Optional[list[torch.Tensor]] = None
+    valid_query_mask: Optional[list[torch.Tensor]] = None
 
 def build_kvcomp_metadata(
     max_num_reqs: int,
@@ -615,7 +618,7 @@ def build_kvcomp_metadata(
     - KVCompMetaData: 构建完成的KVComp元数据对象
     """
     # 打印KVComp启用状态
-    print(f"KVComp is enabled")
+    # print(f"KVComp is enabled")
 
     # 自动检测KVComp配置文件
     kvcomp_config_path = get_kvcomp_config_path_for_model(vllm_config)
@@ -650,6 +653,17 @@ def build_kvcomp_metadata(
     )
     hamming_output = torch.zeros([max_num_reqs, vllm_config.model_config.get_num_kv_heads(parallel_config), 
         cdiv(vllm_config.model_config.max_model_len, block_size)] , dtype=torch.int32, device=device)
+    seq_lens_for_reshape = torch.zeros(
+        [max_num_reqs], 
+        dtype=torch.int32, 
+        device=device
+    )
+    valid_query_mask = torch.empty((max_num_reqs,), dtype=torch.bool, device=device)
+    seq_lens_from_hamming = torch.zeros(
+        [max_num_reqs], 
+        dtype=torch.int32, 
+        device='cpu'
+    )
 
 
     # 根据MLA配置初始化HashEncoder（替换self.xxx为入参）
@@ -697,6 +711,9 @@ def build_kvcomp_metadata(
         hash_encoder_rope=hash_encoder_rope,
         hashk_cache_nope=hashk_cache_nope,
         hashk_cache_rope=hashk_cache_rope,
+        seq_lens_for_reshape=seq_lens_for_reshape,
+        valid_query_mask=valid_query_mask,
+        seq_lens_from_hamming=seq_lens_from_hamming,
     )
 
     return kvcomp_meta_data
