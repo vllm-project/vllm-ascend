@@ -67,6 +67,7 @@ a2:
           - Qwen3-ASR-1.7B
           - InternVL3_5-8B-hf
           - llava-onevision-qwen2-0.5b-ov-hf
+          - Pixtral-12B-2409
       - name: pr-accuracy-group-2
         os: linux-aarch64-a2b3-4
         model_list:
