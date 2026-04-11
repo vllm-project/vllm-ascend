@@ -291,7 +291,7 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self.gate,
+            self._gate,
             self._shared_experts,
             self.quant_method,
             self.reduce_results,
