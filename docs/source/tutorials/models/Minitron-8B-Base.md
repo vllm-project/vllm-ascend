@@ -75,10 +75,13 @@ Start the online serving service with the following command:
 :sync-target: test_cases[0].model test_cases[0].server_cmd
 :sync-class: cmd
 
-vllm serve /data/vllm-workspace/models/Minitron-8B-Base \
+vllm serve "nvidia/Minitron-8B-Base" \
   --served-model-name minitron-8b-base \
+  --tensor-parallel-size 1 \
   --max-model-len 4096 \
-  --gpu-memory-utilization 0.90
+  --gpu-memory-utilization 0.9 \
+  --enforce-eager \
+  --port 8000
 ```
 
 ## Functional Verification
