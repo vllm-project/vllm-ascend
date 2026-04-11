@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # -----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2025 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -10,14 +9,15 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import argparse
 import os
 import sys
-import re
-import argparse
+
+import regex as re
 
 
 def match_op_proto(file_path):
-    with open(file_path, 'r', encoding='utf-8') as f:
+    with open(file_path, encoding="utf-8") as f:
         content = f.read()
 
     op_def_pattern = re.compile(r"REG_OP\((.+)\).*OP_END_FACTORY_REG\(\1\)", re.DOTALL)
@@ -29,7 +29,7 @@ def match_op_proto(file_path):
         return op_name, op_def
     else:
         return None, None
-    
+
 
 def merge_op_proto(protos_path, output_file):
     op_defs = []
@@ -50,13 +50,13 @@ def merge_op_proto(protos_path, output_file):
 
 namespace ge{{
 
-{os.linesep.join([f'{op_def}{os.linesep}' for op_def in op_defs])}
+{os.linesep.join([f"{op_def}{os.linesep}" for op_def in op_defs])}
 }}  // namespace ge
 
 #endif // OP_TRANSFORMER_PROTO_H_
 """
 
-    with open(output_file, 'w', encoding='utf-8') as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write(merged_content)
 
     print(f"merged op transformer proto file: {output_file}")
@@ -64,14 +64,14 @@ namespace ge{{
 
 def parse_args(argv):
     parser = argparse.ArgumentParser()
-    parser.add_argument("protos", nargs='+')
+    parser.add_argument("protos", nargs="+")
     parser.add_argument("--output-file", nargs=1, default=None)
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args(sys.argv)
-    
+
     protos_path = args.protos[1:]
     output_file = args.output_file[0]
     merge_op_proto(protos_path, output_file)

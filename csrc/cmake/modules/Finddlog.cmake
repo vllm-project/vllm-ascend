@@ -47,7 +47,7 @@ unset(_cmake_expected_targets)
 set(DLOG_HEAD_SEARCH_PATHS
   ${ASCEND_DIR}/${SYSTEM_PREFIX}/include/toolchain
   ${ASCEND_DIR}/pkg_inc/base         # new slog directory structure
-  ${TOP_DIR}/abl/slog/inc/toolchain  # compile with ci
+  ${TOP_DIR}/abl/slog/inc/toolchain  # compile with CI  # codespell:ignore abl
 )
 
 find_path(dlog_TRANSFORMER_INCLUDE_DIR

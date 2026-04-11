@@ -54,7 +54,7 @@ struct Conv3dBpFilterV2RunInfo {
     int32_t ci;             // input channels
     int32_t cout1_g;        // output channels per group
     int32_t cin1_g;         // input channels per group
-    int32_t dout;           // output depth
+    int32_t dout;           // output depth  // codespell:ignore dout
     int32_t wo;             // output width
     int32_t ho;             // output height
     int32_t wi;             // input width
@@ -78,7 +78,7 @@ struct Conv3dBpFilterV2RunInfo {
     int32_t dilation_d;
     int32_t ci1;            // another input channels parameter
     uint64_t bl1_bound;     // buffer limit 1 bound, tiling结果的衍生参数，不建议放在这里
-    int32_t batch_dout_single_core;  // batch*dout per core, tiling结果的衍生参数，不建议放在这里
+    int32_t batch_dout_single_core;  // batch*dout per core, tiling结果的衍生参数，不建议放在这里  // codespell:ignore dout
 
     // Tiling parameters
     uint32_t k0;

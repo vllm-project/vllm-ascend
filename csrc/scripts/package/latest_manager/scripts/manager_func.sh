@@ -303,7 +303,7 @@ package_uninstalled() {
         # 多版本卸载时检查版本兼容性
         if ! recreate_compatiable_softlink_in_multi_version_uninstall "$install_path" "$LATEST_DIR" "$package" \
             "$USERNAME" "$USERGROUP" "$docker_root"; then
-            comm_log "ERROR" "Recreate ${package} compatiable softlink in package uninstalled failed!"
+            comm_log "ERROR" "Recreate ${package} compatible softlink in package uninstalled failed!"
             return 1
         fi
     fi

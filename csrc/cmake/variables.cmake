@@ -172,7 +172,7 @@ set(OP_TILING_INCLUDE
 
 if (NOT BUILD_OPEN_PROJECT)
   list(APPEND OP_TILING_INCLUDE
-    ${TOP_DIR}/abl/msprof/inc
+    ${TOP_DIR}/abl/msprof/inc  # codespell:ignore abl
     ${METADEF_INC_DIR}/../common/util
     ${TOP_DIR}/asl/ops/cann/ops/utils/inc
     ${TOP_DIR}/ace/comop/inc
@@ -224,7 +224,7 @@ set(OP_PROTO_INCLUDE
 
 if (NOT BUILD_OPEN_PROJECT)
   list(APPEND OP_PROTO_INCLUDE
-    ${TOP_DIR}/abl/msprof/inc
+    ${TOP_DIR}/abl/msprof/inc  # codespell:ignore abl
     ${METADEF_INC_DIR}/../common/util
     ${TOP_DIR}/ace/comop/inc
     ${TOP_DIR}/ace/comop/hccl/open_source/inc

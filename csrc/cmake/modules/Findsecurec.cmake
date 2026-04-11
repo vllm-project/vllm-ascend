@@ -15,7 +15,7 @@ endif()
 
 set(C_SEC_HEAD_SEARCH_PATHS
   ${ASCEND_DIR}/${SYSTEM_PREFIX}/include
-  ${TOP_DIR}/abl/libc_sec/include             # compile with ci
+  ${TOP_DIR}/abl/libc_sec/include             # compile with CI  # codespell:ignore abl
 )
 
 set(C_SEC_LIB_SEARCH_PATHS ${ASCEND_DIR}/${SYSTEM_PREFIX})

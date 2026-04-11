@@ -53,7 +53,7 @@ ARCH_INFO=$(grep -e "arch" "$RUN_PKG_INFO_FILE" | cut --only-delimited -d"=" -f2
 GRAPH_SO_PATH="${CURR_PATH}/../../../../${OPP_PLATFORM_DIR}/built-in/op_graph/lib/linux/${ARCH_INFO}/libopgraph_transformer.so"
 HOST_SO_PATH="${CURR_PATH}/../../../../${OPP_PLATFORM_DIR}/built-in/op_impl/ai_core/tbe/op_host/lib/linux/${ARCH_INFO}/libophost_transformer.so"
 
-# defaluts info determinated by user's inputs
+# defaults info determined by user's inputs
 ASCEND_INSTALL_INFO="ascend_install.info"
 TARGET_INSTALL_PATH="${DEFAULT_INSTALL_PATH}" #--input-path
 TARGET_USERNAME="${CURR_OPERATE_USER}"
@@ -259,7 +259,7 @@ check_install_path() {
   if [ x"${temp_path}" = "x" ]; then
     temp_path="/"
   fi
-  # covert relative path to absolute path
+  # convert relative path to absolute path
   local prefix=$(echo "${temp_path}" | cut -d"/" -f1 | cut -d"~" -f1)
   if [ "x${prefix}" = "x" ]; then
     TARGET_INSTALL_PATH="${temp_path}"
@@ -273,7 +273,7 @@ check_install_path() {
       exit 1
     fi
   fi
-  # covert '~' to home path
+  # convert '~' to home path
   local home=$(echo "${TARGET_INSTALL_PATH}" | cut -d"~" -f1)
   if [ "x${home}" = "x" ]; then
     local temp_path_value=$(echo "${TARGET_INSTALL_PATH}" | cut -d"~" -f2)
@@ -363,7 +363,7 @@ get_opts() {
         ;;
       -*)
         echo "[OpsTransformer] [ERROR]: ERR_NO:${PARAM_INVALID};ERR_DES:Unsupported parameters [$1],\
- operation execute failed. Please use [--help] to see the useage."
+ operation execute failed. Please use [--help] to see the usage."
         exitlog
         exit 1
         ;;

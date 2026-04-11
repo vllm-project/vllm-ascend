@@ -104,9 +104,9 @@ else ()
     ${TOP_DIR}/ops-base/pkg_inc/aicpu_common/context/cpu_proto
     ${TOP_DIR}/metadef/inc/external
     ${TOP_DIR}/metadef/inc
-    ${TOP_DIR}/abl/slog/inc/toolchain
+    ${TOP_DIR}/abl/slog/inc/toolchain  # codespell:ignore abl
     ${TOP_DIR}/metadef/inc/external/base
-    ${TOP_DIR}/abl/slog/inc
+    ${TOP_DIR}/abl/slog/inc  # codespell:ignore abl
   )
 endif ()
 

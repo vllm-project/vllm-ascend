@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # -----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2025 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -12,22 +11,24 @@
 """
 build_opp_kernel_static.py
 """
+
+import argparse
 import concurrent.futures
+import contextlib
 import glob
+import json
+import logging as log
 import multiprocessing
-import sys
 import os
-import re
 import platform
 import stat
-import json
-import argparse
 import subprocess
-import logging as log
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+
+import regex as re
 
 
 class Const:
@@ -50,14 +51,14 @@ def shell_checkout_key_func(symbol_file, key_str):
     process.wait()
     cppfilt = subprocess.check_output(("c++filt",), input=awk_out)
     if key_str not in cppfilt.decode("utf-8"):
-        return "".encode("utf-8")
+        return b""
     grep_out = subprocess.check_output(("grep", key_str), input=cppfilt)
     return grep_out.decode("utf-8")
 
 
 def to_upper_camel_case(x) -> str:
     """转大驼峰法命名"""
-    s = re.sub('_([a-zA-Z])', lambda m: (m.group(1).upper()), x.lower())
+    s = re.sub("_([a-zA-Z])", lambda m: (m.group(1).upper()), x.lower())
     return s[0].upper() + s[1:]
 
 
@@ -73,16 +74,24 @@ def generate_symbol(args):
 
 
 def parser_generate_symbol(subparsers):
-    generate_symbol_parser = subparsers.add_parser(name='GenerateSymbol', help='Generate Symbol file of input library')
-    generate_symbol_parser.add_argument('-l', '--library_file', type=str, required=False, dest="library_file",
-                                        default="", help="Input the library file")
-    generate_symbol_parser.add_argument('-s', '--symbol_file', type=str, required=False, dest="symbol_file", default="",
-                                        help="The symbol file for output")
+    generate_symbol_parser = subparsers.add_parser(name="GenerateSymbol", help="Generate Symbol file of input library")
+    generate_symbol_parser.add_argument(
+        "-l", "--library_file", type=str, required=False, dest="library_file", default="", help="Input the library file"
+    )
+    generate_symbol_parser.add_argument(
+        "-s",
+        "--symbol_file",
+        type=str,
+        required=False,
+        dest="symbol_file",
+        default="",
+        help="The symbol file for output",
+    )
     generate_symbol_parser.set_defaults(func=generate_symbol)
 
 
 class CompileOpStaticLib:
-    def __init__(self, ops_compile_files: Dict, out_path: str, dist_index: int, arch: str):
+    def __init__(self, ops_compile_files: dict, out_path: str, dist_index: int, arch: str):
         self.ops_compile_files = ops_compile_files
         self.out_path = out_path
         self.part_index = dist_index
@@ -90,39 +99,60 @@ class CompileOpStaticLib:
         if self.cpu_arch not in [Const.x86, Const.arm]:
             raise Exception(f"CompileOpStaticLib Error, input arch<{arch}> error...")
 
-
     def compile_link_single(self, file_path, file_o):
         (dir_path, file_name) = os.path.split(file_path)
         if self.cpu_arch == Const.x86:
-            shell_exec(["bash", "-c", f"cd {dir_path} && "
-                                      f"objcopy --input-target binary --output-target elf64-x86-64 "
-                                      f"--binary-architecture i386 "
-                                      f"{file_name} {file_o}"], shell=False)
+            shell_exec(
+                [
+                    "bash",
+                    "-c",
+                    f"cd {dir_path} && "
+                    f"objcopy --input-target binary --output-target elf64-x86-64 "
+                    f"--binary-architecture i386 "
+                    f"{file_name} {file_o}",
+                ],
+                shell=False,
+            )
         elif self.cpu_arch == Const.arm and platform.machine() != Const.x86:
-            shell_exec(["bash", "-c", f"cd {dir_path} && "
-                                      f"objcopy --input-target binary "
-                                      f"--output-target elf64-littleaarch64 --binary-architecture aarch64 "
-                                      f"{file_name} {file_o}"], shell=False)
+            shell_exec(
+                [
+                    "bash",
+                    "-c",
+                    f"cd {dir_path} && "
+                    f"objcopy --input-target binary "
+                    f"--output-target elf64-littleaarch64 --binary-architecture aarch64 "
+                    f"{file_name} {file_o}",
+                ],
+                shell=False,
+            )
         elif self.cpu_arch == Const.arm:
-            shell_exec(["bash", "-c", f"cd {dir_path} && "
-                                      f"aarch64-linux-gnu-objcopy --input-target binary "
-                                      f"--output-target elf64-littleaarch64 --binary-architecture aarch64 "
-                                      f"{file_name} {file_o}"], shell=False)
-
+            shell_exec(
+                [
+                    "bash",
+                    "-c",
+                    f"cd {dir_path} && "
+                    f"aarch64-linux-gnu-objcopy --input-target binary "
+                    f"--output-target elf64-littleaarch64 --binary-architecture aarch64 "
+                    f"{file_name} {file_o}",
+                ],
+                shell=False,
+            )
 
     def compile_link_o(self, out_path, file_path, is_need_path=True):
-        file_pre = os.path.basename(file_path).replace('.', '_').replace('-', '_')
+        file_pre = os.path.basename(file_path).replace(".", "_").replace("-", "_")
         path_o_prefix = os.path.join(out_path, f"data_{file_pre}_{self.cpu_arch}.o")
         # 向json文件中写入"filePath"参数
         if is_need_path and file_path.name.endswith(".json"):
-            with open(file_path, 'r', encoding='UTF-8') as json_fd:
+            with open(file_path, encoding="UTF-8") as json_fd:
                 json_dict = json.load(json_fd)
                 soc = str(file_path).split("/binary/")[-1].split("/bin/")[0]
                 json_dict["filePath"] = os.path.join(soc, str(file_path).split("/bin/")[-1].split("/kernel/")[-1])
                 if "opp/built-in/" in str(file_path):
-                    json_dict["filePath"] = str(file_path).split("/bin/")[-1].split("/kernel/")[-1].replace("/ops_transformer", "")
+                    json_dict["filePath"] = (
+                        str(file_path).split("/bin/")[-1].split("/kernel/")[-1].replace("/ops_transformer", "")
+                    )
                 file_path = os.path.join(out_path, os.path.basename(file_path))
-                with open(file_path, 'w', encoding='UTF-8') as new_json_fd:
+                with open(file_path, "w", encoding="UTF-8") as new_json_fd:
                     new_json_fd.write(json.dumps(json_dict, indent=4))
         file_path = os.path.realpath(file_path)
         self.compile_link_single(file_path, path_o_prefix)
@@ -137,11 +167,11 @@ class CompileOpStaticLib:
         file_part_o = f"{ops_name}_{self.cpu_arch}_part{self.part_index}.o"  # eg: floor_mod_aarch64_1.a
         path_part_o = os.path.join(dir_path, file_part_o)
         if self.cpu_arch == Const.x86 or (self.cpu_arch == Const.arm and platform.machine() != Const.x86):
-            shell_exec(["bash", "-c", f"cd {out_path} && "
-                                      f"ld -r {path_data_o} -o {path_part_o}"], shell=False)
+            shell_exec(["bash", "-c", f"cd {out_path} && ld -r {path_data_o} -o {path_part_o}"], shell=False)
         if self.cpu_arch == Const.arm and platform.machine() == Const.x86:
-            shell_exec(["bash", "-c", f"cd {out_path} && "
-                                      f"aarch64-linux-gnu-ld -r {path_data_o} -o {path_part_o}"], shell=False)
+            shell_exec(
+                ["bash", "-c", f"cd {out_path} && aarch64-linux-gnu-ld -r {path_data_o} -o {path_part_o}"], shell=False
+            )
         return
 
     def exec_compile(self):
@@ -149,6 +179,7 @@ class CompileOpStaticLib:
         编译算子静态库
         :return:
         """
+
         def get_parallel_num() -> int:
             """
             获取多线程最大并发数量
@@ -188,32 +219,45 @@ def compile_static_library(args):
 
     ops_compile_files = GenOpResourceIni(args.soc_version, args.build_dir, args.jit).analyze_ops_files()
 
-    csl = CompileOpStaticLib(ops_compile_files,
-                            os.path.join(args.build_dir, f"bin_tmp/{args.soc_version}"), index_num, cpu_aarch)
+    csl = CompileOpStaticLib(
+        ops_compile_files, os.path.join(args.build_dir, f"bin_tmp/{args.soc_version}"), index_num, cpu_aarch
+    )
     ret = csl.exec_compile()
     return ret
 
 
 def parser_compile_static_library(subparsers):
-    """ 配置静态编译参数及执行信息 """
-    compile_lib_parser = subparsers.add_parser(name='StaticCompile',
-                                    help='Compile static libraries(.a) on distributed server')
-    compile_lib_parser.add_argument('-s', '--soc_version', type=str, required=True, dest="soc_version",
-                                    help="Operator Name, eg: ascend910b, ascend310p")
-    compile_lib_parser.add_argument('-b', '--build_dir', type=str, required=True, dest="build_dir",
-                                    help="Input build dir for this project")
-    compile_lib_parser.add_argument('-j', '--jit', action='store_true', dest="jit",
-                                    help="Compile static libraries(.a) with cann package")
-    compile_lib_parser.add_argument('-n', '--index_num', type=int, required=True, dest="index_num",
-                                    help="Please input distributed compilation idx")
-    compile_lib_parser.add_argument('-a', '--cpu_aarch', type=str, required=True, dest="cpu_aarch",
-                                    help="Please input cpu aarch, eg:x86_64,aarch64")
+    """配置静态编译参数及执行信息"""
+    compile_lib_parser = subparsers.add_parser(
+        name="StaticCompile", help="Compile static libraries(.a) on distributed server"
+    )
+    compile_lib_parser.add_argument(
+        "-s",
+        "--soc_version",
+        type=str,
+        required=True,
+        dest="soc_version",
+        help="Operator Name, eg: ascend910b, ascend310p",
+    )
+    compile_lib_parser.add_argument(
+        "-b", "--build_dir", type=str, required=True, dest="build_dir", help="Input build dir for this project"
+    )
+    compile_lib_parser.add_argument(
+        "-j", "--jit", action="store_true", dest="jit", help="Compile static libraries(.a) with cann package"
+    )
+    compile_lib_parser.add_argument(
+        "-n", "--index_num", type=int, required=True, dest="index_num", help="Please input distributed compilation idx"
+    )
+    compile_lib_parser.add_argument(
+        "-a", "--cpu_aarch", type=str, required=True, dest="cpu_aarch", help="Please input cpu aarch, eg:x86_64,aarch64"
+    )
     compile_lib_parser.set_defaults(func=compile_static_library)
 
 
 @dataclass
 class OpResource:
     """算子资源"""
+
     # tiling 注册函数
     tiling_register: str = field(default=None)
     extend_register: str = field(default_factory=list)
@@ -235,7 +279,7 @@ class GenOpResourceIni:
     def __init__(self, soc_version: str, build_dir: str, build_with_package: bool):
         self._soc_version = soc_version
         self._build_dir = Path(build_dir)
-        opp_path = os.environ.get('ASCEND_OPP_PATH')
+        opp_path = os.environ.get("ASCEND_OPP_PATH")
         if build_with_package and opp_path:
             opp_path = Path(opp_path)
             self._binary_path = opp_path / "built-in/op_impl/ai_core/tbe/kernel"
@@ -249,11 +293,10 @@ class GenOpResourceIni:
             # transformer aic*.json 适配
             ops_info = self._build_dir / "custom/op_impl/ai_core/tbe/config" / self._soc_version
             ops_info = list(ops_info.glob(f"aic-{self._soc_version}-ops-info*.json"))
-            self._ops_info = ops_info[0] if len(ops_info) != 0 else None        
+            self._ops_info = ops_info[0] if len(ops_info) != 0 else None
         self._op_resource_path = self._build_dir / "autogen" / self._soc_version / "aclnnop_resource"
-        self._op_res: Dict[str, OpResource] = defaultdict(OpResource)
+        self._op_res: dict[str, OpResource] = defaultdict(OpResource)
         self._l0op_list = []
-
 
     TILING_REG_DECL_FMT = """
 namespace {namespace} {{
@@ -369,7 +412,6 @@ namespace l0op {{
 
 """
 
-
     @staticmethod
     def _extract_op_symbol_pair(symbol_file: str, search_key: str, prefix: str, suffix: str):
         symbol_ret = shell_checkout_key_func(symbol_file, search_key)
@@ -380,11 +422,10 @@ namespace l0op {{
                 continue
             op_type = symbol_name
             if prefix:
-                op_type = op_type[len(prefix):]
+                op_type = op_type[len(prefix) :]
             if suffix:
-                op_type = op_type[:-len(suffix)]
+                op_type = op_type[: -len(suffix)]
             yield op_type, symbol
-
 
     @staticmethod
     def _extract_op_symbol_pair_v2(symbol_file: str, search_key: str, prefix: str):
@@ -396,10 +437,9 @@ namespace l0op {{
                 continue
             op_type = symbol_name
             if prefix:
-                op_type = op_type[len(prefix):]
+                op_type = op_type[len(prefix) :]
             op_type = op_type.split("_")[0]
             yield op_type, symbol
-
 
     @staticmethod
     def _extract_register_symbol(register_symbol: str):
@@ -414,14 +454,13 @@ namespace l0op {{
         reference_code = f"&{register_symbol}"
         return namespace, func_name, reference_code
 
-
     @staticmethod
     def _gen_binary_res_code(files):
         declaration = ""
         reference_code = ""
         for binary_file in files:
             # static not support supperkernel
-            if ("relocatable" in binary_file.name):
+            if "relocatable" in binary_file.name:
                 continue
             binary_name = binary_file.name.replace(".", "_").replace("-", "_")
             declaration += f"""// {binary_file.name}
@@ -430,7 +469,6 @@ extern const uint8_t _binary_{binary_name}_end[];
 """
             reference_code += f"{{_binary_{binary_name}_start, _binary_{binary_name}_end}},\n"
         return declaration, reference_code
-
 
     def gen_ops_ini_files(self):
         self.analyze_ops_files()
@@ -446,7 +484,6 @@ extern const uint8_t _binary_{binary_name}_end[];
                 continue
             ini_content = self.generate_op_resouce_ini(op_type)
             self._save_op_resource(op_type, ini_content)
-
 
     def generate_op_resouce_ini(self, op_type: str) -> str:
         value_dict = {
@@ -467,15 +504,14 @@ const OP_BINARY_RES& {op_type}KernelResource() {{
 """
         return self.OP_RESOURCE_CPP_FMT.format_map(value_dict)
 
-
     def analyze_ops_files(self):
         if not self._ops_info:
             return self._op_res
-        with open(self._ops_info, "r") as autogen_fd:
+        with open(self._ops_info) as autogen_fd:
             ops_info_json = json.load(autogen_fd)
 
         for ops in ops_info_json:
-            if 'opFile' in ops_info_json[ops]:
+            if "opFile" in ops_info_json[ops]:
                 json_file = f"{ops_info_json[ops]['opFile']['value']}.json"
             else:
                 o_lists = list(Path(self._binary_path).rglob(f"{self._soc_version}/**/*{ops}*.o"))
@@ -489,48 +525,48 @@ const OP_BINARY_RES& {op_type}KernelResource() {{
                 json_path = self._binary_path / "config" / self._soc_version / "ops_transformer" / json_file
             if not os.path.exists(json_path):
                 continue
-            with open(json_path, "r") as op_json_fd:
+            with open(json_path) as op_json_fd:
                 op_json_content = json.load(op_json_fd)
             if "binList" not in op_json_content or len(op_json_content["binList"]) == 0:
                 continue
             # 算子.json内 kernel json路径适配
-            bin_json_file = self._binary_path / op_json_content["binList"][0]["binInfo"]["jsonFilePath"].split("/", 1)[1]
+            bin_json_file = (
+                self._binary_path / op_json_content["binList"][0]["binInfo"]["jsonFilePath"].split("/", 1)[1]
+            )
             if "opp/built-in/" in str(self._binary_path):
-                bin_json_file = self._binary_path / self._soc_version / "ops_transformer" / op_json_content["binList"][0]["binInfo"]["jsonFilePath"].split("/", 1)[1]
+                bin_json_file = (
+                    self._binary_path
+                    / self._soc_version
+                    / "ops_transformer"
+                    / op_json_content["binList"][0]["binInfo"]["jsonFilePath"].split("/", 1)[1]
+                )
             ops_path = os.path.dirname(bin_json_file)
             self._op_res[ops].binary_config_files.append(json_path)
             self._op_res[ops].kernel_files.extend(sorted(Path(ops_path).iterdir()))
-        for kb_json in list(Path(self._tuning_basic_path).rglob(f"*_AiCore_*_runtime_kb.json")):
+        for kb_json in list(Path(self._tuning_basic_path).rglob("*_AiCore_*_runtime_kb.json")):
             ops = kb_json.name.split("_AiCore_")[-1].split("_runtime_kb")[0]
             self._op_res[ops].runtime_kb_files.append(kb_json)
             self._op_res[ops].runtime_kb_files.sort(key=lambda p: p.name)
         return self._op_res
-    
 
     def _analyze_ops_l0op(self):
         opapi_symbol = self._build_dir / "opapi_transformer.txt"
         if not os.path.exists(opapi_symbol):
             return
         # infershape
-        for op_type, _ in self._extract_op_symbol_pair(
-                opapi_symbol, "_kernelName_Be_Defined_Multi_Times__", "", ""
-            ):
+        for op_type, _ in self._extract_op_symbol_pair(opapi_symbol, "_kernelName_Be_Defined_Multi_Times__", "", ""):
             self._l0op_list.append(op_type.split("_kernelName_")[0])
         self._l0op_list.sort()
-    
 
     def _save_op_resource(self, op_type, res_content):
         res_cpp_file = self._op_resource_path / f"{op_type}_op_resource.cpp"
-        try:
+        with contextlib.suppress(FileNotFoundError):
             res_cpp_file.unlink()
-        except FileNotFoundError:
-            pass
 
         flags = os.O_WRONLY | os.O_CREAT
         modes = stat.S_IWUSR | stat.S_IRUSR
         with os.fdopen(os.open(res_cpp_file, flags, modes), "w") as fd:
             fd.write(res_content)
-
 
     def _analyze_symbols(self):
         # ophost txt 适配
@@ -539,37 +575,34 @@ const OP_BINARY_RES& {op_type}KernelResource() {{
             return
         # infershape
         for op_type, symbol in self._extract_op_symbol_pair(
-                ophost_symbol, "op_impl_register_infershape_", "op_impl_register_infershape_", ""
-            ):
+            ophost_symbol, "op_impl_register_infershape_", "op_impl_register_infershape_", ""
+        ):
             self._op_res[op_type].infer_shape_register = symbol
         # tiling
         for op_type, symbol in self._extract_op_symbol_pair(
-                ophost_symbol, "op_impl_register_optiling_", "op_impl_register_optiling_", ""
-            ):
+            ophost_symbol, "op_impl_register_optiling_", "op_impl_register_optiling_", ""
+        ):
             self._op_res[op_type].tiling_register = symbol
         for op_type, symbol in self._extract_op_symbol_pair_v2(
-                ophost_symbol, "op_impl_register_template_", "op_impl_register_template_"
-            ):
+            ophost_symbol, "op_impl_register_template_", "op_impl_register_template_"
+        ):
             self._op_res[op_type].extend_register.append(symbol)
         # 知识库
         for op_type, symbol in self._extract_op_symbol_pair(
-                ophost_symbol, "BankKeyRegistryInterf", "g_", "BankKeyRegistryInterf"
-            ):
+            ophost_symbol, "BankKeyRegistryInterf", "g_", "BankKeyRegistryInterf"
+        ):
             self._op_res[op_type].tuning_bank_key_register = symbol
         for op_type, symbol in self._extract_op_symbol_pair(ophost_symbol, "BankParseInterf", "g_", "BankParseInterf"):
             self._op_res[op_type].tuning_bank_parse_register = symbol
         for op_type, symbol in self._extract_op_symbol_pair(
-                ophost_symbol, "g_tuning_tiling_", "g_tuning_tiling_", "Helper"
-            ):
+            ophost_symbol, "g_tuning_tiling_", "g_tuning_tiling_", "Helper"
+        ):
             self._op_res[op_type].tuning_tiling_helper = symbol
 
-
     def _gen_register_resouce_code(self, op_type: str):
-        """ 注册函数 """
+        """注册函数"""
         # Tiling
-        namespace, func_name, reference_code = self._extract_register_symbol(
-            self._op_res[op_type].tiling_register
-        )
+        namespace, func_name, reference_code = self._extract_register_symbol(self._op_res[op_type].tiling_register)
         symbol_map = {
             "op_type": op_type,
             "namespace": namespace,
@@ -584,10 +617,10 @@ const OP_BINARY_RES& {op_type}KernelResource() {{
         for symbol in self._op_res[op_type].extend_register:
             namespace, func_name, reference_code = self._extract_register_symbol(symbol)
             if func_name:
-                extend_declaration += self.EXTEND_REG_DECL_FMT.format(namespace = namespace, func_name = func_name)
+                extend_declaration += self.EXTEND_REG_DECL_FMT.format(namespace=namespace, func_name=func_name)
                 reference_code_list.append(reference_code)
         reference_code = ", ".join(reference_code_list)
-        extend_reg_func = self.EXTLEND_REG_RES_FUNC_FMT.format(op_type = op_type, reference_code = reference_code)
+        extend_reg_func = self.EXTLEND_REG_RES_FUNC_FMT.format(op_type=op_type, reference_code=reference_code)
 
         # InferShape
         namespace, func_name, reference_code = self._extract_register_symbol(self._op_res[op_type].infer_shape_register)
@@ -606,36 +639,48 @@ const OP_BINARY_RES& {op_type}KernelResource() {{
             "tiling_reg_func": tiling_reg_func,
             "infer_shape_reg_func": infer_shape_reg_func,
             "extend_reg_func": extend_reg_func,
-            "extend_declaration": extend_declaration
+            "extend_declaration": extend_declaration,
         }
 
     def _gen_tuning_register_resouce_code(self, op_type: str):
-        """ 知识库注册函数 """
+        """知识库注册函数"""
         # Tuning
         namespace, func_name, tuning_bank_key_ref_code = self._extract_register_symbol(
             self._op_res[op_type].tuning_bank_key_register
         )
-        tuning_bank_key_declaration = self.TUNING_REG_DECL_FMT.format(
-            namespace=namespace,
-            class_type="OpBankKeyFuncRegistryV2",
-            func_name=func_name,
-        ) if func_name else ""
+        tuning_bank_key_declaration = (
+            self.TUNING_REG_DECL_FMT.format(
+                namespace=namespace,
+                class_type="OpBankKeyFuncRegistryV2",
+                func_name=func_name,
+            )
+            if func_name
+            else ""
+        )
         namespace, func_name, tuning_bank_parse_ref_code = self._extract_register_symbol(
             self._op_res[op_type].tuning_bank_parse_register
         )
-        tuning_bank_parse_declaration = self.TUNING_REG_DECL_FMT.format(
-            namespace=namespace,
-            class_type="OpBankKeyFuncRegistryV2",
-            func_name=func_name,
-        ) if func_name else ""
+        tuning_bank_parse_declaration = (
+            self.TUNING_REG_DECL_FMT.format(
+                namespace=namespace,
+                class_type="OpBankKeyFuncRegistryV2",
+                func_name=func_name,
+            )
+            if func_name
+            else ""
+        )
         namespace, func_name, tuning_helper_ref_code = self._extract_register_symbol(
             self._op_res[op_type].tuning_tiling_helper
         )
-        tuning_helper_declaration = self.TUNING_REG_DECL_FMT.format(
-            namespace=namespace,
-            class_type=f"{op_type}ClassHelper",
-            func_name=func_name,
-        ) if func_name else ""
+        tuning_helper_declaration = (
+            self.TUNING_REG_DECL_FMT.format(
+                namespace=namespace,
+                class_type=f"{op_type}ClassHelper",
+                func_name=func_name,
+            )
+            if func_name
+            else ""
+        )
         tuning_reg_func = self.TUNING_REG_RES_FUNC_FMT.format(
             op_type=op_type,
             tuning_bank_key=tuning_bank_key_ref_code,
@@ -648,7 +693,7 @@ const OP_BINARY_RES& {op_type}KernelResource() {{
             "tuning_helper_declaration": tuning_helper_declaration,
             "tuning_reg_func": tuning_reg_func,
         }
-    
+
     def _gen_binary_resource_code(self, op_type: str) -> str:
         """二进制"""
         # kernel
@@ -656,11 +701,15 @@ const OP_BINARY_RES& {op_type}KernelResource() {{
             self._op_res[op_type].binary_config_files
         )
         kernel_files_declaration, kernel_files_ref_code = self._gen_binary_res_code(self._op_res[op_type].kernel_files)
-        kernel_resource = self.KERNEL_BINARY_RES_FUNC_FMT.format(
-            op_type=op_type,
-            binary_config_ref_code=binary_config_ref_code,
-            kernel_files_ref_code=kernel_files_ref_code,
-        ) if kernel_files_ref_code else ""
+        kernel_resource = (
+            self.KERNEL_BINARY_RES_FUNC_FMT.format(
+                op_type=op_type,
+                binary_config_ref_code=binary_config_ref_code,
+                kernel_files_ref_code=kernel_files_ref_code,
+            )
+            if kernel_files_ref_code
+            else ""
+        )
         # 知识库
         tuning_kb_declaration, tuning_kb_ref_code = self._gen_binary_res_code(self._op_res[op_type].runtime_kb_files)
         tuning_kb_resource = self.TUNING_KB_BINARY_RES_FUNC_FMT.format(
@@ -686,21 +735,30 @@ def generate_op_resource_h_file(args):
 
 
 def parser_generate_op_resource_h_file(subparsers):
-    gen_resource_ini_parser = subparsers.add_parser(name='GenStaticOpResourceIni',
-                                                    help='Generate xxx_op_resource.h on consolidation server')
-    gen_resource_ini_parser.add_argument('-s', '--soc_version', type=str, required=True, dest="soc_version",
-                                         help="Operator Name, eg: ascend910b, ascend310p")
-    gen_resource_ini_parser.add_argument('-b', '--build_dir', type=str, required=True, dest="build_dir",
-                                         help="Input build dir for this project")
-    gen_resource_ini_parser.add_argument('-j', '--jit', action='store_true', dest="jit",
-                                        help="Generate xxx_op_resource.h  with cann package")
+    gen_resource_ini_parser = subparsers.add_parser(
+        name="GenStaticOpResourceIni", help="Generate xxx_op_resource.h on consolidation server"
+    )
+    gen_resource_ini_parser.add_argument(
+        "-s",
+        "--soc_version",
+        type=str,
+        required=True,
+        dest="soc_version",
+        help="Operator Name, eg: ascend910b, ascend310p",
+    )
+    gen_resource_ini_parser.add_argument(
+        "-b", "--build_dir", type=str, required=True, dest="build_dir", help="Input build dir for this project"
+    )
+    gen_resource_ini_parser.add_argument(
+        "-j", "--jit", action="store_true", dest="jit", help="Generate xxx_op_resource.h  with cann package"
+    )
     gen_resource_ini_parser.set_defaults(func=generate_op_resource_h_file)
 
 
 def execute_argus_parse_func():
     parser = argparse.ArgumentParser()
 
-    subparsers = parser.add_subparsers(help='Subparsers Commands')
+    subparsers = parser.add_subparsers(help="Subparsers Commands")
 
     """ 配置静态编译参数及执行信息 """
     parser_compile_static_library(subparsers)

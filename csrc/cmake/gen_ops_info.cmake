@@ -283,7 +283,7 @@ endfunction()
 function(gen_ops_info_and_python)
   gen_aclnn_with_opdef()
   if(NOT TARGET opbuild_custom_gen_aclnn_all)
-    message(STATUS "no need build binary, for all the ops donot have any operator def")
+    message(STATUS "no need build binary, for all the ops do not have any operator def")
     return()
   endif()
 

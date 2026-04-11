@@ -65,7 +65,7 @@ get_opts() {
     if [ "${INSTALLED_PATH}" = "" ] ||
       [ "${UNINSTALL_MODE}" = "" ] ||
       [ "${IS_QUIET}" = "" ]; then
-      logandprint "[ERROR]: ERR_NO:${PARAM_INVALID};ERR_DES:Empty paramters is invalid\
+      logandprint "[ERROR]: ERR_NO:${PARAM_INVALID};ERR_DES:Empty parameters is invalid\
 for call uninstall functions."
       exit 1
     fi
@@ -96,7 +96,7 @@ log_with_errorlevel() {
 check_directory_exist() {
   local path="${1}"
   if [ ! -d "${path}" ]; then
-    logandprint "[ERROR]: ERR_NO:${FILE_NOT_EXIST};ERR_DES:Installation directroy [${path}] does not exist, uninstall failed."
+    logandprint "[ERROR]: ERR_NO:${FILE_NOT_EXIST};ERR_DES:Installation directory [${path}] does not exist, uninstall failed."
     exit 1
   fi
 }

@@ -72,7 +72,7 @@ get_opts() {
 
   if [ "${TARGET_INSTALL_PATH}" = "" ] || [ "${TARGET_USERNAME}" = "" ] ||
     [ "${TARGET_USERGROUP}" = "" ] || [ "${INSTALL_TYPE}" = "" ]; then
-    logandprint "[ERROR]: ERR_NO:${PARAM_INVALID};ERR_DES:Empty paramters is invalid for install."
+    logandprint "[ERROR]: ERR_NO:${PARAM_INVALID};ERR_DES:Empty parameters is invalid for install."
     exit 1
   fi
 
@@ -392,7 +392,7 @@ main() {
   chmod "${ONLYREAD_PERM}" "${INSTALL_INFO_FILE}" 2>/dev/null
 
   # change installed folder's owner and group except aicpu
-  log_with_errorlevel "$?" "error" "[ERROR]: ERR_NO:${INSTALL_FAILED};ERR_DES:Change opp onwership failed.."
+  log_with_errorlevel "$?" "error" "[ERROR]: ERR_NO:${INSTALL_FAILED};ERR_DES:Change opp ownership failed.."
 
   logandprint "[INFO]: upgradePercentage:100%"
 

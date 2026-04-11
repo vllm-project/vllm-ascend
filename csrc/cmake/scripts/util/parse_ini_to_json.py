@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# coding: utf-8
 # -----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2025 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -15,26 +14,119 @@ import os
 import stat
 import sys
 
-
-ATTR_TYPE_LIST = ["int", "float", "bool", "str", "listInt", "listFloat", "listBool", "listStr", "listListInt",
-                  "type", "listType", "tensor", "listTensor"]
+ATTR_TYPE_LIST = [
+    "int",
+    "float",
+    "bool",
+    "str",
+    "listInt",
+    "listFloat",
+    "listBool",
+    "listStr",
+    "listListInt",
+    "type",
+    "listType",
+    "tensor",
+    "listTensor",
+]
 ATTR_PARAMTYPE_LIST = ["optional", "required"]
-BOOL_FLAG_KEY = ["dynamicFormat", "dynamicShapeSupport", "dynamicRankSupport", "precision_reduce", "heavyOp",
-                 "needCheckSupport", "enableVectorCore"]
+BOOL_FLAG_KEY = [
+    "dynamicFormat",
+    "dynamicShapeSupport",
+    "dynamicRankSupport",
+    "precision_reduce",
+    "heavyOp",
+    "needCheckSupport",
+    "enableVectorCore",
+]
 BOOL_LIST = ["true", "false"]
-DTYPE_LIST = ["float16", "float", "float32", "int8", "int16", "int32", "uint8", "uint16", "uint32", "bool",
-              "int64", "uint64", "qint8", "qint16", "qint32", "quint8", "quint16", "double", "complex32", "complex64",
-              "complex128", "string", "resource", "dual", "dual_sub_int8", "dual_sub_uint8", "string_ref",
-              "int4", "bfloat16", "uint1", "hifloat8", "float8_e4m3fn", "float8_e5m2", "float8_e8m0", "float4_e2m1",
-              "float4_e1m2", "int2"]
-FORMAT_LIST = ["NCHW", "NHWC", "ND", "NC1HWC0", "FRACTAL_Z", "NC1C0HWPAD", "NHWC1C0", "FSR_NCHW", "FRACTAL_DECONV",
-               "C1HWNC0", "FRACTAL_DECONV_TRANSPOSE", "FRACTAL_DECONV_SP_STRIDE_TRANS", "NC1HWC0_C04",
-               "FRACTAL_Z_C04", "CHWN", "FRACTAL_DECONV_SP_STRIDE8_TRANS", "HWCN", "NC1KHKWHWC0", "BN_WEIGHT",
-               "FILTER_HWCK", "HASHTABLE_LOOKUP_LOOKUPS", "HASHTABLE_LOOKUP_KEYS", "HASHTABLE_LOOKUP_VALUE",
-               "HASHTABLE_LOOKUP_OUTPUT", "HASHTABLE_LOOKUP_HITS", "C1HWNCoC0", "MD", "NDHWC", "FRACTAL_ZZ",
-               "FRACTAL_NZ", "NCDHW", "DHWCN", "NDC1HWC0", "FRACTAL_Z_3D", "CN", "NC", "DHWNC",
-               "FRACTAL_Z_3D_TRANSPOSE", "FRACTAL_ZN_LSTM", "FRACTAL_ZN_RNN", "FRACTAL_Z_G", "NULL",
-               "FRACTAL_NZ_C0_2", "FRACTAL_NZ_C0_4", "FRACTAL_NZ_C0_16", "FRACTAL_NZ_C0_32"]
+DTYPE_LIST = [
+    "float16",
+    "float",
+    "float32",
+    "int8",
+    "int16",
+    "int32",
+    "uint8",
+    "uint16",
+    "uint32",
+    "bool",
+    "int64",
+    "uint64",
+    "qint8",
+    "qint16",
+    "qint32",
+    "quint8",
+    "quint16",
+    "double",
+    "complex32",
+    "complex64",
+    "complex128",
+    "string",
+    "resource",
+    "dual",
+    "dual_sub_int8",
+    "dual_sub_uint8",
+    "string_ref",
+    "int4",
+    "bfloat16",
+    "uint1",
+    "hifloat8",
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e8m0",
+    "float4_e2m1",
+    "float4_e1m2",
+    "int2",
+]
+FORMAT_LIST = [
+    "NCHW",
+    "NHWC",
+    "ND",
+    "NC1HWC0",
+    "FRACTAL_Z",
+    "NC1C0HWPAD",
+    "NHWC1C0",
+    "FSR_NCHW",
+    "FRACTAL_DECONV",
+    "C1HWNC0",
+    "FRACTAL_DECONV_TRANSPOSE",
+    "FRACTAL_DECONV_SP_STRIDE_TRANS",
+    "NC1HWC0_C04",
+    "FRACTAL_Z_C04",
+    "CHWN",
+    "FRACTAL_DECONV_SP_STRIDE8_TRANS",
+    "HWCN",
+    "NC1KHKWHWC0",
+    "BN_WEIGHT",
+    "FILTER_HWCK",
+    "HASHTABLE_LOOKUP_LOOKUPS",
+    "HASHTABLE_LOOKUP_KEYS",
+    "HASHTABLE_LOOKUP_VALUE",
+    "HASHTABLE_LOOKUP_OUTPUT",
+    "HASHTABLE_LOOKUP_HITS",
+    "C1HWNCoC0",
+    "MD",
+    "NDHWC",
+    "FRACTAL_ZZ",
+    "FRACTAL_NZ",
+    "NCDHW",
+    "DHWCN",
+    "NDC1HWC0",
+    "FRACTAL_Z_3D",
+    "CN",
+    "NC",
+    "DHWNC",
+    "FRACTAL_Z_3D_TRANSPOSE",
+    "FRACTAL_ZN_LSTM",
+    "FRACTAL_ZN_RNN",
+    "FRACTAL_Z_G",
+    "NULL",
+    "FRACTAL_NZ_C0_2",
+    "FRACTAL_NZ_C0_4",
+    "FRACTAL_NZ_C0_16",
+    "FRACTAL_NZ_C0_32",
+]
 
 
 def parse_ini_files(ini_files):
@@ -57,10 +149,10 @@ def check_file_size(input_file):
     try:
         file_size = os.path.getsize(input_file)
     except OSError as os_error:
-        print('[ERROR] Failed to open "%s". %s' % (input_file, str(os_error)))
+        print(f'[ERROR] Failed to open "{input_file}". {os_error}')
         raise OSError from os_error
-    if file_size > 10*1024*1024:
-        print('[WARN] The size of %s exceeds 10MB, it may take more time to run, please wait.' % input_file)
+    if file_size > 10 * 1024 * 1024:
+        print(f"[WARN] The size of {input_file} exceeds 10MB, it may take more time to run, please wait.")
 
 
 def parse_ini_to_obj(ini_file, tbe_ops_info):
@@ -88,14 +180,13 @@ def parse_ini_to_obj(ini_file, tbe_ops_info):
                     tbe_ops_info[op_name] = op_dict
                     find_op_type = True
             elif "=" in line:
-                key1 = line[:line.index("=")]
-                key2 = line[line.index("=")+1:]
+                key1 = line[: line.index("=")]
+                key2 = line[line.index("=") + 1 :]
                 key1_0, key1_1 = key1.split(".")
                 if key1_0 not in op_dict:
                     op_dict[key1_0] = {}
                 if key1_1 in op_dict.get(key1_0):
-                    raise RuntimeError("Op:" + op_name + " " + key1_0 + " " +
-                                       key1_1 + " is repeated!")
+                    raise RuntimeError("Op:" + op_name + " " + key1_0 + " " + key1_1 + " is repeated!")
                 dic_key = op_dict.get(key1_0)
                 dic_key[key1_1] = key2
             else:
@@ -135,13 +226,13 @@ def check_attr_dict(attr_dict, is_valid, attr):
     param_type = attr_dict.get("paramType")
     if attr_type is None or value is None:
         is_valid = False
-        print("If attr.list is exist, {0}.type and {0}.value is required".format(attr))
+        print(f"If attr.list is exist, {attr}.type and {attr}.value is required")
     if param_type and param_type not in ATTR_PARAMTYPE_LIST:
         is_valid = False
-        print("{0}.paramType only support {1}.".format(attr, ATTR_PARAMTYPE_LIST))
+        print(f"{attr}.paramType only support {ATTR_PARAMTYPE_LIST}.")
     if attr_type and attr_type not in ATTR_TYPE_LIST:
         is_valid = False
-        print("{0}.type only support {1}.".format(attr, ATTR_TYPE_LIST))
+        print(f"{attr}.type only support {ATTR_TYPE_LIST}.")
     return is_valid
 
 
@@ -167,7 +258,7 @@ def check_attr(op_dict, is_valid):
                     is_valid = check_attr_dict(attr_dict, is_valid, attr)
                 else:
                     is_valid = False
-                    print("%s is required in .ini file, when attr.list is %s!" % (attr, attr_list_str))
+                    print(f"{attr} is required in .ini file, when attr.list is {attr_list_str}!")
     return is_valid
 
 
@@ -183,7 +274,7 @@ def check_bool_flag(op_dict, is_valid):
             op_bool_key = op_dict.get(key)
             if op_bool_key.get("flag").strip() not in BOOL_LIST:
                 is_valid = False
-                print("{0}.flag only support {1}.".format(key, BOOL_LIST))
+                print(f"{key}.flag only support {BOOL_LIST}.")
     return is_valid
 
 
@@ -204,7 +295,7 @@ def check_type_format(op_info, is_valid, op_info_key):
         for dtype in op_info_dtype:
             if dtype.strip() not in DTYPE_LIST:
                 is_valid = False
-                print("{0}.dtype not support {1}.".format(op_info_key, dtype))
+                print(f"{op_info_key}.dtype not support {dtype}.")
     op_info_format_str = op_info.get("format")
     if op_info_format_str:
         op_info_format = op_info_format_str.split(",")
@@ -212,7 +303,7 @@ def check_type_format(op_info, is_valid, op_info_key):
         for op_format in op_info_format:
             if op_format.strip() not in FORMAT_LIST:
                 is_valid = False
-                print("{0}.format not support {1}.".format(op_info_key, op_format))
+                print(f"{op_info_key}.format not support {op_format}.")
     if op_info_dtype_num > 0 and op_info_format_num > 0:
         if op_info_dtype_num != op_info_format_num:
             is_valid = False
@@ -242,14 +333,14 @@ def check_op_info(tbe_ops):
                     if required_op_input_info_key not in op_input_info:
                         missing_keys.append(required_op_input_info_key)
                 if len(missing_keys) > 0:
-                    print("op: " + op_key + " " + op_info_key + " missing: " +
-                          ",".join(missing_keys))
+                    print("op: " + op_key + " " + op_info_key + " missing: " + ",".join(missing_keys))
                     is_valid = False
                 else:
-                    if not op_input_info["paramType"] in param_type_valid_value:
-                        print("op: " + op_key + " " + op_info_key + \
-                              " paramType not valid, valid key:[dynamic, "
-                              "optional, required]")
+                    if op_input_info["paramType"] not in param_type_valid_value:
+                        print(
+                            "op: " + op_key + " " + op_info_key + " paramType not valid, valid key:[dynamic, "
+                            "optional, required]"
+                        )
                         is_valid = False
                 is_valid = check_type_format(op_input_info, is_valid, op_info_key)
             if op_info_key.startswith("output"):
@@ -259,14 +350,14 @@ def check_op_info(tbe_ops):
                     if required_op_input_info_key not in op_input_info:
                         missing_keys.append(required_op_input_info_key)
                 if len(missing_keys) > 0:
-                    print("op: " + op_key + " " + op_info_key + " missing: " +
-                          ",".join(missing_keys))
+                    print("op: " + op_key + " " + op_info_key + " missing: " + ",".join(missing_keys))
                     is_valid = False
                 else:
-                    if not op_input_info["paramType"] in param_type_valid_value:
-                        print("op: " + op_key + " " + op_info_key +
-                              " paramType not valid, valid key:[dynamic, "
-                              "optional, required]")
+                    if op_input_info["paramType"] not in param_type_valid_value:
+                        print(
+                            "op: " + op_key + " " + op_info_key + " paramType not valid, valid key:[dynamic, "
+                            "optional, required]"
+                        )
                         is_valid = False
                 is_valid = check_type_format(op_input_info, is_valid, op_info_key)
         is_valid = check_attr(op_dict, is_valid)
@@ -287,12 +378,10 @@ def write_json_file(tbe_ops_info, json_file_path):
     json_file_real_path = os.path.realpath(json_file_path)
     wr_flag = os.O_WRONLY | os.O_CREAT
     wr_mode = stat.S_IWUSR | stat.S_IRUSR
-    with os.fdopen(os.open(json_file_real_path, wr_flag, wr_mode), 'w') as file_path:
+    with os.fdopen(os.open(json_file_real_path, wr_flag, wr_mode), "w") as file_path:
         # The owner have all rights£¬group only have read rights
-        os.chmod(json_file_real_path, stat.S_IWUSR + stat.S_IRGRP
-                 + stat.S_IRUSR)
-        json.dump(tbe_ops_info, file_path, sort_keys=True, indent=4,
-                  separators=(',', ':'))
+        os.chmod(json_file_real_path, stat.S_IWUSR + stat.S_IRGRP + stat.S_IRUSR)
+        json.dump(tbe_ops_info, file_path, sort_keys=True, indent=4, separators=(",", ":"))
     print("Compile op info cfg successfully.")
 
 
@@ -313,7 +402,7 @@ def parse_ini_to_json(ini_file_paths, outfile_path):
     return True
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = sys.argv
 
     OUTPUT_FILE_PATH = "tbe_ops_info.json"

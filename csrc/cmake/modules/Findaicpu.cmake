@@ -29,7 +29,7 @@ if(BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG)
   )
 else()
   set(AICPU_INC_DIRS
-    ${TOP_DIR}/abl/msprof/inc
+    ${TOP_DIR}/abl/msprof/inc  # codespell:ignore abl
     ${TOP_DIR}/ace/comop/inc
     ${TOP_DIR}/inc/aicpu/cpu_kernels
     ${TOP_DIR}/inc/external/aicpu

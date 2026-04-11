@@ -33,7 +33,7 @@ struct l0c_to_gm<ArchType::ASCEND_V220, DataFormatT::ND, half, float> {
      * @param l0cTensor the source tensor on L0C buffer, which is stored in FRACTAL_NZ format.
      * @param mTileActual the m-direction size of the matrix in L0C buffer.
      * @param nTileActual the n-direction size of the matrix in L0C buffer.
-     * @param srcStride the source stride between the adjacent fractal matrics along n-direction in unit of C0_SIZE.
+     * @param srcStride the source stride between the adjacent fractal matrices along n-direction in unit of C0_SIZE.
      * @param dstStride the leading dimension of the destination matrix in unit of element.
      */
     __aicore__ l0c_to_gm(AscendC::GlobalTensor<half> gmTensor,

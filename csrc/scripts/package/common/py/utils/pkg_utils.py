@@ -12,24 +12,23 @@
 
 """基础构件。"""
 
-import os 
-from functools import partial
+import os
+from collections.abc import Callable, Iterator
 from itertools import chain, tee
-from operator import methodcaller
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional, TypeVar, Set
+from typing import Optional, TypeVar
 
 TOP_DIR = str(Path(__file__).resolve().parents[5])
-TOP_SOURCE_DIR = TOP_DIR + '/scripts/'
+TOP_SOURCE_DIR = TOP_DIR + "/scripts/"
 DELIVERY_PATH = "build/_CPack_Packages/makeself_staging"
-CONFIG_SCRIPT_PATH = 'package'
-BLOCK_CONFIG_PATH = 'package/module'
+CONFIG_SCRIPT_PATH = "package"
+BLOCK_CONFIG_PATH = "package/module"
 
 SUCCESS = 0
 FAIL = -1
 
 
-A = TypeVar('A')
+A = TypeVar("A")
 
 
 class PackageError(Exception):
@@ -87,7 +86,7 @@ class IllegalVersionDir(PackageError):
 class CompressError(PackageError):
     """打包错误。"""
 
-    def __init__(self, package_name: Optional[str]):
+    def __init__(self, package_name: str | None):
         super().__init__(package_name)
         self.package_name = package_name
 
@@ -97,7 +96,7 @@ def flatten(list_of_lists):
     return chain.from_iterable(list_of_lists)
 
 
-def merge_dict(base: Dict, *news: Dict):
+def merge_dict(base: dict, *news: dict):
     """合并两个字典。"""
     result = base.copy()
     for new in news:
@@ -107,6 +106,7 @@ def merge_dict(base: Dict, *news: Dict):
 
 def star_pipe(*funcs):
     """串联多个函数。解包结果。"""
+
     def pipe_func(*args, **k_args):
         result = funcs[0](*args, **k_args)
         for func in funcs[1:]:
@@ -119,13 +119,16 @@ def star_pipe(*funcs):
 
 def swap_args(func):
     """交换函数前两个参数。"""
+
     def inner(fst, snd, *args, **k_args):
         return func(snd, fst, *args, **k_args)
+
     return inner
 
 
 def conditional_apply(predicate, func):
     """条件下应用函数。"""
+
     def conditional_apply_func(arg):
         if predicate(arg):
             return func(arg)
@@ -154,7 +157,7 @@ def yield_if(data, predicate: Callable) -> Iterator:
         yield data
 
 
-def config_feature_to_set(feature_str: str, feature_type: str = 'feature') -> Set[str]:
+def config_feature_to_set(feature_str: str, feature_type: str = "feature") -> set[str]:
     """配置feature转换为集合。"""
     if feature_str is None:
         return set()
@@ -162,17 +165,17 @@ def config_feature_to_set(feature_str: str, feature_type: str = 'feature') -> Se
     if isinstance(feature_str, set):
         return feature_str
 
-    if feature_str == '':
+    if feature_str == "":
         raise PackageConfigError(f"Not allow to config {feature_type} empty.")
 
-    features = set(feature_str.split(';'))
-    if 'all' in features:
+    features = set(feature_str.split(";"))
+    if "all" in features:
         raise PackageConfigError(f"Not allow to config {feature_type} all.")
     return features
 
 
-def config_feature_to_string(features: Set[str]) -> str:
+def config_feature_to_string(features: set[str]) -> str:
     """配置feature集合转换为字符串。"""
     if not features:
-        return 'all'
-    return ';'.join(sorted(features))
+        return "all"
+    return ";".join(sorted(features))

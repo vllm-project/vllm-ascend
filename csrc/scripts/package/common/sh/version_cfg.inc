@@ -318,7 +318,7 @@ __process_cfg_file() {
     local running_version="$3" 
     local filepath_new="$4"
     local cfg_items package_name attr_type line
-    local setted="false"
+    local is_set="false"
 
     touch "${filepath}"
     while read line; do
@@ -329,23 +329,23 @@ __process_cfg_file() {
 
         if [ "${attr_type}" = "running" ]; then
             if [ "${package_name}" = "${package}" ]; then
-                if [ "${setted}" = "false" ]; then
+                if [ "${is_set}" = "false" ]; then
                     echo "${running_version}" >> "${filepath_new}"
-                    setted="true"
+                    is_set="true"
                 fi
             else
                 echo "${line}" >> "${filepath_new}"
             fi
         elif [ "${attr_type}" = "upgrade" ]; then
-            if [ "${setted}" = "false" ]; then
+            if [ "${is_set}" = "false" ]; then
                 echo "${running_version}" >> "${filepath_new}"
-                setted="true"
+                is_set="true"
             fi
             echo "${line}" >> "${filepath_new}"
         elif [ "${attr_type}" = "installed" ]; then
-            if [ "${setted}" = "false" ]; then
+            if [ "${is_set}" = "false" ]; then
                 echo "${running_version}" >> "${filepath_new}"
-                setted="true"
+                is_set="true"
             fi
             echo "${line}" >> "${filepath_new}"
         else
@@ -353,9 +353,9 @@ __process_cfg_file() {
         fi
     done < "${filepath}"
 
-    if [ "${setted}" = "false" ]; then
+    if [ "${is_set}" = "false" ]; then
         echo "${running_version}" >> "${filepath_new}"
-        setted="true"
+        is_set="true"
     fi
 }
 
@@ -366,7 +366,7 @@ set_running_package_version() {
     local version="$3"
     local version_dir="$4"
     local filepath filepath_new line cfg_items package_name attr_type running_version
-    local setted="false" cleanup="" ret mod
+    local is_set="false" cleanup="" ret mod
 
     get_version_cfg_path "filepath" "${dirpath}"
     get_version_cfg_new_path "filepath_new" "${dirpath}"
@@ -430,11 +430,11 @@ get_running_package_version() {
 
 # 处理升级版本文件操作和清理
 __finalize_upgrade_file() {
-    local filepath="$1" filepath_new="$2" setted="$3" upgrade_version="$4" cleanup="$5"
+    local filepath="$1" filepath_new="$2" is_set="$3" upgrade_version="$4" cleanup="$5"
 
-    if [ "${setted}" = "false" ]; then
+    if [ "${is_set}" = "false" ]; then
         echo "${upgrade_version}" >> "${filepath_new}"
-        setted="true"
+        is_set="true"
     fi
 
     add_cfg_version_comment "${filepath_new}"
@@ -456,7 +456,7 @@ __process_set_upgrade_line() {
     local package="$2"
     local upgrade_version="$3"
     local filepath_new="$4"
-    local -n setted_ref="$5"
+    local -n is_set_ref="$5"
     local cfg_items package_name attr_type
 
     parse_cfg_line "cfg_items" "${line}"
@@ -466,17 +466,17 @@ __process_set_upgrade_line() {
 
     if [ "${attr_type}" = "upgrade" ]; then
         if [ "${package_name}" = "${package}" ]; then
-            if [ "${setted_ref}" = "false" ]; then
+            if [ "${is_set_ref}" = "false" ]; then
                 echo "${upgrade_version}" >> "${filepath_new}"
-                setted_ref="true"
+                is_set_ref="true"
             fi
         else
             echo "${line}" >> "${filepath_new}"
         fi
     elif [ "${attr_type}" = "installed" ]; then
-        if [ "${setted_ref}" = "false" ]; then
+        if [ "${is_set_ref}" = "false" ]; then
             echo "${upgrade_version}" >> "${filepath_new}"
-            setted_ref="true"
+            is_set_ref="true"
         fi
         echo "${line}" >> "${filepath_new}"
     else
@@ -491,7 +491,7 @@ set_upgrade_package_version() {
     local version="$3"
     local version_dir="$4"
     local filepath filepath_new line cfg_items package_name attr_type upgrade_version
-    local setted="false" cleanup="" ret mod
+    local is_set="false" cleanup="" ret mod
 
     get_version_cfg_path "filepath" "${dirpath}"
     get_version_cfg_new_path "filepath_new" "${dirpath}"
@@ -519,10 +519,10 @@ set_upgrade_package_version() {
 
     touch "${filepath}"
     while read line; do
-        __process_set_upgrade_line "${line}" "${package}" "${upgrade_version}" "${filepath_new}" "setted"
+        __process_set_upgrade_line "${line}" "${package}" "${upgrade_version}" "${filepath_new}" "is_set"
     done < "${filepath}"
 
-    __finalize_upgrade_file "${filepath}" "${filepath_new}" "${setted}" "${upgrade_version}" "${cleanup}"
+    __finalize_upgrade_file "${filepath}" "${filepath_new}" "${is_set}" "${upgrade_version}" "${cleanup}"
     ret="$?" && [ $ret -ne 0 ] && return $ret
 
     return 0
@@ -598,7 +598,7 @@ add_installed_package_version() {
     local version="$3"
     local version_dir="$4"
     local filepath filepath_new line cfg_items package_name attr_type value versions matched version_str
-    local setted="false"
+    local is_set="false"
 
     get_version_cfg_path "filepath" "${dirpath}"
     get_version_cfg_new_path "filepath_new" "${dirpath}"
@@ -631,15 +631,15 @@ add_installed_package_version() {
             else
                 echo "${line}${version_str}" >> "${filepath_new}"
             fi
-            setted="true"
+            is_set="true"
         else
             echo "${line}" >> "${filepath_new}"
         fi
     done < "${filepath}"
 
-    if [ "${setted}" = "false" ]; then
+    if [ "${is_set}" = "false" ]; then
         echo "${package}_installed_version=${version_str}" >> "${filepath_new}"
-        setted="true"
+        is_set="true"
     fi
 
     add_cfg_version_comment "${filepath_new}"

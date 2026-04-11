@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# coding: utf-8
 # -----------------------------------------------------------------------------------------------------------
 # Copyright (c) 2025 Huawei Technologies Co., Ltd.
 # This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -16,15 +15,16 @@ test_config.yaml 格式转换
 """
 
 import logging
-import sys
 import os
+import sys
+
 import yaml
 
 
 def load_test_config(test_config_path: str):
     """读取并解析test_config.yaml文件"""
     try:
-        with open(test_config_path, 'r', encoding='utf-8') as file:
+        with open(test_config_path, encoding="utf-8") as file:
             return yaml.safe_load(file)
 
     except Exception as e:
@@ -39,15 +39,15 @@ def extract_src_and_exclude(data):
 
     def extract_from_dict(obj, current_key=None):
         if isinstance(obj, dict):
-            if 'src' in obj and isinstance(obj['src'], list):
-                for path in obj['src']:
+            if "src" in obj and isinstance(obj["src"], list):
+                for path in obj["src"]:
                     src_paths.add(path)
-            if 'exclude' in obj and isinstance(obj['exclude'], list):
-                for path in obj['exclude']:
+            if "exclude" in obj and isinstance(obj["exclude"], list):
+                for path in obj["exclude"]:
                     exclude_paths.add(path)
-            if 'ut_cov_exclude' in obj and isinstance(obj['ut_cov_exclude'], list):
-                for path in obj['ut_cov_exclude']:
-                    exclude_paths.add(f'"{path}"' if path.startswith('*') else path)
+            if "ut_cov_exclude" in obj and isinstance(obj["ut_cov_exclude"], list):
+                for path in obj["ut_cov_exclude"]:
+                    exclude_paths.add(f'"{path}"' if path.startswith("*") else path)
 
             # 递归处理所有值
             for key, value in obj.items():
@@ -64,7 +64,7 @@ def extract_src_and_exclude(data):
 def write_new_format(new_file_path: str, src_paths: list, exclude_paths: list):
     """以新格式写入文件"""
     try:
-        with open(new_file_path, 'w', encoding='utf-8') as file:
+        with open(new_file_path, "w", encoding="utf-8") as file:
             file.write("ops-transformer:\n")
             file.write("  src:\n")
 
@@ -107,8 +107,9 @@ def main(test_config_path: str, output_path: str):
     else:
         logging.error("File conversion failed")
 
-if __name__ == '__main__':
-    logging.basicConfig(format='[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
+
+if __name__ == "__main__":
+    logging.basicConfig(format="[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.INFO)
 
     if len(sys.argv) == 1:
         main("test_config.yaml", "test_config.yaml")
