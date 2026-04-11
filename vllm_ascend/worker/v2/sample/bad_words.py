@@ -21,12 +21,10 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
 MAX_BAD_WORDS_TOTAL_TOKENS = 1024  # Max total tokens for all bad words per request
 MAX_NUM_BAD_WORDS = 128  # Max number of bad words per request
-
-
-def get_npu_vectorcore_num():
-    return triton.runtime.driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"]
 
 
 @triton.jit(do_not_specialize=["num_tokens", "max_num_bad_words"])
@@ -160,7 +158,7 @@ def apply_bad_words(
     """
     num_tokens = logits.shape[0]
 
-    core_num = get_npu_vectorcore_num()
+    core_num = get_vectorcore_num()
 
     MAX_PREFIX_LEN = 32
 

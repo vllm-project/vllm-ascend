@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words, get_npu_vectorcore_num
+from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 
 # Test cases for different input shapes
 BAD_WORDS_TEST_CASES = [
@@ -76,13 +76,6 @@ def create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req
         logits, expanded_idx_mapping, bad_word_token_ids, bad_word_offsets, num_bad_words,
         all_token_ids, prompt_len, total_len, input_ids, expanded_local_pos
     )
-
-
-def test_get_npu_vectorcore_num():
-    """Test get_npu_vectorcore_num function"""
-    vectorcore_num = get_npu_vectorcore_num()
-    assert vectorcore_num > 0, "Vector core number should be positive"
-    print(f"NPU vector core number: {vectorcore_num}")
 
 
 @pytest.mark.parametrize("num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length", BAD_WORDS_TEST_CASES)
