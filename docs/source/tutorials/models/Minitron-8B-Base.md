@@ -45,21 +45,21 @@ You can use the official docker image for deployment:
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0
 docker run --rm \
---name vllm-ascend \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--v /data/vllm-workspace/models:/data/vllm-workspace/models \
--p 8000:8000 \
--it $IMAGE bash
+  --name vllm-ascend \
+  --shm-size=1g \
+  --device /dev/davinci0 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -v /data/vllm-workspace/models:/data/vllm-workspace/models \
+  -p 8000:8000 \
+  -it $IMAGE bash
 ```
 
 If you do not want to use the docker image, you can also build from source:
@@ -70,21 +70,22 @@ If you do not want to use the docker image, you can also build from source:
 
 Start the online serving service with the following command:
 
-```bash
-vllm serve /data/vllm-workspace/models/Minitron-8B-Base \
+```{test} bash
+:sync-yaml: tests/e2e/nightly/single_node/models/configs/Minitron-8B-Base.yaml
+:sync-target: test_cases[0].model test_cases[0].server_cmd
+:sync-class: cmd
+
+vllm serve "/data/vllm-workspace/models/Minitron-8B-Base" \
   --served-model-name minitron-8b-base \
-  --tensor-parallel-size 1 \
   --max-model-len 4096 \
-  --gpu-memory-utilization 0.95 \
-  --enforce-eager \
-  --port 8000
+  --gpu-memory-utilization 0.90 \
 ```
 
 ## Functional Verification
 
 Once your server is started, you can query the model with a simple prompt:
 
-```shell
+```bash
 curl http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
