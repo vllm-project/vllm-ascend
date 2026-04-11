@@ -220,26 +220,7 @@ class build_and_install_aclnn(Command):
     def run(self):
         try:
             print("Running bash build_aclnn.sh ...")
-            # The legacy custom-op build reuses CMake cache args from the
-            # environment. Keep the current top-level extension build settings
-            # from leaking into that frozen build system, otherwise the vendor
-            # name is overridden back to the modern default layout.
-            build_env = os.environ.copy()
-            build_env.pop("CMAKE_ARGS", None)
-            build_env.pop("VENDOR_NAME", None)
-            build_env.pop("vendor_name", None)
-            python_dir = os.path.dirname(sys.executable)
-            build_env["PATH"] = os.pathsep.join([python_dir, build_env.get("PATH", "")]).rstrip(os.pathsep)
-            python_paths = []
-            for key in ("purelib", "platlib"):
-                path = get_paths().get(key)
-                if path and path not in python_paths:
-                    python_paths.append(path)
-            if build_env.get("PYTHONPATH"):
-                python_paths.append(build_env["PYTHONPATH"])
-            if python_paths:
-                build_env["PYTHONPATH"] = os.pathsep.join(python_paths)
-            subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION], env=build_env)
+            subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR, envs.SOC_VERSION])
             print("build_aclnn.sh executed successfully!")
         except subprocess.CalledProcessError as e:
             print(f"Error running build_aclnn.sh: {e}")
