@@ -175,7 +175,7 @@ install_aisbench() {
     VLLM_ASCEND_DIR="$WORKSPACE/vllm-ascend/"
     BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
 
-    cd "VLLM_ASCEND_DIR"
+    cd "$VLLM_ASCEND_DIR"
     git clone https://github.com/AISBench/benchmark.git
 
     cd "$BENCH_DIR"
