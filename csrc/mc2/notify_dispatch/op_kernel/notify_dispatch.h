@@ -4,10 +4,10 @@
 #include <climits>
 #include "kernel_operator.h"
 
-#include "../common/comm_args.h"
-#include "../common/data_copy.h"
-#include "../common/sync_collectives.h"
-#include "../common/moe_distribute_base.h"
+#include "kernel/comm_args.h"
+#include "kernel/data_copy.h"
+#include "kernel/sync_collectives.h"
+#include "kernel/moe_distribute_base.h"
 
 using namespace AscendC;
 using namespace Moe;
