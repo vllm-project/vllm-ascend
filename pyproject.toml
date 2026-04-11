@@ -50,6 +50,8 @@ plugins.md029.enabled = false # ol-prefix
 line-length = 120
 # Folder to be modified
 exclude = [
+    "csrc/**",
+
     # Batch (1)
     # "tests/e2e/__init__.py",
     # "tests/e2e/310p/",

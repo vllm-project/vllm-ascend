@@ -333,8 +333,9 @@ def enable_custom_op():
         if "libcust_opapi.so" in str(e):
             try:
                 bootstrap_custom_op_env(include_vendor_lib=True)
-                import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
                 import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+                import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
                 _CUSTOM_OP_ENABLED = True
             except ImportError:
                 _CUSTOM_OP_ENABLED = False

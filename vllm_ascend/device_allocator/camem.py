@@ -26,6 +26,7 @@ from typing import Any
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
 from vllm.logger import logger
+
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 

@@ -12,8 +12,10 @@ repos:
   rev: v0.14.0
   hooks:
   - id: ruff-check
+    exclude: ^csrc/.*
     args: [--output-format, github, --fix]
   - id: ruff-format
+    exclude: ^csrc/.*
 
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
@@ -21,7 +23,7 @@ repos:
     - id: codespell
       args: [
         --toml, pyproject.toml,
-        '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
+        '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml,csrc/**',
         '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog'
       ]
       additional_dependencies:
@@ -56,6 +58,7 @@ repos:
   rev: v1.7.7
   hooks:
   - id: actionlint
+    args: ['-shellcheck=']
     exclude: '.*\.github/workflows/scripts/.*\.ya?ml$'
 
 - repo: local
@@ -65,6 +68,7 @@ repos:
     entry: tools/shellcheck.sh
     language: script
     types: [shell]
+    exclude: ^csrc/.*
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/png-lint.sh
@@ -109,6 +113,7 @@ repos:
     language: python
     types: [python]
     additional_dependencies: [regex]
+    exclude: ^csrc/.*
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
     entry: python tools/check_boolean_context_manager.py

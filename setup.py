@@ -229,9 +229,7 @@ class build_and_install_aclnn(Command):
             build_env.pop("VENDOR_NAME", None)
             build_env.pop("vendor_name", None)
             python_dir = os.path.dirname(sys.executable)
-            build_env["PATH"] = os.pathsep.join(
-                [python_dir, build_env.get("PATH", "")]
-            ).rstrip(os.pathsep)
+            build_env["PATH"] = os.pathsep.join([python_dir, build_env.get("PATH", "")]).rstrip(os.pathsep)
             python_paths = []
             for key in ("purelib", "platlib"):
                 path = get_paths().get(key)
