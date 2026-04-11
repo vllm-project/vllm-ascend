@@ -75,10 +75,10 @@ Start the online serving service with the following command:
 :sync-target: test_cases[0].model test_cases[0].server_cmd
 :sync-class: cmd
 
-vllm serve "/data/vllm-workspace/models/Minitron-8B-Base" \
+vllm serve /data/vllm-workspace/models/Minitron-8B-Base \
   --served-model-name minitron-8b-base \
   --max-model-len 4096 \
-  --gpu-memory-utilization 0.90 \
+  --gpu-memory-utilization 0.90
 ```
 
 ## Functional Verification
