@@ -217,7 +217,7 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         if self.cos_sin_cache.dtype != query.dtype:
             self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
 
-        # MRoPE THW layout is handled in `merge_mrope_cos_sin_for_apply` (mrope_interleaved).
+        # MRoPE T/H/W layout is handled in `merge_mrope_cos_sin_for_apply` (mrope_interleaved).
         # Here `rotary_mode` matches vLLM ApplyRotaryEmb: half = neox chunk, interleave = GPT-J pairs.
         rotary_mode = "half" if self.is_neox_style else "interleave"
         num_tokens = query.shape[0]
