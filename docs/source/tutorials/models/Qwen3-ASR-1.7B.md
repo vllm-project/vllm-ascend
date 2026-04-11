@@ -87,8 +87,8 @@ curl http://localhost:8000/v1/chat/completions
 
 After all samples were processed, transcription quality was measured using:
 
-WER (Word Error Rate) for word-level recognition accuracy
-CER (Character Error Rate) for character-level recognition accuracy
+- WER (Word Error Rate) for word-level recognition accuracy
+- CER (Character Error Rate) for character-level recognition accuracy
 
 The current evaluation results are:
 
