@@ -114,13 +114,14 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
             from vllm_ascend.attention.attention_v1 import AscendC8AttentionBackendImpl
 
             layer.impl.__class__ = AscendC8AttentionBackendImpl
-        layer.k_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=torch.float32), requires_grad=False)
+        dtype = torch.get_default_dtype()
+        layer.k_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
         layer.k_cache_scale.weight_loader = _c8_kv_scale_weight_loader
-        layer.k_cache_offset = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32), requires_grad=False)
+        layer.k_cache_offset = torch.nn.Parameter(torch.zeros(1, dtype=dtype), requires_grad=False)
         layer.k_cache_offset.weight_loader = _c8_kv_scale_weight_loader
-        layer.v_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=torch.float32), requires_grad=False)
+        layer.v_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
         layer.v_cache_scale.weight_loader = _c8_kv_scale_weight_loader
-        layer.v_cache_offset = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32), requires_grad=False)
+        layer.v_cache_offset = torch.nn.Parameter(torch.zeros(1, dtype=dtype), requires_grad=False)
         layer.v_cache_offset.weight_loader = _c8_kv_scale_weight_loader
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

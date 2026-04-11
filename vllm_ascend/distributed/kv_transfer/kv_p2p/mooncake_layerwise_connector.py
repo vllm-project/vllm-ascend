@@ -272,33 +272,6 @@ class KVCacheSendingLayerThread(threading.Thread):
         except Exception as e:
             logger.error(f"Failed to transfer KV cache for layer idx {send_task.layer_idx}, {e}")
 
-    def transfer_quant_kv_cache(self,block_lens:list[int], send_task: SendTask, layer_remote_kv_base_addr:list[int],
-                                grouped_remote_block_ids:list[int], grouped_local_block_ids:list[int]) -> None:
-        assert len(block_lens) == 2, "Quantization block length must be 2!"
-        if self.enable_kv_quant:
-            quant_block_lens = [block_lens[0] // 2, block_lens[1]]
-        elif self.enable_c8_quant:
-            quant_block_lens = [block_lens[0] // 2, block_lens[1] // 2]
-        layer_local_quant_kv_addr = [self.k_buffer.data_ptr(), self.v_buffer.data_ptr()]
-        rearrange_block_ids = send_task.group_rearrange_block_ids[layer_group_idx]
-        # eg:[5,6,7,9] -> {5:0, 6:1, 7:2, 9:3}
-        rearrange_block_dict = {
-            value: index
-            for index, value in enumerate(rearrange_block_ids)  # type:ignore
-        }
-        for block_len, src_layer_base_addr, dst_layer_base_addr in zip(
-                quant_block_lens, layer_local_quant_kv_addr, layer_remote_kv_base_addr
-        ):
-            for group_remote_block_id, group_local_block_id in zip(
-                    grouped_remote_block_ids, grouped_local_block_ids
-            ):
-                src = src_layer_base_addr + rearrange_block_dict[group_local_block_id[0]] * block_len
-                dst = dst_layer_base_addr + group_remote_block_id[0] * block_len
-                length = len(group_local_block_id) * block_len
-                src_list.append(src)
-                dst_list.append(dst)
-                length_list.append(length)
-
     def get_transfer_meta(self, send_task: SendTask, req_id: str, req_meta: ReqMeta, layer_group_idx: int):
         src_list: list[int] = []
         dst_list: list[int] = []
@@ -388,7 +361,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                         quant_block_lens = [block_lens[0] // 2, block_lens[1]]
                     else:
                         quant_block_lens = [block_lens[0] // 2, block_lens[1] // 2]
-                    layer_local_quant_kv_addr = [self.k_quant_buffer.data_ptr(), self.v_quant_buffer.data_ptr()]
+                    layer_local_quant_kv_addr = [self.k_buffer.data_ptr(), self.v_buffer.data_ptr()]
                     rearrange_block_ids = send_task.group_rearrange_block_ids[layer_group_idx]
                     # eg:[5,6,7,9] -> {5:0, 6:1, 7:2, 9:3}
                     rearrange_block_dict = {

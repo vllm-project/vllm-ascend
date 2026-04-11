@@ -557,12 +557,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             flashcomm2_oshard_manager.post_process_after_loading()
 
     def full_graph_fia(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor,
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            attn_metadata: AscendMetadata,
+            output: torch.Tensor,
+            layer = None
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
@@ -580,7 +581,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         extra_args = {}
         if self.enable_c8_quant:
-            layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
             extra_args = {
                 "key_antiquant_scale": layer._c8_k_aq_scale,
                 "key_antiquant_offset": layer._c8_k_aq_offset,
@@ -621,7 +621,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event.wait(stream)
         event.reset(stream)
         graph_params.events[num_tokens].append(event)
-        attn_params =(
+        attn_params = (
             weak_ref_tensors(query),
             weak_ref_tensors(key),
             weak_ref_tensors(value),
@@ -641,7 +641,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                          weak_ref_tensors(layer._c8_k_aq_offset),
                                          weak_ref_tensors(layer._c8_v_aq_scale),
                                          weak_ref_tensors(layer._c8_v_aq_offset),
-            )
+                                         )
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
@@ -1093,6 +1093,13 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         if attn_metadata is None:
             return output.fill_(0)
 
+        # pooling model branch
+        if attn_metadata.model_runner_type == "pooling":
+            attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
+
+        self._prepare_c8_scales(layer, query.device)
         float_key, float_value = None, None
         if self.vllm_config.kv_transfer_config is None:
             if key is not None and value is not None:
@@ -1101,15 +1108,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
                 query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
 
-            if attn_metadata.model_runner_type == "pooling":
-                attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
-
-            self._prepare_c8_scales(layer, query.device)
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
+                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
                 return self._forward_c8_decode(query, attn_metadata, output, layer)
@@ -1125,12 +1126,11 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     layer,
                 )
         else:
-            self._prepare_c8_scales(layer, query.device)
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and not self.is_kv_producer:
                 key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
                 query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
                 if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
+                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
                 return self._forward_c8_decode(query, attn_metadata, output, layer)
@@ -1141,11 +1141,6 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     query, key, value, output_padded = self.reshape_and_cache(
                         query, key, value, kv_cache, attn_metadata, output
                     )
-                # pooling model branch
-                if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
-                    attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
                 if output_padded is not None:
                     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
                 else:
@@ -1181,20 +1176,20 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
         dequant_num = self.num_kv_heads* self.head_size
         layer._c8_k_descale = layer._c8_k_scale.view(dequant_num)
-        layer._c8_k_deoffset = layer._c8_k_scale.view(dequant_num)
-        layer._c8_v_descale = layer._c8_k_scale.view(dequant_num)
-        layer._c8_v_deoffset = layer._c8_k_scale.view(dequant_num)
+        layer._c8_k_deoffset = layer._c8_k_offset.view(dequant_num)
+        layer._c8_v_descale = layer._c8_v_scale.view(dequant_num)
+        layer._c8_v_deoffset = layer._c8_v_offset.view(dequant_num)
 
         bnsd = (1, self.num_kv_heads, 1, self.head_size)
-        layer._c8_k_aq_scale = layer._c8_k_scale.to(torch.bfloat16).view(bnsd).contiguous()
-        layer._c8_k_aq_offset = layer._c8_k_offset.to(torch.bfloat16).view(bnsd).contiguous()
-        layer._c8_v_aq_scale = layer._c8_v_scale.to(torch.bfloat16).view(bnsd).contiguous()
-        layer._c8_v_aq_offset = layer._c8_v_offset.to(torch.bfloat16).view(bnsd).contiguous()
+        layer._c8_k_aq_scale = layer._c8_k_scale.view(bnsd).contiguous()
+        layer._c8_k_aq_offset = layer._c8_k_offset.view(bnsd).contiguous()
+        layer._c8_v_aq_scale = layer._c8_v_scale.view(bnsd).contiguous()
+        layer._c8_v_aq_offset = layer._c8_v_offset.view(bnsd).contiguous()
 
-        layer._c8_k_inv_scale_bf16 = (1.0 / layer._c8_k_scale).to(torch.bfloat16)
-        layer._c8_k_offset_bf16 = layer._c8_k_offset.to(torch.bfloat16)
-        layer._c8_v_inv_scale_bf16 = (1.0 / layer._c8_v_scale).to(torch.bfloat16)
-        layer._c8_v_offset_bf16 = layer._c8_v_offset.to(torch.bfloat16)
+        layer._c8_k_inv_scale_bf16 = 1.0 / layer._c8_k_scale
+        layer._c8_k_offset_bf16 = layer._c8_k_offset
+        layer._c8_v_inv_scale_bf16 = 1.0 / layer._c8_v_scale
+        layer._c8_v_offset_bf16 = layer._c8_v_offset
 
         layer._c8_scales_prepared = True
 
