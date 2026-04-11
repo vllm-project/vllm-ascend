@@ -24,16 +24,6 @@ from .base import AscendLinearScheme
 from .registry import register_scheme
 
 
-def scale_from_float_to_int64(scale: torch.Tensor) -> torch.Tensor:
-    """Convert float32 scale tensor to the int64 bit-pattern expected by A8W4."""
-    import numpy as np
-
-    scale = torch.from_numpy(
-        np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(), dtype=np.int32).astype(np.int64)
-    ).to(scale.device)
-    return scale
-
-
 @register_scheme("W4A4_DYNAMIC", "linear")
 class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A4_DYNAMIC.
@@ -70,7 +60,7 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
         output = torch_npu.npu_quant_matmul(
             x,
             layer.weight.data,
-            scale=layer.weight_scale_int64,
+            scale=layer.weight_scale.data.view(-1),
             pertoken_scale=pertoken_scale,
             bias=None,
             output_dtype=dtype,
@@ -80,9 +70,7 @@ class AscendW4A4LaosDynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale.data = layer.weight_scale.data.flatten().to(torch.float32)
-        layer.weight_scale_int64 = scale_from_float_to_int64(layer.weight_scale.data)
-        layer.weight_offset.data = layer.weight_offset.data.flatten().to(torch.float32)
+        layer.weight_scale.data = layer.weight_scale.data.to(torch.float32)
         layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.weight.data.to(torch.int32))
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(-1, -2)
