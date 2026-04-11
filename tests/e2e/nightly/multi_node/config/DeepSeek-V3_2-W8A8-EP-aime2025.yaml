@@ -9,7 +9,7 @@ env_common:
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 10
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  HCCL_BUFFSIZE: 256
+  HCCL_BUFFSIZE: 1024
   VLLM_TORCH_PROFILER_WITH_STACK: 0
   ASCEND_AGGREGATE_ENABLE: 1
   ASCEND_TRANSPORT_PRINT: 1
@@ -41,18 +41,18 @@ deployment:
           --data-parallel-address $LOCAL_IP
           --tensor-parallel-size 16
           --enable-expert-parallel
-          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
           --max-num-seqs 64
-          --max-model-len 68000 
-          --max-num-batched-tokens 32560
+          --max-model-len 85000
+          --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.82
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
-          --tokenizer-mode deepseek_v32 
+          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}'
+          --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -86,18 +86,18 @@ deployment:
           --data-parallel-address $MASTER_IP
           --tensor-parallel-size 16
           --enable-expert-parallel
-          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
           --max-num-seqs 64
-          --max-model-len 68000 
-          --max-num-batched-tokens 32560
+          --max-model-len 85000
+          --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.82
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
-          --tokenizer-mode deepseek_v32 
+          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}'
+          --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -133,12 +133,12 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
-          --max-model-len 68000 
+          --max-model-len 85000
           --max-num-batched-tokens 12
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' 
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}'
           --trust-remote-code
           --max-num-seqs 4
-          --gpu-memory-utilization 0.90
+          --gpu-memory-utilization 0.95
           --no-enable-prefix-caching
           --async-scheduling
           --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
@@ -180,18 +180,18 @@ deployment:
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
           --seed 1024
           --quantization ascend
-          --max-model-len 68000 
+          --max-model-len 85000
           --max-num-batched-tokens 12
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}' 
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3, 6, 9, 12]}'
           --trust-remote-code
           --max-num-seqs 4
-          --gpu-memory-utilization 0.90
+          --gpu-memory-utilization 0.95
           --no-enable-prefix-caching
           --async-scheduling
           --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
-          --kv-transfer-config 
+          --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_consumer",
           "kv_port": "30200",
@@ -208,60 +208,12 @@ deployment:
               }
           }'
 benchmarks:
-  perf_short_warmup:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 1
-    max_out_len: 3000
-    batch_size: 1
-    request_rate: 11.2
-    baseline: 1
-    threshold: 0.97
-
-  perf_long_warmup:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in64000-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 1
-    max_out_len: 3000
-    batch_size: 1
-    request_rate: 11.2
-    baseline: 1
-    threshold: 0.97
-
-  perf_short:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 512
-    max_out_len: 3000
-    batch_size: 128
-    request_rate: 11.2
-    baseline: 1441.4691 
-    threshold: 0.97
-
-  perf_long:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in64000-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 128
-    max_out_len: 3000
-    batch_size: 32
-    request_rate: 11.2
-    baseline: 702.6262 # https://github.com/vllm-project/vllm-ascend/actions/runs/24222505363/job/70716884885?pr=7119
-    threshold: 0.97
-
   acc:
     case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k-lite
+    dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 4096
-    batch_size: 64
-    baseline: 96.88
-    threshold: 5
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 72348
+    batch_size: 32
+    baseline: 66.67
+    threshold: 7
