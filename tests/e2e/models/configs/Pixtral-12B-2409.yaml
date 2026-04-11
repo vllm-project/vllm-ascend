@@ -1,0 +1,14 @@
+model_name: "mistralai/Pixtral-12B-2409"
+hardware: "Atlas 800I A2 Series"
+model: "vllm-vlm"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.55
+  - name: "exact_match,flexible-extract"
+    value: 0.60
+max_model_len: 4096
+trust_remote_code: true
+tokenizer_mode: "mistral"
+enforce_eager: true
