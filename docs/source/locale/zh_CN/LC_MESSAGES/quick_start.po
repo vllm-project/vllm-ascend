@@ -75,7 +75,7 @@ msgid ""
 "The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed"
 " in `/vllm-workspace` and installed in [development "
 "mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)"
-" (`pip install -e`) to help developers immediately make changes effective"
+" (`pip install -e`) to help developers make changes effective immediately"
 " without requiring a new installation."
 msgstr ""
 "默认工作目录为 `/workspace`。vLLM 和 vLLM Ascend 的源码位于 `/vllm-workspace`，"
@@ -101,7 +101,7 @@ msgstr "离线批量推理"
 #: ../../source/quick_start.md:102
 msgid ""
 "With vLLM installed, you can start generating texts for list of input "
-"prompts (i.e. offline batch inferencing)."
+"prompts (i.e. offline batch inference)."
 msgstr "安装 vLLM 后，您可以针对一组输入提示（Prompts）开始生成文本（即离线批量推理）。"
 
 #: ../../source/quick_start.md:104

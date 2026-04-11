@@ -40,7 +40,7 @@ msgid "Python: >= 3.10, < 3.12"
 msgstr "Python：>= 3.10, < 3.12"
 
 #: ../../source/installation.md:9
-msgid "A hardware with Ascend NPU. It's usually the Atlas 800 A2 series."
+msgid "Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series."
 msgstr "配备昇腾 NPU 的硬件设备，通常为 Atlas 800 A2 系列。"
 
 #: ../../source/installation.md:10
@@ -121,8 +121,8 @@ msgstr "有两种安装方式："
 
 #: ../../source/installation.md:21
 msgid ""
-"**Using pip**: first prepare env manually or via CANN image, then install"
-" `vllm-ascend` using pip."
+"**Using pip**: first prepare the environment manually or via a CANN image, then install"
+" `vllm-ascend` using pip"
 msgstr "**使用 pip**：首先手动或通过 CANN 镜像准备环境，然后使用 pip 安装 `vllm-ascend`。"
 
 #: ../../source/installation.md:22
@@ -135,7 +135,7 @@ msgstr "配置昇腾 CANN 环境"
 
 #: ../../source/installation.md:26
 msgid ""
-"Before installation, you need to make sure firmware/driver and CANN are "
+"Before installation, you need to make sure firmware/driver, and CANN are "
 "installed correctly, refer to [Ascend Environment Setup "
 "Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) "
 "for more details."
@@ -177,7 +177,7 @@ msgstr "准备软件环境最简单的方法是直接使用 CANN 官方镜像：
 #: ../../source/installation.md:51
 msgid ""
 "The CANN prebuilt image includes NNAL (Ascend Neural Network Acceleration"
-" Library) which provides libatb.so for advanced tensor operations. No "
+" Library), which provides libatb.so for advanced tensor operations. No "
 "additional installation is required when using the prebuilt image."
 msgstr ""
 "CANN 预构建镜像已包含 NNAL（昇腾神经网络加速库），它为高级张量操作提供 libatb.so 支持。使用预构建镜像时无需额外安装。"
@@ -207,7 +207,7 @@ msgid "No more extra step if you are using `vllm-ascend` prebuilt Docker image."
 msgstr "如果您使用的是 `vllm-ascend` 预构建的 Docker 镜像，则无需额外步骤。"
 
 #: ../../source/installation.md:119
-msgid "Once it is done, you can start to set up `vllm` and `vllm-ascend`."
+msgid "Once this is done, you can start to set up `vllm` and `vllm-ascend`."
 msgstr "完成上述步骤后，即可开始安装 `vllm` 和 `vllm-ascend`。"
 
 #: ../../source/installation.md:121
@@ -215,7 +215,7 @@ msgid "Set up using Python"
 msgstr "使用 Python 安装"
 
 #: ../../source/installation.md:123
-msgid "First install system dependencies and configure pip mirror:"
+msgid "First, install system dependencies and configure the pip mirror:"
 msgstr "首先安装系统依赖并配置 pip 镜像源："
 
 #: ../../source/installation.md:135
@@ -225,8 +225,17 @@ msgid ""
 msgstr "**[可选]** 如果您在 x86 架构机器上操作或使用 torch-npu 开发版本，请配置 pip 的额外索引 (extra-index)："
 
 #: ../../source/installation.md:142
-msgid "Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:"
+msgid "Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using one of the following methods:"
 msgstr "接着，您可以从**预构建的 wheel 包**安装 `vllm` 和 `vllm-ascend`："
+
+#: ../../source/installation.md
+msgid ""
+"The `uv-wheelnext` installation downloads only the delta on top of "
+"vllm, resulting in a smaller download size. First install "
+"`uv-wheelnext` to support incremental wheels:"
+msgstr ""
+"`uv-wheelnext` 安装方式仅下载 vLLM 之上的增量部分，从而减少下载量。"
+"请先安装 `uv-wheelnext` 以支持增量 wheel 包："
 
 #: ../../source/installation.md
 msgid "Click here to see \"Build from source code\""
@@ -246,15 +255,26 @@ msgstr ""
 
 #: ../../source/installation.md:178
 msgid ""
-"To build custom operators, gcc/g++ higher than 8 and c++ 17 or higher is "
-"required. If you're using `pip install -e .` and encounter a torch-npu "
+"To build custom operators, gcc/g++ higher than 8 and C++17 or higher are "
+"required. If you are using `pip install -e .` and encounter a torch-npu "
 "version conflict, please install with `pip install --no-build-isolation "
 "-e .` to build on system env. If you encounter other problems during "
-"compiling, it is probably because unexpected compiler is being used, you "
-"may export `CXX_COMPILER` and `C_COMPILER` in environment to specify your"
+"compiling, it is probably because an unexpected compiler is being used, you "
+"may export `CXX_COMPILER` and `C_COMPILER` in the environment to specify your"
 " g++ and gcc locations before compiling."
 msgstr ""
 "构建自定义算子需要 gcc/g++ 版本高于 8 且支持 C++17 或更高标准。如果您在使用 `pip install -e .` 时遇到 torch-npu 版本冲突，请使用 `pip install --no-build-isolation -e .` 以在系统环境下构建。如果在编译过程中遇到其他问题，通常是因为使用了非预期的编译器，您可以在编译前导出 `CXX_COMPILER` 和 `C_COMPILER` 环境变量来指定 g++ 和 gcc 的具体路径。"
+
+#: ../../source/installation.md
+msgid ""
+"If you are building in a CPU-only environment where `npu-smi` is "
+"unavailable, you need to set `SOC_VERSION` before `pip install -e .` so "
+"the build can target the correct chip. You can refer to `Dockerfile*` "
+"defaults, for example:"
+msgstr ""
+"如果在没有 `npu-smi` 的纯 CPU 环境中进行构建，则需要在执行 `pip install -e .` "
+"之前设置 `SOC_VERSION`，以使构建过程能够针对正确的芯片进行目标适配。"
+"可参考 `Dockerfile*` 中的默认配置，例如："
 
 #: ../../source/installation.md:182
 msgid "Set up using Docker"
