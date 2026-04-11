@@ -39,6 +39,7 @@ from vllm_ascend.utils import (
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
+    bootstrap_custom_op_env,
     check_kv_extra_config,
     flashcomm2_enable,
     get_ascend_device_type,
@@ -569,14 +570,7 @@ class NPUPlatform(Platform):
         global _CUSTOM_OP_REGISTERED
         if _CUSTOM_OP_REGISTERED:
             return
-        CUR_DIR = os.path.dirname(os.path.realpath(__file__))
-        CUSTOM_OPP_PATH = os.path.join(CUR_DIR, "_cann_ops_custom", "vendors", "vllm-ascend")
-        if os.path.exists(CUSTOM_OPP_PATH):
-            current_cust_opp_path = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
-            if current_cust_opp_path:
-                os.environ["ASCEND_CUSTOM_OPP_PATH"] = f"{CUSTOM_OPP_PATH}:{current_cust_opp_path}"
-            else:
-                os.environ["ASCEND_CUSTOM_OPP_PATH"] = CUSTOM_OPP_PATH
+        bootstrap_custom_op_env()
         _CUSTOM_OP_REGISTERED = True
 
     @classmethod
