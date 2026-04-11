@@ -70,6 +70,9 @@ _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
+_CUSTOM_OP_BASE_DIR = (
+    os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
+)
 
 
 def is_310p():
@@ -205,8 +208,7 @@ def _prepend_env_path(env_name: str, path: str) -> None:
 
 
 def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
-    cur_dir = os.path.dirname(os.path.realpath(__file__))
-    vendor_path = os.path.join(cur_dir, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
+    vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
     if not os.path.exists(vendor_path):
         return
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
@@ -315,6 +317,12 @@ def enable_custom_op():
     if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
+
+    # `enable_custom_op()` is called from model forward paths. Keep the runtime
+    # bootstrap out of Dynamo tracing and fall back to the non-custom-op path if
+    # the extension has not already been initialized before compilation starts.
+    if torch.compiler.is_compiling():
+        return False
 
     try:
         bootstrap_custom_op_env()
