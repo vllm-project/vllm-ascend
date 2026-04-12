@@ -111,8 +111,14 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
 
-    # For vllm model, we need to pass model_args as a dictionary
-    # because lm_eval's vllm implementation expects it that way
+    # Try a different approach: pass model directly as a separate parameter
+    # This might work better with lm_eval's vllm implementation
+    model_name = eval_config["model_name"]
+    
+    # Remove 'pretrained' from model_args_dict since we're passing it separately
+    if 'pretrained' in model_args_dict:
+        del model_args_dict['pretrained']
+
     eval_params = {
         "model": eval_config.get("model", "vllm"),
         "model_args": model_args_dict,
@@ -121,6 +127,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
         "fewshot_as_multiturn": eval_config.get("fewshot_as_multiturn", True),
         "limit": eval_config.get("limit", None),
         "batch_size": eval_config.get("batch_size", "auto"),
+        "model_name": model_name,  # Pass model name directly
     }
     for s in ["num_fewshot", "fewshot_as_multiturn", "apply_chat_template"]:
         val = eval_config.get(s, None)
