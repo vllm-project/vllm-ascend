@@ -172,11 +172,9 @@ install_vllm() {
 install_aisbench() {
     echo "====> Install AISBench benchmark"
 
-    VLLM_ASCEND_DIR="$WORKSPACE/vllm-ascend/"
     BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
 
-    cd "$VLLM_ASCEND_DIR"
-    git clone https://github.com/AISBench/benchmark.git
+    cp -r /tmp/aisbench-backup "$BENCH_DIR"
 
     cd "$BENCH_DIR"
     pip install -e . \
