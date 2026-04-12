@@ -110,20 +110,15 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
 
-    # Build model_args with the correct parameter name for lm_eval
+    # For lm_eval with vllm, we need to pass the model name directly in the model_args string
+    # This is a workaround for the issue where lm_eval expects a specific format
+    model_name = eval_config["model_name"]
     trust_remote_code = eval_config.get("trust_remote_code", False)
     max_model_len = eval_config.get("max_model_len", 4096)
     dtype = eval_config.get("dtype", "auto")
 
-    # Provide both 'model' and 'pretrained' parameters to satisfy both lm_eval and vLLM
-    model_args = {
-        "model": eval_config["model_name"],
-        "pretrained": eval_config["model_name"],
-        "tensor_parallel_size": tp_size,
-        "dtype": dtype,
-        "trust_remote_code": trust_remote_code,
-        "max_model_len": max_model_len,
-    }
+    # Build model_args as a string in the format expected by lm_eval
+    model_args = f"model={model_name},pretrained={model_name},tensor_parallel_size={tp_size},dtype={dtype},trust_remote_code={trust_remote_code},max_model_len={max_model_len}"
 
     # Add other optional parameters
     for s in [
@@ -137,7 +132,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     ]:
         val = eval_config.get(s, None)
         if val is not None:
-            model_args[s] = val
+            model_args += f",{s}={val}"
 
     print("Model Parameters:")
     print(model_args)
