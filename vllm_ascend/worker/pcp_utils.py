@@ -1028,8 +1028,8 @@ class PCPManager:
             dtype=np.int32,
         )
 
-        # MTP token count (scheduled_tokens includes the actual token, so mtp_len = scheduled_tokens - 1)
-        mtp_len = decode_num_scheduled_tokens - 1
+        # MTP token count is directly decode_num_scheduled_tokens
+        mtp_len = decode_num_scheduled_tokens
 
         # Get local history tokens on each rank using _get_cp_local_seq_lens
         num_computed_tokens_tensor = torch.from_numpy(np.array(decode_num_computed_tokens))
