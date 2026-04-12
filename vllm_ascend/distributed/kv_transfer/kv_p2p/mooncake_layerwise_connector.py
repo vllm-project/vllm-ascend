@@ -1762,7 +1762,9 @@ class MooncakeLayerwiseConnectorWorker:
             path = make_zmq_path("tcp", req_meta.remote_host, req_meta.remote_port)
             msg_encoder = msgspec.msgpack.Encoder()
             side_channel_path = str(self.side_channel_host) + str(self.side_channel_port)
-            encoded_data = msg_encoder.encode((DONE_SENDING_MSG, external_req_id, req_meta.trans_count[group_idx], side_channel_path))
+            encoded_data = msg_encoder.encode(
+                (DONE_SENDING_MSG, external_req_id, req_meta.trans_count[group_idx], side_channel_path)
+            )
             max_retries = 3
             for attempt in range(1, max_retries + 1):
                 try:
@@ -1791,9 +1793,7 @@ class MooncakeLayerwiseConnectorWorker:
                         )
                         time.sleep(0.1)
                     else:
-                        raise RuntimeError(
-                            f"Failed to receive ACK after {max_retries} attempts: {e}"
-                        ) from e
+                        raise RuntimeError(f"Failed to receive ACK after {max_retries} attempts: {e}") from e
         except Exception as e:
             logger.error(
                 f"Sending done sending signal for request {external_req_id} to "
