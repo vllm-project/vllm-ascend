@@ -107,9 +107,12 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
 
 def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
-    model_args = build_model_args(eval_config, tp_size)
+    model_args_dict = build_model_args(eval_config, tp_size)
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
+
+    # Convert model_args to string format expected by lm_eval
+    model_args = ",".join([f"{k}={v}" for k, v in model_args_dict.items()])
 
     eval_params = {
         "model": eval_config.get("model", "vllm"),
