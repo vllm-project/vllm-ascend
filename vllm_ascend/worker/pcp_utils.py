@@ -782,50 +782,54 @@ class PCPManager:
                         self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
                     )
                 )
-            if self.decode_threshold > 1:
-                num_computed_tokens_of_pcp_dcp_list = []
-                if self.num_decode_reqs:
-                    num_decodes_flatten = query_lens[: self.num_decode_reqs].sum().item()
-                    if query_lens[: self.num_decode_reqs].min().item() == self.decode_threshold:
-                        decode_flatten_idx = list(range(num_decodes_flatten))
-                    else:
-                        decode_flatten_idx = []
-                        for req_id in range(self.num_decode_reqs):
-                            offset = (req_id + 1) * self.decode_threshold
-                            decode_flatten_idx += list(range(offset - query_lens[req_id], offset))
-                    num_computed_tokens_of_pcp_dcp_list.append(num_computed_tokens_of_pcp_dcp[decode_flatten_idx])
-                if self.num_prefill_reqs:
-                    num_computed_tokens_of_pcp_dcp_list.append(
-                        num_computed_tokens_of_pcp_dcp[
-                            (self.num_decode_reqs + 1) * self.decode_threshold - 1 :: self.decode_threshold
-                        ]
-                    )
-                num_computed_tokens_of_pcp_dcp = torch.cat(num_computed_tokens_of_pcp_dcp_list, dim=0)
-
-                # For pcp + spec decode, we flatten block_table
-                # to avoid irregular attn_mask shape, e.g.,
-                # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
-                # ori block_table: # [d0, d1, p0, p1, p2]
-                # (num_reqs_d + num_reqs_p, max_num_blocks),
-                # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
-                # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens = self.query_lens_pcp_full.gpu[:num_reqs_padded]
-                num_prefill_reqs = self.num_prefill_reqs
-                num_decode_reqs = self.num_decode_reqs
-                num_decode_reqs_flatten = ori_query_lens_cpu[:num_decode_reqs].sum().item()
-                if not self.use_sparse:
-                    block_table_tensor[num_decode_reqs_flatten : num_decode_reqs_flatten + num_prefill_reqs].copy_(
-                        block_table_tensor[num_decode_reqs : num_decode_reqs + num_prefill_reqs].clone()
-                    )
-                    block_table_tensor[:num_decode_reqs_flatten].copy_(
-                        block_table_tensor[:num_decode_reqs].repeat_interleave(ori_query_lens[:num_decode_reqs], dim=0)
-                    )
-                    block_table_tensor = block_table_tensor[: num_decode_reqs_flatten + num_prefill_reqs]
-                    if num_reqs_padded > num_reqs:
-                        pad_size = num_reqs_padded - num_reqs
-                        ori_query_lens_cpu[-pad_size:] = torch.full(
-                            [pad_size], ori_query_lens_cpu[-pad_size - 1].item()
-                        )
+            # [Deprecated] With MTP attention mask, flattening is no longer needed.
+            # The original code flattened num_computed_tokens_of_pcp_dcp to handle
+            # irregular attn_mask shapes in MTP scenarios. Now we use mtp_attention_masks_for_decode
+            # instead.
+            # if self.decode_threshold > 1:
+            #     num_computed_tokens_of_pcp_dcp_list = []
+            #     if self.num_decode_reqs:
+            #         num_decodes_flatten = query_lens[: self.num_decode_reqs].sum().item()
+            #         if query_lens[: self.num_decode_reqs].min().item() == self.decode_threshold:
+            #             decode_flatten_idx = list(range(num_decodes_flatten))
+            #         else:
+            #             decode_flatten_idx = []
+            #             for req_id in range(self.num_decode_reqs):
+            #                 offset = (req_id + 1) * self.decode_threshold
+            #                 decode_flatten_idx += list(range(offset - query_lens[req_id], offset))
+            #         num_computed_tokens_of_pcp_dcp_list.append(num_computed_tokens_of_pcp_dcp[decode_flatten_idx])
+            #     if self.num_prefill_reqs:
+            #         num_computed_tokens_of_pcp_dcp_list.append(
+            #             num_computed_tokens_of_pcp_dcp[
+            #                 (self.num_decode_reqs + 1) * self.decode_threshold - 1 :: self.decode_threshold
+            #             ]
+            #         )
+            #     num_computed_tokens_of_pcp_dcp = torch.cat(num_computed_tokens_of_pcp_dcp_list, dim=0)
+            #
+            #     # For pcp + spec decode, we flatten block_table
+            #     # to avoid irregular attn_mask shape, e.g.,
+            #     # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
+            #     # ori block_table: # [d0, d1, p0, p1, p2]
+            #     # (num_reqs_d + num_reqs_p, max_num_blocks),
+            #     # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
+            #     # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
+            #     ori_query_lens = self.query_lens_pcp_full.gpu[:num_reqs_padded]
+            #     num_prefill_reqs = self.num_prefill_reqs
+            #     num_decode_reqs = self.num_decode_reqs
+            #     num_decode_reqs_flatten = ori_query_lens_cpu[:num_decode_reqs].sum().item()
+            #     if not self.use_sparse:
+            #         block_table_tensor[num_decode_reqs_flatten : num_decode_reqs_flatten + num_prefill_reqs].copy_(
+            #             block_table_tensor[num_decode_reqs : num_decode_reqs + num_prefill_reqs].clone()
+            #         )
+            #         block_table_tensor[:num_decode_reqs_flatten].copy_(
+            #             block_table_tensor[:num_decode_reqs].repeat_interleave(ori_query_lens[:num_decode_reqs], dim=0)
+            #         )
+            #         block_table_tensor = block_table_tensor[: num_decode_reqs_flatten + num_prefill_reqs]
+            #         if num_reqs_padded > num_reqs:
+            #             pad_size = num_reqs_padded - num_reqs
+            #             ori_query_lens_cpu[-pad_size:] = torch.full(
+            #                 [pad_size], ori_query_lens_cpu[-pad_size - 1].item()
+            #             )
             pcp_unpad_mask = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length]
             long_seq_metadata = AscendPrefillContextParallelMetadata(
                 pcp_use_hybrid_attn=self.pcp_use_hybrid_attn,

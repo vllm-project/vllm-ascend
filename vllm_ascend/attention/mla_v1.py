@@ -638,7 +638,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             # Use the first decode request's MTP mask
             # TODO: Support multiple decode requests
             if self.num_decodes > 0 and mtp_masks[0] is not None:
-                mtp_attn_mask = mtp_masks[0]
+                mtp_attn_mask = mtp_masks[0].to(sin.device)
 
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
