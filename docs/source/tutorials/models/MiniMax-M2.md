@@ -128,7 +128,7 @@ Below are recommended startup configurations for `MiniMax-M2.5`. Users can simpl
 
 ### A3 (single node)
 
-Below is a recommended startup configuration for short-context condition like 3.5k/1.5k on `MiniMax-M2.5` to reach a good performance. If you wish to run on long-context case, you may follow `Remarks` bellow to change your config.
+Below is a recommended startup configuration for short-context condition like 3.5k/1.5k on `MiniMax-M2.5` to reach a good performance. If you wish to run on long-context case, you may follow `Remarks` below to change your config.
 
 Notes:
 
