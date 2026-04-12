@@ -1,4 +1,4 @@
-model_name: "allenai/OLMo-2-0425-1B"
+model_name: "modelscope/allenai/OLMo-2-0425-1B"
 hardware: "Atlas A2 Series"
 tasks:
   - name: "gsm8k"

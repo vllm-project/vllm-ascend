@@ -9,7 +9,6 @@ from vllm.model_executor.models.qwen3_vl import (
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
-from vllm_ascend.utils import vllm_version_is
 
 
 def tensor_parallel_wrap(func):
