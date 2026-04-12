@@ -1979,6 +1979,8 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
+    # This is a function from the upstream vllm used to handle PP+SP. Since the judgment logic 
+    # of flashcomm1 in Ascend is inconsistent with SP in vllm, it needs to be overridden.
     def sync_and_slice_intermediate_tensors(
         self,
         num_tokens: int,

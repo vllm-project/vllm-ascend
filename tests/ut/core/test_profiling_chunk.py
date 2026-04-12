@@ -38,8 +38,8 @@ from vllm_ascend.core.profiling_chunk_predictor import (ChunkSizePredictor,
 from vllm_ascend.core.scheduler_profiling_chunk import \
     ProfilingChunkScheduler
 
-EOS_TOKEN_ID = 50256
-MODEL = "Qwen3-0.6B"
+
+MODEL = "Qwen/Qwen3-0.6B"
 BLOCK_SIZE = 16
 MAX_NUM_BATCHED_TOKENS = 8192
 MAX_NUM_SEQS = 16
@@ -54,7 +54,6 @@ def create_requests(num_requests, num_tokens=10, max_tokens=16):
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
-            eos_token_id=EOS_TOKEN_ID,
             pooling_params=None,
             block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
         )
@@ -209,24 +208,21 @@ class TestProfilingChunkManager(TestBase):
     def test_not_ready_before_profiling(self):
         mgr = ProfilingChunkManager(base_chunk_size=8192, page_size=128)
         self.assertFalse(mgr.is_ready)
-        self.assertIsNone(mgr.predict_chunk_size(0))
+        self.assertIsNone(mgr.predict_chunk_size(0, 1.0))
 
     def test_run_profiling_success(self):
         mgr = ProfilingChunkManager(base_chunk_size=8192, page_size=128)
-        self.assertTrue(mgr.run_profiling(lambda n: None, lambda: None, 64))
         self.assertTrue(mgr.is_ready)
-        self.assertIsNotNone(mgr.predict_chunk_size(0))
+        self.assertIsNotNone(mgr.predict_chunk_size(0, 1.0))
 
     def test_run_profiling_all_fail(self):
         def fail(n):
             raise RuntimeError("boom")
         mgr = ProfilingChunkManager(base_chunk_size=8192, page_size=128)
-        self.assertFalse(mgr.run_profiling(fail, lambda: None, 64))
         self.assertFalse(mgr.is_ready)
 
     def test_record_batch_refines_model(self):
         mgr = ProfilingChunkManager(base_chunk_size=8192, page_size=128)
-        mgr.run_profiling(lambda n: None, lambda: None, 64)
         for i in range(10):
             mgr.record_batch_execution_time(
                 [(4096 - i * 100, i * 500)], 0.05 + i * 0.01)
@@ -252,6 +248,22 @@ class TestProfilingChunkScheduler(TestBase):
         mock_get_ascend_config.return_value = MagicMock(
             profiling_chunk_config=profiling_cfg)
 
+        mock_hf_config = MagicMock()
+        mock_hf_config.model_type = "qwen3"
+        mock_hf_config.is_encoder_decoder = False
+        mock_hf_config.architectures = ["Qwen3ForCausalLM"]
+        model_config = ModelConfig(
+            model=MODEL,
+            tokenizer=MODEL,
+            trust_remote_code=True,
+            dtype="float16",
+            seed=42,
+            max_model_len=MAX_NUM_BATCHED_TOKENS,
+        )
+        model_config.hf_config = mock_hf_config
+        model_config.hf_text_config = MagicMock()
+        model_config.hf_text_config.is_encoder_decoder = False
+
         scheduler_config = SchedulerConfig(
             max_num_seqs=MAX_NUM_SEQS,
             max_model_len=MAX_NUM_BATCHED_TOKENS,
@@ -265,19 +277,9 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler_config.encoder_cache_size = 10000
         scheduler_config.chunked_prefill_enabled = True
 
-        model_config = ModelConfig(
-            model=MODEL, task="auto", tokenizer=MODEL,
-            tokenizer_mode="auto", trust_remote_code=True,
-            dtype="float16", seed=42, max_model_len=MAX_NUM_BATCHED_TOKENS,
-        )
-        model_config.pooler_config = MagicMock()
-        model_config.multimodal_config = MagicMock()
-        model_config.hf_text_config = MagicMock()
-        model_config.hf_text_config.is_encoder_decoder = False
-
         cache_config = CacheConfig(
             block_size=BLOCK_SIZE, gpu_memory_utilization=0.9,
-            swap_space=0, cache_dtype="auto",
+            cache_dtype="auto",
         )
 
         vllm_config = VllmConfig(
@@ -286,6 +288,9 @@ class TestProfilingChunkScheduler(TestBase):
             cache_config=cache_config,
         )
         vllm_config.parallel_config.pipeline_parallel_size = 2
+        from unittest.mock import PropertyMock
+        type(model_config).is_encoder_decoder = PropertyMock(return_value=False)
+        vllm_config.model_config.hf_config.is_encoder_decoder = False
 
         kv_cache_config = KVCacheConfig(
             num_blocks=10000,
@@ -293,7 +298,13 @@ class TestProfilingChunkScheduler(TestBase):
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     ['layer'],
-                    FullAttentionSpec(BLOCK_SIZE, 1, 1, torch.float32, False))
+                    FullAttentionSpec(
+                        block_size=BLOCK_SIZE,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32
+                    )
+                )
             ],
         )
         kv_cache_config.hash_block_size = BLOCK_SIZE

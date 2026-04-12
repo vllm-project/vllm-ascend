@@ -59,6 +59,14 @@ class AscendConfig:
                 "or disable profiling_chunk_config."
             )
 
+        from vllm_ascend import envs as ascend_envs
+
+        if self.profiling_chunk_config.enabled and ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING:
+            raise ValueError(
+                "profiling_chunk_config and balance scheduling (VLLM_ASCEND_BALANCE_SCHEDULING) "
+                "cannot be enabled at the same time. Please disable one of them."
+            )
+
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
         self.layer_sharding = additional_config.get("layer_sharding", None)

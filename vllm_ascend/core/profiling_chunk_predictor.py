@@ -28,8 +28,6 @@ The approach:
 """
 
 import math
-import time
-from collections.abc import Callable
 
 import numpy as np
 from vllm.logger import logger
@@ -178,6 +176,30 @@ class ChunkSizePredictor:
             base_chunk_size,
         )
 
+    def get_time(
+        self,
+        query_len: int,
+        history_len: int,
+    ) -> float:
+        """Get time T based on current seq_lens, f(l) = al^2 + bl + c, f(L+x) - f(L) = T"""
+
+        def f(seq_lens: float) -> float:
+            return self.quadratic_coeff_a * seq_lens * seq_lens + self.linear_coeff_b * seq_lens + self.constant_coeff_c
+
+        return f(query_len + history_len) - f(history_len)
+
+    def get_time_with_history(
+        self,
+        query_len: int,
+        history_len: int,
+    ) -> float:
+        """Get time T based on current seq_lens, f(C,H) = a*C(C+H) + b*(C+H) + c = T"""
+        return (
+            self.quadratic_chunk_a * query_len * (query_len + history_len)
+            + self.linear_chunk_b * (query_len + history_len)
+            + self.constant_chunk_c
+        )
+
     def predict(
         self,
         history_len: int,
@@ -233,7 +255,7 @@ class ChunkSizePredictor:
         if self.quadratic_chunk_a <= 0:
             return None
 
-        # a*C^2 + (a*H + b)*C + c*H - T = 0
+        # a*C^2 + (a*H + b)*C + b*H + c - T = 0
         A = self.quadratic_chunk_a
         B = self.quadratic_chunk_a * history_len + self.linear_chunk_b
         C = self.linear_chunk_b * history_len + self.constant_chunk_c - self.target_latency
@@ -289,82 +311,29 @@ class ProfilingChunkManager:
     def history_ready(self) -> bool:
         return self.is_ready and self.predictor.with_history_ready
 
-    def run_profiling(
-        self,
-        forward_fn: Callable[[int], None],
-        sync_fn: Callable[[], None],
-        num_samples: int = 64,
-    ) -> bool:
-        """Run profiling by executing forward passes with different chunk sizes.
-
-        Args:
-            forward_fn: Function that runs forward pass with given num_tokens
-            sync_fn: Function to synchronize device
-            num_samples: Number of samples to collect
-
-        Returns:
-            True if profiling succeeded
-        """
-        logger.info(
-            "[ProfilingChunk] Starting profiling with %d samples...",
-            num_samples,
-        )
-
-        seq_lens: list[int] = []
-        latencies: list[float] = []
-
-        for i in range(num_samples):
-            chunk_size = int(self.base_chunk_size * 1.25 - i * (self.base_chunk_size * 1.25 / num_samples))
-            if chunk_size <= 0:
-                break
-
-            sync_fn()
-            start = time.perf_counter()
-
-            try:
-                forward_fn(chunk_size)
-            except Exception as e:
-                logger.debug("Forward failed for chunk=%d: %s", chunk_size, e)
-                continue
-
-            sync_fn()
-            latency_ms = (time.perf_counter() - start) * 1000
-
-            seq_lens.append(chunk_size)
-            latencies.append(latency_ms)
-
-        if len(seq_lens) < 8:
-            logger.warning(
-                "[ProfilingChunk] Profiling failed: only %d samples collected",
-                len(seq_lens),
-            )
-            return False
-
-        logger.info(
-            "[ProfilingChunk] Collected %d samples. Latency range: [%.2f, %.2f] ms",
-            len(seq_lens),
-            min(latencies),
-            max(latencies),
-        )
-
-        if not self.predictor.fit(seq_lens, latencies):
-            return False
-
-        self.predictor.set_target_latency(self.base_chunk_size)
-        self.predictor.is_ready = True
-        self._profiling_done = True
-        return True
-
-    def predict_chunk_size(self, history_len: int) -> int | None:
+    def predict_chunk_size(self, history_len: int, target_time: float) -> int | None:
         """Predict optimal chunk size for given history length."""
         if not self.is_ready:
             return None
+
+        self.predictor.target_latency = target_time
 
         if not self.history_ready:
             predict_func = self.predictor.predict
         else:
             predict_func = self.predictor.predict_with_history
         return predict_func(history_len=history_len, base_chunk_size=self.base_chunk_size, page_size=self.page_size)
+
+    def predict_time(self, num_new_tokens: int, history_len: int) -> float:
+        """Predict optimal chunk size for given history length."""
+        if not self.is_ready:
+            return 0.0
+
+        if not self.history_ready:
+            predict_func = self.predictor.get_time
+        else:
+            predict_func = self.predictor.get_time_with_history
+        return predict_func(query_len=num_new_tokens, history_len=history_len)
 
     def record_batch_execution_time(self, request_chunks: list, elapsed_time: float) -> bool:
         """Record batch execution time for online model refinement.

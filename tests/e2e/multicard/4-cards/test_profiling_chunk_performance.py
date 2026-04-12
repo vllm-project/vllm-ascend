@@ -1,19 +1,3 @@
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
 """Performance guard for profiling-based dynamic chunk sizing (PP scenario).
 
 Measures Time-To-First-Token (TTFT) on 64k-token prefill requests with
@@ -32,40 +16,42 @@ import os
 import statistics
 import time
 
-import pytest
-
 from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+os.environ["VLLM_ASCEND_ENABLE_FLASHCOMM1"] = "1"
 
-MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+MODEL = "Qwen/Qwen3-30B-A3B"
 
-# ~64k tokens: DeepSeek-V2 tokenizer averages ~3.5 chars/token for English;
-# 64000 * 3.5 ≈ 224000 chars.  We use a plain repeated word to keep it simple.
+# ~64k tokens
 _WORD = "hello "
-INPUT_64K_TOKENS = _WORD * (224_000 // len(_WORD))
+INPUT_64K_TOKENS = _WORD * (384_000 // len(_WORD))
 
 NUM_WARMUP = 5
 NUM_TEST = 5
 
 # NOTE: Any changes to this baseline must be approved by team members.
-# Measured on DeepSeek-V2-Lite-Chat, PP=2, TP=2, 64k prefill, profiling_chunk enabled.
-BASELINE_TTFT_S = 5.0
+# Measured on Qwen3-30B-A3B, PP=2, TP=2, 64k prefill, profiling_chunk enabled.
+BASELINE_TTFT_S = 5.2
 
 
 def test_profiling_chunk_ttft_performance() -> None:
     with VllmRunner(
         MODEL,
         max_model_len=70000,
-        dtype="auto",
         tensor_parallel_size=2,
         pipeline_parallel_size=2,
         block_size=128,
         enable_expert_parallel=True,
+        enable_prefix_caching=False,
         gpu_memory_utilization=0.9,
-        max_num_batched_tokens=65536,
+        max_num_batched_tokens=12288,
         distributed_executor_backend="mp",
-        additional_config={"profiling_chunk_config": {"enabled": True}},
+        enforce_eager=True,
+        async_scheduling=False,
+        additional_config={"profiling_chunk_config": {"enabled":True, "smooth_factor":0.9}, "enable_cpu_binding": False},
+        hf_overrides={"rope_parameters": {"rope_type":"yarn","rope_theta":1000,"factor":5,"original_max_position_embeddings":262144}}
     ) as vllm_model:
         # With max_tokens=1, total latency ≈ prefill time ≈ TTFT
         prompts = [INPUT_64K_TOKENS]

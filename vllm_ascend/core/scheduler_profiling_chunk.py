@@ -240,7 +240,13 @@ class ProfilingChunkScheduler(Scheduler):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         # >>> PROFILING CHUNK >>>
-        dynamic_chunking_full = False
+        # NOTE(gjc): We found that the FIA operator has abnormal performance
+        # when processing multiple request groups in a batch, so the time_budget
+        # feature is temporarily disabled. It will be enabled again after the
+        # issues with the FIA operator are resolved. Therefore, in multi-request
+        # concurrent scenarios, there is still room for performance improvement in CPP.
+        # time_budget = self.profiling_chunk_manager.predictor.target_latency
+        time_budget = 0.01
         # <<< PROFILING CHUNK <<<
         token_budget = self.max_num_scheduled_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
@@ -259,10 +265,8 @@ class ProfilingChunkScheduler(Scheduler):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
-            # >>> PROFILING CHUNK >>>
-            if dynamic_chunking_full:
-                break
+        # >>> PROFILING CHUNK >>>
+        while req_index < len(self.running) and token_budget > 0 and time_budget > 0:
             # <<< PROFILING CHUNK <<<
             request = self.running[req_index]
 
@@ -314,10 +318,9 @@ class ProfilingChunkScheduler(Scheduler):
             ):
                 predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
                     history_len=request.num_computed_tokens,
+                    target_time=time_budget,
                 )
                 if predicted_chunk is not None and predicted_chunk > 0:
-                    if predicted_chunk <= num_new_tokens:
-                        dynamic_chunking_full = True
                     num_new_tokens = min(predicted_chunk, num_new_tokens)
             # <<< PROFILING CHUNK <<<
 
@@ -376,6 +379,7 @@ class ProfilingChunkScheduler(Scheduler):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
             req_index += 1
 
             # Speculative decode related.
@@ -419,11 +423,11 @@ class ProfilingChunkScheduler(Scheduler):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
-            while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                # >>> PROFILING CHUNK >>>
-                if len(self.running) == self.max_num_running_reqs or dynamic_chunking_full:
-                    break
+            # >>> PROFILING CHUNK >>>
+            while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
                 # <<< PROFILING CHUNK <<<
+                if len(self.running) == self.max_num_running_reqs:
+                    break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
@@ -513,6 +517,7 @@ class ProfilingChunkScheduler(Scheduler):
                     ):
                         predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
                             history_len=num_computed_tokens,
+                            target_time=time_budget,
                         )
                         if predicted_chunk is not None and predicted_chunk > 0:
                             num_new_tokens = min(num_new_tokens, predicted_chunk)
@@ -620,6 +625,7 @@ class ProfilingChunkScheduler(Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if request.num_cached_tokens < 0:
