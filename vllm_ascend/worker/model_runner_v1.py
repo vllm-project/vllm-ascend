@@ -655,6 +655,12 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_spec_tokens,
             )
 
+        # Generate MTP attention masks for decode requests when dcp_size > 1 with MTP
+        if self.dcp_size > 1 and self.speculative_config and self.speculative_config.method == "mtp":
+            self.pcp_manager.mtp_attention_masks_for_decode = self.pcp_manager.generate_mtp_attention_mask_for_decode(
+                scheduler_output
+            )
+
         if self.pcp_size > 1:
             num_scheduled_tokens[:num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
                 num_scheduled_tokens[:num_reqs], self.arange_np
@@ -2206,7 +2212,12 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
-                maybe_num_reqs_padded = num_reqs_padded * self.decode_token_per_req if self.use_cp else num_reqs_padded
+                # Only expand block_table for decode requests when using CP.
+                # For prefill-only requests, num_decode_reqs = 0, no expansion needed.
+                if self.use_cp and self.pcp_manager.num_decode_reqs > 0:
+                    maybe_num_reqs_padded = num_reqs_padded * self.decode_token_per_req
+                else:
+                    maybe_num_reqs_padded = num_reqs_padded
                 blk_table_tensor = blk_table.get_device_tensor()[:maybe_num_reqs_padded]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
