@@ -115,9 +115,10 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     max_model_len = eval_config.get("max_model_len", 4096)
     dtype = eval_config.get("dtype", "auto")
 
-    # For lm_eval, we need to use 'model' as the parameter name for the model ID
+    # Provide both 'model' and 'pretrained' parameters to satisfy both lm_eval and vLLM
     model_args = {
         "model": eval_config["model_name"],
+        "pretrained": eval_config["model_name"],
         "tensor_parallel_size": tp_size,
         "dtype": dtype,
         "trust_remote_code": trust_remote_code,
