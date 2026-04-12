@@ -126,6 +126,10 @@ class AscendPrefillContextParallelMetadata:
     # the number of scheduled tokens on the current rank before padding
     total_num_scheduled_tokens: int = 0
 
+    # MTP attention masks for decode requests in PCP mode
+    # List of tensors, one per request. Each mask shape: [num_mtp_tokens, num_local_tokens]
+    mtp_attention_masks_for_decode: list[torch.Tensor | None] = None
+
 
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):

@@ -686,12 +686,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_spec_tokens,
             )
 
-        # Generate MTP attention masks for decode requests when dcp_size > 1 with MTP
-        if self.dcp_size > 1 and self.speculative_config and self.speculative_config.method == "mtp":
-            self.pcp_manager.mtp_attention_masks_for_decode = self.pcp_manager.generate_mtp_attention_mask_for_decode(
-                scheduler_output
-            )
-
         if self.pcp_size > 1:
             num_scheduled_tokens[:num_reqs], position_pcp = self.pcp_manager.update_tokens_for_pcp(
                 num_scheduled_tokens[:num_reqs], self.arange_np

@@ -967,12 +967,34 @@ class PCPManager:
                     long_seq_metadata.head_attn_nomask_seqlens = head_attn_nomask_seqlens_list
                     long_seq_metadata.tail_attn_nomask_seqlens = tail_attn_nomask_seqlens_list
 
+        # Generate MTP attention masks for decode requests when dcp_size > 1 with MTP
+        if (
+            self.dcp_world_size > 1
+            and self.speculative_config
+            and self.speculative_config.method == "mtp"
+            and self.num_decode_reqs > 0
+            and num_scheduled_tokens is not None
+        ):
+            # Extract decode request info from input_batch and num_scheduled_tokens
+            decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
+            decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
+            mtp_masks = self.generate_mtp_attention_mask_for_decode(
+                decode_num_computed_tokens, decode_num_scheduled_tokens
+            )
+            if long_seq_metadata is not None:
+                long_seq_metadata.mtp_attention_masks_for_decode = mtp_masks
+            else:
+                long_seq_metadata = AscendPrefillContextParallelMetadata(
+                    mtp_attention_masks_for_decode=mtp_masks
+                )
+
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
 
     def generate_mtp_attention_mask_for_decode(
         self,
-        scheduler_output,
+        decode_num_computed_tokens: list[int],
+        decode_num_scheduled_tokens: np.ndarray,
     ) -> list[torch.Tensor | None]:
         """
         Generate MTP attention masks for decode requests in PCP mode.
@@ -1001,8 +1023,8 @@ class PCPManager:
               - rank1: [d,e,f,h] positions [3,4,5,7] -> mask 4x4
 
         Args:
-            scheduler_output: SchedulerOutput containing scheduled_cached_reqs with
-                num_computed_tokens and num_scheduled_tokens
+            decode_num_computed_tokens: List of global history lengths for decode requests
+            decode_num_scheduled_tokens: Array of scheduled token counts for decode requests
 
         Returns:
             List of attention mask tensors for decode requests, one per request
@@ -1016,17 +1038,6 @@ class PCPManager:
         cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_world_rank
         cp_size = self.pcp_world_size * self.dcp_world_size
         assert cp_size > 0, "cp_size must be greater than 0"
-
-        # Extract decode request info from scheduler_output.scheduled_cached_reqs
-        cached_req_data = scheduler_output.scheduled_cached_reqs
-        decode_num_computed_tokens = cached_req_data.num_computed_tokens[: self.num_decode_reqs]
-        decode_req_ids = cached_req_data.req_ids[: self.num_decode_reqs]
-
-        # Get num_scheduled_tokens from scheduler_output using req_ids
-        decode_num_scheduled_tokens = np.array(
-            [scheduler_output.num_scheduled_tokens[req_id] for req_id in decode_req_ids],
-            dtype=np.int32,
-        )
 
         # MTP token count is directly decode_num_scheduled_tokens
         mtp_len = decode_num_scheduled_tokens

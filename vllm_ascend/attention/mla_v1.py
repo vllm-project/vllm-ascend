@@ -629,13 +629,24 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 )
 
         cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+
+        # Check if MTP attention masks are available from PCP metadata
+        long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        mtp_attn_mask = None
+        if long_seq_metadata and long_seq_metadata.mtp_attention_masks_for_decode:
+            mtp_masks = long_seq_metadata.mtp_attention_masks_for_decode
+            # Use the first decode request's MTP mask
+            # TODO: Support multiple decode requests
+            if self.num_decodes > 0 and mtp_masks[0] is not None:
+                mtp_attn_mask = mtp_masks[0]
+
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=self.block_table,
             seq_lens=self.seq_lens,
             seq_lens_list=seq_lens_list,
             max_seq_lens=max_seq_lens,
-            attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
+            attn_mask=mtp_attn_mask if mtp_attn_mask is not None else self.attn_mask_builder.get_splitfuse_attn_mask(),
             actual_seq_lengths_q=actual_seq_lengths_q,
             sin=sin[: self.num_decode_tokens, ...],
             cos=cos[: self.num_decode_tokens, ...],
