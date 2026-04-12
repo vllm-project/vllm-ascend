@@ -40,7 +40,7 @@ def build_model_args(eval_config, tp_size):
     max_model_len = eval_config.get("max_model_len", 4096)
     dtype = eval_config.get("dtype", "auto")
     model_args = {
-        "model": eval_config["model_name"],
+        "pretrained": eval_config["model_name"],
         "tensor_parallel_size": tp_size,
         "dtype": dtype,
         "trust_remote_code": trust_remote_code,
@@ -111,12 +111,11 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
 
-    # Convert model_args to string format expected by lm_eval
-    model_args = ",".join([f"{k}={v}" for k, v in model_args_dict.items()])
-
+    # For vllm model, we need to pass model_args as a dictionary
+    # because lm_eval's vllm implementation expects it that way
     eval_params = {
         "model": eval_config.get("model", "vllm"),
-        "model_args": model_args,
+        "model_args": model_args_dict,
         "tasks": [task["name"] for task in eval_config["tasks"]],
         "apply_chat_template": eval_config.get("apply_chat_template", True),
         "fewshot_as_multiturn": eval_config.get("fewshot_as_multiturn", True),
