@@ -114,7 +114,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     trust_remote_code = eval_config.get("trust_remote_code", False)
     max_model_len = eval_config.get("max_model_len", 4096)
     dtype = eval_config.get("dtype", "auto")
-    
+
     # For lm_eval, we need to use 'model' as the parameter name for the model ID
     model_args = {
         "model": eval_config["model_name"],
@@ -123,7 +123,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
         "trust_remote_code": trust_remote_code,
         "max_model_len": max_model_len,
     }
-    
+
     # Add other optional parameters
     for s in [
         "max_images",
