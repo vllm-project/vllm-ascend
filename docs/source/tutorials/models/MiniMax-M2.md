@@ -1,10 +1,10 @@
-# MiniMax-M2.5/M2.7
+# MiniMax-M2
 
 ## Introduction
 
 MiniMax‑M2.5 is MiniMax’s flagship large language model, reinforced for high‑value scenarios such as code generation, agentic tool calling/search, and complex office workflows, with an emphasis on reasoning efficiency and end‑to‑end speed on challenging tasks.
 
-MiniMax-M2.7 is MiniMax's first model deeply participating in its own evolution. M2.7 is capable of building complex agent harnesses and completing highly elaborate productivity tasks, leveraging Agent Teams, complex Skills, and dynamic tool search. 
+MiniMax-M2.7 is MiniMax's first model deeply participating in its own evolution. M2.7 is capable of building complex agent harnesses and completing highly elaborate productivity tasks, leveraging Agent Teams, complex Skills, and dynamic tool search.
 
 This document provides a unified deployment guide for `MiniMax-M2.5` and `MiniMax-M2.7` on vLLM Ascend, covering both:
 
@@ -24,7 +24,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `MiniMax-M2.5` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5).
 - `MiniMax-M2.5-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot).
 - `Eagle3` : Download the model weights from [vllm-ascend/MiniMax-M2.5-eagel-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagel-model-0318).
-- `MiniMax-M2.7` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.7](https://modelscope.cn/models/MiniMax/MiniMax-M2.7). 
+- `MiniMax-M2.7` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.7](https://modelscope.cn/models/MiniMax/MiniMax-M2.7).
 - `MiniMax-M2.7-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.7-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-w8a8-QuaRot).
 
 It is recommended to download the model weights to a shared directory, such as `/mnt/sfs_turbo/.cache/`. The current release automatically detects the MiniMax-M2 fp8 checkpoint, disables fp8 quantization kernels on NPU, and loads the weights by dequantizing to bf16. This behavior may be removed once public bf16 weights are available.
