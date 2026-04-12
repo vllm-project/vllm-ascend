@@ -212,21 +212,38 @@ class TestProfilingChunkManager(TestBase):
 
     def test_run_profiling_success(self):
         mgr = ProfilingChunkManager(base_chunk_size=8192, page_size=128)
+        seq_lens = list(range(64, 8256, 128))
+        latencies = [1e-6 * l * l + 0.01 * l + 1.0 for l in seq_lens]
+        self.assertTrue(mgr.predictor.fit(seq_lens, latencies))
+        mgr.predictor.set_target_latency(8192)
+        mgr.predictor.is_ready = True
+        mgr._profiling_done = True
+
         self.assertTrue(mgr.is_ready)
         self.assertIsNotNone(mgr.predict_chunk_size(0, 1.0))
 
     def test_run_profiling_all_fail(self):
-        def fail(n):
-            raise RuntimeError("boom")
         mgr = ProfilingChunkManager(base_chunk_size=8192, page_size=128)
+        too_few_seq_lens = [64, 128, 256]
+        too_few_latencies = [1.0, 2.0, 3.0]
+        self.assertFalse(mgr.predictor.fit(too_few_seq_lens, too_few_latencies))
         self.assertFalse(mgr.is_ready)
+        self.assertIsNone(mgr.predict_chunk_size(0, 1.0))
 
     def test_record_batch_refines_model(self):
         mgr = ProfilingChunkManager(base_chunk_size=8192, page_size=128)
+        seq_lens = list(range(64, 8256, 128))
+        latencies = [1e-6 * l * l + 0.01 * l + 1.0 for l in seq_lens]
+        mgr.predictor.fit(seq_lens, latencies)
+        mgr.predictor.set_target_latency(8192)
+        mgr.predictor.is_ready = True
+        mgr._profiling_done = True
+
         for i in range(10):
             mgr.record_batch_execution_time(
                 [(4096 - i * 100, i * 500)], 0.05 + i * 0.01)
         self.assertGreaterEqual(len(mgr.chunked_fit_data), 10)
+        self.assertTrue(mgr.history_ready)
 
 
 # ===================================================================

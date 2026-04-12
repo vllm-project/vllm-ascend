@@ -83,9 +83,21 @@ class ChunkSizePredictor:
             fitted_a = float(coeffs[0])
             fitted_b = float(coeffs[1])
             fitted_c = float(coeffs[2])
-        except np.linalg.LinAlgError as e:
-            logger.warning("Failed to fit quadratic model: %s", e)
-            return False
+        except Exception as e:
+            # Keep a robust fallback for environments where least-squares may
+            # fail due backend/LAPACK differences.
+            try:
+                poly = np.polyfit(L, T, 2)
+                fitted_a = float(poly[0])
+                fitted_b = float(poly[1])
+                fitted_c = float(poly[2])
+                logger.warning(
+                    "Least-squares fitting failed (%s), fallback to polyfit succeeded.",
+                    e,
+                )
+            except Exception as fallback_error:
+                logger.warning("Failed to fit quadratic model: %s", fallback_error)
+                return False
 
         if fitted_a < 0:
             logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)

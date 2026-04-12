@@ -538,14 +538,31 @@ class EplbConfig:
 _ASCEND_CONFIG: AscendConfig | None = None
 
 
+def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
+    """Check whether a config object has essential initialized fields.
+
+    Some unit tests monkeypatch ``AscendConfig.__init__`` to bypass heavy
+    initialization. In that case, the singleton cache can be polluted with a
+    partially initialized instance. This guard prevents reusing such instances
+    across tests.
+    """
+    if config is None:
+        return False
+    return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
+
+
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is not None and not refresh:
+    if _ASCEND_CONFIG is not None and not refresh and _is_ascend_config_initialized(_ASCEND_CONFIG):
         return _ASCEND_CONFIG
-    _ASCEND_CONFIG = AscendConfig(vllm_config)
-    return _ASCEND_CONFIG
+    new_config = AscendConfig(vllm_config)
+    if _is_ascend_config_initialized(new_config):
+        _ASCEND_CONFIG = new_config
+    else:
+        logger.warning("Ascend config instance is not fully initialized; skip singleton cache update.")
+    return new_config
 
 
 def clear_ascend_config():
@@ -555,6 +572,6 @@ def clear_ascend_config():
 
 def get_ascend_config():
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is None:
+    if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
