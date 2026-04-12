@@ -1238,7 +1238,10 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     vllm_config = get_current_vllm_config()
     # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
     # effectively hidden, it is enabled only during the prefill stage.
-    is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
+    is_prefill_instance = (
+        vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.kv_role == "kv_producer"
+    )
     return is_prefill_instance
 
 
