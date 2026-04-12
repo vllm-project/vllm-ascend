@@ -118,7 +118,10 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     dtype = eval_config.get("dtype", "auto")
 
     # Build model_args as a string in the format expected by lm_eval
-    model_args = f"model={model_name},pretrained={model_name},tensor_parallel_size={tp_size},dtype={dtype},trust_remote_code={trust_remote_code},max_model_len={max_model_len}"
+    model_args = (
+        f"model={model_name},pretrained={model_name},tensor_parallel_size={tp_size},"
+        f"dtype={dtype},trust_remote_code={trust_remote_code},max_model_len={max_model_len}"
+    )
 
     # Add other optional parameters
     for s in [
