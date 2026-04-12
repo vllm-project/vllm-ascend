@@ -1,0 +1,383 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-09 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:1
+msgid "Disaggregated-prefill"
+msgstr "预填充-解码分离"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:3
+msgid "Why disaggregated-prefill?"
+msgstr "为什么需要预填充-解码分离？"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:5
+msgid ""
+"This feature addresses the need to optimize the **Time Per Output Token "
+"(TPOT)** and **Time To First Token (TTFT)** in large-scale inference "
+"tasks. The motivation is two-fold:"
+msgstr ""
+"该特性旨在优化大规模推理任务中的**每个输出 Token 时间（TPOT）**和**首个 Token 时间（TTFT）**。其动机有两个方面："
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:7
+msgid ""
+"**Adjusting Parallel Strategy and Instance Count for P and D Nodes**   "
+"Using the disaggregated-prefill strategy, this feature allows the system "
+"to flexibly adjust the parallelization strategy (e.g., data parallelism "
+"(dp), tensor parallelism (tp), and expert parallelism (ep)) and the "
+"instance count for both P (Prefiller) and D (Decoder) nodes. This leads "
+"to better system performance tuning, particularly for **TTFT** and "
+"**TPOT**."
+msgstr ""
+"**调整 P 节点和 D 节点的并行策略与实例数量**\n"
+"通过预填充-解码分离策略，该系统可以灵活调整并行化策略（如数据并行 dp、张量并行 tp、专家并行 ep）以及 P（预填充节点）和 D（解码节点）的实例数量。"
+"这有助于更好地进行系统性能调优，特别是针对 **TTFT** 和 **TPOT**。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:10
+msgid ""
+"**Optimizing TPOT** Without the disaggregated-prefill strategy, prefill "
+"tasks are inserted during decoding, which results in inefficiencies and "
+"delays. Disaggregated-prefill solves this by allowing for better control "
+"over the system’s **TPOT**. By managing chunked prefill tasks "
+"effectively, the system avoids the challenge of determining the optimal "
+"chunk size and provides more reliable control over the time taken for "
+"generating output tokens."
+msgstr ""
+"**优化 TPOT**\n"
+"若不采用预填充-解码分离策略，预填充任务会插入解码过程中，导致效率低下和延迟。"
+"预填充-解码分离通过更好地控制系统 **TPOT** 来解决此问题。通过有效管理分块预填充任务，"
+"系统避免了确定最优分块大小的难题，并能更可靠地控制输出 Token 的生成时间。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:15
+msgid "Usage"
+msgstr "使用方法"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:17
+msgid ""
+"vLLM Ascend currently supports two types of connectors for handling KV "
+"cache management:"
+msgstr ""
+"vLLM Ascend 当前支持两种类型的连接器来处理 KV 缓存管理："
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:19
+msgid "**MooncakeConnector**: D nodes pull KV cache from P nodes."
+msgstr "**MooncakeConnector**：D 节点从 P 节点拉取 KV 缓存。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:20
+msgid ""
+"**MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a "
+"layered manner."
+msgstr "**MooncakeLayerwiseConnector**：P 节点按层方式将 KV 缓存推送到 D 节点。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:22
+msgid ""
+"For step-by-step deployment and configuration, refer to the following "
+"guide:   "
+"[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)"
+msgstr ""
+"有关逐步部署和配置，请参考以下指南：\n"
+"[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:27
+msgid "How It Works"
+msgstr "工作原理"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:29
+msgid "1. Design Approach"
+msgstr "1. 设计思路"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:31
+msgid ""
+"Under the disaggregated-prefill, a global proxy receives external "
+"requests, forwarding prefill to P nodes and decode to D nodes; the KV "
+"cache (key–value cache) is exchanged between P and D nodes via peer-to-"
+"peer (P2P) communication."
+msgstr ""
+"在预填充-解码分离架构下，一个全局代理接收外部请求，将预填充请求转发给 P 节点，将解码请求转发给 D 节点；"
+"KV 缓存在 P 节点和 D 节点之间通过点对点（P2P）通信进行交换。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:33
+msgid "2. Implementation Design"
+msgstr "2. 实现设计"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:35
+msgid ""
+"Our design diagram is shown below, illustrating the pull and push schemes"
+" respectively. ![alt text](../../assets/disaggregated_prefill_pull.png) "
+"![alt text](../../assets/disaggregated_prefill_push.png)"
+msgstr ""
+"我们的设计图如下所示，分别展示了拉取和推送方案。\n"
+"![alt text](../../assets/disaggregated_prefill_pull.png) \n"
+"![alt text](../../assets/disaggregated_prefill_push.png)"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:35
+msgid "alt text"
+msgstr "示意图"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:39
+msgid "Mooncake Connector"
+msgstr "Mooncake 连接器"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:41
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:49
+msgid "The request is sent to the Proxy’s `_handle_completions` endpoint."
+msgstr "请求被发送到代理的 `_handle_completions` 端点。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:42
+msgid ""
+"The Proxy calls `select_prefiller` to choose a P node and forwards the "
+"request, configuring `kv_transfer_params` with `do_remote_decode=True`, "
+"`max_completion_tokens=1`, and `min_tokens=1`."
+msgstr ""
+"代理调用 `select_prefiller` 选择一个 P 节点并转发请求，配置 `kv_transfer_params`，"
+"设置 `do_remote_decode=True`、`max_completion_tokens=1` 和 `min_tokens=1`。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:43
+msgid ""
+"After the P node’s scheduler finishes prefill, `update_from_output` "
+"invokes the schedule connector’s `request_finished` to defer KV cache "
+"release, constructs `kv_transfer_params` with `do_remote_prefill=True`, "
+"and returns to the Proxy."
+msgstr ""
+"P 节点的调度器完成预填充后，`update_from_output` 调用调度连接器的 `request_finished` 延迟 KV 缓存的释放，"
+"构造包含 `do_remote_prefill=True` 的 `kv_transfer_params`，然后返回给代理。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:44
+msgid ""
+"The Proxy calls `select_decoder` to choose a D node and forwards the "
+"request."
+msgstr "代理调用 `select_decoder` 选择一个 D 节点并转发请求。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:45
+msgid ""
+"On the D node, the scheduler marks the request as "
+"`RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, calls "
+"`kv_connector_no_forward` to pull the remote KV cache, then notifies the "
+"P node to release KV cache and proceeds with decoding to return the "
+"result."
+msgstr ""
+"在 D 节点上，调度器将请求标记为 `RequestStatus.WAITING_FOR_REMOTE_KVS`，预分配 KV 缓存，"
+"调用 `kv_connector_no_forward` 拉取远程 KV 缓存，然后通知 P 节点释放 KV 缓存，并继续解码以返回结果。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:47
+msgid "Mooncake Layerwise Connector"
+msgstr "Mooncake 分层连接器"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:50
+msgid ""
+"The Proxy calls `select_decoder` to choose a D node and forwards the "
+"request, configuring `kv_transfer_params` with `do_remote_prefill=True` "
+"and setting the `metaserver` endpoint."
+msgstr ""
+"代理调用 `select_decoder` 选择一个 D 节点并转发请求，配置 `kv_transfer_params`，"
+"设置 `do_remote_prefill=True` 和 `metaserver` 端点。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:51
+msgid ""
+"On the D node, the scheduler uses `kv_transfer_params` to mark the "
+"request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV "
+"cache, then calls `kv_connector_no_forward` to send a request to the "
+"metaserver and waits for the KV cache transfer to complete."
+msgstr ""
+"在 D 节点上，调度器使用 `kv_transfer_params` 将请求标记为 `RequestStatus.WAITING_FOR_REMOTE_KVS`，"
+"预分配 KV 缓存，然后调用 `kv_connector_no_forward` 向元服务器发送请求，并等待 KV 缓存传输完成。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:52
+msgid ""
+"The Proxy’s `metaserver` endpoint receives the request, calls "
+"`select_prefiller` to choose a P node, and forwards it with "
+"`kv_transfer_params` set to `do_remote_decode=True`, "
+"`max_completion_tokens=1`, and `min_tokens=1`."
+msgstr ""
+"代理的 `metaserver` 端点接收请求，调用 `select_prefiller` 选择一个 P 节点，"
+"并使用 `kv_transfer_params` 设置 `do_remote_decode=True`、`max_completion_tokens=1` 和 `min_tokens=1` 进行转发。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:53
+msgid ""
+"During processing, the P node’s scheduler pushes KV cache layer-wise; "
+"once all layers pushing is complete, it releases the request and notifies"
+" the D node to begin decoding."
+msgstr ""
+"在处理过程中，P 节点的调度器逐层推送 KV 缓存；当所有层的推送完成后，它释放请求并通知 D 节点开始解码。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:54
+msgid "The D node performs decoding and returns the result."
+msgstr "D 节点执行解码并返回结果。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:56
+msgid "3. Interface Design"
+msgstr "3. 接口设计"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:58
+msgid ""
+"Taking MooncakeConnector as an example, the system is organized into "
+"three primary classes:"
+msgstr "以 MooncakeConnector 为例，系统组织为三个主要类："
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:60
+msgid "**MooncakeConnector**: Base class that provides core interfaces."
+msgstr "**MooncakeConnector**：提供核心接口的基类。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:61
+msgid ""
+"**MooncakeConnectorScheduler**: Interface for scheduling the connectors "
+"within the engine core, responsible for managing KV cache transfer "
+"requirements and completion."
+msgstr "**MooncakeConnectorScheduler**：在引擎核心内调度连接器的接口，负责管理 KV 缓存传输需求和完成状态。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:62
+msgid ""
+"**MooncakeConnectorWorker**: Interface for managing KV cache registration"
+" and transfer in worker processes."
+msgstr "**MooncakeConnectorWorker**：在工作进程中管理 KV 缓存注册和传输的接口。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:64
+msgid "4. Specifications Design"
+msgstr "4. 规格设计"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:66
+msgid ""
+"This feature is flexible and supports various configurations, including "
+"setups with MLA and GQA models. It is compatible with A2 and A3 hardware "
+"configurations and facilitates scenarios involving both equal and unequal"
+" TP setups across multiple P and D nodes."
+msgstr ""
+"该特性灵活且支持多种配置，包括 MLA 和 GQA 模型的设置。它与 A2 和 A3 硬件配置兼容，"
+"并支持跨多个 P 节点和 D 节点的相等 TP 和不等 TP 配置场景。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "Feature"
+msgstr "功能"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "Status"
+msgstr "状态"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "A2"
+msgstr "A2"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "🟢 Functional"
+msgstr "🟢 功能完善"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "A3"
+msgstr "A3"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "equal TP configuration"
+msgstr "相等 TP 配置"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "unequal TP configuration"
+msgstr "不等 TP 配置"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "MLA"
+msgstr "MLA"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md
+msgid "GQA"
+msgstr "GQA"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:77
+msgid "🟢 Functional: Fully operational, with ongoing optimizations."
+msgstr "🟢 功能完善：完全可用，持续优化中。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:78
+msgid "🔵 Experimental: Experimental support, interfaces and functions may change."
+msgstr "🔵 实验性：实验性支持，接口和功能可能发生变化。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:79
+msgid "🚧 WIP: Under active development, will be supported soon."
+msgstr "🚧 开发中：正在积极开发，即将支持。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:80
+msgid ""
+"🟡 Planned: Scheduled for future implementation (some may have open "
+"PRs/RFCs)."
+msgstr "🟡 计划中：已计划未来实现（部分可能有开放的 PR/RFC）。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:81
+msgid "🔴 NO plan/Deprecated: No plan or deprecated by vLLM."
+msgstr "🔴 无计划/已废弃：无计划或已被 vLLM 废弃。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:85
+msgid "DFX Analysis"
+msgstr "DFX 分析"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:87
+msgid "1. Config Parameter Validation"
+msgstr "1. 配置参数验证"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:89
+msgid ""
+"Validate KV transfer config by checking whether the kv_connector type is "
+"supported and whether kv_connector_module_path exists and is loadable. On"
+" transfer failures, emit clear error logs for diagnostics."
+msgstr ""
+"通过检查 kv_connector 类型是否受支持以及 kv_connector_module_path 是否存在且可加载，来验证 KV 传输配置。"
+"传输失败时，输出清晰的错误日志以便诊断。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:91
+msgid "2. Port Conflict Detection"
+msgstr "2. 端口冲突检测"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:93
+msgid ""
+"Before startup, perform a port-usage check on configured ports (e.g., "
+"rpc_port, metrics_port, http_port/metaserver) by attempting to bind. If a"
+" port is already in use, fail fast and log an error."
+msgstr ""
+"启动前，通过尝试绑定来检查配置的端口（如 rpc_port、metrics_port、http_port/metaserver）是否已被占用。"
+"如果端口已被使用，快速失败并记录错误日志。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:95
+msgid "3. PD Ratio Validation"
+msgstr "3. PD 比例验证"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:97
+msgid ""
+"Under non-symmetric PD scenarios, validate the P-to-D tp ratio against "
+"expected and scheduling constraints to ensure correct and reliable "
+"operation."
+msgstr ""
+"在非对称 PD 场景下，根据预期和调度约束验证 P 节点与 D 节点的 TP 比例，以确保正确可靠的运行。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:101
+msgid "Limitations"
+msgstr "限制"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:103
+msgid ""
+"Heterogeneous P and D nodes are not supported—for example, running P "
+"nodes on A2 and D nodes on A3."
+msgstr ""
+"不支持异构的 P 节点和 D 节点，例如在 A2 上运行 P 节点、在 A3 上运行 D 节点。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:105
+msgid ""
+"In non-symmetric TP configurations, only cases where the P nodes have a "
+"higher TP degree than the D nodes and the P TP count is an integer "
+"multiple of the D TP count are supported (i.e., P_tp > D_tp and P_tp % "
+"D_tp = 0)."
+msgstr ""
+"在非对称 TP 配置中，仅支持 P 节点的 TP 度数高于 D 节点且 P 的 TP 数量是 D 的 TP 数量的整数倍的情况"
+"（即 P_tp > D_tp 且 P_tp % D_tp = 0）。"

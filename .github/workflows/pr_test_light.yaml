@@ -41,7 +41,7 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-      vllm: v0.19.0
+      vllm: 5af684c31912232e5c89484c2e8259e0fac6c55b
   changes:
     runs-on: linux-aarch64-a2b3-0
     outputs:
@@ -79,7 +79,7 @@ jobs:
             _310_tracker:
               - 'vllm_ascend/_310p/**'
               - 'tests/e2e/310p/**'
-              - 'vllm_ascend/worker/model_runner_v1.py'
+              - 'vllm_ascend/worker/**'
               - 'vllm_ascend/attention/attention_v1.py'
               - 'vllm_ascend/ops/fused_moe/**'
               - 'CMakeLists.txt'
@@ -91,7 +91,7 @@ jobs:
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     strategy:
       matrix:
-        vllm_version: [v0.19.0]
+        vllm_version: [5af684c31912232e5c89484c2e8259e0fac6c55b, v0.19.0]
     uses: ./.github/workflows/_unit_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -103,7 +103,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [v0.19.0]
+        vllm_version: [5af684c31912232e5c89484c2e8259e0fac6c55b, v0.19.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
