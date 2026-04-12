@@ -1,10 +1,10 @@
-# MiniMax-M2.5
+# MiniMax-M2.5/M2.7
 
 ## Introduction
 
-MiniMax‑M2.5 is MiniMax’s flagship large language model, reinforced for high‑value scenarios such as code generation, agentic tool calling/search, and complex office workflows, with an emphasis on reasoning efficiency and end‑to‑end speed on challenging tasks.
+MiniMax-M2.7 is MiniMax's first model deeply participating in its own evolution. M2.7 is capable of building complex agent harnesses and completing highly elaborate productivity tasks, leveraging Agent Teams, complex Skills, and dynamic tool search. 
 
-This document provides a unified deployment guide for `MiniMax-M2.5` on vLLM Ascend, covering both:
+This document provides a unified deployment guide for `MiniMax-M2.5/2.7` on vLLM Ascend, covering both:
 
 - **A3 single-node** deployment (Atlas 800 A3)
 - **A2 dual-node** deployment (2× Atlas 800I A2)
@@ -18,8 +18,9 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 ## Environment Preparation
 
 ### Model Weights
-
-- `MiniMax-M2.5` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5).
+- `MiniMax-M2.7` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.7](https://modelscope.cn/models/MiniMax/MiniMax-M2.7). 
+- `MiniMax-M2.7-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.7-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-w8a8-QuaRot).
+- `MiniMax-M2.5` (fp8 checkpoint): Download the model weights from [MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5). 
 - `MiniMax-M2.5-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot).
 - `Eagle3` : Download the model weights from [vllm-ascend/MiniMax-M2.5-eagel-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagel-model-0318).
 
@@ -27,7 +28,7 @@ It is recommended to download the model weights to a shared directory, such as `
 
 ### Installation
 
-You can use the official docker image to run `MiniMax-M2.5` directly.
+You can use the official docker image to run `MiniMax-M2.5/M2.7` directly.
 
 Select an image based on your machine type and start the container on your node. See [using docker](../../installation.md#set-up-using-docker).
 
@@ -128,6 +129,8 @@ Notes:
 
 - If you only care about short-context low latency, you can explicitly set `--max-model-len 32768`. You may also set `tensor-parallel-size` to 16 and set `data-parallel-size` to 1.
 - `export VLLM_ASCEND_BALANCE_SCHEDULING=1` is used to enhance scheduling capacity between prefill and decode. This will work remarkably with a lager `data-parallel-size`. This can increace performance when cuncurrency gets closer to values equals to `data-parallel-size` times `max-num-seqs`.
+- Running the current Eagle3 weights for M2.7 yields no performance improvement; it is recommended to remove the `--speculative_config`.
+
 
 ```{code-block} bash
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -145,8 +148,8 @@ export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-vllm serve /path/to/weight/MiniMax-M2.5-w8a8-QuaRot \
-    --served-model-name "MiniMax-M2.5" \
+vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
+    --served-model-name "MiniMax-M2.7" \
     --host 0.0.0.0 \
     --port 8000 \
     --trust-remote-code \
@@ -197,7 +200,7 @@ Since cross-node tensor parallelism (TP) can be unstable, the dual-node guide us
 
 #### Node0 (primary) startup script
 
-Edit `minimax25_service_node0.sh` inside the node0 container, and replace the placeholders with your actual values:
+Edit `minimax27_service_node0.sh` inside the node0 container, and replace the placeholders with your actual values:
 
 - `{PrimaryNodeIP}`: the primary node's IP address (public/cluster network)
 - `{NIC}`: the NIC name for the public/cluster network (check via `ifconfig`, e.g., `enp67s0f0np0`)
@@ -226,8 +229,8 @@ export HCCL_INTRA_ROCE_ENABLE=0
 export VLLM_TORCH_PROFILER_WITH_STACK=0
 export VLLM_TORCH_PROFILER_DIR="{profiling_dir}"
 
-vllm serve /opt/data/verification/models/MiniMax-M2.5/ \
-  --served-model-name "minimax25" \
+vllm serve /opt/data/verification/models/MiniMax-M2.7/ \
+  --served-model-name "minimax27" \
   --host {PrimaryNodeIP} \
   --port 20004 \
   --tensor-parallel-size 8 \
@@ -252,7 +255,7 @@ vllm serve /opt/data/verification/models/MiniMax-M2.5/ \
 
 #### Node1 (secondary) startup script
 
-Edit `minimax25_service_node1.sh` inside the node1 container:
+Edit `minimax27_service_node1.sh` inside the node1 container:
 
 - `{SecondaryNodeIP}`: the secondary node's IP address
 - `{PrimaryNodeIP}`: the primary node's IP address (same as node0)
@@ -281,8 +284,8 @@ export HCCL_INTRA_ROCE_ENABLE=0
 export VLLM_TORCH_PROFILER_WITH_STACK=0
 export VLLM_TORCH_PROFILER_DIR="{profiling_dir}"
 
-vllm serve /opt/data/verification/models/MiniMax-M2.5/ \
-  --served-model-name "minimax25" \
+vllm serve /opt/data/verification/models/MiniMax-M2.7/ \
+  --served-model-name "minimax27" \
   --host {SecondaryNodeIP} \
   --port 20004 \
   --headless \
@@ -312,10 +315,10 @@ Start the service on both nodes:
 
 ```{code-block} bash
 # node0
-bash minimax25_service_node0.sh
+bash minimax27_service_node0.sh
 
 # node1
-bash minimax25_service_node1.sh
+bash minimax27_service_node1.sh
 ```
 
 After node0 prints `service start` in logs, you can verify the service.
@@ -332,7 +335,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="na")
 
 resp = client.chat.completions.create(
-    model="MiniMax-M2.5",
+    model="MiniMax-M2.7",
     messages=[{"role": "user", "content": "你好，请介绍一下你自己，并展示一次工具调用的参数格式。"}],
     max_tokens=256,
 )
@@ -345,7 +348,7 @@ Or send a request using curl:
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "MiniMax-M2.5",
+    "model": "MiniMax-M2.7",
     "messages": [{"role": "user", "content": "请查询上海的天气。"}],
     "tools": [{
       "type": "function",
@@ -376,7 +379,7 @@ Run the following from any machine that can reach the primary node (replace `{Pr
 curl http://{PrimaryNodeIP}:20004/v1/chat/completions \
   -H "Content-type: application/json" \
   -d '{
-    "model": "minimax25",
+    "model": "minimax27",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
     "stream": false,
     "ignore_eos": true,
