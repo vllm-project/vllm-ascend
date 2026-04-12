@@ -1761,7 +1761,7 @@ class MooncakeLayerwiseConnectorWorker:
         try:
             path = make_zmq_path("tcp", req_meta.remote_host, req_meta.remote_port)
             msg_encoder = msgspec.msgpack.Encoder()
-            side_channel_path = str(self.side_channel_host) + str(self.side_channel_port)
+            side_channel_path = f"{self.side_channel_host}:{self.handshake_port}"
             encoded_data = msg_encoder.encode(
                 (DONE_SENDING_MSG, external_req_id, req_meta.trans_count[group_idx], side_channel_path)
             )
