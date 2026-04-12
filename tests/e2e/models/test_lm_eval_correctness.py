@@ -107,27 +107,48 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
 
 def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
-    model_args_dict = build_model_args(eval_config, tp_size)
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
 
-    # Try a different approach: pass model directly as a separate parameter
-    # This might work better with lm_eval's vllm implementation
-    model_name = eval_config["model_name"]
+    # Build model_args with the correct parameter name for lm_eval
+    trust_remote_code = eval_config.get("trust_remote_code", False)
+    max_model_len = eval_config.get("max_model_len", 4096)
+    dtype = eval_config.get("dtype", "auto")
     
-    # Remove 'pretrained' from model_args_dict since we're passing it separately
-    if 'pretrained' in model_args_dict:
-        del model_args_dict['pretrained']
+    # For lm_eval, we need to use 'model' as the parameter name for the model ID
+    model_args = {
+        "model": eval_config["model_name"],
+        "tensor_parallel_size": tp_size,
+        "dtype": dtype,
+        "trust_remote_code": trust_remote_code,
+        "max_model_len": max_model_len,
+    }
+    
+    # Add other optional parameters
+    for s in [
+        "max_images",
+        "gpu_memory_utilization",
+        "enable_expert_parallel",
+        "tensor_parallel_size",
+        "enforce_eager",
+        "enable_thinking",
+        "quantization",
+    ]:
+        val = eval_config.get(s, None)
+        if val is not None:
+            model_args[s] = val
+
+    print("Model Parameters:")
+    print(model_args)
 
     eval_params = {
         "model": eval_config.get("model", "vllm"),
-        "model_args": model_args_dict,
+        "model_args": model_args,
         "tasks": [task["name"] for task in eval_config["tasks"]],
         "apply_chat_template": eval_config.get("apply_chat_template", True),
         "fewshot_as_multiturn": eval_config.get("fewshot_as_multiturn", True),
         "limit": eval_config.get("limit", None),
         "batch_size": eval_config.get("batch_size", "auto"),
-        "model_name": model_name,  # Pass model name directly
     }
     for s in ["num_fewshot", "fewshot_as_multiturn", "apply_chat_template"]:
         val = eval_config.get(s, None)
