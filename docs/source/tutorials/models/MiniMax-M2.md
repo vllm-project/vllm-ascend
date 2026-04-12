@@ -1,10 +1,12 @@
-# MiniMax-M2.5
+# MiniMax-M2.5/M2.7
 
 ## Introduction
 
 MiniMax‑M2.5 is MiniMax’s flagship large language model, reinforced for high‑value scenarios such as code generation, agentic tool calling/search, and complex office workflows, with an emphasis on reasoning efficiency and end‑to‑end speed on challenging tasks.
 
-This document provides a unified deployment guide for `MiniMax-M2.5` on vLLM Ascend, covering both:
+MiniMax-M2.7 is MiniMax's first model deeply participating in its own evolution. M2.7 is capable of building complex agent harnesses and completing highly elaborate productivity tasks, leveraging Agent Teams, complex Skills, and dynamic tool search. 
+
+This document provides a unified deployment guide for `MiniMax-M2.5` and `MiniMax-M2.7` on vLLM Ascend, covering both:
 
 - **A3 single-node** deployment (Atlas 800 A3)
 - **A2 dual-node** deployment (2× Atlas 800I A2)
@@ -22,12 +24,14 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `MiniMax-M2.5` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.5](https://modelscope.cn/models/MiniMax/MiniMax-M2.5).
 - `MiniMax-M2.5-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.5-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot).
 - `Eagle3` : Download the model weights from [vllm-ascend/MiniMax-M2.5-eagel-model](https://modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagel-model-0318).
+- `MiniMax-M2.7` (fp8 checkpoint): recommended to use **1× Atlas 800 A3** or **2× Atlas 800I A2** nodes. Download the model weights from [MiniMax/MiniMax-M2.7](https://modelscope.cn/models/MiniMax/MiniMax-M2.7). 
+- `MiniMax-M2.7-w8a8-QuaRot` : Download the model weights from [Eco-Tech/MiniMax-M2.7-w8a8-QuaRot](https://modelscope.cn/models/Eco-Tech/MiniMax-M2.7-w8a8-QuaRot).
 
 It is recommended to download the model weights to a shared directory, such as `/mnt/sfs_turbo/.cache/`. The current release automatically detects the MiniMax-M2 fp8 checkpoint, disables fp8 quantization kernels on NPU, and loads the weights by dequantizing to bf16. This behavior may be removed once public bf16 weights are available.
 
 ### Installation
 
-You can use the official docker image to run `MiniMax-M2.5` directly.
+You can use the official docker image to run `MiniMax-M2.5/M2.7` directly.
 
 Select an image based on your machine type and start the container on your node. See [using docker](../../installation.md#set-up-using-docker).
 
@@ -120,14 +124,17 @@ docker run -itd -u 0 --ipc=host --privileged \
 
 ## Online Inference on Multi-NPU
 
+Below are recommended startup configurations for `MiniMax-M2.5`. Users can simply change weights and model name to run this startup configuration on `MiniMax-M2.7`. However it may not yet the best matchup for `MiniMax-M2.7` if one is trying to reach the best performance.
+
 ### A3 (single node)
 
-Below is a recommended startup configuration for short-context condition like 3.5k/1.5k to reach a good performance.
+Below is a recommended startup configuration for short-context condition like 3.5k/1.5k on `MiniMax-M2.5` to reach a good performance. If you wish to run on long-context case, you may follow `Remarks` bellow to change your config.
 
 Notes:
 
 - If you only care about short-context low latency, you can explicitly set `--max-model-len 32768`. You may also set `tensor-parallel-size` to 16 and set `data-parallel-size` to 1.
 - `export VLLM_ASCEND_BALANCE_SCHEDULING=1` is used to enhance scheduling capacity between prefill and decode. This will work remarkably with a lager `data-parallel-size`. This can increace performance when cuncurrency gets closer to values equals to `data-parallel-size` times `max-num-seqs`.
+- Running the current Eagle3 weights for `MiniMax-M2.7` yields no performance improvement; it is recommended to remove the `--speculative_config`.
 
 ```{code-block} bash
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -386,7 +393,7 @@ curl http://{PrimaryNodeIP}:20004/v1/chat/completions \
   }'
 ```
 
-## Performance Reference
+## Performance Reference (`MiniMax-M2.5`)
 
 ### A3 (single node, tp=16, 4k/1k@bs16)
 
