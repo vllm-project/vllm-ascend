@@ -76,7 +76,7 @@ Qwen3VLForConditionalGeneration._get_deepstack_input_embeds = tensor_parallel_wr
 # This function was introduced in vLLM 0.19.0+
 try:
     from vllm.model_executor.models.qwen3_vl import pos_embed_interpolate_native
-    
+
     def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
         outputs = []
         for t, h, w in grid_thw:
