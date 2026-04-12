@@ -40,7 +40,7 @@ def build_model_args(eval_config, tp_size):
     max_model_len = eval_config.get("max_model_len", 4096)
     dtype = eval_config.get("dtype", "auto")
     model_args = {
-        "pretrained": eval_config["model_name"],
+        "model": eval_config["model_name"],
         "tensor_parallel_size": tp_size,
         "dtype": dtype,
         "trust_remote_code": trust_remote_code,
