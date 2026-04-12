@@ -1186,10 +1186,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer._c8_v_aq_scale = layer._c8_v_scale.view(bnsd).contiguous()
         layer._c8_v_aq_offset = layer._c8_v_offset.view(bnsd).contiguous()
 
-        layer._c8_k_inv_scale_bf16 = 1.0 / layer._c8_k_scale
-        layer._c8_k_offset_bf16 = layer._c8_k_offset
-        layer._c8_v_inv_scale_bf16 = 1.0 / layer._c8_v_scale
-        layer._c8_v_offset_bf16 = layer._c8_v_offset
+        layer._c8_k_inv_scale = 1.0 / layer._c8_k_scale
+        layer._c8_v_inv_scale = 1.0 / layer._c8_v_scale
 
         layer._c8_scales_prepared = True
 
@@ -1244,12 +1242,12 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         actual_value = value[:num_actual_tokens]
 
         k_int8 = torch.clamp(
-            torch.round(actual_key * layer._c8_k_inv_scale_bf16 + layer._c8_k_offset_bf16),
+            torch.round(actual_key * layer._c8_k_inv_scale + layer._c8_k_offset),
             -128,
             127,
         ).to(torch.int8)
         v_int8 = torch.clamp(
-            torch.round(actual_value * layer._c8_v_inv_scale_bf16 + layer._c8_v_offset_bf16),
+            torch.round(actual_value * layer._c8_v_inv_scale + layer._c8_v_offset),
             -128,
             127,
         ).to(torch.int8)
