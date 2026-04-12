@@ -765,10 +765,6 @@ class PCPManager:
             )
             prefill_context_lens = input_batch.num_computed_tokens_cpu[self.num_decode_reqs : self.num_reqs]
             context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
-            num_computed_tokens_of_pcp_dcp = torch.zeros(
-                [self.num_reqs * self.decode_threshold, self.pcp_world_size, self.dcp_world_size],
-                dtype=torch.int32,
-            )
             # With MTP attention mask, no flattening needed.
             # Each decode request produces only one output.
             num_computed_tokens_of_pcp_dcp = self._get_cp_local_seq_lens(
@@ -777,6 +773,7 @@ class PCPManager:
                 self.dcp_world_size,
                 self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
             )
+            # Shape: [num_reqs, pcp_world_size, dcp_world_size]
             # [Deprecated] With MTP attention mask, flattening is no longer needed.
             # The original code flattened num_computed_tokens_of_pcp_dcp to handle
             # irregular attn_mask shapes in MTP scenarios. Now we use mtp_attention_masks_for_decode
