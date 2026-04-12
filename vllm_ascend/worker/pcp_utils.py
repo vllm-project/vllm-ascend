@@ -1056,36 +1056,31 @@ class PCPManager:
             # Get global history length (before splitting) for position calculation
             global_history_len = decode_num_computed_tokens[req_idx]
 
-            # Get the number of MTP tokens assigned to this rank
-            # MTP tokens are assigned based on position % cp_size
-            local_mtp_count = sum(
-                1 for mtp_idx in range(mtp_token_len)
+            # Get the MTP tokens assigned to this rank based on position % cp_size
+            local_mtp_positions = [
+                global_history_len + mtp_idx
+                for mtp_idx in range(mtp_token_len)
                 if (global_history_len + mtp_idx) % cp_size == cp_rank
-            )
+            ]
+            local_mtp_count = len(local_mtp_positions)
 
             # local_len = history tokens on this rank + MTP tokens on this rank
             local_len = history_len + local_mtp_count
 
-            # MTP token global positions: history_len to history_len + mtp_token_len - 1
-            # Use ALL MTP tokens for mask, not just the ones assigned to this rank
-            mtp_positions = list(range(global_history_len, global_history_len + mtp_token_len))
-
-            # Generate mask: ALL MTP tokens can attend to local tokens on this rank
+            # All MTP tokens (not just assigned to this rank) can attend to local tokens
             # MTP token at global position m can attend to local token at position k if m >= k
-            # Note: Since MTP tokens have larger positions than history tokens,
-            # MTP tokens can always attend to history tokens (mask = True)
+            # local tokens consist of: history tokens (positions 0 to history_len-1) +
+            # MTP tokens assigned to this rank (from local_mtp_positions)
+            all_mtp_positions = list(range(global_history_len, global_history_len + mtp_token_len))
             mask = np.zeros((mtp_token_len, local_len), dtype=bool)
-            for m_idx, mtp_global_pos in enumerate(mtp_positions):
+            for m_idx, mtp_global_pos in enumerate(all_mtp_positions):
                 for k_idx in range(local_len):
-                    # For local tokens:
-                    # - k_idx < history_len: history token at position k_idx
-                    # - k_idx >= history_len: MTP token at position history_len + (k_idx - history_len)
                     if k_idx < history_len:
                         # History token at local position k_idx
                         local_token_pos = k_idx
                     else:
-                        # MTP token at local position
-                        local_token_pos = global_history_len + (k_idx - history_len)
+                        # MTP token at local position - get its global position from local_mtp_positions
+                        local_token_pos = local_mtp_positions[k_idx - history_len]
                     mask[m_idx, k_idx] = (mtp_global_pos >= local_token_pos)
 
             mtp_masks.append(torch.from_numpy(mask))
