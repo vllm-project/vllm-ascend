@@ -334,15 +334,36 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
-        # TODO: Full graph is fully supported later, and the default value will be set to full graph.
+        # Enable FULL_AND_PIECEWISE mode for prefill->decode dynamic switching
+        # When FULL_AND_PIECEWISE is used:
+        # - Prefill stage: uses PIECEWISE mode
+        # - Decode stage: uses FULL mode
+        # This is controlled dynamically in model_runner based on is_all_decode flag
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (
+                "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == "
+                "CompilationMode.VLLM_COMPILE"
+            )
+            compilation_config.set_splitting_ops_for_v1(
+                all2all_backend=vllm_config.parallel_config.all2all_backend,
+                data_parallel_size=vllm_config.parallel_config.data_parallel_size,
+            )
+            compilation_config.use_inductor = False
+            compilation_config.splitting_ops.extend(["vllm::mla_forward"])
+            update_aclgraph_sizes(vllm_config)
+            ascend_config.ascend_compilation_config.enable_npugraph_ex = False
 
         # encoder-decoder models currently only support piecewise mode
         if model_config and model_config.is_encoder_decoder is True:
-            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-                logger.warning("encoder-decoder model doesn't support FULL_DECODE_ONLY, fallback to PIECEWISE ")
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            if (
+               compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+               or compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+            ):
+                logger.warning(
+                    "encoder-decoder model doesn't support FULL_DECODE_ONLY"
+                    " or FULL_AND_PIECEWISE, fallback to PIECEWISE "
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         # get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
@@ -392,6 +413,8 @@ class NPUPlatform(Platform):
             **********************************************************************************\033[0m
             """
             logger.warning(warning_message)
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+            logger.info("FULL_AND_PIECEWISE enabled on NPU. Prefill will use PIECEWISE, Decode will use FULL mode.")
         else:
             logger.info(
                 "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode

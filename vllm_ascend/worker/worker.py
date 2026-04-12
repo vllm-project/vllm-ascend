@@ -454,8 +454,14 @@ class NPUWorker(WorkerBase):
                     warmup_sizes.append(compile_range.end)
 
         for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size)
+            cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
+            if cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                logger.info("FULL_AND_PIECEWISE mode: warm up PIECEWISE")
+                self.model_runner._dummy_run(size, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE)
+                logger.info("FULL_AND_PIECEWISE mode: warm up FULL")
+                self.model_runner._dummy_run(size, uniform_decode=True, cudagraph_runtime_mode=CUDAGraphMode.FULL)
+            else:
+                self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
