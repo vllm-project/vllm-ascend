@@ -56,8 +56,17 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
-        self.validate_supported_v2_features(vllm_config, self.ascend_config)
+        # The following features are not yet supported in Ascend NPU model runner v2:
+        # - Context parallelism (prefill or decode)
+        # - Dynamic EPLB
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
+
+        if self.ascend_config.eplb_config.dynamic_eplb:
+            raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -127,7 +136,11 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        self._initialize_runtime_state(vllm_config)
+        # set _WEIGHT_PREFETCH_METHOD, _mc2_tokens_capacity and _reserved_mc2_mask which
+        # is necessary for weight_prfetching function, and MoE communication optimization.
+        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
+        set_mc2_mask(vllm_config, self.device)
 
         # we need to update full graph params in run_fullgraph,
         # so create a stream to update full graph params.
@@ -143,26 +156,13 @@ class NPUModelRunner(GPUModelRunner):
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
 
-    def _initialize_runtime_state(self, vllm_config: VllmConfig) -> None:
-        # Keep Ascend runtime state aligned with model runner v1.
-        set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
-        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
-        set_mc2_mask(vllm_config, self.device)
-
-    @staticmethod
-    def validate_supported_v2_features(vllm_config: VllmConfig, ascend_config) -> None:
-        if ascend_config.weight_prefetch_config.enabled:
-            raise NotImplementedError("Weight prefetch is not supported by Ascend NPU model runner v2.")
-
-        parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
-
-        if ascend_config.eplb_config.dynamic_eplb:
-            raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
-
     @torch.inference_mode()
     def profile_run(self) -> None:
+        """Override GPUModelRunner.profile_run for Ascend NPUs.
+        When running moe models, we need an extra dummy run with mc2_tokens_capacity tokens to reserve
+        necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
+        override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
+        """
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         with override_mrv2_in_profile_run(True):
             if (

@@ -1,5 +1,4 @@
 import unittest
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -15,34 +14,6 @@ class TestNPUModelRunnerV2(unittest.TestCase):
         runner.max_num_tokens = max_num_tokens
         runner.vllm_config = MagicMock()
         return runner
-
-    @staticmethod
-    def _make_configs(*, weight_prefetch: bool = False, pcp_size: int = 1, dcp_size: int = 1, dynamic_eplb: bool = False):
-        vllm_config = MagicMock()
-        vllm_config.parallel_config = SimpleNamespace(
-            prefill_context_parallel_size=pcp_size,
-            decode_context_parallel_size=dcp_size,
-        )
-        ascend_config = SimpleNamespace(
-            weight_prefetch_config=SimpleNamespace(enabled=weight_prefetch),
-            eplb_config=SimpleNamespace(dynamic_eplb=dynamic_eplb),
-        )
-        return vllm_config, ascend_config
-
-    def test_validate_supported_v2_features_rejects_weight_prefetch(self):
-        vllm_config, ascend_config = self._make_configs(weight_prefetch=True)
-        with self.assertRaisesRegex(NotImplementedError, "Weight prefetch"):
-            NPUModelRunner.validate_supported_v2_features(vllm_config, ascend_config)
-
-    def test_validate_supported_v2_features_rejects_context_parallel(self):
-        vllm_config, ascend_config = self._make_configs(pcp_size=2)
-        with self.assertRaisesRegex(NotImplementedError, "Context parallelism"):
-            NPUModelRunner.validate_supported_v2_features(vllm_config, ascend_config)
-
-    def test_validate_supported_v2_features_rejects_dynamic_eplb(self):
-        vllm_config, ascend_config = self._make_configs(dynamic_eplb=True)
-        with self.assertRaisesRegex(NotImplementedError, "dynamic_eplb"):
-            NPUModelRunner.validate_supported_v2_features(vllm_config, ascend_config)
 
     def test_profile_run_marks_only_mc2_warmup_dummy_run(self):
         runner = self._make_runner(max_num_tokens=16)
