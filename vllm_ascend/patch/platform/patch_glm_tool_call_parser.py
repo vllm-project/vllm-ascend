@@ -655,6 +655,7 @@ async def _patched_chat_completion_stream_generator(
                         index = 0
 
                     if self._should_check_for_unstreamed_tool_arg_tokens(delta_message, output) and tool_parser:
+                        already_streamed = index in streamed_tool_args[i]
                         already_streamed_args = streamed_tool_args[i].get(index, "")
                         remaining_call = self._compute_remaining_tool_args(
                             expected_args=tool_parser.prev_tool_call_arr[index].get("arguments", {}),
@@ -663,13 +664,14 @@ async def _patched_chat_completion_stream_generator(
 
                         # Per OpenAI streaming semantics, id/type/name must only
                         # appear in the *first* chunk for a tool call index.
-                        # If already_streamed_args is non-empty the header was
-                        # sent in a previous chunk, so pass None for all fallback
-                        # fields so _create_remaining_args_delta omits them.
+                        # Use `already_streamed` (key existence) rather than
+                        # `already_streamed_args` (string truthiness) so that a
+                        # first chunk with an empty arguments string does not
+                        # cause the header to be re-emitted in a later chunk.
                         fallback_tool_call_id = None
                         fallback_tool_call_type = None
                         fallback_tool_call_name = None
-                        if not already_streamed_args:
+                        if not already_streamed:
                             fallback_tool_call = (
                                 tool_parser.prev_tool_call_arr[index]
                                 if index < len(tool_parser.prev_tool_call_arr)
