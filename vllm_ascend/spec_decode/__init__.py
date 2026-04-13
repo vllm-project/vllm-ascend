@@ -22,7 +22,7 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-
+from vllm_ascend.spec_decode.dflash_proposer import AscendDFlashProposer
 
 def get_spec_decode_method(method, vllm_config, device, runner):
     if method == "ngram":
@@ -35,5 +35,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "draft_model":
         return AscendDraftModelProposer(vllm_config, device, runner)
+    elif method == "dflash":
+        return AscendDFlashProposer(vllm_config, device, runner)
     else:
         raise ValueError(f"Unknown speculative decoding method: {method}")

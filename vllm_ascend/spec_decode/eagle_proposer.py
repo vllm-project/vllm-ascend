@@ -24,6 +24,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -243,7 +244,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_lm_head(model)
 
-        if self.parallel_drafting and self.pass_hidden_states_to_model:
+        if self.parallel_drafting and self.pass_hidden_states_to_model and self.method != "dflash":
             assert self.parallel_drafting_hidden_state_tensor is not None
             self.parallel_drafting_hidden_state_tensor.copy_(
                 self.model.combine_hidden_states(self.model.mask_hidden.view(3 * self.hidden_size))
@@ -317,7 +318,7 @@ class SpecDecodeBaseProposer(EagleProposer):
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.method == "eagle" and hasattr(model, "lm_head"):
+        if self.method in ("eagle", "dflash") and hasattr(model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
             if supports_multimodal(model):
                 self.model.lm_head = model.get_language_model().lm_head
@@ -331,7 +332,10 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
-            self._runnable = ACLGraphWrapper(self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+            if self.method == "dflash":
+                self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+            else:
+                self._runnable = ACLGraphWrapper(self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -493,11 +497,12 @@ class SpecDecodeBaseProposer(EagleProposer):
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
-        if self.method == "eagle3":
-            assert isinstance(self.get_model(), Eagle3LlamaForCausalLM)
-            target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
+        if self.method in ("eagle3", "dflash"):
+            assert isinstance(self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM))
+            target_hidden_states = self.model.combine_hidden_states(
+                target_hidden_states
+            )
             assert target_hidden_states.shape[-1] == self.hidden_size
-
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
@@ -517,7 +522,11 @@ class SpecDecodeBaseProposer(EagleProposer):
         assert self.runner is not None
 
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
-        uniform_decode = target_model_batch_desc.uniform
+        
+        if self.method == "dflash":
+            uniform_decode = True
+        else:
+            uniform_decode = target_model_batch_desc.uniform
 
         if self.use_cuda_graph:
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
@@ -543,6 +552,28 @@ class SpecDecodeBaseProposer(EagleProposer):
             batch_descriptor = None
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            if self.method == "dflash":
+                num_query_per_req = 1 + self.num_speculative_tokens
+                num_reqs_actual = common_attn_metadata.num_reqs
+                num_reqs_padded = num_input_tokens // num_query_per_req
+                
+                self.runner.query_start_loc.gpu[: num_reqs_padded + 1] = (
+                    self.arange[: num_reqs_padded + 1] * num_query_per_req
+                )
+                self.runner.query_start_loc.cpu[: num_reqs_padded + 1] = (
+                    torch.from_numpy(self.token_arange_np[: num_reqs_padded + 1]).clone()
+                    * num_query_per_req
+                )
+                common_attn_metadata.num_reqs = num_reqs_padded
+                common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
+                common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
+                common_attn_metadata.block_table_tensor = self._adjust_tensor(
+                    common_attn_metadata.block_table_tensor, num_reqs_padded
+                )
+                common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
+                    self.runner.optimistic_seq_lens_cpu, num_reqs_padded
+                )
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
             # should have been done in model runner but not. For example, at prefill stage, target model
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
@@ -611,6 +642,9 @@ class SpecDecodeBaseProposer(EagleProposer):
         assert len(self.draft_attn_groups) > 0
         builder = self.draft_attn_groups[0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
+
+        if not attn_metadata.causal:
+            attn_metadata.attn_mask = None
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -766,21 +800,23 @@ class SpecDecodeBaseProposer(EagleProposer):
         # The lifecycle of `input_ids`, `positions`, `hidden_states` runs through all
         # speculative tokens' proposings. `model_input_ids`, `model_positions` and
         # `model_hidden_states` represent the speculative model inputs.
-        model_input_ids = self.input_ids[:num_input_tokens]
-        model_positions = self._get_positions(num_input_tokens)
 
-        model_kwargs = {
-            "input_ids": model_input_ids,
-            "positions": model_positions,
-            "inputs_embeds": inputs_embeds,
-        }
-
-        if self.pass_hidden_states_to_model:
-            model_hidden_states = self.hidden_states[:num_input_tokens]
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
-            model_kwargs["hidden_states"] = model_hidden_states
-            if self.method == "mtp":
-                model_kwargs["positions"] = model_positions
+        if self.method == "dflash":
+            model_kwargs, _  = self.build_model_inputs_first_pass(num_tokens, num_input_tokens, inputs_embeds)
+        else:
+            model_input_ids = self.input_ids[:num_input_tokens]
+            model_positions = self._get_positions(num_input_tokens)
+            model_kwargs = {
+                "input_ids": model_input_ids,
+                "positions": model_positions,
+                "inputs_embeds": inputs_embeds,
+            }
+            if self.pass_hidden_states_to_model:
+                model_hidden_states = self.hidden_states[:num_input_tokens]
+                model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
+                model_kwargs["hidden_states"] = model_hidden_states
+                if self.method == "mtp":
+                    model_kwargs["positions"] = model_positions
 
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
@@ -789,9 +825,10 @@ class SpecDecodeBaseProposer(EagleProposer):
         else:
             last_hidden_states, hidden_states = ret_hidden_states
 
-        last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-            last_hidden_states, model_positions, hidden_states
-        )
+        if self.method != "dflash":
+            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
+                last_hidden_states, model_positions, hidden_states
+            )
 
         num_indices = token_indices_to_sample.shape[0]
         if self.pcp_size > 1:
@@ -1142,7 +1179,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             return total_num_output_tokens, token_indices_to_sample, new_cad, None
 
     def model_returns_tuple(self) -> bool:
-        return self.method not in ("mtp", "draft_model")
+        return self.method not in ("mtp", "draft_model", "dflash")
 
     def attn_update_stack_num_spec_norm(
         self,
