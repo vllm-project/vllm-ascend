@@ -53,10 +53,10 @@ jobs:
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
       _310_tracker: ${{ steps.filter.outputs._310_tracker }}
     steps:
-      - name: Setup git proxy
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+      # - name: Setup git proxy
+      #   run: |
+      #     git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      #     git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
