@@ -103,6 +103,20 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
+    # Whether to enable LAPS-style length-aware prefill scheduling on the
+    # engine side. This currently targets the FCFS waiting queue path.
+    "VLLM_ASCEND_LAPS_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_LAPS_SCHEDULING", "0"))),
+    # Prompt-length threshold used by LAPS scheduling. Requests with
+    # num_prompt_tokens <= threshold are treated as short prefills.
+    "VLLM_ASCEND_LAPS_THRESHOLD": lambda: int(os.getenv("VLLM_ASCEND_LAPS_THRESHOLD", "256")),
+    # Optional waiting window for short requests, in milliseconds. When set to
+    # 0, short requests dispatch immediately. When positive, the scheduler may
+    # hold a short batch briefly to accumulate more short prefills while still
+    # allowing long prefills to run.
+    "VLLM_ASCEND_LAPS_WAIT_WINDOW_MS": lambda: float(os.getenv("VLLM_ASCEND_LAPS_WAIT_WINDOW_MS", "0")),
+    # Maximum number of short requests to accumulate before dispatching early,
+    # even if the waiting window has not expired yet.
+    "VLLM_ASCEND_LAPS_WAIT_MAX_BATCH": lambda: int(os.getenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")),
     # use fused op transpose_kv_cache_by_block, default is True
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
