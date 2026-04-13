@@ -19,12 +19,25 @@
 
 #include <cstdint>
 
+enum FnExecutionPlan : int64_t {
+    FN_EXECUTION_PLAN_INVALID = 0,
+    FN_EXECUTION_PLAN_CUTBS = 1,
+    FN_EXECUTION_PLAN_CUTBSD = 2,
+};
+
+inline constexpr int64_t ResolveFnExecutionPlan(int64_t baseDimCnt)
+{
+    return (baseDimCnt <= 0) ? FN_EXECUTION_PLAN_INVALID
+        : (baseDimCnt <= 1) ? FN_EXECUTION_PLAN_CUTBS
+        :                     FN_EXECUTION_PLAN_CUTBSD;
+}
+
+
 struct CausalConv1dTilingData {
     int64_t dim;
     int64_t cuSeqlen;
     int64_t seqLen;
     int64_t inputMode;
-    int64_t runMode;
 
     int64_t width;
 
@@ -33,17 +46,25 @@ struct CausalConv1dTilingData {
 
     int64_t batch;
 
-    int64_t activationMode;
-    int64_t padSlotId;
+    // attrs / runtime metadata
+    int64_t activationMode; // 0/1
+    int64_t padSlotId;      // default -1
+    int64_t hasBias;        // 0/1
 
-    int64_t hasBias;
+    int64_t baseDim;
+    int64_t baseDimCnt;
 
-    int64_t dimTileSize;
-    int64_t blocksPerSeq;
+    int64_t hasNumAcceptedTokens; // 0/1
 
-    int64_t hasNumAcceptedTokens;
+    int64_t hasCacheIndices;     // 0/1
+    int64_t hasInitialStateMode; // 0/1
 
-    int64_t hasCacheIndices;
-    int64_t hasInitialStateMode;
+    int64_t tokenBlockSize;
+    int64_t tokenBlockCnt;
+
+    int64_t hasExplicitTokenSeqRanges;
+    int64_t explicitTokenSeqRangeCount;
+    int64_t tokenTileStartSeq[128];
+    int64_t tokenTileEndSeq[128];
 };
 #endif // CAUSAL_CONV1D_TILING_DATA_H_
