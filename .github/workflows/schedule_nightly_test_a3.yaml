@@ -121,13 +121,16 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        vllm_ascend_branch: [releases-v0.18.0]
+        vllm_ascend_branch: [releases-v0.19.0]
         test_config:
           - name: multi-node-deepseek-v3.2-W8A8-EP
             config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
             size: 4
           - name: multi-node-deepseek-v3.2-W8A8-EP-aime2025
             config_file_path: DeepSeek-V3_2-W8A8-EP-aime2025.yaml
+            size: 4
+          - name: multi-node-glm5-W8A8-PD
+            config_file_path: GLM5-W8A8-PD.yaml
             size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
@@ -161,7 +164,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        vllm_ascend_branch: [releases-v0.19.0]
+        vllm_ascend_branch: [releases-v0.18.0]
         test_config:
           - name: multi-node-deepseek-r1-w8a8-longseq
             config_file_path: DeepSeek-R1-W8A8-longseq.yaml
@@ -199,9 +202,6 @@ jobs:
           - name: multi-node-deepseek-v3.1
             config_file_path: DeepSeek-V3.1-BF16.yaml
             size: 2
-          - name: multi-node-glm5-W8A8-PD
-            config_file_path: GLM5-W8A8-PD.yaml
-            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
