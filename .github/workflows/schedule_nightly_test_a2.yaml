@@ -68,8 +68,6 @@ env:
   # so these values are exported as job outputs via the `setup-vars` job below.
   CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
-  # Do not name the env the same as `VLLM_VERSION`, VLLM_VERSION is used in the src.
-  VLLM_REF: 'v0.18.0'
 
 jobs:
   parse-trigger:

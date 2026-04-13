@@ -57,9 +57,6 @@ jobs:
           echo "$HW_TOKEN" | docker login -u "$HW_USERNAME" --password-stdin swr.cn-southwest-2.myhuaweicloud.com
 
       - name: Build nightly-${{ inputs.target }} image
-        env:
-          GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
@@ -72,8 +69,6 @@ jobs:
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}" \
-            --build-arg GITEE_USERNAME="${GITEE_USERNAME}" \
-            --build-arg GITEE_TOKEN="${GITEE_TOKEN}" \
             -t "$IMAGE" .
 
       - name: Push image to SWR

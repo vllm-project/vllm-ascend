@@ -30,11 +30,6 @@ on:
         default: "2"
         type: string
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
-      vllm_version:
-        required: false
-        default: "v0.18.0"
-        type: string
-        description: vllm version to use
       vllm_ascend_remote_url:
         required: false
         default: https://github.com/vllm-project/vllm-ascend.git
