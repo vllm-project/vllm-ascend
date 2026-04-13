@@ -27,6 +27,7 @@ from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import vllm_version_is
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -35,6 +36,10 @@ from .moe_comm_method import AllGatherCommImpl310
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
 
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
@@ -156,21 +161,20 @@ class AscendFusedMoE310(FusedMoE):
         self.quant_type = self.get_quant_type()
 
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
-        self.runner = self._init_runner()
 
-    def _init_runner(self):
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        return AscendMoERunner(
-            layer=self,
-            moe_config=self.moe_config,
-            router=self.router,
-            routed_input_transform=self._routed_input_transform,
-            gate=self.gate,
-            shared_experts=self.shared_experts,
-            quant_method=self.quant_method,
-            reduce_results=self.reduce_results,
-            enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+        is_legacy = vllm_version_is("0.19.0")
+        self.runner = AscendMoERunner(
+            self if is_legacy else self.layer_name,
+            self.moe_config,
+            self.router,
+            self._routed_input_transform,
+            self.gate if is_legacy else kwargs.pop("gate", None),
+            self.shared_experts if is_legacy else kwargs.pop("shared_experts", None),
+            self.quant_method,
+            self.reduce_results,
+            self.vllm_config.parallel_config.enable_dbo,
         )
 
     def init_experts_map(self, moe_config):
@@ -276,7 +280,23 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         self._gate = gate
         # Recreate runner after shared_experts/gate are set so custom op dispatch
         # goes through moe_forward_shared.
-        self.runner = self._init_runner()
+        # NOTE: must use self._shared_experts here, not self.shared_experts —
+        # FusedMoE.shared_experts is a property that reads self.runner.shared_experts,
+        # which at this point is still the stale runner built with shared_experts=None.
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
+        is_legacy = vllm_version_is("0.19.0")
+        self.runner = AscendMoERunner(
+            self if is_legacy else self.layer_name,
+            self.moe_config,
+            self.router,
+            self._routed_input_transform,
+            self.gate,
+            self._shared_experts,
+            self.quant_method,
+            self.reduce_results,
+            self.vllm_config.parallel_config.enable_dbo,
+        )
 
     @property
     def is_internal_router(self) -> bool:
@@ -288,20 +308,16 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self._shared_experts is None:
-            fused_out = AscendFusedMoE310.forward(
-                self,
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-            )
-            shared_out = None
-            return shared_out, fused_out
-        shared_out, fused_out = AscendFusedMoE310.forward(
+        result = AscendFusedMoE310.forward(
             self,
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-        return shared_out, fused_out
+        # When shared experts are absent, the parent returns only fused_out;
+        # otherwise it returns a (shared_out, fused_out) tuple.
+        if self._shared_experts is None:
+            return None, result
+        return result
 
     def _forward_shared_experts(self, hidden_states: torch.Tensor):
         if self._shared_experts is None:

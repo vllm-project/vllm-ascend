@@ -368,7 +368,7 @@ You can get the proxy program in the repository's examples, [load\_balance\_prox
 We recommend using aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark). Execute the following commands to install aisbench
 
 ```shell
-git clone https://gitee.com/aisbench/benchmark.git
+git clone https://github.com/AISBench/benchmark.git
 cd benchmark/
 pip3 install -e ./
 ```

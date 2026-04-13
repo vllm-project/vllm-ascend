@@ -18,13 +18,14 @@
 #include <torch/library.h>
 #include <torch/version.h>
 #include <torch/torch.h>
+#include <ATen/core/Formatting.h>
+#include "acl/acl.h"
+#include "acl/acl_rt.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
-#include "acl/acl.h"
-#include "acl/acl_rt.h"
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
@@ -46,10 +47,70 @@
 #include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include <c10/core/Device.h>
+#include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <sstream>
 
 namespace vllm_ascend {
+
+namespace {
+
+struct DevicePrintPayload {
+    std::string message;
+    at::Tensor host_tensor_snapshot;
+};
+
+std::mutex& get_device_print_mutex()
+{
+    static std::mutex device_print_mutex;
+    return device_print_mutex;
+}
+
+void device_print_callback(void* args)
+{
+    // device_print is a debug-only helper. We intentionally do not reclaim the
+    // callback payload here because aclgraph replay may re-execute the same host
+    // callback payload multiple times. Freeing it on first execution would make
+    // later replays dereference a dangling pointer.
+    auto* payload = static_cast<DevicePrintPayload*>(args);
+    if (payload == nullptr) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> guard(get_device_print_mutex());
+    if (!payload->message.empty()) {
+        std::cout << payload->message;
+    }
+
+    if (payload->host_tensor_snapshot.defined()) {
+        if (!payload->message.empty()) {
+            std::cout << std::endl;
+        }
+        at::print(std::cout, payload->host_tensor_snapshot.contiguous(), 120);
+    }
+
+    std::cout << std::endl;
+    std::cout.flush();
+}
+
+void enqueue_device_print(std::unique_ptr<DevicePrintPayload> payload,
+                          aclrtStream stream)
+{
+    auto* raw_payload = payload.release();
+    const aclError ret = aclrtLaunchHostFunc(stream, device_print_callback,
+                                             raw_payload);
+    if (ret != ACL_SUCCESS) {
+        delete raw_payload;
+    }
+    TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc failed, error code: ", ret);
+}
+
+}
+
 void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping, aclrtStream stream)
 {
@@ -175,7 +236,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
 
     // Create output tensors
     at::Tensor masked_input = at::empty_like(input);
-	at::Tensor mask = at::empty_like(input).to(at::kBool);
+    at::Tensor mask = at::empty_like(input).to(at::kBool);
 
     // Get data pointers
     void *input_ptr = input.data_ptr();
@@ -600,6 +661,50 @@ void transpose_kv_cache_by_block(
 
 }
 
+void device_print(c10::string_view msg)
+{
+    auto payload = std::make_unique<DevicePrintPayload>();
+    payload->message = std::string(msg);
+    enqueue_device_print(std::move(payload), c10_npu::getCurrentNPUStream().stream());
+}
+
+void device_print(const at::Tensor& tensor)
+{
+    TORCH_CHECK(tensor.defined(), "tensor must be defined");
+    TORCH_CHECK(
+        tensor.device().is_cpu() ||
+            tensor.device().type() == c10::DeviceType::PrivateUse1,
+        "device_print only supports CPU and NPU tensors, but got device ",
+        tensor.device());
+
+    auto payload = std::make_unique<DevicePrintPayload>();
+    if (tensor.device().is_cpu()) {
+        payload->host_tensor_snapshot = tensor.contiguous().clone();
+        enqueue_device_print(std::move(payload),
+                             c10_npu::getCurrentNPUStream().stream());
+        return;
+    }
+
+    const c10_npu::OptionalNPUGuard npu_guard(tensor.device());
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at::Tensor contiguous_tensor = tensor.contiguous();
+    payload->host_tensor_snapshot = at::empty_like(
+        contiguous_tensor,
+        contiguous_tensor.options().device(at::kCPU).pinned_memory(true));
+
+    const size_t num_bytes = contiguous_tensor.numel() *
+                             contiguous_tensor.element_size();
+    const aclError memcpy_ret = aclrtMemcpyAsync(
+        payload->host_tensor_snapshot.data_ptr(), num_bytes,
+        contiguous_tensor.data_ptr(), num_bytes, ACL_MEMCPY_DEVICE_TO_HOST, stream);
+    TORCH_CHECK(memcpy_ret == ACL_SUCCESS,
+                "aclrtMemcpyAsync failed, error code: ", memcpy_ret);
+
+    // The D2H copy and host callback are queued on the same stream so the
+    // callback prints only after the host snapshot is ready.
+    enqueue_device_print(std::move(payload), stream);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 npu_copy_and_expand_eagle_inputs(
     const at::Tensor &target_token_ids,
@@ -795,6 +900,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
+
+    ops.def("device_print(str msg) -> ()");
+    ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
+
+    ops.def("device_print_tensor(Tensor tensor) -> ()");
+    ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
