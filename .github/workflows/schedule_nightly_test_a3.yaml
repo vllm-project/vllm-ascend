@@ -161,7 +161,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        vllm_ascend_branch: [releases-v0.18.0]
+        vllm_ascend_branch: [releases-v0.19.0]
         test_config:
           - name: multi-node-deepseek-r1-w8a8-longseq
             config_file_path: DeepSeek-R1-W8A8-longseq.yaml
