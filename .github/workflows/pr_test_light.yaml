@@ -58,7 +58,16 @@ jobs:
       #     git config --global --add safe.directory "$GITHUB_WORKSPACE"
       #     git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
+      - name: Cleanup Git Proxy
+        run: |
+          # 清除可能存在的全局代理重定向
+          git config --global --unset-all url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf || true
+          # 确保当前工作目录是安全的
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v6
+        with:
+          # 显式指定拉取的 ref，防止 merge 队列导致的指向错误
+          fetch-depth: 0
       - uses: dorny/paths-filter@v3
         id: filter
         with:
