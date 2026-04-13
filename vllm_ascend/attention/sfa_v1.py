@@ -485,6 +485,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     @staticmethod
+    def get_op_prefix() -> set[str]:
+        return {"Fia"}
+
+    @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,

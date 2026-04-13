@@ -398,6 +398,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_hamming_sparse = is_enable_hamming_sparse()
 
     @staticmethod
+    def get_op_prefix() -> set[str]:
+        return {"Fia"}
+
+    @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,
