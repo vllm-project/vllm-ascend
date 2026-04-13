@@ -80,7 +80,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
         enable_sp_by_pass() and is_ep_comm
     )
 
-    if not flash_comm_v1_enabled or (forward_context.is_draft_model and is_vl_model()):
+    if not flash_comm_v1_enabled or (forward_context.is_draft_model and is_vl_model() and not is_ep_comm):
         return tensor_model_parallel_all_reduce(x)
 
     dp_metadata = forward_context.dp_metadata
