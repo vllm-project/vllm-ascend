@@ -394,6 +394,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.sinks = sinks
 
     @staticmethod
+    def get_op_prefix() -> set[str]:
+        return {"Fia"}
+
+    @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,
