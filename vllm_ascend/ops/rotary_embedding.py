@@ -523,7 +523,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             return self.forward_triton(positions, query, key)
 
         if self.mrope_section not in ([16, 24, 24], [24, 20, 20]):
-            # Before CANN 9.0.0, the mrope operator only supported models with mrope_section set to [16, 24, 24]. 
+            # Before CANN 9.0.0, the mrope operator only supported models with mrope_section set to [16, 24, 24].
             # CANN 9.0.0, additional support has been added for models with mrope_section shape of [20, 24, 24].
             return super().forward_oot(positions, query, key)
 
