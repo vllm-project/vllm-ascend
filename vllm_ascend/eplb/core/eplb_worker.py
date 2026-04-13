@@ -320,7 +320,7 @@ class EplbProcess:
         call do_update, then notify main process update is complete.
         """
         try:
-            from ms_service_metric.adapters.vllm.adapter import get_vllm_adapter, initialize_vllm_metric
+            from ms_service_metric.adapters.vllm.adapter import get_vllm_adapter, initialize_vllm_metric  # type: ignore
 
             initialize_vllm_metric()
             adapter = get_vllm_adapter()
