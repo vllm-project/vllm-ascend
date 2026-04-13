@@ -11,3 +11,5 @@ trust_remote_code: True
 gpu_memory_utilization: 0.85
 max_model_len: 4096
 apply_chat_template: false
+dtype: "bfloat16"
+enforce_eager: True
