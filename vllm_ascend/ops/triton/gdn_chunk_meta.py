@@ -16,6 +16,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.utils import is_310p
+
 
 def _cdiv(x: int, y: int) -> int:
     triton_cdiv = getattr(triton, "cdiv", None)
@@ -156,7 +158,12 @@ def _build_final_chunk_indices(
     out_final_chunk_indices: torch.Tensor,
 ) -> None:
     num_seqs = chunk_counts.shape[0]
-    if hasattr(_build_final_chunk_indices_kernel, "__getitem__"):
+    # 310P does not support Triton kernel compilation (bishengir-compile
+    # cannot target Ascend310P), so always use the PyTorch fallback path.
+    if (
+        not is_310p()
+        and hasattr(_build_final_chunk_indices_kernel, "__getitem__")
+    ):
         block_size = 256
         grid = (_cdiv(num_seqs, block_size),)
         _build_final_chunk_indices_kernel[grid](
