@@ -62,7 +62,7 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
-
+FAILED_TRANSFER_MSG = b"failed_transfer_msg"
 
 class RemotePortInfo(TypedDict):
     num: int
@@ -213,6 +213,7 @@ class KVCacheSendingThread(threading.Thread):
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
+        self.failed_requests = set()
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -292,6 +293,17 @@ class KVCacheSendingThread(threading.Thread):
                         except zmq.Again:  # type: ignore
                             # If the socket is not ready, retry sending.
                             logger.debug("Socket not ready, retrying to send ACK for request %s", msg[1])
+                            time.sleep(0.01)
+                elif msg[0] == FAILED_TRANSFER_MSG:
+                    logger.debug("Got FAILED_TRANSFER_MSG for request %s. Cleaning up resources", msg[1])
+                    request_id = msg[1]
+                    if request_id in self.port_send_num:
+                        del self.port_send_num[request_id]
+                    while True:
+                        try:
+                            sock.send_multipart((identity, b"", b"ACK"), flags=zmq.NOBLOCK)  # type: ignore
+                            break
+                        except zmq.Again:  # type: ignore
                             time.sleep(0.01)
                 else:
                     logger.error("Connection listener got unexpected message %s", msg)
@@ -427,26 +439,40 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _handle_request(self, req_meta: dict[str, Any]):
         request_id = req_meta["request_id"]
+
+        if request_id in self.failed_requests:
+            logger.warning(f"Request {request_id} has previously failed. Canceling subsequent pull tasks.")
+            self.request_queue.task_done()
+            return 
+
         remote_request_id = req_meta["remote_request_id"]
         remote_host = req_meta["remote_host"]
         remote_handshake_port = req_meta["remote_handshake_port"]
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
+        transfer_succcess = False
 
         try:
             logger.debug(f"Starting to transfer KV cache for request {remote_request_id}.")
             self._transfer_kv_cache(req_meta)
             logger.debug(f"Finished transferring KV cache for request {remote_request_id}.")
+            transfer_succcess = True
         except Exception as e:
             logger.error(f"Failed to transfer KV cache for request {remote_request_id}: {e}", exc_info=True)
+            self.failed_requests.add(request_id)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if all_task_done:
-                if len(req_meta["local_block_ids"]) > 0:
+                if len(req_meta["local_block_ids"]) > 0 and not transfer_succcess:
                     self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
             self.request_queue.task_done()
+
+            if transfer_succcess:
+                self._send_done_recv_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
+            else:
+                self._send_failed_transfer_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
             # remote host.
@@ -546,7 +572,7 @@ class KVCacheRecvingThread(threading.Thread):
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
             logger.error(
-                "Mooncake transfer failed for request %s",
+                "Mooncake transfer failed for request %s. Failed local_block_ids: %s, remote_block_ids: %s",
                 req_meta["remote_request_id"],
                 local_block_ids,
                 remote_block_ids
@@ -753,6 +779,32 @@ class KVCacheRecvingThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
                 logger.debug("Returned socket to pool for %s:%d", remote_host, remote_handshake_port)
+
+    def _send_failed_transfer_signal(
+        self,
+        request_id: str,
+        remote_host: str,
+        remote_handshake_port: int,
+        remote_port_send_num: dict[int, RemotePortInfo],
+    ):
+        logger.debug(
+            "Sending FAILED resving signal for request %s to %s:%d", request_id, remote_host, remote_handshake_port
+        )
+        sock: zmq.Socket | None = None  # type: ignore
+        try:
+            sock = self._get_remote_socket(remote_host, remote_handshake_port)
+            data_bytes = self.encoder.encode((FAILED_TRANSFER_MSG, request_id, remote_port_send_num))
+            ensure_zmq_send(sock, data_bytes, f"{remote_host}:{remote_handshake_port}")
+            resp = ensure_zmq_recv(
+                sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}", timeout=self.timeout
+            )
+            if resp != b"ACK":
+                raise RuntimeError(f"Failed to receive ACK for FAILED signal, resp: {resp.decode('utf-8')}")
+        except Exception as e:
+            logger.warning(f"Error occurred while sending failed transfer signal for request, {e}")
+        finally:
+            if sock is not None:
+                self._return_remote_socket(sock, remote_host, remote_handshake_port)
 
     def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore
         """Get a socket to the remote host."""
