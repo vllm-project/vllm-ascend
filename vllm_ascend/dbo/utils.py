@@ -1,6 +1,11 @@
+from vllm_ascend.dbo.overlap_templates.bailing_moe_v25 import (
+    BailingMoEV25AllgatherTemplate,
+    BailingMoEV25AlltoallTemplate,
+)
 from vllm_ascend.dbo.overlap_templates.base import UbatchOverlapBaseTemplate
 from vllm_ascend.dbo.overlap_templates.deepseek import DeepseekAllgatherTemplate, DeepseekAlltoallTemplate
 from vllm_ascend.dbo.overlap_templates.glm4_moe import Glm4MoEAllgatherTemplate, Glm4MoEAlltoallTemplate
+from vllm_ascend.dbo.overlap_templates.glm_moe_dsa import GlmMoeDsaAllgatherTemplate, GlmMoeDsaAlltoallTemplate
 from vllm_ascend.dbo.overlap_templates.qwen3_dense import QwenDenseAllgatherTemplate, QwenDenseAlltoallTemplate
 from vllm_ascend.dbo.overlap_templates.qwen3_moe import QwenMoEAllgatherTemplate, QwenMoEAlltoallTemplate
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -17,6 +22,12 @@ def select_dbo_templates(vllm_config):
             return DeepseekAlltoallTemplate()
         else:
             return DeepseekAllgatherTemplate()
+    elif "GlmMoeDsaForCausalLM" in architectures:
+        # GlmMoeDsa model (MLA+MoE, same architecture as DeepSeek V2/V3)
+        if soc_version in {AscendDeviceType.A3}:
+            return GlmMoeDsaAlltoallTemplate()
+        else:
+            return GlmMoeDsaAllgatherTemplate()
     elif "Qwen3MoeForCausalLM" in architectures:
         # qwen MoE model
         if soc_version in {AscendDeviceType.A3}:
@@ -29,6 +40,12 @@ def select_dbo_templates(vllm_config):
             return Glm4MoEAlltoallTemplate()
         else:
             return Glm4MoEAllgatherTemplate()
+    elif "BailingMoeV2_5ForCausalLM" in architectures:
+        # Bailing MoE V2.5 model (hybrid attention: MLA + Linear Attention + MoE)
+        if soc_version in {AscendDeviceType.A3}:
+            return BailingMoEV25AlltoallTemplate()
+        else:
+            return BailingMoEV25AllgatherTemplate()
     elif "Qwen3ForCausalLM" in architectures:
         # qwen dense model
         if soc_version in {AscendDeviceType.A3}:
