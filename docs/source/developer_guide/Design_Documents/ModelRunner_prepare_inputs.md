@@ -281,6 +281,6 @@ Scheduled token count: `[1, 1, 3]`
 
 ## At last
 
-If you understand step_1 and step_2, you will know all the following steps.
+If you understand step 1 and step 2, you will know all the following steps.
 
 Hope this document helps you better understand how vLLM prepares inputs for model forwarding. If you have any good ideas, you are welcome to contribute to us.
