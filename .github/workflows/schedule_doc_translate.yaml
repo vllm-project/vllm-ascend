@@ -158,6 +158,11 @@ jobs:
           github-token: ${{ secrets.PAT_TOKEN }}
           script: |
             try {
+              const branchLabel = process.env.PR_BASE.split('/').pop();
+              const date = new Date().toISOString().slice(0, 10);
+              const prTitle = branchLabel === 'main'
+                ? '[Doc] Translated Doc files ' + date
+                : '[' + branchLabel + '][Doc] Translated Doc files ' + date;
               const prBody = '## Auto-Translation Summary\n\n' +
                 'Translated **' + process.env.FILE_COUNT + '** file(s):\n\n' +
                 process.env.FILE_LIST + '\n---\n\n' +
@@ -165,7 +170,7 @@ jobs:
               const pr = await github.rest.pulls.create({
                 owner: 'vllm-project', repo: 'vllm-ascend',
                 head: process.env.PR_HEAD, base: process.env.PR_BASE,
-                title: '[Doc] Translated Doc files', body: prBody
+                title: prTitle, body: prBody
               });
               core.info('Created PR #' + pr.data.number);
             } catch (error) {
