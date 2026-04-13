@@ -221,10 +221,17 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         if num_decodes > 0:
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
             num_computed_tokens_array = num_computed_tokens_array[: self.num_decodes_flatten]
+            # Get MTP attention mask from PCP metadata
+            mtp_attn_mask = None
+            if common_long_seq_metadata and common_long_seq_metadata.mtp_attention_masks_for_decode:
+                mtp_masks = common_long_seq_metadata.mtp_attention_masks_for_decode
+                if mtp_masks and mtp_masks[0] is not None:
+                    mtp_attn_mask = mtp_masks[0]
             # TODO: numpy array mode of the shared memory is used to improve performance
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
                 block_tables=block_table[: self.num_decodes_flatten],
+                mtp_attn_mask=mtp_attn_mask,
             )
 
         attn_metadata = AscendMetadata(
@@ -539,11 +546,26 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         k_nope = self.key_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
         value = self.value_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
+
+        # Get MTP attention mask and expand to target length
+        spec_attn_mask = None
+        if (
+            attn_metadata.decode_meta
+            and attn_metadata.decode_meta.mtp_attn_mask is not None
+            and self.vllm_config.speculative_config is not None
+        ):
+            mtp_mask = attn_metadata.decode_meta.mtp_attn_mask
+            B = mtp_mask.shape[0]
+            target_length = 16384
+            new_mask = torch.zeros(1, B, target_length, dtype=torch.bool, device=mtp_mask.device)
+            new_mask[:, :, : mtp_mask.shape[1]] = mtp_mask
+            spec_attn_mask = new_mask
+
         common_kwargs = {
             "num_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": "TND",
-            "atten_mask": None,
+            "atten_mask": spec_attn_mask,
             "scale": self.scale,
             "antiquant_mode": 0,
             "antiquant_scale": None,
