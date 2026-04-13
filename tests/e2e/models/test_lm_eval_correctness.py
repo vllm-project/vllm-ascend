@@ -118,9 +118,9 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     dtype = eval_config.get("dtype", "auto")
 
     # Build model_args as a string in the format expected by lm_eval
-    # Note: For vllm model in lm_eval, the first parameter should be the model path
+    # Note: vLLM's __init__ method requires the 'pretrained' parameter
     model_args = (
-        f"{model_name},tensor_parallel_size={tp_size},dtype={dtype},"
+        f"pretrained={model_name},tensor_parallel_size={tp_size},dtype={dtype},"
         f"trust_remote_code={trust_remote_code},max_model_len={max_model_len}"
     )
 
