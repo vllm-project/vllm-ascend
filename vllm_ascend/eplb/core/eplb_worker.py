@@ -321,6 +321,7 @@ class EplbProcess:
         """
         try:
             from ms_service_metric.adapters.vllm.adapter import get_vllm_adapter, initialize_vllm_metric
+
             initialize_vllm_metric()
             adapter = get_vllm_adapter()
             logger.info("[EPLB metrics] The adapter initialized: %s", adapter.is_initialized())
