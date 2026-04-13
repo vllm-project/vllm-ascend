@@ -383,8 +383,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         )
         num_experts_per_device = num_experts // ep_world_size
         if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
-            # TODO(zxdu): temp use ALLGATHER for test
-            moe_comm_type = MoECommType.ALLGATHER
+            moe_comm_type = MoECommType.MC2
         else:
             moe_comm_type = MoECommType.ALLGATHER
 

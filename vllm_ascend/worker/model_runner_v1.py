@@ -1761,7 +1761,9 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 max_tokens_across_pcp=0 if self.pcp_size == 1 else self.pcp_manager.max_num_tokens_across_pcp,
                 skip_compiled=has_encoder_input,
-                ubatch_slices=ubatch_slices_padded,
+                # TODO(zxdu):check it, if we use padded ubatch here but use unpadded ubatch in attn split
+                # shape errors may occurs
+                ubatch_slices=ubatch_slices
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
