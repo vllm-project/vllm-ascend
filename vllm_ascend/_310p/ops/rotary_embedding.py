@@ -9,7 +9,7 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# WITHOUT WARRANTIES OR ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
@@ -35,17 +35,6 @@ _mrope_cos_slice: torch.Tensor | None = None
 _mrope_sin_slice: torch.Tensor | None = None
 
 
-def _mrope_cos_sin_half_for_apply_emb(
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Strip duplicated half from MRoPE buffers; shapes match ApplyRotaryEmb (per-token half-dim)."""
-    half = cos.shape[-1] // 2
-    cos_h = cos[0, :, 0, :half].contiguous()
-    sin_h = sin[0, :, 0, :half].contiguous()
-    return cos_h, sin_h
-
-
 def _apply_rotary_mrope_torch(
     q_rot: torch.Tensor,
     k_rot: torch.Tensor,
@@ -54,7 +43,9 @@ def _apply_rotary_mrope_torch(
     is_neox_style: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """PyTorch path aligned with vLLM MRotaryEmbedding.forward_native -> ApplyRotaryEmb."""
-    cos_h, sin_h = _mrope_cos_sin_half_for_apply_emb(cos, sin)
+    half = cos.shape[-1] // 2
+    cos_h = cos[0, :, 0, :half].contiguous()
+    sin_h = sin[0, :, 0, :half].contiguous()
     q_out = ApplyRotaryEmb.forward_static(q_rot[0], cos_h, sin_h, is_neox_style)
     k_out = ApplyRotaryEmb.forward_static(k_rot[0], cos_h, sin_h, is_neox_style)
     return q_out.unsqueeze(0), k_out.unsqueeze(0)
@@ -227,34 +218,38 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
             )
         cos, sin = _mrope_cos_slice[:, :num_tokens], _mrope_sin_slice[:, :num_tokens]
 
-        # Keep branch layout aligned with rope implementation for better numerical consistency.
-        if self.head_size == 128 and self.rotary_dim == self.head_size:
-            query = query.contiguous().view(1, num_tokens, -1, self.head_size)
-            key = key.contiguous().view(1, num_tokens, -1, self.head_size)
-            query, key = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin, rotary_mode=rotary_mode)
-        elif self.rotary_dim < self.head_size:
+        is_partial_rope = self.rotary_dim < self.head_size
+        if is_partial_rope:
             query = query.view(num_tokens, -1, self.head_size)
             key = key.view(num_tokens, -1, self.head_size)
-            q_rot = query[..., : self.rotary_dim]
             q_pass = query[..., self.rotary_dim :]
-            k_rot = key[..., : self.rotary_dim]
             k_pass = key[..., self.rotary_dim :]
-            q_rot = q_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
-            k_rot = k_rot.contiguous().view(1, num_tokens, -1, self.rotary_dim)
-            if self.rotary_dim == 64:
-                q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
-            else:
-                q_rot, k_rot = _apply_rotary_mrope_torch(q_rot, k_rot, cos, sin, self.is_neox_style)
+            q_rot = query[..., : self.rotary_dim].contiguous().view(1, num_tokens, -1, self.rotary_dim)
+            k_rot = key[..., : self.rotary_dim].contiguous().view(1, num_tokens, -1, self.rotary_dim)
+        else:
+            q_rot = query.contiguous().view(1, num_tokens, -1, self.head_size)
+            k_rot = key.contiguous().view(1, num_tokens, -1, self.head_size)
+
+        # `npu_apply_rotary_pos_emb` only supports rotary_dim 64 or 128.
+        use_npu_apply = self.rotary_dim in (64, 128)
+
+        if use_npu_apply:
+            q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(
+                q_rot, k_rot, cos, sin, rotary_mode=rotary_mode
+            )
+        else:
+            q_rot, k_rot = _apply_rotary_mrope_torch(q_rot, k_rot, cos, sin, self.is_neox_style)
+
+        if is_partial_rope:
             q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
             k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
             query = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
             key = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
         else:
-            query = query.contiguous().view(1, num_tokens, -1, self.head_size)
-            key = key.contiguous().view(1, num_tokens, -1, self.head_size)
-            query, key = _apply_rotary_mrope_torch(query, key, cos, sin, self.is_neox_style)
+            query = q_rot.view(query_shape)
+            key = k_rot.view(key_shape)
 
-        return query.view(query_shape), key.view(key_shape)
+        return query, key
 
 
 class AscendRotaryEmbedding310(AscendRotaryEmbedding):
