@@ -1533,7 +1533,7 @@ class MooncakeLayerwiseConnectorWorker:
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
             if (self.use_mla and not hasattr(attn_metadata[layer_name], "reshape_cache_event")) or (
-                not self.use_mla and not hasattr(attn_metadata, "reshape_cache_event") or self.enable_c8_quant
+                not self.use_mla and not hasattr(attn_metadata, "reshape_cache_event")
             ):
                 reshape_cache_event = torch.npu.Event()
                 reshape_cache_event.record()
