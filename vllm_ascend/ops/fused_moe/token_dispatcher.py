@@ -394,7 +394,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
     def token_combine(self, hidden_states, combine_metadata, bias=None):
         final_hidden_states = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
-            sorted_indices=torch.abs(combine_metadata.expanded_row_idx),
+            sorted_indices=combine_metadata.expanded_row_idx,
             probs=combine_metadata.topk_weights,
         )
         if len(combine_metadata.restore_shape) == 3:
