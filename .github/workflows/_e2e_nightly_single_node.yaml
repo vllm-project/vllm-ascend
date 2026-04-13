@@ -62,7 +62,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: 600
+    timeout-minutes: 120
     container:
       image: ${{ inputs.image }}
     env:
@@ -144,6 +144,9 @@ jobs:
           echo "Installed vLLM-related Python packages:"
           pip list | grep vllm || echo "No vllm packages found."
 
+          echo "VLLM_VERSION=$(pip show vllm | grep ^Version | awk '{print $2}')" >> $GITHUB_ENV
+          echo "VLLM_ASCEND_VERSION=$(pip show vllm-ascend | grep ^Version | awk '{print $2}')" >> $GITHUB_ENV
+
           echo ""
           echo "============================"
           echo "vLLM Git information"
@@ -210,15 +213,31 @@ jobs:
           --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
 
       - name: Run Pytest (YAML-driven)
-        if: ${{ always() && inputs.config_file_path != '' }} 
+        if: ${{ always() && inputs.config_file_path != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
           CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
+          BENCHMARK_JOB_NAME: ${{ inputs.name }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
           echo "Running YAML-driven test with config: ${{ inputs.config_file_path }}"
           pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
+
+      - name: Set benchmark artifact timestamp
+        if: ${{ always() && inputs.config_file_path != '' }}
+        id: bench_ts
+        run: echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+
+      - name: Upload benchmark results
+        if: ${{ always() && inputs.config_file_path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
+          if-no-files-found: warn
+          retention-days: 90
+          compression-level: 0

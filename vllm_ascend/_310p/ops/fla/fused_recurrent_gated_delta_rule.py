@@ -1,10 +1,11 @@
 import torch
+import torch.nn.functional as F
 
 
 def _maybe_l2norm(x: torch.Tensor, enabled: bool) -> torch.Tensor:
     if not enabled:
         return x
-    return x / (torch.sqrt(torch.sum(x * x, dim=-1, keepdim=True)) + 1e-6)
+    return F.normalize(x, p=2, dim=-1, eps=1e-6).to(x.dtype)
 
 
 def _expand_to_hv(x: torch.Tensor, hv: int) -> torch.Tensor:
@@ -65,7 +66,7 @@ def _run_recurrent_gated_delta_rule(
     q,k: [B, T, H, K]
     v:   [B, T, HV, V]
     g,beta: [B, T, HV] (beta may also be [B, T, HV, V])
-    states: [N_state, HV, K, V]
+    states: [N_state, HV, V, K]
     """
     B, T, _, Kdim = k.shape
     HV = v.shape[2]
@@ -112,7 +113,7 @@ def _run_recurrent_gated_delta_rule(
                 continue
             if init_state_idx >= states.shape[0]:
                 raise IndexError(f"state_idx {init_state_idx} out of range for states size {states.shape[0]}")
-            h_t = states[init_state_idx].transpose(-1, -2).to(torch.float32)
+            h_t = states[init_state_idx].to(torch.float32)
         else:
             h_t = torch.zeros(HV, Vdim, Kdim, dtype=torch.float32, device=q.device)
 
@@ -176,7 +177,7 @@ def _run_recurrent_gated_delta_rule(
             if state_idx >= 0:
                 if state_idx >= states.shape[0]:
                     raise IndexError(f"state_idx {state_idx} out of range for states size {states.shape[0]}")
-                states[state_idx] = h_t.transpose(-1, -2).to(states.dtype)
+                states[state_idx] = h_t.to(states.dtype)
 
     return out, states
 
@@ -204,7 +205,7 @@ def fused_recurrent_gated_delta_rule_pytorch(
     if initial_state is not None:
         states = initial_state if inplace_final_state else initial_state.clone()
     else:
-        states = torch.zeros(n_states, HV, Kdim, Vdim, dtype=q.dtype, device=q.device)
+        states = torch.zeros(n_states, HV, Vdim, Kdim, dtype=q.dtype, device=q.device)
 
     scale = Kdim**-0.5
     out, states = _run_recurrent_gated_delta_rule(

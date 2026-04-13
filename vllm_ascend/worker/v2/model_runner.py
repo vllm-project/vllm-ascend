@@ -45,9 +45,8 @@ from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.sample.sampler import AscendSampler
-from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.eagle import init_speculator
+from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
@@ -76,7 +75,6 @@ class NPUModelRunner(GPUModelRunner):
         del self.cudagraph_manager
         del self.req_states
         del self.input_buffers
-        del self.sampler
         del self.speculator
 
         # NPU specific initializations can be added below.
@@ -88,7 +86,7 @@ class NPUModelRunner(GPUModelRunner):
             model_runner=self,
         )
 
-        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
+        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
@@ -111,16 +109,6 @@ class NPUModelRunner(GPUModelRunner):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
-        )
-        # we need to adjust triton operators in sampler,
-        # so reinitialize sampler here.
-        self.sampler: AscendSampler = AscendSampler(
-            max_num_reqs=self.max_num_reqs,
-            vocab_size=self.vocab_size,
-            device=self.device,
-            req_states=self.req_states,
-            logprobs_mode=self.model_config.logprobs_mode,
-            num_speculative_tokens=self.num_speculative_steps + 1,
         )
 
         # we need to copy num_computed_tokens back to cpu to help
@@ -258,15 +246,17 @@ class NPUModelRunner(GPUModelRunner):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
-        # This is only required for vllm-ascend.
-        query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
-            num_tokens_after_padding,
-            num_reqs_padded,
-            num_reqs,
-            query_start_loc_np,
-            batch_desc.cg_mode,
-            batch_desc.num_reqs,
-        )
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # This is only required for vllm-ascend.
+            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
+                num_tokens_after_padding,
+                num_reqs_padded,
+                num_reqs,
+                query_start_loc_np,
+                batch_desc.cg_mode,
+                batch_desc.num_reqs,
+            )
+
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]

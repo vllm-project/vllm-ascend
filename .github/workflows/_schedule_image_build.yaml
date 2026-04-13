@@ -66,6 +66,20 @@ jobs:
             tag: arm64
     steps:
 
+    - name: Validate inputs (workflow_dispatch only)
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      run: |
+        tag="${{ inputs.workflow_dispatch_tag }}"
+        branch="${{ inputs.branch_ref }}"
+        if [[ -n "$tag" && -n "$branch" ]]; then
+          echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
+          exit 1
+        fi
+        if [[ -z "$tag" && -z "$branch" ]]; then
+          echo "Error: Either 'tag' or 'branch' must be specified."
+          exit 1
+        fi
+
     - uses: actions/checkout@v6
       if: ${{ github.event_name != 'workflow_dispatch' }}
       with:
