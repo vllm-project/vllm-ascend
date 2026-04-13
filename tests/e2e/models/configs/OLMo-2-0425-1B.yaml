@@ -8,8 +8,8 @@ tasks:
         value: 0.6
 num_fewshot: 5
 trust_remote_code: True
-gpu_memory_utilization: 0.85
+gpu_memory_utilization: 0.7
 max_model_len: 4096
 apply_chat_template: false
-dtype: "bfloat16"
+dtype: "float16"
 enforce_eager: True
