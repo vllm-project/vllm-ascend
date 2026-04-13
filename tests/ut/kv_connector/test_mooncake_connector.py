@@ -287,6 +287,50 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertEqual(result, {"req1", "req2"})
 
 
+class TestKVCacheRecvingThreadHeadDimFallback(unittest.TestCase):
+
+    @patch(
+        'vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.is_vl_model',
+        return_value=False,
+    )
+    def test_non_mla_uses_model_config_head_size_without_head_dim(
+        self,
+        _mock_is_vl_model,
+    ):
+        engine = MagicMock()
+        ready_event = threading.Event()
+        vllm_config = MockVllmConfig()
+        hf_text_config = types.SimpleNamespace(
+            num_hidden_layers=28,
+            num_key_value_heads=8,
+        )
+        model_config = MagicMock()
+        model_config.hf_text_config = hf_text_config
+        model_config.get_head_size.return_value = 128
+        vllm_config.model_config = model_config
+
+        thread = KVCacheRecvingThread(
+            tp_rank=0,
+            tp_size=4,
+            _prefill_pp_size=1,
+            engine=engine,
+            local_engine_id="local_engine",
+            local_handshake_port=5555,
+            side_channel_port=30000,
+            local_kv_caches_base_addr=[0x1000, 0x2000],
+            block_len=[1024],
+            ready_event=ready_event,
+            vllm_config=vllm_config,
+            kv_caches={},
+            prefill_pp_layer_partition=None)
+
+        self.assertFalse(thread.use_mla)
+        self.assertEqual(thread.k_head_dim, 128)
+        self.assertEqual(thread.v_head_dim, 128)
+        self.assertEqual(thread.num_kv_heads, 2)
+        model_config.get_head_size.assert_called_once_with()
+
+
 class TestSocketManagement(unittest.TestCase):
 
     def setUp(self):
@@ -576,6 +620,15 @@ class MockVllmConfig:
         self.parallel_config.data_parallel_rank_local = 0
         self.model_config.get_num_layers_by_block_type = MagicMock(
             return_value=32)
+        self.model_config.get_head_size = MagicMock(return_value=128)
+        self.model_config.is_deepseek_mla = False
+        self.model_config.hf_text_config = MagicMock()
+        self.model_config.hf_text_config.num_hidden_layers = 32
+        self.model_config.hf_text_config.num_key_value_heads = 8
+        self.model_config.hf_text_config.head_dim = 128
+        self.model_config.hf_text_config.kv_lora_rank = 16
+        self.model_config.hf_text_config.qk_rope_head_dim = 8
+        self.model_config.hf_config = self.model_config.hf_text_config
         self.cache_config.block_size = 16
         self.kv_transfer_config.kv_port = 5000
         self.kv_transfer_config.kv_role = 'kv_producer'

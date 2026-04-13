@@ -364,8 +364,9 @@ class KVCacheRecvingThread(threading.Thread):
                 self.v_head_dim = self.model_config.hf_text_config.qk_rope_head_dim
                 self.num_kv_heads = 1
             else:
-                self.k_head_dim = self.model_config.hf_text_config.head_dim
-                self.v_head_dim = self.model_config.hf_text_config.head_dim
+                head_dim = self.model_config.get_head_size()
+                self.k_head_dim = head_dim
+                self.v_head_dim = head_dim
                 self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
 
@@ -584,7 +585,7 @@ class KVCacheRecvingThread(threading.Thread):
         # Get necessary parameters
         k_cache = list(self.kv_caches.values())[0][0]
         device = k_cache.device
-        head_dim = self.model_config.hf_text_config.head_dim
+        head_dim = self.k_head_dim
         block_size = self.vllm_config.cache_config.block_size
         num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         layers = self.model_config.hf_text_config.num_hidden_layers
