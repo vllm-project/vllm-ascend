@@ -19,12 +19,12 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import shutil
 import sys
 import time
 from pathlib import Path
 
+import regex as re
 from openai import AsyncOpenAI
 
 SYSTEM_PROMPT = (
@@ -120,22 +120,22 @@ class POTranslator:
         orphaned msgstr lines.  This method keeps each entry intact.
         """
         # PO entries are separated by one or more blank lines.
-        entries = re.split(r'\n{2,}', content.strip())
+        entries = re.split(r"\n{2,}", content.strip())
         chunks: list[str] = []
         current: list[str] = []
         current_lines = 0
 
         for entry in entries:
-            entry_lines = entry.count('\n') + 1
+            entry_lines = entry.count("\n") + 1
             if current_lines + entry_lines > max_lines and current:
-                chunks.append('\n\n'.join(current) + '\n')
+                chunks.append("\n\n".join(current) + "\n")
                 current = []
                 current_lines = 0
             current.append(entry)
             current_lines += entry_lines
 
         if current:
-            chunks.append('\n\n'.join(current) + '\n')
+            chunks.append("\n\n".join(current) + "\n")
 
         return chunks if len(chunks) > 1 else [content]
 
@@ -167,7 +167,7 @@ class POTranslator:
             translated[idx] = chunk_text
 
         # Write result: join chunks with a single blank line between them
-        final = '\n\n'.join(t.strip('\n') for t in translated) + '\n'
+        final = "\n\n".join(t.strip("\n") for t in translated) + "\n"
         Path(po_path).write_text(final, encoding="utf-8")
         return True
 
