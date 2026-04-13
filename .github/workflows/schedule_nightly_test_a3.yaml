@@ -121,7 +121,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        vllm_ascend_branch: [releases-v0.19.0]
+        vllm_ascend_branch: [main]
         test_config:
           - name: multi-node-deepseek-v3.2-W8A8-EP
             config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
