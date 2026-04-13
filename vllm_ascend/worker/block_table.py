@@ -4,8 +4,8 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu.block_table import _compute_slot_mappings_kernel as _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.v1.worker.gpu.block_table import _compute_slot_mappings_kernel as _compute_slot_mapping_kernel
 
 
 class BlockTable:
