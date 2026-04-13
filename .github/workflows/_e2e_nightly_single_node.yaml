@@ -106,12 +106,6 @@ jobs:
           mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
           ls -R /vllm-workspace
 
-      - name: Install vllm-project/vllm from source
-        if: ${{ github.event_name == 'pull_request' }}
-        working-directory: /vllm-workspace/vllm
-        run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
-      
       - name: Install vllm-project/vllm-ascend
         if: ${{ github.event_name == 'pull_request' }}
         working-directory: /vllm-workspace/vllm-ascend

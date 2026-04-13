@@ -157,7 +157,7 @@ checkout_src() {
     fi
 }
 
-install_vllm() {
+install_vllm_ascend() {
     echo "====> Install vllm-ascend"
     pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
     pip install -e "$WORKSPACE/vllm-ascend"
@@ -230,7 +230,7 @@ main() {
     check_and_config
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src
-        install_vllm
+        install_vllm_ascend
         install_aisbench
     fi
     show_vllm_info

@@ -105,7 +105,7 @@ jobs:
               normalized=$(echo "$input_branch" | tr '/' '-')
               echo "vllm_ascend_branches=[\"${normalized}\"]"
             else
-              echo 'vllm_ascend_branches=["main", "releases-v0.18.0"]'
+              echo 'vllm_ascend_branches=["releases-v0.18.0"]'
             fi
           } >> $GITHUB_OUTPUT
 
@@ -136,7 +136,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 1
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
@@ -177,7 +177,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 3
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
@@ -248,7 +248,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 9
+      max-parallel: 7
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
