@@ -873,3 +873,7 @@ class NPUPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        pass
