@@ -9,11 +9,13 @@ generates structured reports covering:
   - Compute vs Communication overlap ratio
   - Per-layer DBO hook timing estimation
   - Overlap opportunity identification for DBO template design
+  - Communication call stack extraction (trace Python source → comm op mapping)
 
 Usage:
     python analyze_ascend_profiling.py triage   --input /path/to/profiling_dir
     python analyze_ascend_profiling.py breakdown --input /path/to/profiling_dir
     python analyze_ascend_profiling.py comm      --input /path/to/profiling_dir
+    python analyze_ascend_profiling.py stack     --input /path/to/profiling_dir
     python analyze_ascend_profiling.py compare   --input-a /path/to/dir_a --input-b /path/to/dir_b
 """
 
@@ -28,7 +30,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,18 @@ class CommOp:
     sync_ms: float
     idle_ms: float
     group_id: str = ""
+
+
+@dataclass
+class TraceCommEvent:
+    """A communication event extracted from trace_view.json with call stack."""
+    name: str
+    comm_type: str
+    ts_us: float
+    dur_us: float
+    tid: int
+    call_stack: List[str] = field(default_factory=list)  # from innermost to outermost
+    code_location: str = ""  # the most relevant vllm/vllm-ascend source location
 
 
 @dataclass
@@ -171,13 +185,22 @@ def classify_kernel(name: str) -> str:
 
 
 def classify_comm_type(name: str) -> str:
-    """Extract communication type from hcom op name."""
+    """Extract communication type from hcom op name.
+
+    Note: AlltoAll ops are classified as "alltoallv" (not "alltoall") throughout
+    this script. This is intentional: Ascend NPU's hcom library uses the name
+    "HcclAlltoAllV" (variable-length AlltoAll) for MoE token dispatch/combine,
+    and the op names in communication.json / trace_view.json contain "alltoall"
+    which maps to "alltoallv" here. Using a single canonical key "alltoallv"
+    avoids splitting the same op type across two keys ("alltoall" vs "alltoallv").
+    """
     name_lower = name.lower()
     if "allreduce" in name_lower:
         return "allreduce"
     if "allgather" in name_lower:
         return "allgather"
     if "alltoall" in name_lower:
+        # Unified as "alltoallv": covers both HcclAlltoAll and HcclAlltoAllV
         return "alltoallv"
     if "broadcast" in name_lower:
         return "broadcast"
@@ -332,6 +355,350 @@ def load_profiler_info(prof_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# trace_view.json loading and call-stack extraction
+# ---------------------------------------------------------------------------
+
+# Communication op names in trace_view.json (cpu_op category)
+TRACE_COMM_OP_NAMES = {
+    "c10d::allreduce_", "c10d::allgather_", "c10d::_allgather_base_",
+    "c10d::alltoall_", "c10d::broadcast_", "c10d::_reduce_scatter_base_",
+    "c10d::reduce_scatter_", "c10d::reduce_scatter_tensor_",
+    "HcclAllreduce", "HcclAllgather", "HcclAlltoAll",
+    "HcclBroadcast", "HcclReduceScatter",
+}
+
+# Patterns to identify communication ops by substring match
+TRACE_COMM_PATTERNS = [
+    "allreduce", "allgather", "alltoall", "broadcast",
+    "reduce_scatter", "HcclAll", "HcclBroadcast", "HcclReduce",
+]
+
+# Source path prefixes that indicate vllm or vllm-ascend code (most relevant)
+RELEVANT_SOURCE_PREFIXES = [
+    "vllm_ascend/", "vllm/", "/vllm-ascend/", "/vllm/",
+]
+
+# Source path prefixes to skip (framework internals)
+SKIP_SOURCE_PREFIXES = [
+    "torch/", "torch_npu/", "threading.py", "tqdm/",
+    "<built-in method", "<frozen", "importlib",
+]
+
+
+def _classify_trace_comm_type(name: str) -> str:
+    """Classify a trace event name into communication type."""
+    name_lower = name.lower()
+    if "reduce_scatter" in name_lower:
+        return "reduce_scatter"
+    if "allreduce" in name_lower:
+        return "allreduce"
+    if "allgather" in name_lower:
+        return "allgather"
+    if "alltoall" in name_lower:
+        return "alltoallv"
+    if "broadcast" in name_lower:
+        return "broadcast"
+    return "other"
+
+
+def _is_comm_event(ev: dict) -> bool:
+    """Check if a trace event is a communication operation."""
+    name = ev.get("name", "")
+    if name in TRACE_COMM_OP_NAMES:
+        return True
+    name_lower = name.lower()
+    return any(p.lower() in name_lower for p in TRACE_COMM_PATTERNS)
+
+
+def _is_relevant_source(name: str) -> bool:
+    """Check if a python_function event name points to vllm/vllm-ascend source."""
+    if name.startswith("<built-in"):
+        return False
+    return any(prefix in name for prefix in RELEVANT_SOURCE_PREFIXES)
+
+
+def _should_skip_source(name: str) -> bool:
+    """Check if a python_function event name should be skipped in stack display."""
+    return any(name.startswith(prefix) or prefix in name
+               for prefix in SKIP_SOURCE_PREFIXES)
+
+
+def _determine_target_comm_types(
+    comm_ops: List[CommOp],
+    top_k: int = 3,
+    min_count: int = 10,
+) -> Set[str]:
+    """Determine the most frequent communication types from communication.json data.
+
+    Analyzes the frequency of each communication type and returns the top-K
+    types that appear at least ``min_count`` times.  This is used to focus
+    stack extraction on the most relevant communication operations.
+
+    Args:
+        comm_ops: List of CommOp loaded from communication.json.
+        top_k: Number of top communication types to return.
+        min_count: Minimum occurrence count for a type to be considered.
+
+    Returns:
+        Set of communication type strings (e.g. {"allreduce", "alltoallv", "allgather"}).
+        Returns an empty set if no types meet the criteria.
+    """
+    from collections import Counter
+
+    counter = Counter(op.comm_type for op in comm_ops)
+    result: Set[str] = set()
+    for comm_type, count in counter.most_common(top_k):
+        if count >= min_count:
+            result.add(comm_type)
+    return result
+
+
+def _extract_source_location(name: str) -> str:
+    """Extract file:line from a python_function event name.
+
+    Format: ``path/to/file.py(123): function_name``
+    Returns: ``path/to/file.py:123 function_name``
+    """
+    # Match pattern: path(line): func
+    m = re.match(r"(.+?)\((\d+)\):\s*(.+)", name)
+    if m:
+        filepath, line, func = m.group(1), m.group(2), m.group(3)
+        # Normalize path: strip leading deployment prefix
+        for marker in ["/vllm-ascend/", "/vllm/"]:
+            idx = filepath.find(marker)
+            if idx >= 0:
+                filepath = filepath[idx + 1:]  # keep "vllm-ascend/..." or "vllm/..."
+                break
+        return f"{filepath}:{line} {func}"
+    return name
+
+
+def load_trace_comm_with_stacks(
+    prof_dir: Path,
+    *,
+    max_depth: int = 20,
+    dedup: bool = True,
+    target_comm_types: Optional[Set[str]] = None,
+    max_stacks: int = 100,
+    comm_ops: Optional[List[CommOp]] = None,
+) -> List[TraceCommEvent]:
+    """Load trace_view.json and extract communication events with Python call stacks.
+
+    Uses a two-phase strategy to minimise memory usage on large trace files:
+
+    **Phase 1 – Determine targets** (from communication.json):
+      If *target_comm_types* is ``None`` and *comm_ops* (or a fresh load) is
+      available, the function calls ``_determine_target_comm_types()`` to pick
+      the top-K most frequent communication types so that Phase 2 can skip
+      irrelevant events early.
+
+    **Phase 2 – Single-pass extraction** (from trace_view.json):
+      Iterates over the events list **once**, simultaneously building a
+      ``py_by_id`` index (for ``python_function`` events) and collecting
+      target ``cpu_op`` communication events.  After the scan, call stacks
+      are reconstructed by tracing the ``Python parent id`` chain.
+
+    The events list is explicitly deleted after processing to free memory.
+
+    Args:
+        prof_dir: Profiling directory containing ASCEND_PROFILER_OUTPUT/trace_view.json
+        max_depth: Maximum call stack depth to trace.
+        dedup: If True, deduplicate events with identical call stacks.
+        target_comm_types: If provided, only extract stacks for these comm types.
+            When ``None``, the function will auto-determine targets from
+            *comm_ops* / communication.json (top-3 by default).
+        max_stacks: Maximum number of unique stacks to collect (enables early
+            termination).  Set to 0 to disable the limit.
+        comm_ops: Pre-loaded CommOp list.  Passed in to avoid re-loading
+            communication.json when the caller already has it.
+
+    Returns:
+        List of TraceCommEvent with populated call_stack and code_location.
+    """
+    json_path = prof_dir / "ASCEND_PROFILER_OUTPUT" / "trace_view.json"
+    if not json_path.exists():
+        return []
+
+    # ------------------------------------------------------------------
+    # Phase 1: determine target comm types (cheap – from communication.json)
+    # ------------------------------------------------------------------
+    if target_comm_types is None:
+        if comm_ops is None:
+            comm_ops = load_communication_json(prof_dir)
+        if comm_ops:
+            target_comm_types = _determine_target_comm_types(comm_ops)
+        # If still empty / None, we will accept all comm types below.
+
+    # ------------------------------------------------------------------
+    # Phase 2: single-pass scan of trace_view.json
+    # ------------------------------------------------------------------
+    with open(json_path, "r") as f:
+        events = json.load(f)
+
+    if isinstance(events, dict):
+        events = events.get("traceEvents", events.get("events", []))
+
+    # Single-pass: build python_function index AND collect comm events
+    py_by_id: Dict[int, dict] = {}
+    py_by_tid: Dict[int, List[dict]] = defaultdict(list)
+    raw_comm_events: List[dict] = []
+
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        cat = ev.get("cat")
+        if cat == "python_function":
+            pid = ev.get("args", {}).get("Python id")
+            if pid is not None:
+                py_by_id[pid] = ev
+                py_by_tid[ev.get("tid", 0)].append(ev)
+        elif cat == "cpu_op" and _is_comm_event(ev):
+            comm_type = _classify_trace_comm_type(ev.get("name", ""))
+            if target_comm_types is None or comm_type in target_comm_types:
+                raw_comm_events.append(ev)
+
+    # Free the (potentially huge) events list as early as possible
+    del events
+
+    # Sort each thread's python_function events by start timestamp for
+    # efficient binary-search based containment lookup.
+    for tid in py_by_tid:
+        py_by_tid[tid].sort(key=lambda e: float(e.get("ts", 0)))
+
+    # ------------------------------------------------------------------
+    # Reconstruct call stacks for collected comm events
+    # ------------------------------------------------------------------
+    results: List[TraceCommEvent] = []
+    seen_stacks: set = set()
+
+    for ev in raw_comm_events:
+        comm_name = ev.get("name", "")
+        comm_type = _classify_trace_comm_type(comm_name)
+        comm_ts = float(ev.get("ts", 0))
+        comm_dur = float(ev.get("dur", 0))
+        comm_end = comm_ts + comm_dur
+        comm_tid = ev.get("tid", 0)
+
+        # Find the most specific (smallest duration) python_function event
+        # on the same thread that contains this comm event.
+        # Use a linear scan over the (sorted-by-ts) list; for each candidate
+        # check containment and track the tightest fit.
+        best_py = None
+        best_dur = float("inf")
+        for py_ev in py_by_tid.get(comm_tid, []):
+            py_ts = float(py_ev.get("ts", 0))
+            py_dur = float(py_ev.get("dur", 0))
+            py_end = py_ts + py_dur
+            if py_ts <= comm_ts and py_end >= comm_end and py_dur < best_dur:
+                best_py = py_ev
+                best_dur = py_dur
+
+        # Trace the call stack via Python parent id
+        call_stack: List[str] = []
+        code_location = ""
+        if best_py:
+            current = best_py
+            depth = 0
+            while current and depth < max_depth:
+                name = current.get("name", "")
+                call_stack.append(name)
+                if not code_location and _is_relevant_source(name):
+                    code_location = _extract_source_location(name)
+                parent_id = current.get("args", {}).get("Python parent id")
+                if parent_id is not None and parent_id in py_by_id:
+                    current = py_by_id[parent_id]
+                else:
+                    break
+                depth += 1
+
+        # Deduplication: skip if we've seen this exact stack before
+        if dedup:
+            stack_key = (comm_name, tuple(call_stack[:5]))  # use top 5 frames as key
+            if stack_key in seen_stacks:
+                continue
+            seen_stacks.add(stack_key)
+
+        results.append(TraceCommEvent(
+            name=comm_name,
+            comm_type=comm_type,
+            ts_us=comm_ts,
+            dur_us=comm_dur,
+            tid=comm_tid,
+            call_stack=call_stack,
+            code_location=code_location,
+        ))
+
+        # Early termination: stop once we have enough unique stacks
+        if max_stacks > 0 and len(results) >= max_stacks:
+            break
+
+    return results
+
+
+def render_comm_stacks(
+    trace_comms: List[TraceCommEvent],
+    *,
+    show_full_stack: bool = False,
+    max_stack_depth: int = 15,
+) -> str:
+    """Render communication events with their call stacks.
+
+    Args:
+        trace_comms: List of TraceCommEvent from load_trace_comm_with_stacks
+        show_full_stack: If True, show full call stack; otherwise show only relevant frames
+        max_stack_depth: Maximum number of stack frames to display
+    """
+    if not trace_comms:
+        return "  (No communication events with call stacks found in trace_view.json)\n"
+
+    lines: List[str] = []
+
+    # Group by comm_type
+    by_type: Dict[str, List[TraceCommEvent]] = defaultdict(list)
+    for ev in trace_comms:
+        by_type[ev.comm_type].append(ev)
+
+    lines.append("\n### Communication Call Stacks (from trace_view.json)\n")
+
+    for comm_type in ["allreduce", "reduce_scatter", "allgather", "alltoallv", "broadcast", "other"]:
+        evts = by_type.get(comm_type, [])
+        if not evts:
+            continue
+
+        lines.append(f"\n#### {comm_type.upper()} ({len(evts)} unique call sites)\n")
+
+        for i, ev in enumerate(evts, 1):
+            lines.append(f"**{i}. `{ev.name}`** (dur={ev.dur_us:.1f}μs)")
+            if ev.code_location:
+                lines.append(f"   → **Code location**: `{ev.code_location}`")
+
+            # Show call stack
+            lines.append("   ```")
+            displayed = 0
+            for frame in ev.call_stack:
+                if not show_full_stack and _should_skip_source(frame):
+                    continue
+                loc = _extract_source_location(frame)
+                lines.append(f"   {'  ' * min(displayed, 10)}{loc}")
+                displayed += 1
+                if displayed >= max_stack_depth:
+                    lines.append(f"   {'  ' * 10}... (truncated)")
+                    break
+            lines.append("   ```")
+            lines.append("")
+
+    # Summary table: code location → comm types
+    lines.append("\n### Communication Code Location Summary\n")
+    lines.append("| # | Comm Type | Op Name | Code Location | Duration(μs) |")
+    lines.append("| --- | --- | --- | --- | ---: |")
+    for i, ev in enumerate(trace_comms, 1):
+        loc = ev.code_location or "(unknown)"
+        lines.append(f"| {i} | {ev.comm_type} | `{ev.name}` | `{loc}` | {ev.dur_us:.1f} |")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Analysis functions
 # ---------------------------------------------------------------------------
 
@@ -417,14 +784,18 @@ def analyze_communication(
 
 
 def estimate_per_layer_comm(comm_ops: List[CommOp], num_layers: int = 10) -> Dict[str, Any]:
-    """Estimate per-layer communication cost.
+    """Estimate per-layer communication cost by dividing total comm ops by num_layers.
 
-    For MoE models with EP, the typical per-layer comm pattern is:
-      - 1x AllReduce (attention o_proj)
-      - 1x AllReduce (MoE shared expert or final reduce)
-      - 1x AllGather (MoE expert dispatch)
-      - 3x AlltoAll (MoE dispatch/combine)
-      - 8x Broadcast (MoE token routing)
+    Filters out initialization ops (first ~10% of ops) to get steady-state
+    estimates, then divides the remaining ops evenly across layers.
+
+    Args:
+        comm_ops: List of CommOp from load_communication_json.
+        num_layers: Estimated number of decoder layers in the model.
+
+    Returns:
+        Dict mapping comm_type -> {ops_per_layer, avg_per_op_ms, total_per_layer_ms}.
+        Only includes comm types with at least 2 ops total.
     """
     by_type: Dict[str, List[float]] = defaultdict(list)
     for op in comm_ops:
@@ -926,6 +1297,116 @@ def cmd_compare(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_stack(args: argparse.Namespace) -> None:
+    """Extract communication call stacks from trace_view.json.
+
+    Uses a two-phase approach for efficiency:
+      1. Load communication.json to determine the most frequent comm types.
+      2. Pass the target types into ``load_trace_comm_with_stacks()`` so that
+         only relevant events are collected from the (potentially huge)
+         trace_view.json.
+
+    This enables precise identification of which source code location
+    triggers each communication operation, which is critical for:
+    1. Verifying static analysis results (Step 2 of SKILL.md)
+    2. Detecting missing DBO hooks (Step 2.5)
+    3. Understanding the exact communication flow in the model
+    """
+    root = Path(args.input).resolve()
+    prof_dirs = discover_profiling_dirs(root)
+    if not prof_dirs:
+        print(f"ERROR: No Ascend profiling directories found under {root}")
+        sys.exit(1)
+
+    top_comm_types_k = args.top_comm_types
+    max_stacks = args.max_stacks
+
+    for prof_dir in prof_dirs:
+        print(render_header(f"Communication Call Stacks: {prof_dir.name}"))
+        print(render_metadata(prof_dir))
+
+        # Phase 1: Load communication.json and determine target comm types
+        comm_ops = load_communication_json(prof_dir)
+
+        target_comm_types: Optional[Set[str]] = None
+        if top_comm_types_k > 0 and comm_ops:
+            target_comm_types = _determine_target_comm_types(
+                comm_ops, top_k=top_comm_types_k,
+            )
+            if target_comm_types:
+                print(f"\n### Filtering by top-{top_comm_types_k} communication types: "
+                      f"{sorted(target_comm_types)}\n")
+            else:
+                print(f"\n### WARNING: No comm types with sufficient frequency found; "
+                      f"extracting all types.\n")
+                target_comm_types = None
+
+        # Phase 2: Extract stacks from trace_view.json
+        trace_comms = load_trace_comm_with_stacks(
+            prof_dir,
+            max_depth=args.max_depth,
+            dedup=not args.no_dedup,
+            target_comm_types=target_comm_types,
+            max_stacks=max_stacks,
+            comm_ops=comm_ops,
+        )
+
+        if not trace_comms:
+            print("\n  WARNING: No communication events found in trace_view.json.")
+            print("  Possible reasons:")
+            print("    1. trace_view.json does not exist or is empty")
+            print("    2. Profiling was collected without python tracing enabled")
+            print("    3. No communication ops were executed during profiling")
+            continue
+
+        print(render_comm_stacks(
+            trace_comms,
+            show_full_stack=args.full_stack,
+            max_stack_depth=args.max_depth,
+        ))
+
+        # Cross-reference with communication.json for timing data
+        if comm_ops:
+            print("\n### Cross-Reference: Stack Locations vs communication.json Timing\n")
+            print("| Code Location | Comm Type | Avg Elapse(ms) | Count | Overlap Priority |")
+            print("| --- | --- | ---: | ---: | --- |")
+
+            # Group trace_comms by code_location
+            by_loc: Dict[str, TraceCommEvent] = {}
+            for ev in trace_comms:
+                loc = ev.code_location or "(unknown)"
+                if loc not in by_loc:
+                    by_loc[loc] = ev
+
+            # Match with communication.json timing by comm_type
+            comm_by_type: Dict[str, List[CommOp]] = defaultdict(list)
+            for op in comm_ops:
+                comm_by_type[op.comm_type].append(op)
+
+            for loc, ev in by_loc.items():
+                # Map trace comm_type to communication.json comm_type
+                ctype = ev.comm_type
+                matching_ops = comm_by_type.get(ctype, [])
+                if matching_ops:
+                    avg_ms = sum(op.elapse_ms for op in matching_ops) / len(matching_ops)
+                    count = len(matching_ops)
+                    if avg_ms * 1000 > 1000:
+                        priority = "🔴 P0 (>1000μs)"
+                    elif avg_ms * 1000 > 500:
+                        priority = "🟠 P1 (>500μs)"
+                    elif avg_ms * 1000 > 100:
+                        priority = "🟡 P2 (>100μs)"
+                    elif avg_ms * 1000 > 50:
+                        priority = "⚪ P3 (>50μs)"
+                    else:
+                        priority = "⬜ P4 (<50μs)"
+                    print(f"| `{loc}` | {ctype} | {avg_ms:.4f} | {count} | {priority} |")
+                else:
+                    print(f"| `{loc}` | {ctype} | N/A | 0 | — |")
+
+        print()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -961,6 +1442,37 @@ def main() -> None:
     p_compare.add_argument("--input-a", required=True, help="First profiling directory.")
     p_compare.add_argument("--input-b", required=True, help="Second profiling directory.")
 
+    # stack
+    p_stack = sub.add_parser(
+        "stack",
+        help="Extract communication call stacks from trace_view.json.",
+    )
+    p_stack.add_argument("--input", required=True, help="Profiling directory path.")
+    p_stack.add_argument(
+        "--max-depth", type=int, default=20,
+        help="Maximum call stack depth to trace (default: 20).",
+    )
+    p_stack.add_argument(
+        "--full-stack", action="store_true",
+        help="Show full call stack including framework internals (torch, torch_npu).",
+    )
+    p_stack.add_argument(
+        "--no-dedup", action="store_true",
+        help="Do not deduplicate events with identical call stacks.",
+    )
+    p_stack.add_argument(
+        "--top-comm-types", type=int, default=3,
+        help="Only extract stacks for top-K most frequent comm types (0 = all, default: 3). "
+             "This optimization significantly reduces memory usage and processing time "
+             "for large trace_view.json files by filtering early.",
+    )
+    p_stack.add_argument(
+        "--max-stacks", type=int, default=50,
+        help="Maximum number of unique stacks to collect per extraction (default: 50). "
+             "Enables early termination once enough unique stacks are found. "
+             "Set to 0 to disable the limit.",
+    )
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
@@ -971,6 +1483,7 @@ def main() -> None:
         "breakdown": cmd_breakdown,
         "comm": cmd_comm,
         "compare": cmd_compare,
+        "stack": cmd_stack,
     }
     dispatch[args.command](args)
 
