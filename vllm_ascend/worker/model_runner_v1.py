@@ -2414,6 +2414,8 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         with record_function_or_nullcontext("draft_token"):
+            self._draft_token_ids = None
+            self._draft_token_req_ids = None
             if self.speculative_config:
                 use_padded_batch = (
                     self.speculative_config
@@ -2440,6 +2442,36 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
+            # Get draft token ids if available
+            output_spec_token_ids = None
+            if self._draft_token_ids is not None:
+                # Use synchronous copy to avoid NPU async stream/event
+                # synchronization issues. _get_draft_token_ids_cpu relies on
+                # event.synchronize() which may not properly wait for the
+                # async copy on NPU, resulting in stale data.
+                if torch.is_tensor(self._draft_token_ids):
+                    num_reqs = self._draft_token_ids.shape[0]
+                    draft_ids_list = self._draft_token_ids[:num_reqs].cpu().tolist()
+                    draft_req_ids = self._draft_token_req_ids
+                else:
+                    draft_ids_list = self._draft_token_ids
+                    draft_req_ids = self.input_batch.req_ids
+                if draft_ids_list and draft_req_ids:
+                    draft_by_req_id = dict(
+                        zip(draft_req_ids, draft_ids_list))
+                    output_spec_token_ids = [
+                        draft_by_req_id.get(req_id, [])
+                        for req_id in req_ids_output_copy
+                    ]
+
+        if self.routed_experts_initialized and vllm_version_is("0.21.0"):
+            issue_routing_d2h_copy(
+                input_batch_req_ids=self.input_batch.req_ids,
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                positions=self.positions,
+                positions_cpu=self._positions_cpu,
+            )
+
         routed_experts_lists = None
         if self.model_config.enable_return_routed_experts:
             if self.routed_experts_initialized:
@@ -2460,6 +2492,7 @@ class NPUModelRunner(GPUModelRunner):
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=output_spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             kv_connector_output=kv_connector_output,
@@ -3689,7 +3722,7 @@ class NPUModelRunner(GPUModelRunner):
         # Initialize drafter attention group initialization
         if self.speculative_config and (
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
-        ):
+        ) and get_pp_group().is_last_rank:
             assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
             block_size = (self.kernel_block_sizes[0] if isinstance(
             self.kernel_block_sizes, list) else self.kernel_block_sizes)
