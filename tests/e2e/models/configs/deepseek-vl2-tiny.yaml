@@ -1,0 +1,60 @@
+# DeepSeek-VL2-Tiny 模型测试报告
+
+## 基本信息
+
+- 模型名称：DeepSeek-VL2-Tiny
+- 模型路径：`deepseek-ai/deepseek-vl2-tiny`
+- 任务类型：图像到文本（image-to-text）
+- 测试日期：2026-04-06
+
+## 验证结论
+
+**模型无法直接在 vLLM 0.11.0 上运行，需要适配**
+
+## 问题描述
+
+### 模型加载测试
+
+尝试使用 vLLM 加载模型时失败：
+
+- **输入**：`Describe this image`
+- **预期结果**：失败
+- **错误类型**：`ValueError`
+- **错误信息**：`No model architectures are specified`
+
+### 配置文件结构检查
+
+分析模型 `config.json` 发现特殊结构：
+
+- **architectures 位置**：`language_config.architectures`（不在顶层）
+- **vLLM 兼容性**：不兼容
+- **原因**：vLLM 只在顶层查找 `architectures` 字段，不支持嵌套配置
+
+## 适配差距(GAP)分析
+
+### 问题根因
+
+1. 模型架构信息在 `language_config.architectures` 中，不在顶层
+2. 当前 vLLM 版本（0.11.0）只在顶层查找 `architectures` 字段
+3. 需要修改 vLLM 的 `ModelConfig` 创建逻辑，支持嵌套字段查找
+
+### 环境限制
+
+- 昇腾 NPU 需要 `torch-npu`，最高支持 PyTorch 2.9.0
+- vLLM 0.18.0 需要 PyTorch 2.10.0，两者无法同时满足
+- 适配需基于 vLLM 0.11.0 进行
+
+## 适配建议
+
+### 修改 vLLM 源码（推荐）
+
+修改 `vllm/engine/arg_utils.py` 中的 `create_model_config` 方法：
+
+```python
+# 原逻辑
+architectures = getattr(hf_config, "architectures", [])
+```
+# 修改为
+architectures = getattr(hf_config, "architectures", [])
+if not architectures and hasattr(hf_config, "language_config"):
+    architectures = getattr(hf_config.language_config, "architectures", [])
