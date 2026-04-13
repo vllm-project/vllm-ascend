@@ -644,7 +644,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
             q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, -1)
-            sparse_mode = 3
+            sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             B = spec_attn_mask.shape[0]  # batch size
             L = spec_attn_mask.shape[1]  # length
