@@ -199,6 +199,9 @@ jobs:
           - name: multi-node-deepseek-v3.1
             config_file_path: DeepSeek-V3.1-BF16.yaml
             size: 2
+          - name: multi-node-glm5-W8A8-PD
+            config_file_path: GLM5-W8A8-PD.yaml
+            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
