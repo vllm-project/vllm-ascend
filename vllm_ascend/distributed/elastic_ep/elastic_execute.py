@@ -161,6 +161,20 @@ def broadcast_expert_mapping(
     return expert_maps
 
 
+def setup_moe_comm_and_quant_method(module: nn.Module) -> None:
+    if isinstance(quant_method := getattr(module.quant_method, "quant_method", None), AscendW8A8DynamicFusedMoEMethod):
+        quant_method.ep_group = get_ep_group()
+        try:
+            device_group = get_mc2_group().device_group
+            # TODO: Try local_rank = ep_group.rank_in_group
+            local_rank = get_mc2_group().rank_in_group
+            backend = device_group._get_backend(torch.device("npu"))
+            quant_method.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        except AttributeError:
+            quant_method.moe_all_to_all_group_name = ""
+    setup_moe_comm_method(module.moe_config)
+
+
 class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
     @contextmanager
     def _use_ascend_transfer_impl(self):
@@ -303,19 +317,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
             module.moe_config.mc2_group = get_mc2_group()
 
             with set_current_vllm_config(self.worker.vllm_config):
-                if isinstance(
-                    quant_method := getattr(module.quant_method, "quant_method", None), AscendW8A8DynamicFusedMoEMethod
-                ):
-                    quant_method.ep_group = get_ep_group()
-                    try:
-                        device_group = get_mc2_group().device_group
-                        # TODO: Try local_rank = ep_group.rank_in_group
-                        local_rank = get_mc2_group().rank_in_group
-                        backend = device_group._get_backend(torch.device("npu"))
-                        quant_method.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-                    except AttributeError:
-                        quant_method.moe_all_to_all_group_name = ""
-                setup_moe_comm_method(module.moe_config)
+                setup_moe_comm_and_quant_method(module)
 
         if self.worker.vllm_config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             # NOTE(yongji): when using stock torch.compile,
@@ -434,15 +436,4 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         moe_modules = [module for module in self.worker.model_runner.model.modules() if isinstance(module, FusedMoE)]
         for module in moe_modules:
             with set_current_vllm_config(self.worker.vllm_config):
-                if isinstance(
-                    quant_method := getattr(module.quant_method, "quant_method", None), AscendW8A8DynamicFusedMoEMethod
-                ):
-                    try:
-                        device_group = get_mc2_group().device_group
-                        # TODO: Try local_rank = ep_group.rank_in_group
-                        local_rank = get_mc2_group().rank_in_group
-                        backend = device_group._get_backend(torch.device("npu"))
-                        quant_method.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-                    except AttributeError:
-                        quant_method.moe_all_to_all_group_name = ""
-                setup_moe_comm_method(module.moe_config)
+                setup_moe_comm_and_quant_method(module)
