@@ -1693,6 +1693,8 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         with record_function_or_nullcontext("draft_token"):
+            self._draft_token_ids = None
+            self._draft_token_req_ids = None
             if self.speculative_config:
                 use_padded_batch = (
                     self.speculative_config
@@ -1713,6 +1715,28 @@ class NPUModelRunner(GPUModelRunner):
             # draft model runs so KV pool save/put can complete.
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
+
+            # Get draft token ids if available
+            output_spec_token_ids = None
+            if self._draft_token_ids is not None:
+                # Use synchronous copy to avoid NPU async stream/event
+                # synchronization issues. _get_draft_token_ids_cpu relies on
+                # event.synchronize() which may not properly wait for the
+                # async copy on NPU, resulting in stale data.
+                if torch.is_tensor(self._draft_token_ids):
+                    num_reqs = self._draft_token_ids.shape[0]
+                    draft_ids_list = self._draft_token_ids[:num_reqs].cpu().tolist()
+                    draft_req_ids = self._draft_token_req_ids
+                else:
+                    draft_ids_list = self._draft_token_ids
+                    draft_req_ids = self.input_batch.req_ids
+                if draft_ids_list and draft_req_ids:
+                    draft_by_req_id = dict(
+                        zip(draft_req_ids, draft_ids_list))
+                    output_spec_token_ids = [
+                        draft_by_req_id.get(req_id, [])
+                        for req_id in req_ids_output_copy
+                    ]
 
         if self.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
