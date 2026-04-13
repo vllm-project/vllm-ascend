@@ -522,7 +522,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             # todo: need cann update in 8.5.0
             return self.forward_triton(positions, query, key)
 
-        if self.mrope_section != [16, 24, 24]:
+        if self.mrope_section not in ([16, 24, 24], [24, 20, 20]):
             return super().forward_oot(positions, query, key)
 
         import torch_npu
