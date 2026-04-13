@@ -188,8 +188,9 @@ class AscendSFACPImpl(AscendSFAImpl):
         block_table = attn_metadata.block_table
         assert attn_metadata.sfa_cp_metadata is not None
         block_arange = attn_metadata.sfa_cp_metadata.block_arange
-        kv, block_table = self.gather_kv_cross_cp(kv, block_table, block_arange)
-        key_rope, _ = self.gather_kv_cross_cp(key_rope)
+        kv, block_num = self.gather_kv_cross_cp(kv, block_table)
+        key_rope, block_num = self.gather_kv_cross_cp(key_rope, block_table)
+        block_table = self.gather_block_table(block_num, block_table, block_arange)
         assert block_table is not None
         if self.pcp_size == 1:
             attn_output = self._execute_sparse_flash_attention(
@@ -300,20 +301,24 @@ class AscendSFACPImpl(AscendSFAImpl):
         )
         return attn_output
 
-    def gather_kv_cross_cp(
-        self, kv_cache: torch.Tensor, block_tables: torch.Tensor | None = None, block_arange: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def gather_kv_cross_cp(self, kv_cache: torch.Tensor, block_tables: torch.Tensor) -> torch.Tensor:
         # Note(qcs): we need set kv_cache_interleave_size = block_size for sfa!!!
-        block_num = kv_cache.shape[0]
+        req_kv_cache = torch.index_select(kv_cache, 0, block_tables.flatten())
+        block_num = req_kv_cache.shape[0]
         if self.dcp_size > 1:
-            kv_cache = get_dcp_group().all_gather(kv_cache, 0)
+            req_kv_cache = get_dcp_group().all_gather(req_kv_cache, 0)
         if self.pcp_size > 1:
-            kv_cache = get_pcp_group().all_gather(kv_cache, 0)
-        if block_tables is not None and block_arange is not None:
-            block_tables = (
-                block_tables.unsqueeze(-1) + (block_arange * block_num).view(1, 1, -1).to(block_tables)
-            ).reshape(block_tables.shape[0], -1)
-        return kv_cache, block_tables
+            req_kv_cache = get_pcp_group().all_gather(req_kv_cache, 0)
+            return req_kv_cache, block_num
+
+    def gather_block_table(self, block_num: int, block_tables: torch.Tensor, block_arange: torch.Tensor):
+        new_block_tables = torch.arange(block_tables.numel(), device=block_tables.device).view(block_tables.shape)
+        block_tables = (
+            (new_block_tables.unsqueeze(-1) + (block_arange * block_num).view(1, 1, -1).to(block_tables))
+            .reshape(block_tables.shape[0], -1)
+            .to(block_tables.dtype)
+        )
+        return block_tables
 
     def indexer_select_post_process(
         self,
@@ -350,8 +355,8 @@ class AscendSFACPImpl(AscendSFAImpl):
         block_table = attn_metadata.block_table
         assert attn_metadata.sfa_cp_metadata is not None
         block_arange = attn_metadata.sfa_cp_metadata.block_arange
-
-        key, block_table = self.gather_kv_cross_cp(key, block_table, block_arange)
+        key, block_num = self.gather_kv_cross_cp(key, block_table)
+        block_table = self.gather_block_table(block_num, block_table, block_arange)
 
         if self.pcp_size == 1:
             return self._execute_indexer_select(
