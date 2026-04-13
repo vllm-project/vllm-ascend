@@ -111,7 +111,7 @@ from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
-from vllm_ascend.quantization.utils import enable_c8_quant, enable_fa_quant
+from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
@@ -3097,7 +3097,7 @@ class NPUModelRunner(GPUModelRunner):
                             v_dim,
                         )
                     k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-                    if (self.is_kv_consumer and enable_fa_quant(self.vllm_config)) or (self.is_kv_producer and enable_c8_quant(self.vllm_config)):
+                    if self.is_kv_consumer and enable_fa_quant(self.vllm_config):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
@@ -3398,16 +3398,7 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    if self.is_kv_producer and enable_c8_quant(self.vllm_config):
-                        dtype = self.model_config.dtype
-                    else:
-                        dtype = spec.dtype
-                    kv_cache_spec[layer_name] = FullAttentionSpec(
-                        block_size=spec.block_size,
-                        num_kv_heads=spec.num_kv_heads,
-                        head_size=spec.head_size,
-                        dtype=dtype
-                    )
+                    kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
