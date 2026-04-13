@@ -1601,12 +1601,12 @@ class MooncakeLayerwiseConnectorWorker:
                     if self.enable_c8_quant:
                         layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
                         quant_keys = torch.clamp(
-                            torch.round(keys * layer._c8_k_inv_scale + layer._c8_k_offset),
+                            torch.round(keys * layer._c8_k_inv_scale_bf16 + layer._c8_k_offset_bf16),
                             -128,
                             127,
                         ).to(torch.int8)
                         quant_values = torch.clamp(
-                            torch.round(values * layer._c8_v_inv_scale + layer._c8_v_offset),
+                            torch.round(values * layer._c8_v_inv_scale_bf16 + layer._c8_v_offset_bf16),
                             -128,
                             127,
                         ).to(torch.int8)

@@ -590,7 +590,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "value_antiquant_mode": 0,
             }
             key = (key.to(query.dtype) - layer._c8_k_deoffset) * layer._c8_k_descale
-            value = (value.to(query.dtype) - layer._c8_v_deoffset) / layer._c8_v_descale
+            value = (value.to(query.dtype) - layer._c8_v_deoffset) * layer._c8_v_descale
 
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
@@ -1127,8 +1127,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 )
         else:
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and not self.is_kv_producer:
-                key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
-                query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
+                if key is not None and value is not None:
+                    key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
+                    query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
                 if _EXTRA_CTX.capturing:
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
@@ -1186,8 +1187,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer._c8_v_aq_scale = layer._c8_v_scale.view(bnsd).contiguous()
         layer._c8_v_aq_offset = layer._c8_v_offset.view(bnsd).contiguous()
 
-        layer._c8_k_inv_scale = 1.0 / layer._c8_k_scale
-        layer._c8_v_inv_scale = 1.0 / layer._c8_v_scale
+        layer._c8_k_inv_scale_bf16 = 1.0 / layer._c8_k_scale
+        layer._c8_k_offset_bf16 = layer._c8_k_offset
+        layer._c8_v_inv_scale_bf16 = 1.0 / layer._c8_v_scale
+        layer._c8_v_offset_bf16 = layer._c8_v_offset
 
         layer._c8_scales_prepared = True
 
@@ -1242,12 +1245,12 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         actual_value = value[:num_actual_tokens]
 
         k_int8 = torch.clamp(
-            torch.round(actual_key * layer._c8_k_inv_scale + layer._c8_k_offset),
+            torch.round(actual_key * layer._c8_k_inv_scale_bf16 + layer._c8_k_offset_bf16),
             -128,
             127,
         ).to(torch.int8)
         v_int8 = torch.clamp(
-            torch.round(actual_value * layer._c8_v_inv_scale + layer._c8_v_offset),
+            torch.round(actual_value * layer._c8_v_inv_scale_bf16 + layer._c8_v_offset_bf16),
             -128,
             127,
         ).to(torch.int8)
