@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"POT-Creation-Date: 2026-04-13 02:09+0000\n"
 "PO-Revision-Date: 2026-01-22 10:00+0800\n"
 "Last-Translator: Your Name <email@example.com>\n"
 "Language: zh_CN\n"
@@ -17,9 +17,9 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
-#: ../../source/developer_guide/contribution/index.md:107
+#: ../../source/developer_guide/contribution/index.md:108
 msgid "Index"
 msgstr "索引"
 
@@ -31,151 +31,155 @@ msgstr "贡献指南"
 msgid "Building and Testing"
 msgstr "构建与测试"
 
-#: ../../source/developer_guide/contribution/index.md:4
+#: ../../source/developer_guide/contribution/index.md:5
 msgid ""
 "It's recommended to set up a local development environment to build vllm-"
 "ascend and run tests before you submit a PR."
 msgstr "建议在提交拉取请求（PR）之前，先搭建本地开发环境来构建 vllm-ascend 并运行测试。"
 
-#: ../../source/developer_guide/contribution/index.md:7
+#: ../../source/developer_guide/contribution/index.md:8
 msgid "Set up a development environment"
 msgstr "搭建开发环境"
 
-#: ../../source/developer_guide/contribution/index.md:9
+#: ../../source/developer_guide/contribution/index.md:10
 msgid ""
 "Theoretically, the vllm-ascend build is only supported on Linux because "
 "`vllm-ascend` dependency `torch_npu` only supports Linux."
 msgstr "理论上，vllm-ascend 的构建仅支持 Linux 系统，因为其依赖项 `torch_npu` 仅支持 Linux。"
 
-#: ../../source/developer_guide/contribution/index.md:12
+#: ../../source/developer_guide/contribution/index.md:13
 msgid ""
 "But you can still set up a development environment on Linux/Windows/macOS"
 " for linting and running basic tests."
 msgstr "但您仍可在 Linux/Windows/macOS 上搭建开发环境，用于代码规范检查（linting）和运行基础测试。"
 
-#: ../../source/developer_guide/contribution/index.md:15
+#: ../../source/developer_guide/contribution/index.md:16
 msgid "Run lint locally"
 msgstr "本地代码规范检查"
 
-#: ../../source/developer_guide/contribution/index.md:34
+#: ../../source/developer_guide/contribution/index.md:35
 msgid "Run CI locally"
 msgstr "本地运行 CI 测试"
 
-#: ../../source/developer_guide/contribution/index.md:36
+#: ../../source/developer_guide/contribution/index.md:37
 msgid "After completing \"Run lint\" setup, you can run CI locally:"
 msgstr "完成“本地代码规范检查”的环境搭建后，您可在本地运行 CI 测试："
 
-#: ../../source/developer_guide/contribution/index.md:62
+#: ../../source/developer_guide/contribution/index.md:63
 msgid "Submit the commit"
 msgstr "提交更改"
 
-#: ../../source/developer_guide/contribution/index.md:69
+#: ../../source/developer_guide/contribution/index.md:70
 msgid "🎉 Congratulations! You have completed the development environment setup."
 msgstr "🎉 恭喜！您已完成开发环境的搭建。"
 
-#: ../../source/developer_guide/contribution/index.md:71
+#: ../../source/developer_guide/contribution/index.md:72
 msgid "Testing locally"
 msgstr "本地测试"
 
-#: ../../source/developer_guide/contribution/index.md:73
+#: ../../source/developer_guide/contribution/index.md:74
 msgid ""
 "You can refer to [Testing](./testing.md)  to set up a testing environment"
 " and running tests locally."
 msgstr "您可以参考 [测试指南](./testing.md) 来搭建测试环境并在本地运行测试。"
 
-#: ../../source/developer_guide/contribution/index.md:75
+#: ../../source/developer_guide/contribution/index.md:76
 msgid "DCO and Signed-off-by"
 msgstr "开发者来源认证（DCO）与签名确认"
 
-#: ../../source/developer_guide/contribution/index.md:77
+#: ../../source/developer_guide/contribution/index.md:78
 msgid ""
 "When contributing changes to this project, you must agree to the DCO. "
 "Commits must include a `Signed-off-by:` header which certifies agreement "
 "with the terms of the DCO."
-msgstr "向本项目提交贡献时，您必须同意开发者来源认证（DCO）。提交（commit）必须包含 `Signed-off-by:` 头部，以证明您同意 DCO 的条款。"
+msgstr ""
+"向本项目提交贡献时，您必须同意开发者来源认证（DCO）。提交（commit）必须包含 `Signed-off-by:` 头部，以证明您同意 DCO"
+" 的条款。"
 
-#: ../../source/developer_guide/contribution/index.md:79
+#: ../../source/developer_guide/contribution/index.md:80
 msgid "Using `-s` with `git commit` will automatically add this header."
 msgstr "使用 `git commit -s` 命令会自动添加此头部信息。"
 
-#: ../../source/developer_guide/contribution/index.md:81
+#: ../../source/developer_guide/contribution/index.md:82
 msgid "PR Title and Classification"
 msgstr "PR 标题与分类"
 
-#: ../../source/developer_guide/contribution/index.md:83
+#: ../../source/developer_guide/contribution/index.md:84
 msgid ""
 "Only specific types of PRs will be reviewed. The PR title is prefixed "
 "appropriately to indicate the type of change. Please use one of the "
 "following:"
 msgstr "只有特定类型的拉取请求（PR）会被审核。PR 标题应使用合适的前缀来标明变更类型。请使用以下前缀之一："
 
-#: ../../source/developer_guide/contribution/index.md:85
+#: ../../source/developer_guide/contribution/index.md:86
 msgid "`[Attention]` for new features or optimization in attention."
 msgstr "`[Attention]`：注意力机制相关的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:86
+#: ../../source/developer_guide/contribution/index.md:87
 msgid "`[Communicator]` for new features or optimization in communicators."
 msgstr "`[Communicator]`：通信器相关的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:87
+#: ../../source/developer_guide/contribution/index.md:88
 msgid "`[ModelRunner]` for new features or optimization in model runner."
 msgstr "`[ModelRunner]`：模型运行器相关的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:88
+#: ../../source/developer_guide/contribution/index.md:89
 msgid "`[Platform]` for new features or optimization in platform."
 msgstr "`[Platform]`：平台相关的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:89
+#: ../../source/developer_guide/contribution/index.md:90
 msgid "`[Worker]` for new features or optimization in worker."
 msgstr "`[Worker]`：工作进程（worker）相关的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:90
+#: ../../source/developer_guide/contribution/index.md:91
 msgid ""
 "`[Core]` for new features or optimization  in the core vllm-ascend logic "
 "(such as platform, attention, communicators, model runner)"
 msgstr "`[Core]`：vllm-ascend 核心逻辑（如平台、注意力机制、通信器、模型运行器）中的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:91
+#: ../../source/developer_guide/contribution/index.md:92
 msgid "`[Kernel]` for changes affecting compute kernels and ops."
 msgstr "`[Kernel]`：影响计算内核和算子的更改。"
 
-#: ../../source/developer_guide/contribution/index.md:92
+#: ../../source/developer_guide/contribution/index.md:93
 msgid "`[Bugfix]` for bug fixes."
 msgstr "`[Bugfix]`：错误修复。"
 
-#: ../../source/developer_guide/contribution/index.md:93
+#: ../../source/developer_guide/contribution/index.md:94
 msgid "`[Doc]` for documentation fixes and improvements."
 msgstr "`[Doc]`：文档修复与改进。"
 
-#: ../../source/developer_guide/contribution/index.md:94
+#: ../../source/developer_guide/contribution/index.md:95
 msgid "`[Test]` for tests (such as unit tests)."
 msgstr "`[Test]`：测试相关（如单元测试）。"
 
-#: ../../source/developer_guide/contribution/index.md:95
+#: ../../source/developer_guide/contribution/index.md:96
 msgid "`[CI]` for build or continuous integration improvements."
 msgstr "`[CI]`：构建或持续集成的改进。"
 
-#: ../../source/developer_guide/contribution/index.md:96
+#: ../../source/developer_guide/contribution/index.md:97
 msgid ""
 "`[Misc]` for PRs that do not fit the above categories. Please use this "
 "sparingly."
 msgstr "`[Misc]`：不适用于上述类别的 PR。请谨慎使用此类别。"
 
-#: ../../source/developer_guide/contribution/index.md:99
+#: ../../source/developer_guide/contribution/index.md:100
 msgid ""
 "If the PR spans more than one category, please include all relevant "
 "prefixes."
 msgstr "如果 PR 涉及多个类别，请包含所有相关的前缀。"
 
-#: ../../source/developer_guide/contribution/index.md:102
+#: ../../source/developer_guide/contribution/index.md:103
 msgid "Others"
 msgstr "其他信息"
 
-#: ../../source/developer_guide/contribution/index.md:104
+#: ../../source/developer_guide/contribution/index.md:105
 msgid ""
 "You may find more information about contributing to vLLM Ascend backend "
 "plugin on "
-"[<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html)."
-" If you find any problem when contributing, you can feel free to submit a"
-" PR to improve the doc to help other developers."
-msgstr "您可以在 [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html) 上找到有关为 vLLM Ascend 后端插件贡献的更多信息。如果在贡献过程中遇到任何问题，欢迎随时提交 PR 来改进文档，以帮助其他开发者。"
+"[<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing). If "
+"you encounter any problems while contributing, feel free to submit a PR "
+"to improve the documentation to help other developers."
+msgstr ""
+"您可以在 "
+"[<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing) 上找到有关为 vLLM Ascend 后端插件贡献的更多信息。如果在贡献过程中遇到任何问题，欢迎随时提交 PR 来改进文档，以帮助其他开发者。"

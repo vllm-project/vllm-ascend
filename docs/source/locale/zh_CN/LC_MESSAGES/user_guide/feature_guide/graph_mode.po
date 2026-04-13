@@ -1,4 +1,4 @@
-# Translations template for PROJECT.
+# Chinese (Simplified, China) translations for PROJECT.
 # Copyright (C) 2025 ORGANIZATION
 # This file is distributed under the same license as the PROJECT project.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
@@ -7,137 +7,342 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"POT-Creation-Date: 2026-04-13 02:09+0000\n"
 "PO-Revision-Date: 2026-01-22 16:30+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:1
 msgid "Graph Mode Guide"
-msgstr "图模式"
+msgstr "图模式指南"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:4
-msgid ""
-"This feature is currently experimental. In future versions, there may be "
-"behavioral changes around configuration, coverage, performance "
-"improvement."
-msgstr "此功能目前处于实验性阶段。在未来的版本中，配置方式、模型覆盖率以及性能优化方面的行为可能会有所变化。"
+#: ../../source/user_guide/feature_guide/graph_mode.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:5
+msgid "This guide explains how graph mode is used in vLLM Ascend."
+msgstr "本指南解释了如何在 vLLM Ascend 中使用图模式。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:7
 msgid ""
-"This guide provides instructions for using Ascend Graph Mode with vLLM "
-"Ascend. Please note that graph mode is only available on V1 Engine. And "
-"only Qwen, DeepSeek series models are well tested from 0.9.0rc1. We will "
-"make it stable and generalized in the next release."
-msgstr ""
-"本指南提供了在 vLLM Ascend 上使用 Ascend 图模式的说明。请注意，图模式仅在 V1 引擎上可用。自 0.9.0rc1 "
-"版本起，目前仅 Qwen 和 DeepSeek 系列模型经过了充分测试。我们将在下一个版本中提升其稳定性和通用性。"
+"vLLM already provides the generic graph-mode architecture, mode "
+"definitions, and compile integration. For those upstream concepts, see:"
+msgstr "vLLM 已提供了通用的图模式架构、模式定义和编译集成。关于这些上游概念，请参阅："
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:9
-msgid "Getting Started"
-msgstr "快速入门"
+#: ../../source/user_guide/feature_guide/graph_mode.md:158
+msgid "[CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/)"
+msgstr "[CUDA 图](https://docs.vllm.ai/en/latest/design/cuda_graphs/)"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:11
+#: ../../source/user_guide/feature_guide/graph_mode.md:10
+#: ../../source/user_guide/feature_guide/graph_mode.md:159
+msgid "[torch.compile](https://docs.vllm.ai/en/latest/design/torch_compile/)"
+msgstr "[torch.compile](https://docs.vllm.ai/en/latest/design/torch_compile/)"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:12
 msgid ""
-"From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode "
-"by default to keep the same behavior with vLLM. If you hit any issues, "
-"please feel free to open an issue on GitHub and fallback to the eager "
-"mode temporarily by setting `enforce_eager=True` when initializing the "
-"model."
-msgstr ""
-"从 v0.9.1rc1 版本起，搭配 V1 引擎使用时，vLLM Ascend 默认将以图模式运行模型，以保持与 vLLM "
-"官方行为一致。如果您遇到任何问题，欢迎在 GitHub 上提交 Issue，并在初始化模型时通过设置 `enforce_eager=True` "
-"临时回退到 Eager 模式。"
-
-#: ../../source/user_guide/feature_guide/graph_mode.md:13
-msgid "There are two kinds for graph mode supported by vLLM Ascend:"
-msgstr "vLLM Ascend 支持两种图模式："
+"This document focuses on the Ascend-specific view: which graph backends "
+"are available, how to enable them, and what constraints users should keep"
+" in mind on Ascend."
+msgstr "本文档侧重于 Ascend 特有的视角：可用的图后端有哪些、如何启用它们，以及用户在 Ascend 平台上应注意哪些限制。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:14
-msgid ""
-"**ACLGraph**: This is the default graph mode supported by vLLM Ascend. In"
-" v0.9.1rc1, Qwen and Deepseek series models are well tested."
-msgstr ""
-"**ACLGraph**：这是 vLLM Ascend 支持的默认图模式。在 v0.9.1rc1 版本中，Qwen "
-"和 DeepSeek 系列模型已得到充分测试。"
+msgid "Current Status on Ascend"
+msgstr "Ascend 上的当前状态"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:15
-msgid ""
-"**XliteGraph**: This is the openeuler xlite graph mode. In v0.11.0, only "
-"Llama, Qwen dense series models, and Qwen3-vl are supported."
-msgstr "**XliteGraph**：这是 openEuler 的 Xlite 图模式。在 v0.11.0 版本中，仅支持 Llama、Qwen 全量（dense）系列模型以及 Qwen3-vl。"
+#: ../../source/user_guide/feature_guide/graph_mode.md:16
+msgid "Graph mode is currently available only on the **V1 Engine**."
+msgstr "图模式目前仅在 **V1 引擎** 上可用。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:17
-msgid "Using ACLGraph"
-msgstr "使用 ACLGraph"
+msgid "**ACLGraph** is the default graph path in vLLM Ascend."
+msgstr "**ACLGraph** 是 vLLM Ascend 中的默认图路径。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:18
 msgid ""
-"ACLGraph is enabled by default. Take Qwen series models as an example, "
-"just set to use V1 Engine is enough."
-msgstr "ACLGraph 默认启用。以 Qwen 系列模型为例，只需确保使用 V1 引擎即可。"
+"**XliteGraph** is an optional graph path for selected model families and "
+"environments."
+msgstr "**XliteGraph** 是针对特定模型系列和环境的可选图路径。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:20
-#: ../../source/user_guide/feature_guide/graph_mode.md:45
-#: ../../source/user_guide/feature_guide/graph_mode.md:68
+#: ../../source/user_guide/feature_guide/graph_mode.md:19
+msgid ""
+"In context parallel scenarios, `cudagraph_mode=\"FULL\"` is not "
+"sufficiently supported yet."
+msgstr "在上下文并行场景中，`cudagraph_mode=\"FULL\"` 尚未得到充分支持。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:21
+msgid "Graph Backends on Ascend"
+msgstr "Ascend 上的图后端"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:23
+msgid "vLLM Ascend currently exposes two graph backends:"
+msgstr "vLLM Ascend 目前提供了两种图后端："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Backend"
+msgstr "后端"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Typical usage"
+msgstr "典型用途"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Notes"
+msgstr "备注"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Since"
+msgstr "自版本"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "ACL Graph"
+msgstr "ACL 图"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Yes"
+msgstr "是"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "General graph mode on Ascend"
+msgstr "Ascend 上的通用图模式"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Default path in vLLM Ascend"
+msgstr "vLLM Ascend 中的默认路径"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "v0.9.0rc1"
+msgstr "v0.9.0rc1"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "XliteGraph"
+msgstr "Xlite 图"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "No"
+msgstr "否"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Selected models with Xlite installed"
+msgstr "已安装 Xlite 的选定模型"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Requires additional installation and config"
+msgstr "需要额外安装和配置"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "v0.11.0"
+msgstr "v0.11.0"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:30
+msgid "Using ACLGraph"
+msgstr "使用 ACLGraph"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:32
+msgid ""
+"ACLGraph is enabled by default when the model runs on the V1 Engine and "
+"graph mode is available."
+msgstr "当模型在 V1 引擎上运行且图模式可用时，ACLGraph 默认启用。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:34
+msgid "Basic usage"
+msgstr "基本用法"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:36
+#: ../../source/user_guide/feature_guide/graph_mode.md:102
 msgid "Offline example:"
 msgstr "离线推理示例："
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:31
-#: ../../source/user_guide/feature_guide/graph_mode.md:56
-#: ../../source/user_guide/feature_guide/graph_mode.md:78
+#: ../../source/user_guide/feature_guide/graph_mode.md:45
+#: ../../source/user_guide/feature_guide/graph_mode.md:122
 msgid "Online example:"
 msgstr "在线服务示例："
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:37
+#: ../../source/user_guide/feature_guide/graph_mode.md:51
+msgid "Explicit `cudagraph_mode` configuration"
+msgstr "显式 `cudagraph_mode` 配置"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:53
+msgid ""
+"The generic `cudagraph_mode` options come from upstream vLLM. On Ascend, "
+"the final effective mode may still be adjusted according to platform and "
+"backend support, so the official vLLM CUDA Graphs document remains the "
+"canonical reference for mode semantics."
+msgstr "通用的 `cudagraph_mode` 选项来自上游 vLLM。在 Ascend 上，最终生效的模式仍可能根据平台和后端支持情况进行调整，因此官方的 vLLM CUDA 图文档仍然是模式语义的权威参考。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:55
+msgid "CLI example:"
+msgstr "命令行示例："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:62
+msgid "Python example:"
+msgstr "Python 示例："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:73
+msgid ""
+"For the detailed meaning of `NONE`, `PIECEWISE`, `FULL`, "
+"`FULL_DECODE_ONLY`, and `FULL_AND_PIECEWISE`, as well as the generic "
+"fallback policy, see the upstream [CUDA "
+"Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/) design doc."
+msgstr "关于 `NONE`、`PIECEWISE`、`FULL`、`FULL_DECODE_ONLY` 和 `FULL_AND_PIECEWISE` 的详细含义，以及通用的回退策略，请参阅上游的 [CUDA 图](https://docs.vllm.ai/en/latest/design/cuda_graphs/) 设计文档。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:75
+msgid "Attention backend compatibility"
+msgstr "注意力后端兼容性"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:77
+msgid ""
+"Not all attention backends support all graph modes. vLLM checks attention"
+" backend compatibility during compatibility checks and, when possible, "
+"automatically adjusts `cudagraph_mode` to a more compatible mode instead "
+"of failing immediately. In practice, this means a requested full-graph "
+"mode may be narrowed to a mixed or piecewise mode, and if the backend "
+"cannot support graph execution at all, graph mode may be disabled."
+msgstr "并非所有注意力后端都支持所有图模式。vLLM 会在兼容性检查期间检查注意力后端的兼容性，并在可能的情况下自动将 `cudagraph_mode` 调整为更兼容的模式，而不是立即失败。实际上，这意味着请求的完整图模式可能会被缩减为混合或分段模式，如果后端完全无法支持图执行，则图模式可能会被禁用。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:79
+msgid "On Ascend, the current attention backend support levels are:"
+msgstr "在 Ascend 上，当前注意力后端的支持级别如下："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Attention backend"
+msgstr "注意力后端"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Declared support"
+msgstr "声明的支持"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Practical meaning"
+msgstr "实际含义"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`attention_v1`"
+msgstr "`attention_v1`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`ALWAYS`"
+msgstr "`ALWAYS`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "Supports graph execution for mixed prefill/decode batches"
+msgstr "支持混合预填充/解码批次的图执行"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`context_parallel/attention_cp`"
+msgstr "`context_parallel/attention_cp`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`mla_v1`"
+msgstr "`mla_v1`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`UNIFORM_BATCH`"
+msgstr "`UNIFORM_BATCH`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid ""
+"Graph execution is limited to uniform batches; full graph is more "
+"restricted"
+msgstr "图执行仅限于均匀批次；完整图模式限制更多"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`context_parallel/mla_cp`"
+msgstr "`context_parallel/mla_cp`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`sfa_v1`"
+msgstr "`sfa_v1`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md
+msgid "`context_parallel/sfa_cp`"
+msgstr "`context_parallel/sfa_cp`"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:90
+msgid ""
+"This is why the effective graph mode on Ascend may differ from the mode "
+"requested in configuration."
+msgstr "这就是为什么 Ascend 上实际生效的图模式可能与配置中请求的模式不同。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:92
 msgid "Using XliteGraph"
 msgstr "使用 XliteGraph"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:39
+#: ../../source/user_guide/feature_guide/graph_mode.md:94
 msgid ""
-"If you want to run Llama, Qwen dense series models, or Qwen3-vl with "
-"xlite graph mode, please install xlite, and set xlite_graph_config."
-msgstr ""
-"如果您希望在 Xlite 图模式下运行 Llama、Qwen dense 系列或 Qwen3-vl 模型，请安装 xlite 并设置 `xlite_graph_config`。"
+"XliteGraph is an optional path for Llama, Qwen dense series models, Qwen "
+"MoE series models, and Qwen3-VL. It requires Xlite to be installed and "
+"configured through `xlite_graph_config`."
+msgstr "XliteGraph 是 Llama、Qwen 全量（dense）系列模型、Qwen MoE 系列模型和 Qwen3-VL 的可选路径。它需要安装 Xlite 并通过 `xlite_graph_config` 进行配置。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:62
+#: ../../source/user_guide/feature_guide/graph_mode.md:96
+msgid "Install Xlite first:"
+msgstr "首先安装 Xlite："
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:130
 msgid ""
-"You can find more details abort xlite "
-"[here](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)"
-msgstr ""
-"您可以在[此处](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)找到更多关于 Xlite 的详细信息。"
+"For more details about Xlite, see the [Xlite "
+"README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)."
+msgstr "关于 Xlite 的更多详细信息，请参阅 [Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)。"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:64
-msgid "Fallback to the Eager Mode"
+#: ../../source/user_guide/feature_guide/graph_mode.md:132
+msgid "Common Limitations and Caveats"
+msgstr "常见限制与注意事项"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:134
+msgid ""
+"ACLGraph and XliteGraph have different support coverage. XliteGraph "
+"should be treated as an alternative backend, not as a drop-in replacement"
+" for all ACLGraph scenarios."
+msgstr "ACLGraph 和 XliteGraph 的支持范围不同。XliteGraph 应被视为一个替代后端，而不是所有 ACLGraph 场景的直接替换品。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:135
+msgid ""
+"Model and backend coverage is still evolving, so a configuration that "
+"works for one model family may not yet be recommended for another."
+msgstr "模型和后端的覆盖范围仍在不断发展，因此适用于一个模型系列的配置可能尚不推荐用于另一个模型系列。"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:137
+msgid "Fallback to Eager Mode"
 msgstr "回退到 Eager 模式"
 
-#: ../../source/user_guide/feature_guide/graph_mode.md:66
+#: ../../source/user_guide/feature_guide/graph_mode.md:139
 msgid ""
-"If `ACLGraph` and `XliteGraph` all fail to run, you should fallback to "
-"the eager mode."
-msgstr "如果 `ACLGraph` 和 `XliteGraph` 均无法运行，您应当回退到 Eager 模式。"
+"If you encounter issues with graph mode, you can temporarily fall back to"
+" eager mode by setting `enforce_eager=True`."
+msgstr "如果您遇到图模式的问题，可以通过设置 `enforce_eager=True` 临时回退到 Eager 模式。"
 
-#~ msgid "Using TorchAirGraph"
-#~ msgstr "使用 TorchAirGraph"
+#: ../../source/user_guide/feature_guide/graph_mode.md:141
+msgid "**Offline example:**"
+msgstr "**离线推理示例：**"
 
-#~ msgid ""
-#~ "If you want to run DeepSeek series"
-#~ " models with graph mode, you should"
-#~ " use "
-#~ "[TorchAirGraph](https://www.hiascend.com/document/detail/zh/Pytorch/700/modthirdparty/torchairuseguide/torchair_0002.html)."
-#~ " In this case, additional config is"
-#~ " required."
-#~ msgstr ""
-#~ "如果您想在图模式下运行 DeepSeek 系列模型，应当使用 "
-#~ "[TorchAirGraph](https://www.hiascend.com/document/detail/zh/Pytorch/700/modthirdparty/torchairuseguide/torchair_0002.html)。在这种情况下，需要进行额外配置。"
+#: ../../source/user_guide/feature_guide/graph_mode.md:150
+msgid "**Online example:**"
+msgstr "**在线服务示例：**"
 
-#~ msgid ""
-#~ "You can find more detail about "
-#~ "additional config "
-#~ "[here](../configuration/additional_config.md)."
-#~ msgstr "您可以在[此处](../configuration/additional_config.md)找到关于附加配置的更多详情。"
+#: ../../source/user_guide/feature_guide/graph_mode.md:156
+msgid "References"
+msgstr "参考资料"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:160
+msgid ""
+"[Xlite "
+"README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)"
+msgstr "[Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)"
+
+#: ../../source/user_guide/feature_guide/graph_mode.md:161
+msgid ""
+"[ACL Graph Developer "
+"Guide](../../developer_guide/Design_Documents/ACL_Graph.md)"
+msgstr "[ACL 图开发者指南](../../developer_guide/Design_Documents/ACL_Graph.md)"

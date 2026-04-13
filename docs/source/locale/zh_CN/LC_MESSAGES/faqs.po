@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-22 17:09+0800\n"
+"POT-Creation-Date: 2026-04-13 02:09+0000\n"
 "PO-Revision-Date: 2026-01-22 11:40+0800\n"
 "Last-Translator: Gemini <gemini@google.com>\n"
 "Language: zh_CN\n"
@@ -17,7 +17,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../../source/faqs.md:1
 msgid "FAQs"
@@ -29,97 +29,104 @@ msgstr "特定版本常见问题"
 
 #: ../../source/faqs.md:5
 msgid ""
-"[[v0.11.0] FAQ & Feedback](https://github.com/vllm-project/vllm-"
-"ascend/issues/4808)"
+"[[v0.18.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-"
+"ascend/issues/7633)"
 msgstr ""
-"[[v0.11.0] 常见问题与反馈](https://github.com/vllm-project/vllm-"
-"ascend/issues/4808)"
+"[[v0.18.0rc1] 常见问题与反馈](https://github.com/vllm-project/vllm-"
+"ascend/issues/7633)"
 
 #: ../../source/faqs.md:6
 msgid ""
-"[[v0.13.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-"
-"ascend/issues/5333)"
+"[[v0.17.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-"
+"ascend/issues/7173)"
 msgstr ""
-"[[v0.13.0rc1] 常见问题与反馈](https://github.com/vllm-project/vllm-"
-"ascend/issues/5333)"
+"[[v0.17.0rc1] 常见问题与反馈](https://github.com/vllm-project/vllm-"
+"ascend/issues/7173)"
 
-#: ../../source/faqs.md:8
+#: ../../source/faqs.md:7
+msgid ""
+"[[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-"
+"ascend/issues/6583)"
+msgstr ""
+"[[v0.13.0] 常见问题与反馈](https://github.com/vllm-project/vllm-"
+"ascend/issues/6583)"
+
+#: ../../source/faqs.md:9
 msgid "General FAQs"
 msgstr "通用常见问题"
 
-#: ../../source/faqs.md:10
+#: ../../source/faqs.md:11
 msgid "1. What devices are currently supported?"
-msgstr "1.目前支持哪些设备？"
+msgstr "1. 目前支持哪些设备？"
 
-#: ../../source/faqs.md:12
+#: ../../source/faqs.md:13
 msgid ""
-"Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A3 "
-"series(Atlas-A3-cann-kernels) and Atlas 300I(Ascend-cann-kernels-310p) "
+"Currently, **ONLY** Atlas A2 series (Ascend-cann-kernels-910b), Atlas A3 "
+"series (Atlas-A3-cann-kernels) and Atlas 300I (Ascend-cann-kernels-310p) "
 "series are supported:"
 msgstr ""
 "目前，**仅**支持 Atlas A2 系列 (Ascend-cann-kernels-910b)、Atlas A3 系列 (Atlas-A3"
 "-cann-kernels) 以及 Atlas 300I (Ascend-cann-kernels-310p) 系列："
 
-#: ../../source/faqs.md:14
+#: ../../source/faqs.md:15
 msgid ""
 "Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 "
 "Box16, Atlas 300T A2)"
 msgstr ""
-"Atlas A2 训练系列（Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas"
+"Atlas A2 训练系列（Atlas 800T A2、Atlas 900 A2 PoD、Atlas 200T A2 Box16、Atlas"
 " 300T A2）"
 
-#: ../../source/faqs.md:15
+#: ../../source/faqs.md:16
 msgid "Atlas 800I A2 Inference series (Atlas 800I A2)"
 msgstr "Atlas 800I A2 推理系列（Atlas 800I A2）"
 
-#: ../../source/faqs.md:16
+#: ../../source/faqs.md:17
 msgid ""
 "Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas "
 "9000 A3 SuperPoD)"
 msgstr ""
-"Atlas A3 训练系列（Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 "
+"Atlas A3 训练系列（Atlas 800T A3、Atlas 900 A3 SuperPoD、Atlas 9000 A3 "
 "SuperPoD）"
 
-#: ../../source/faqs.md:17
+#: ../../source/faqs.md:18
 msgid "Atlas 800I A3 Inference series (Atlas 800I A3)"
 msgstr "Atlas 800I A3 推理系列（Atlas 800I A3）"
 
-#: ../../source/faqs.md:18
+#: ../../source/faqs.md:19
 msgid "[Experimental] Atlas 300I Inference series (Atlas 300I Duo)."
 msgstr "[实验性] Atlas 300I 推理系列（Atlas 300I Duo）。"
 
-#: ../../source/faqs.md:19
+#: ../../source/faqs.md:20
 msgid ""
 "[Experimental] Currently for 310I Duo the stable version is vllm-ascend "
 "v0.10.0rc1."
 msgstr "[实验性] 目前对于 310I Duo，稳定版本为 vllm-ascend v0.10.0rc1。"
 
-#: ../../source/faqs.md:21
+#: ../../source/faqs.md:22
 msgid "Below series are NOT supported yet:"
 msgstr "以下系列目前尚不支持："
 
-#: ../../source/faqs.md:22
+#: ../../source/faqs.md:24
 msgid "Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet"
 msgstr "Atlas 200I A2 (Ascend-cann-kernels-310b) 暂无计划"
 
-#: ../../source/faqs.md:23
-msgid "Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet"
-msgstr "Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) 暂无计划"
-
 #: ../../source/faqs.md:25
-msgid ""
-"From a technical view, vllm-ascend support would be possible if the "
-"torch-npu is supported. Otherwise, we have to implement it by using "
-"custom ops. We also welcome you to join us to improve together."
-msgstr ""
-"从技术角度来看，如果支持 torch-npu，则理论上可以支持 vllm-"
-"ascend。否则，我们需要通过自定义算子来实现。我们也欢迎大家加入我们，共同改进。"
+msgid "Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet"
+msgstr "Ascend 910、Ascend 910 Pro B (Ascend-cann-kernels-910) 暂无计划"
 
 #: ../../source/faqs.md:27
-msgid "2. How to get our docker containers?"
-msgstr "2.如何获取我们的 Docker 容器？"
+msgid ""
+"From a technical view, vllm-ascend supports devices if torch-npu is "
+"supported. Otherwise, we have to implement it by using custom ops. We "
+"also welcome you to join us to improve together."
+msgstr ""
+"从技术角度来看，如果设备支持 torch-npu，则 vllm-ascend 即可支持。否则，我们需要通过自定义算子来实现。我们也欢迎大家加入我们，共同改进。"
 
 #: ../../source/faqs.md:29
+msgid "2. How to get our docker containers?"
+msgstr "2. 如何获取我们的 Docker 容器？"
+
+#: ../../source/faqs.md:31
 msgid ""
 "You can get our containers at `Quay.io`, e.g., [<u>vllm-"
 "ascend</u>](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and "
@@ -129,52 +136,52 @@ msgstr ""
 "ascend</u>](https://quay.io/repository/ascend/vllm-ascend?tab=tags) 和 "
 "[<u>cann</u>](https://quay.io/repository/ascend/cann?tab=tags)。"
 
-#: ../../source/faqs.md:31
+#: ../../source/faqs.md:33
 msgid ""
 "If you are in China, you can use `daocloud` or some other mirror sites to"
 " accelerate your downloading:"
-msgstr "如果您在中国境内，可以使用 `daocloud` 或其他镜像站来加速下载："
+msgstr "如果您在中国境内，可以使用 `daocloud` 或其他镜像站点来加速下载："
 
-#: ../../source/faqs.md:41
+#: ../../source/faqs.md:43
 msgid "Load Docker Images for offline environment"
 msgstr "为离线环境加载 Docker 镜像"
 
-#: ../../source/faqs.md:42
+#: ../../source/faqs.md:45
 msgid ""
 "If you want to use container image for offline environments (no internet "
 "connection), you need to download container image in an environment with "
 "internet access:"
 msgstr "如果您想在离线环境（无互联网连接）中使用容器镜像，需要先在有网络访问权限的环境中下载镜像："
 
-#: ../../source/faqs.md:44
+#: ../../source/faqs.md:47
 msgid "**Exporting Docker images:**"
 msgstr "**导出 Docker 镜像：**"
 
-#: ../../source/faqs.md:56
+#: ../../source/faqs.md:59
 msgid "**Importing Docker images in environment without internet access:**"
 msgstr "**在无网络环境下导入 Docker 镜像：**"
 
-#: ../../source/faqs.md:68
+#: ../../source/faqs.md:71
 msgid "3. What models does vllm-ascend supports?"
-msgstr "3.vllm-ascend 支持哪些模型？"
+msgstr "3. vllm-ascend 支持哪些模型？"
 
-#: ../../source/faqs.md:70
+#: ../../source/faqs.md:73
 msgid ""
 "Find more details "
 "[<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html)."
 msgstr "请在[<u>此处</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html)查看更多详细信息。"
 
-#: ../../source/faqs.md:72
+#: ../../source/faqs.md:75
 msgid "4. How to get in touch with our community?"
-msgstr "4.如何与我们的社区取得联系？"
+msgstr "4. 如何与我们的社区取得联系？"
 
-#: ../../source/faqs.md:74
+#: ../../source/faqs.md:77
 msgid ""
 "There are many channels that you can communicate with our community "
 "developers / users:"
 msgstr "您可以通过多种渠道与我们的社区开发者及用户进行交流："
 
-#: ../../source/faqs.md:76
+#: ../../source/faqs.md:79
 msgid ""
 "Submit a GitHub [<u>issue</u>](https://github.com/vllm-project/vllm-"
 "ascend/issues?page=1)."
@@ -182,14 +189,14 @@ msgstr ""
 "提交 GitHub [<u>issue</u>](https://github.com/vllm-project/vllm-"
 "ascend/issues?page=1)。"
 
-#: ../../source/faqs.md:77
+#: ../../source/faqs.md:80
 msgid ""
 "Join our [<u>weekly "
 "meeting</u>](https://docs.google.com/document/d/1hCSzRTMZhIB8vRq1_qOOjx4c9uYUxvdQvDsMV2JcSrw/edit?tab=t.0#heading=h.911qu8j8h35z)"
 " and share your ideas."
 msgstr "参加我们的[<u>周会</u>](https://docs.google.com/document/d/1hCSzRTMZhIB8vRq1_qOOjx4c9uYUxvdQvDsMV2JcSrw/edit?tab=t.0#heading=h.911qu8j8h35z)并分享您的想法。"
 
-#: ../../source/faqs.md:78
+#: ../../source/faqs.md:81
 msgid ""
 "Join our [<u>WeChat</u>](https://github.com/vllm-project/vllm-"
 "ascend/issues/227) group and ask your questions."
@@ -197,7 +204,7 @@ msgstr ""
 "加入我们的[<u>微信群</u>](https://github.com/vllm-project/vllm-"
 "ascend/issues/227)并进行提问。"
 
-#: ../../source/faqs.md:79
+#: ../../source/faqs.md:82
 msgid ""
 "Join our ascend channel in [<u>vLLM forums</u>](https://discuss.vllm.ai/c"
 "/hardware-support/vllm-ascend-support/6) and publish your topics."
@@ -205,118 +212,102 @@ msgstr ""
 "加入 [<u>vLLM 论坛</u>](https://discuss.vllm.ai/c/hardware-support/vllm-"
 "ascend-support/6) 中的 Ascend 频道并发布话题。"
 
-#: ../../source/faqs.md:81
+#: ../../source/faqs.md:84
 msgid "5. What features does vllm-ascend V1 supports?"
-msgstr "5.vllm-ascend V1 支持哪些功能？"
+msgstr "5. vllm-ascend V1 支持哪些功能？"
 
-#: ../../source/faqs.md:83
+#: ../../source/faqs.md:86
 msgid ""
 "Find more details "
 "[<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html)."
 msgstr "请在[<u>此处</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html)查看更多详细信息。"
 
-#: ../../source/faqs.md:85
+#: ../../source/faqs.md:88
 msgid ""
 "6. How to solve the problem of \"Failed to infer device type\" or "
 "\"libatb.so: cannot open shared object file\"?"
-msgstr "6.如何解决“无法推断设备类型”或“libatb.so：无法打开共享对象文件”的问题？"
+msgstr "6. 如何解决“无法推断设备类型”或“libatb.so：无法打开共享对象文件”的问题？"
 
-#: ../../source/faqs.md:87
+#: ../../source/faqs.md:90
 msgid ""
 "Basically, the reason is that the NPU environment is not configured "
 "correctly. You can:"
 msgstr "根本原因是 NPU 环境配置不正确。您可以："
 
-#: ../../source/faqs.md:88
+#: ../../source/faqs.md:92
 msgid "try `source /usr/local/Ascend/nnal/atb/set_env.sh` to enable NNAL package."
 msgstr "尝试运行 `source /usr/local/Ascend/nnal/atb/set_env.sh` 以启用 NNAL 包。"
 
-#: ../../source/faqs.md:89
+#: ../../source/faqs.md:93
 msgid ""
 "try `source /usr/local/Ascend/ascend-toolkit/set_env.sh` to enable CANN "
 "package."
 msgstr "尝试运行 `source /usr/local/Ascend/ascend-toolkit/set_env.sh` 以启用 CANN 包。"
 
-#: ../../source/faqs.md:90
+#: ../../source/faqs.md:94
 msgid "try `npu-smi info` to check whether the NPU is working."
 msgstr "尝试运行 `npu-smi info` 检查 NPU 是否正常工作。"
 
-#: ../../source/faqs.md:92
+#: ../../source/faqs.md:96
 msgid ""
-"If all above steps are not working, you can try the following code with "
-"python to check whether there is any error:"
-msgstr "如果以上步骤均无效，可以尝试使用以下 Python 代码检查报错信息："
+"If the above steps are not working, you can try the following code in "
+"Python to check whether there are any errors:"
+msgstr "如果以上步骤均无效，可以尝试使用以下 Python 代码检查是否有任何错误："
 
-#: ../../source/faqs.md:100
+#: ../../source/faqs.md:104
 msgid "If all above steps are not working, feel free to submit a GitHub issue."
 msgstr "如果上述步骤仍无法解决问题，请随时提交 GitHub issue。"
 
-#: ../../source/faqs.md:102
+#: ../../source/faqs.md:106
 msgid "7. How vllm-ascend work with vLLM?"
-msgstr "7.vllm-ascend 如何与 vLLM 协同工作？"
+msgstr "7. vllm-ascend 如何与 vLLM 协同工作？"
 
-#: ../../source/faqs.md:103
+#: ../../source/faqs.md:108
 msgid ""
-"vllm-ascend is a hardware plugin for vLLM. Basically, the version of "
-"vllm-ascend is the same as the version of vllm. For example, if you use "
-"vllm 0.9.1, you should use vllm-ascend 0.9.1 as well. For main branch, we"
-" will make sure `vllm-ascend` and `vllm` are compatible by each commit."
+"`vllm-ascend` is a hardware plugin for vLLM. Stable releases usually "
+"align with the same vLLM version, while RC releases may use the "
+"corresponding vLLM final release version. For example, `vllm-ascend` "
+"`v0.18.0rc1` matches vLLM `v0.18.0`. For the main branch, we ensure that "
+"`vllm-ascend` and `vllm` are compatible at every commit."
 msgstr ""
-"vllm-ascend 是 vLLM 的硬件插件。通常情况下，vllm-ascend 的版本与 vLLM 版本保持一致。例如，如果您使用 vLLM"
-" 0.9.1，则也应使用 vllm-ascend 0.9.1。对于主分支，我们会确保 `vllm-ascend` 和 `vllm` "
-"的每次提交都是兼容的。"
+"`vllm-ascend` 是 vLLM 的硬件插件。稳定版本通常与对应的 vLLM 版本保持一致，而 RC 版本可能使用对应的 vLLM 最终发布版本。例如，`vllm-ascend` `v0.18.0rc1` 对应 vLLM `v0.18.0`。对于主分支，我们确保 `vllm-ascend` 和 `vllm` 在每次提交时都是兼容的。"
 
-#: ../../source/faqs.md:105
+#: ../../source/faqs.md:110
 msgid "8. Does vllm-ascend support Prefill Disaggregation feature?"
-msgstr "8.vllm-ascend 支持预填充解耦 (Prefill Disaggregation) 功能吗？"
+msgstr "8. vllm-ascend 支持预填充解耦 (Prefill Disaggregation) 功能吗？"
 
-#: ../../source/faqs.md:107
+#: ../../source/faqs.md:112
 msgid ""
 "Yes, vllm-ascend supports Prefill Disaggregation feature with Mooncake "
-"backend. Take [official "
-"tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html)"
+"backend. See the [official "
+"tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)"
 " for example."
 msgstr ""
 "是的，vllm-ascend 通过 Mooncake "
-"后端支持预填充解耦功能。详情请参考[官方教程](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html)。"
-
-#: ../../source/faqs.md:109
+"后端支持预填充解耦功能。详情请参考[官方教程](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)。"
 msgid "9. Does vllm-ascend support quantization method?"
-msgstr "9.vllm-ascend 支持量化方法吗？"
+msgstr "9. vllm-ascend 是否支持量化方法？"
 
-#: ../../source/faqs.md:111
+#: ../../source/faqs.md:116
 msgid ""
-"Currently, w8a8, w4a8 and w4a4 quantization methods are already supported"
-" by vllm-ascend."
+"Currently, w8a8, w4a8, and w4a4 quantization methods are already "
+"supported by vllm-ascend."
 msgstr "目前，vllm-ascend 已支持 w8a8、w4a8 和 w4a4 量化方法。"
 
-#: ../../source/faqs.md:113
-msgid "10. How to run a W8A8 DeepSeek model?"
-msgstr "10.如何运行 W8A8 DeepSeek 模型？"
+#: ../../source/faqs.md:118
+msgid "10. How is vllm-ascend tested?"
+msgstr "10. vllm-ascend 是如何进行测试的？"
 
-#: ../../source/faqs.md:115
+#: ../../source/faqs.md:120
 msgid ""
-"Follow the [inference "
-"tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/multi_node.html)"
-" and replace the model with DeepSeek."
-msgstr ""
-"按照[推理教程](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/multi_node.html)操作，并将模型替换为"
-" DeepSeek。"
-
-#: ../../source/faqs.md:117
-msgid "11. How is vllm-ascend tested?"
-msgstr "11.vllm-ascend 是如何进行测试的？"
-
-#: ../../source/faqs.md:119
-msgid ""
-"vllm-ascend is tested in three aspects, functions, performance, and "
+"vllm-ascend is tested in three aspects: functions, performance, and "
 "accuracy."
 msgstr "vllm-ascend 从功能、性能和精度三个方面进行测试。"
 
-#: ../../source/faqs.md:121
+#: ../../source/faqs.md:122
 msgid ""
 "**Functional test**: We added CI, including part of vllm's native unit "
-"tests and vllm-ascend's own unit tests. On vllm-ascend's test, we test "
+"tests and vllm-ascend's own unit tests. In vllm-ascend's tests, we test "
 "basic functionalities, popular model availability, and [supported "
 "features](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html)"
 " through E2E test."
@@ -325,102 +316,99 @@ msgstr ""
 "的测试中，我们通过端到端 (E2E) "
 "测试来验证基本功能、主流模型可用性以及[支持的功能](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html)。"
 
-#: ../../source/faqs.md:123
+#: ../../source/faqs.md:124
 msgid ""
 "**Performance test**: We provide [benchmark](https://github.com/vllm-"
 "project/vllm-ascend/tree/main/benchmarks) tools for E2E performance "
-"benchmark, which can be easily re-routed locally. We will publish a perf "
+"benchmark, which can be easily re-run locally. We will publish a perf "
 "website to show the performance test results for each pull request."
 msgstr ""
 "**性能测试**：我们提供了[基准测试](https://github.com/vllm-project/vllm-"
 "ascend/tree/main/benchmarks)工具用于端到端性能基准测试，可以方便地在本地重现。我们将发布一个性能展示网站，显示每个 "
 "PR 的性能测试结果。"
 
-#: ../../source/faqs.md:125
+#: ../../source/faqs.md:126
 msgid ""
 "**Accuracy test**: We are working on adding accuracy test to the CI as "
 "well."
 msgstr "**精度测试**：我们正在努力将精度测试也添加到 CI 中。"
 
-#: ../../source/faqs.md:127
+#: ../../source/faqs.md:128
 msgid ""
 "**Nightly test**: we'll run full test every night to make sure the code "
 "is working."
 msgstr "**每日构建测试 (Nightly)**：我们每晚会运行全量测试以确保代码正常工作。"
 
-#: ../../source/faqs.md:129
+#: ../../source/faqs.md:130
 msgid ""
-"Finnall, for each release, we'll publish the performance test and "
-"accuracy test report in the future."
-msgstr "最后，在未来的每个正式版本发布时，我们都会公开性能测试和精度测试报告。"
-
-#: ../../source/faqs.md:131
-msgid "12. How to fix the error \"InvalidVersion\" when using vllm-ascend?"
-msgstr "12.使用 vllm-ascend 时出现 “InvalidVersion” 错误如何解决？"
+"For each release, we'll publish the performance test and accuracy test "
+"report in the future."
+msgstr "对于每个正式版本，我们未来都会发布性能测试和精度测试报告。"
 
 #: ../../source/faqs.md:132
+msgid "11. How to fix the error \"InvalidVersion\" when using vllm-ascend?"
+msgstr "11. 使用 vllm-ascend 时出现 “InvalidVersion” 错误如何解决？"
+
+#: ../../source/faqs.md:134
 msgid ""
-"The problem is usually caused by the installation of a dev or editable "
-"version of the vLLM package. In this case, we provide the environment "
-"variable `VLLM_VERSION` to let users specify the version of vLLM package "
-"to use. Please set the environment variable `VLLM_VERSION` to the version"
-" of the vLLM package you have installed. The format of `VLLM_VERSION` "
-"should be `X.Y.Z`."
+"The problem is usually caused by the installation of a development or "
+"editable version of the vLLM package. In this case, we provide the "
+"environment variable `VLLM_VERSION` to let users specify the version of "
+"vLLM package to use. Please set the environment variable `VLLM_VERSION` "
+"to the version of the vLLM package you have installed. The format of "
+"`VLLM_VERSION` should be `X.Y.Z`."
 msgstr ""
 "该问题通常是由于安装了开发版（dev）或可编辑（editable）版本的 vLLM 包导致的。在这种情况下，我们提供了环境变量 "
 "`VLLM_VERSION` 供用户指定要使用的 vLLM 版本。请将 `VLLM_VERSION` 设置为您已安装的 vLLM 包版本，格式应为"
 " `X.Y.Z`。"
 
-#: ../../source/faqs.md:134
-msgid "13. How to handle the out-of-memory issue?"
-msgstr "13.如何处理内存溢出 (OOM) 问题？"
+#: ../../source/faqs.md:136
+msgid "12. How to handle the out-of-memory issue?"
+msgstr "12. 如何处理内存溢出 (OOM) 问题？"
 
-#: ../../source/faqs.md:135
+#: ../../source/faqs.md:138
 msgid ""
 "OOM errors typically occur when the model exceeds the memory capacity of "
 "a single NPU. For general guidance, you can refer to [vLLM OOM "
 "troubleshooting "
-"documentation](https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html"
-"#out-of-memory)."
+"documentation](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-"
+"of-memory)."
 msgstr ""
 "OOM 错误通常在模型超出单个 NPU 的显存容量时发生。一般性指导请参考 [vLLM OOM "
-"故障排除文档](https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html"
-"#out-of-memory)。"
+"故障排除文档](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory)。"
 
-#: ../../source/faqs.md:137
+#: ../../source/faqs.md:140
 msgid ""
 "In scenarios where NPUs have limited high bandwidth memory (HBM) "
 "capacity, dynamic memory allocation/deallocation during inference can "
 "exacerbate memory fragmentation, leading to OOM. To address this:"
 msgstr "在 NPU 的高带宽内存 (HBM) 容量有限的场景下，推理期间的动态内存分配/释放可能会加剧内存碎片，从而导致 OOM。解决方法如下："
 
-#: ../../source/faqs.md:139
+#: ../../source/faqs.md:142
 msgid ""
-"**Limit `--max-model-len`**:  It can save the HBM usage for kv cache "
+"**Limit `--max-model-len`**: It can save the HBM usage for KV cache "
 "initialization step."
 msgstr "**限制 `--max-model-len`**：这可以节省 KV 缓存初始化阶段的 HBM 占用。"
 
-#: ../../source/faqs.md:141
+#: ../../source/faqs.md:144
 msgid ""
 "**Adjust `--gpu-memory-utilization`**: If unspecified, the default value "
 "is `0.9`. You can decrease this value to reserve more memory to reduce "
 "fragmentation risks. See details in: [vLLM - Inference and Serving - "
-"Engine "
-"Arguments](https://docs.vllm.ai/en/latest/serving/engine_args.html#vllm.engine"
-".arg_utils-_engine_args_parser-cacheconfig)."
+"Engine Arguments](https://docs.vllm.ai/en/latest/cli/serve/#-gpu-memory-"
+"utilization)."
 msgstr ""
 "**调整 `--gpu-memory-utilization`**：若未指定，默认值为 "
-"`0.9`。您可以降低此值以预留更多内存，从而降低碎片风险。详见：[vLLM "
-"推理与服务参数](https://docs.vllm.ai/en/latest/serving/engine_args.html#vllm.engine"
-".arg_utils-_engine_args_parser-cacheconfig)。"
+"`0.9`。您可以降低此值以预留更多内存，从而降低碎片风险。详见：[vLLM - 推理与服务 - "
+"引擎参数](https://docs.vllm.ai/en/latest/cli/serve/#-gpu-memory-utilization)。"
 
-#: ../../source/faqs.md:143
+#: ../../source/faqs.md:146
 msgid ""
 "**Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to "
 "optimize NPU memory management. For example, you can use `export "
 "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory"
 " feature to mitigate memory fragmentation caused by frequent dynamic "
-"memory size adjustments during runtime. See details in: "
+"memory size adjustments during runtime. See details in "
 "[PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html)."
 msgstr ""
 "**配置 `PYTORCH_NPU_ALLOC_CONF`**：设置此环境变量以优化 NPU 内存管理。例如，您可以使用 `export "
@@ -428,11 +416,11 @@ msgstr ""
 "启用虚拟内存功能，以缓解运行时频繁动态调整内存大小导致的内存碎片。详见：[PYTORCH_NPU_ALLOC_CONF "
 "文档](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html)。"
 
-#: ../../source/faqs.md:145
-msgid "14. Failed to enable NPU graph mode when running DeepSeek."
-msgstr "14.运行 DeepSeek 时无法启用 NPU 图模式。"
+#: ../../source/faqs.md:148
+msgid "13. Failed to enable NPU graph mode when running DeepSeek"
+msgstr "13. 运行 DeepSeek 时无法启用 NPU 图模式。"
 
-#: ../../source/faqs.md:146
+#: ../../source/faqs.md:150
 msgid ""
 "Enabling NPU graph mode for DeepSeek may trigger an error. This is "
 "because when both MLA and NPU graph mode are active, the number of "
@@ -445,83 +433,83 @@ msgstr ""
 "或 128。然而，DeepSeek-V2-Lite 仅有 16 个注意力头，导致每个 KV 仅有 16 个查询，超出了支持范围。对 "
 "DeepSeek-V2-Lite 的 NPU 图模式支持将在未来更新中添加。"
 
-#: ../../source/faqs.md:148
+#: ../../source/faqs.md:152
 #, python-brace-format
 msgid ""
 "And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after "
-"the tensor parallel split, num_heads/num_kv_heads is {32, 64, 128}."
+"the tensor parallel split, `num_heads`/`num_kv_heads` is {32, 64, 128}."
 msgstr ""
 "如果您使用的是 DeepSeek-V3 或 DeepSeek-R1，请确保在张量并行 (TP) "
-"切分后，num_heads/num_kv_heads 的值为 {32, 64, 128} 其中之一。"
-
-#: ../../source/faqs.md:155
-msgid ""
-"15. Failed to reinstall vllm-ascend from source after uninstalling vllm-"
-"ascend."
-msgstr "15.卸载 vllm-ascend 后无法从源码重新安装 vllm-ascend。"
-
-#: ../../source/faqs.md:156
-msgid ""
-"You may encounter the problem of C compilation failure when reinstalling "
-"vllm-ascend from source using pip. If the installation fails, use `python"
-" setup.py install` (recommended) to install, or use `python setup.py "
-"clean` to clear the cache."
-msgstr ""
-"当使用 pip 从源码重新安装 vllm-ascend 时，可能会遇到 C 编译失败的问题。如果安装失败，建议使用 `python "
-"setup.py install` 进行安装，或者使用 `python setup.py clean` 清除缓存。"
-
-#: ../../source/faqs.md:158
-msgid "16. How to generate deterministic results when using vllm-ascend?"
-msgstr "16.使用 vllm-ascend 时如何生成确定性结果？"
+"切分后，`num_heads`/`num_kv_heads` 的值为 {32, 64, 128} 其中之一。"
 
 #: ../../source/faqs.md:159
-msgid "There are several factors that affect output certainty:"
-msgstr "有几个因素会影响输出的确定性："
+msgid ""
+"14. Failed to reinstall vllm-ascend from source after uninstalling vllm-"
+"ascend"
+msgstr "14. 卸载 vllm-ascend 后无法从源码重新安装 vllm-ascend。"
 
 #: ../../source/faqs.md:161
 msgid ""
-"Sampler method: using **Greedy sample** by setting `temperature=0` in "
+"You may encounter the problem of C/C++ compilation failure when "
+"reinstalling vllm-ascend from source using pip. If the installation "
+"fails, use `python setup.py install` (recommended) to install, or use "
+"`python setup.py clean` to clear the cache."
+msgstr ""
+"当使用 pip 从源码重新安装 vllm-ascend 时，可能会遇到 C/C++ 编译失败的问题。如果安装失败，建议使用 `python "
+"setup.py install` 进行安装，或者使用 `python setup.py clean` 清除缓存。"
+
+#: ../../source/faqs.md:163
+msgid "15. How to generate deterministic results when using vllm-ascend?"
+msgstr "15. 使用 vllm-ascend 时如何生成确定性结果？"
+
+#: ../../source/faqs.md:165
+msgid "There are several factors that affect output determinism:"
+msgstr "有几个因素会影响输出的确定性："
+
+#: ../../source/faqs.md:167
+msgid ""
+"Sampler method: using **greedy sampling** by setting `temperature=0` in "
 "`SamplingParams`, e.g.:"
 msgstr ""
 "采样方法：在 `SamplingParams` 中设置 `temperature=0` 来使用**贪婪采样 (Greedy "
 "Sample)**，例如："
 
-#: ../../source/faqs.md:186
+#: ../../source/faqs.md:192
 msgid "Set the following environment parameters:"
 msgstr "设置以下环境变量参数："
 
-#: ../../source/faqs.md:195
+#: ../../source/faqs.md:201
 msgid ""
-"17. How to fix the error \"ImportError: Please install vllm[audio] for "
+"16. How to fix the error \"ImportError: Please install vllm[audio] for "
 "audio support\" for the Qwen2.5-Omni model？"
 msgstr ""
-"17.Qwen2.5-Omni 模型报错 “ImportError: Please install vllm[audio] for audio "
+"16. Qwen2.5-Omni 模型报错 “ImportError: Please install vllm[audio] for audio "
 "support” 如何解决？"
 
-#: ../../source/faqs.md:196
+#: ../../source/faqs.md:203
 msgid ""
 "The `Qwen2.5-Omni` model requires the `librosa` package to be installed, "
 "you need to install the `qwen-omni-utils` package to ensure all "
-"dependencies are met `pip install qwen-omni-utils`. This package will "
-"install `librosa` and its related dependencies, resolving the "
-"`ImportError: No module named 'librosa'` issue and ensure that the audio "
-"processing functionality works correctly."
+"dependencies are met, run `pip install qwen-omni-utils`. This package "
+"will install `librosa` and its related dependencies, resolving the "
+"`ImportError: No module named 'librosa'` issue and ensuring that the "
+"audio processing functionality works correctly."
 msgstr ""
 "`Qwen2.5-Omni` 模型需要安装 `librosa` 包。您需要执行 `pip install qwen-omni-utils` "
 "以确保满足所有依赖。该包会安装 `librosa` 及其相关依赖，解决 `ImportError: No module named "
 "'librosa'` 问题，并确保音频处理功能正常工作。"
 
-#: ../../source/faqs.md:199
+#: ../../source/faqs.md:206
 msgid ""
-"18. How to troubleshoot and resolve size capture failures resulting from "
+"17. How to troubleshoot and resolve size capture failures resulting from "
 "stream resource exhaustion, and what are the underlying causes?"
-msgstr "18.如何排查并解决因流资源耗尽导致的尺寸捕获（Size Capture）失败，其根本原因是什么？"
+msgstr "17. 如何排查并解决因流资源耗尽导致的尺寸捕获（Size Capture）失败，其根本原因是什么？"
 
-#: ../../source/faqs.md:207
+#: ../../source/faqs.md:214
 msgid "Recommended mitigation strategies:"
 msgstr "建议的缓解策略："
 
-#: ../../source/faqs.md:208
+#: ../../source/faqs.md:216
 #, python-brace-format
 msgid ""
 "Manually configure the compilation_config parameter with a reduced size "
@@ -530,18 +518,18 @@ msgstr ""
 "手动配置 `compilation_config` 参数以减少尺寸集：'{\"cudagraph_capture_sizes\":[size1, "
 "size2, size3, ...]}'。"
 
-#: ../../source/faqs.md:209
+#: ../../source/faqs.md:217
 msgid ""
-"Employ ACLgraph's full graph mode as an alternative to the piece-wise "
+"Employ ACLgraph's full graph mode as an alternative to the piecewise "
 "approach."
 msgstr "采用 ACLgraph 的全图模式（Full Graph Mode）作为分段方式的替代方案。"
 
-#: ../../source/faqs.md:211
+#: ../../source/faqs.md:219
 msgid ""
 "Root cause analysis: The current stream requirement calculation for size "
 "captures only accounts for measurable factors including: data parallel "
 "size, tensor parallel size, expert parallel configuration, piece graph "
-"count, multistream overlap shared expert settings, and HCCL communication"
+"count, multistream-overlap shared expert settings, and HCCL communication"
 " mode (AIV/AICPU). However, numerous unquantifiable elements, such as "
 "operator characteristics and specific hardware features, consume "
 "additional streams outside of this calculation framework, resulting in "
@@ -551,11 +539,11 @@ msgstr ""
 "HCCL "
 "通信模式（AIV/AICPU）。然而，许多不可量化的因素（如算子特性和特定硬件功能）在该计算框架之外消耗了额外的流，导致在尺寸捕获操作期间流资源耗尽。"
 
-#: ../../source/faqs.md:214
-msgid "19. How to install custom version of torch_npu?"
-msgstr "19.如何安装自定义版本的 torch_npu？"
+#: ../../source/faqs.md:222
+msgid "18. How to install custom version of torch_npu?"
+msgstr "18. 如何安装自定义版本的 torch_npu？"
 
-#: ../../source/faqs.md:215
+#: ../../source/faqs.md:224
 msgid ""
 "torch-npu will be overridden  when installing vllm-ascend. If you need to"
 " install a specific version of torch-npu, you can manually install the "
@@ -564,48 +552,47 @@ msgstr ""
 "安装 vllm-ascend 时会覆盖 torch-npu。如果您需要安装特定版本的 torch-npu，请在安装完 vllm-ascend "
 "之后再手动安装指定版本的 torch-npu。"
 
-#: ../../source/faqs.md:217
+#: ../../source/faqs.md:226
 msgid ""
-"20. On certain systems (e.g., Kylin OS), `docker pull` may fail with an "
+"19. On certain systems (e.g., Kylin OS), `docker pull` may fail with an "
 "`invalid tar header` error"
-msgstr "20.在某些系统（如麒麟 OS）上，执行 `docker pull` 可能会报错 `invalid tar header`"
-
-#: ../../source/faqs.md:219
+msgstr "19. 在某些系统（如麒麟 OS）上，执行 `docker pull` 可能会报错 `invalid tar header`"
+#: ../../source/faqs.md:228
 msgid ""
-"On certain operating systems, such as Kylin OS , you may encounter an "
+"On certain operating systems, such as Kylin OS, you may encounter an "
 "`invalid tar header` error during the `docker pull` process:"
 msgstr "在某些操作系统（如麒麟 OS）上，您可能会在 `docker pull` 过程中遇到 `invalid tar header` 错误："
 
-#: ../../source/faqs.md:225
+#: ../../source/faqs.md:234
 msgid ""
 "This is often due to system compatibility issues. You can resolve this by"
 " using an offline loading method with a second machine."
 msgstr "这通常是由于系统兼容性问题导致的。您可以通过另一台机器使用离线加载的方法来解决。"
 
-#: ../../source/faqs.md:227
+#: ../../source/faqs.md:236
 msgid ""
 "On a separate host machine (e.g., a standard Ubuntu server), pull the "
 "image for the target ARM64 architecture and package it into a `.tar` "
 "file."
 msgstr "在另一台宿主机（如标准的 Ubuntu 服务器）上，拉取目标 ARM64 架构的镜像并打包为 `.tar` 文件。"
 
-#: ../../source/faqs.md:240
+#: ../../source/faqs.md:249
 msgid "Transfer the image archive"
 msgstr "传输镜像归档文件"
 
-#: ../../source/faqs.md:242
+#: ../../source/faqs.md:251
 msgid ""
 "Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you"
 " used) to your target machine"
 msgstr "将 `vllm_ascend_<tag>.tar` 文件（其中 `<tag>` 是您使用的镜像标签）拷贝到目标机器。"
 
-#: ../../source/faqs.md:244
+#: ../../source/faqs.md:253
 msgid ""
-"21. Why am I getting an error when executing the script to start a Docker"
-" container? The error message is: \"operation not permitted\"."
-msgstr "21.为什么执行启动 Docker 容器的脚本时会报错 “operation not permitted”？"
+"20. Why am I getting an error when executing the script to start a Docker"
+" container? The error message is: \"operation not permitted\""
+msgstr "20. 为什么执行启动 Docker 容器的脚本时会报错 “operation not permitted”？"
 
-#: ../../source/faqs.md:245
+#: ../../source/faqs.md:255
 msgid ""
 "When using `--shm-size`, you may need to add the `--privileged=true` flag"
 " to your `docker run` command to grant the container necessary "
@@ -618,37 +605,103 @@ msgstr ""
 "标志以授予容器必要权限。请注意，使用 `--privileged=true` "
 "会授予容器在宿主机系统上的极高权限，这可能存在安全风险。请仅在您了解后果并信任镜像来源的情况下使用此选项。"
 
-#: ../../source/faqs.md:247
-msgid "22. How to achieve low latency in a small batch scenario?"
-msgstr "22.如何在小 Batch 场景下实现低延迟？"
+#: ../../source/faqs.md:257
+msgid "21. How to achieve low latency in a small batch scenario?"
+msgstr "21. 如何在小批量场景下实现低延迟？"
 
-#: ../../source/faqs.md:248
+#: ../../source/faqs.md:259
 msgid ""
 "The performance of `torch_npu.npu_fused_infer_attention_score` in small "
-"batch scenario is not satisfactory, mainly due to the lack of flash "
+"batch scenarios is not satisfactory, mainly due to the lack of flash "
 "decoding function. We offer an alternative operator in "
 "`tools/install_flash_infer_attention_score_ops_a2.sh` and "
 "`tools/install_flash_infer_attention_score_ops_a3.sh`, you can install it"
-" by the following instruction:"
+" using the following instruction:"
 msgstr ""
-"`torch_npu.npu_fused_infer_attention_score` 在小 Batch 场景下的性能不够理想，主要是由于缺乏 "
-"Flash Decoding 功能。我们在 "
+"`torch_npu.npu_fused_infer_attention_score` 在小批量场景下的性能不够理想，主要是由于缺乏 Flash Decoding 功能。我们在 "
 "`tools/install_flash_infer_attention_score_ops_a2.sh` 和 "
 "`tools/install_flash_infer_attention_score_ops_a3.sh` "
 "中提供了替代算子，您可以按照以下指令进行安装："
 
-#: ../../source/faqs.md:256
+#: ../../source/faqs.md:267
 msgid ""
 "**NOTE**: Don't set `additional_config.pa_shape_list` when using this "
-"method, otherwise it will lead to another attention operator. "
+"method; otherwise, it will lead to another attention operator. "
 "**Important**: Please make sure you're using the **official image** of "
-"vllm-ascend, otherwise you **must change** the directory `/vllm-"
+"`vllm-ascend`; otherwise, you **must change** the directory `/vllm-"
 "workspace` in `tools/install_flash_infer_attention_score_ops_a2.sh` or "
-"`tools/install_flash_infer_attention_score_ops_a3.sh` to your own or "
-"create one. If you're not in root user, you need `sudo` permission to run"
-" this script."
+"`tools/install_flash_infer_attention_score_ops_a3.sh` to your own, or "
+"create one. If you're not the root user, you need `sudo` **privileges** "
+"to run this script."
 msgstr ""
 "**注意**：使用此方法时请勿设置 `additional_config.pa_shape_list`，否则会导致使用另一种 Attention "
-"算子。**重要提示**：请确保您使用的是 vllm-ascend 的**官方镜像**，否则您**必须将**脚本中的 `/vllm-"
-"workspace` 目录更改为您自己的目录。如果您不是 root 用户，运行此脚本需要 `sudo` 权限。"
+"算子。**重要提示**：请确保您使用的是 `vllm-ascend` 的**官方镜像**，否则您**必须将**脚本中的 `/vllm-"
+"workspace` 目录更改为您自己的目录。如果您不是 root 用户，运行此脚本需要 `sudo` **权限**。"
 
+#: ../../source/faqs.md:270
+msgid ""
+"22. How to set `SOC_VERSION` when building from source on a CPU-only "
+"machine?"
+msgstr "22. 在仅含 CPU 的机器上从源码构建时，如何设置 `SOC_VERSION`？"
+
+#: ../../source/faqs.md:272
+msgid ""
+"When building from source (e.g. `pip install -e .`), the build may try to"
+" infer the target chip via `npu-smi`. If `npu-smi` is not available "
+"(common in CPU-only build environments), you must set `SOC_VERSION` "
+"manually before installation."
+msgstr "从源码构建时（例如 `pip install -e .`），构建过程可能会尝试通过 `npu-smi` 推断目标芯片。如果 `npu-smi` 不可用（这在仅含 CPU 的构建环境中很常见），您必须在安装前手动设置 `SOC_VERSION`。"
+
+#: ../../source/faqs.md:274
+msgid "You can use the defaults from `Dockerfile*` as a reference. For example:"
+msgstr "您可以参考 `Dockerfile*` 中的默认值。例如："
+
+#: ../../source/faqs.md:290
+msgid "23. Why TPOT increases drastically as concurrency grows?"
+msgstr "23. 为什么 TPOT 会随着并发数增长而急剧增加？"
+
+#: ../../source/faqs.md:292
+msgid ""
+"When testing a vLLM server, one may find that TPOT increases as "
+"concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when "
+"concurrency increases by 4). This phenomenon is normal in most cases. "
+"However, sometimes TPOT may increase dramatically (10 to 100ms for "
+"example) as concurrency grows. This is possibly caused by "
+"[**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption)"
+" in vLLM. Generally, when your server hits KV cache limits, vLLM tries to"
+" free KV cache of requests to ensure sufficient space for other requests,"
+" which is called preemption in vLLM. When a request is preempted, the "
+"default behavior is to recompute the KV cache of this request again in "
+"the future, which is why the performance might drop significantly. There "
+"are several ways to verify this:"
+msgstr ""
+"测试 vLLM 服务器时，您可能会发现 TPOT 会随着并发数增加而增加（例如，并发数增加 4 时，TPOT 增加 0.5 ~ 1ms）。在大多数情况下，这种现象是正常的。"
+"然而，有时 TPOT 可能会随着并发数增长而急剧增加（例如增加 10 到 100ms）。这可能是由 vLLM 中的 [**抢占**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) 引起的。"
+"通常，当您的服务器达到 KV 缓存限制时，vLLM 会尝试释放请求的 KV 缓存，以确保为其他请求提供足够空间，这在 vLLM 中称为抢占。当一个请求被抢占时，默认行为是在未来重新计算该请求的 KV 缓存，这就是性能可能显著下降的原因。有几种方法可以验证这一点："
+
+#: ../../source/faqs.md:295
+msgid ""
+"vLLM usually logs stats on your server. You might see metrics like `GPU "
+"KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption."
+msgstr "vLLM 通常会在您的服务器上记录统计信息。您可能会看到诸如 `GPU KV cache usage: 99.0%,` 这样的指标。当达到 100% 时，会触发抢占。"
+
+#: ../../source/faqs.md:296
+msgid ""
+"When launching a vLLM server, you will see logs like `GPU KV cache size: "
+"66340 tokens` and `Maximum concurrency for 16,384 tokens per request: "
+"4.05`. These are estimated KV cache capacity for a single DP group. You "
+"can adjust the overall request traffic according to this."
+msgstr "启动 vLLM 服务器时，您会看到类似 `GPU KV cache size: 66340 tokens` 和 `Maximum concurrency for 16,384 tokens per request: 4.05` 的日志。这些是针对单个 DP 组的估计 KV 缓存容量。您可以据此调整总体请求流量。"
+
+#: ../../source/faqs.md:298
+msgid ""
+"Preemption cannot be avoided completely since KV cache usage always has a"
+" limit. But there are methods to reduce the chances of preemption. As is "
+"suggested in "
+"[**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption),"
+" the core strategy is to increase available KV cache. For example, one "
+"can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && "
+"`--max-num-batched-tokens`."
+msgstr ""
+"由于 KV 缓存使用量总是有限制的，因此抢占无法完全避免。但有方法可以减少抢占的发生几率。正如 [**抢占**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) 中所建议的，核心策略是增加可用的 KV 缓存。"
+"例如，可以增加 `--gpu-memory-utilization` 或减少 `--max-num-seqs` 和 `--max-num-batched-tokens`。"
