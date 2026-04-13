@@ -119,7 +119,13 @@ class MoECommMethod(ABC):
         fused_experts_input: MoEFusedExpertsInput,
     ):
         # Check constraints
-        assert fused_experts_input.hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16, torch.int8]
+        assert fused_experts_input.hidden_states.dtype in [
+            torch.float32,
+            torch.float16,
+            torch.bfloat16,
+            torch.int8,
+            torch.float8_e4m3fn,
+        ]
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"

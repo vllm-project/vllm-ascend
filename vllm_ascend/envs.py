@@ -107,6 +107,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # Whether to enable AllgatherEPQuant in A5 when expert parallel is enabled.
+    "VLLM_ASCEND_ENABLE_A5_ALLGATHER_EP_QUANT": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_A5_ALLGATHER_EP_QUANT", "0"))
+    ),
 }
 
 # end-env-vars-definition
