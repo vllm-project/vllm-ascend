@@ -131,26 +131,25 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        
+
         # Create idx_mapping tensor
         idx_mapping = torch.arange(num_reqs, device=query_start_loc.device, dtype=torch.int32)
-        
+
         # Reshape block_size to match expected shape
         block_size_tensor = torch.tensor([self.block_size], device=query_start_loc.device, dtype=torch.int32)
-        
+
         # Get block table pointer and stride
         block_table_ptr = self.block_table.gpu.data_ptr()
         block_table_stride = self.block_table.gpu.stride(0)
         block_table_ptrs = torch.tensor([block_table_ptr], device=query_start_loc.device, dtype=torch.uint64)
         block_table_strides = torch.tensor([block_table_stride], device=query_start_loc.device, dtype=torch.int32)
-        
+
         # Get slot mapping pointer and stride
         slot_mapping_ptr = self.slot_mapping.gpu.data_ptr()
         slot_mapping_stride = self.slot_mapping.gpu.stride(0)
-        
+
         _compute_slot_mapping_kernel[(1, num_reqs + 1)](
             self.max_num_batched_tokens,
             idx_mapping,

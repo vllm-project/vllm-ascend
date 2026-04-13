@@ -625,8 +625,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
+
+    # Try to import GatedDeltaNetAttention if available
+    try:
+        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+    except ImportError:
+        # GatedDeltaNetAttention is not available in this vLLM version
+        AscendGatedDeltaNetAttention = None
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
         AscendMergedColumnParallelLinear,
@@ -678,14 +684,16 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
-        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
     }
+    
+    # Add GatedDeltaNetAttention if available
+    if AscendGatedDeltaNetAttention is not None:
+        REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
-        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
             AscendRMSNorm310,
@@ -697,22 +705,33 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             AscendParallelLMHead310,
             AscendVocabParallelEmbedding310,
         )
+        
+        # Try to import AscendGatedDeltaNetAttention310 if available
+        try:
+            from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+            has_gdn_310 = True
+        except ImportError:
+            # AscendGatedDeltaNetAttention310 is not available in this vLLM version
+            has_gdn_310 = False
 
-        REGISTERED_ASCEND_OPS.update(
-            {
-                "SiluAndMul": AscendSiluAndMul310,
-                "RotaryEmbedding": AscendRotaryEmbedding310,
-                "RMSNorm": AscendRMSNorm310,
-                "GemmaRMSNorm": AscendGemmaRMSNorm310,
-                "RMSNormGated": AscendRMSNormGated310,
-                "FusedMoE": AscendFusedMoE310,
-                "SharedFusedMoE": AscendSharedFusedMoE310,
-                "ParallelLMHead": AscendParallelLMHead310,
-                "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
-                "MMEncoderAttention": AscendMMEncoderAttention310,
-                "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
-            }
-        )
+        update_dict = {
+            "SiluAndMul": AscendSiluAndMul310,
+            "RotaryEmbedding": AscendRotaryEmbedding310,
+            "RMSNorm": AscendRMSNorm310,
+            "GemmaRMSNorm": AscendGemmaRMSNorm310,
+            "RMSNormGated": AscendRMSNormGated310,
+            "FusedMoE": AscendFusedMoE310,
+            "SharedFusedMoE": AscendSharedFusedMoE310,
+            "ParallelLMHead": AscendParallelLMHead310,
+            "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
+            "MMEncoderAttention": AscendMMEncoderAttention310,
+        }
+        
+        # Add GatedDeltaNetAttention310 if available
+        if has_gdn_310:
+            update_dict["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention310
+        
+        REGISTERED_ASCEND_OPS.update(update_dict)
 
         REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
 
