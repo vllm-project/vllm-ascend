@@ -93,6 +93,10 @@ jobs:
               if (eventName === 'pull_request') {
                 return context.payload.pull_request.head.sha;
               }
+              // For schedule and workflow_dispatch, return the commit SHA
+              if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
+                return context.sha || 'unknown';
+              }
               return (context.ref || '').replace(/^refs\/(heads|tags)\//, '') || 'main';
             }
 

@@ -41,7 +41,7 @@ After completing "Run lint" setup, you can run CI locally:
 
 cd ~/vllm-project/
 
-# Run CI need vLLM installed
+# Run CI needs vLLM installed
 git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/build.txt
@@ -52,7 +52,7 @@ cd ..
 cd vllm-ascend
 # For Linux:
 pip install -r requirements-dev.txt
-# For non Linux:
+# For non-Linux:
 cat requirements-dev.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 
@@ -112,4 +112,5 @@ testing
 multi_node_test
 nightly_ci_test
 e2e_ci_test
+doc_writing
 :::

@@ -61,7 +61,7 @@ Refer to [AISBench](https://gitee.com/aisbench/benchmark/tree/master) for detail
 Install AISBench from source.
 
 ```shell
-git clone https://gitee.com/aisbench/benchmark.git
+git clone https://github.com/AISBench/benchmark.git
 cd benchmark/
 pip3 install -e ./ --use-pep517
 ```

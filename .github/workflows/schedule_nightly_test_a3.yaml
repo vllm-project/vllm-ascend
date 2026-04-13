@@ -123,6 +123,49 @@ jobs:
       matrix:
         vllm_ascend_branch: [releases-v0.18.0]
         test_config:
+          - name: multi-node-deepseek-v3.2-W8A8-EP
+            config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
+            size: 4
+          - name: multi-node-deepseek-v3.2-W8A8-EP-aime2025
+            config_file_path: DeepSeek-V3_2-W8A8-EP-aime2025.yaml
+            size: 4
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a3
+      runner: linux-aarch64-a3-0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
+      should_run: >-
+        ${{
+          needs.parse-trigger.outputs.run == 'true' && (
+            needs.parse-trigger.outputs.filter == 'all' ||
+            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
+          )
+        }}
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+
+  double-node-tests:
+    name: multi-node
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        vllm_ascend_branch: [releases-v0.18.0]
+        test_config:
+          - name: multi-node-deepseek-r1-w8a8-longseq
+            config_file_path: DeepSeek-R1-W8A8-longseq.yaml
+            size: 2
           - name: multi-node-deepseek-pd
             config_file_path: DeepSeek-V3.yaml
             size: 2
@@ -141,9 +184,6 @@ jobs:
           - name: multi-node-qwen3-dp-mooncake-layerwise
             config_file_path: Qwen3-235B-A22B-Mooncake-Layerwise.yaml
             size: 2
-          - name: multi-node-deepseek-r1-w8a8-longseq
-            config_file_path: DeepSeek-R1-W8A8-longseq.yaml
-            size: 2
           - name: multi-node-qwenw8a8-2node-longseq
             config_file_path: Qwen3-235B-W8A8-longseq.yaml
             size: 2
@@ -159,9 +199,6 @@ jobs:
           - name: multi-node-deepseek-v3.1
             config_file_path: DeepSeek-V3.1-BF16.yaml
             size: 2
-          - name: multi-node-deepseek-v3.2-W8A8-EP
-            config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
-            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -171,6 +208,7 @@ jobs:
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
+      name: ${{ matrix.test_config.name }}
       vllm_ascend_ref: ${{ needs.parse-trigger.outputs.ref }}
       should_run: >-
         ${{
@@ -184,7 +222,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -259,9 +297,6 @@ jobs:
           - name: qwen2-5-vl-32b
             os: linux-aarch64-a3-4
             config_file_path: Qwen2.5-VL-32B-Instruct.yaml
-          - name: qwen3-32b-int8-a3-feature-stack3
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen3-32B-Int8-A3-Feature-Stack3.yaml
           - name: qwen3-32b-int8-prefix-cache
             os: linux-aarch64-a3-4
             config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
@@ -295,10 +330,28 @@ jobs:
 
   clear-pre-logs:
     runs-on: linux-aarch64-a3-0
-    needs: [multi-node-tests]
-    if: github.event_name == 'schedule' && needs.multi-node-tests.result != 'skipped'
+    needs: [multi-node-tests, double-node-tests]
+    if: github.event_name == 'schedule' && (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
     steps:
       - name: Clear pre-logs on pvc
         run: |
           # Clear logs generated before the test to avoid confusion
           rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+
+  merge-benchmark-artifacts:
+    name: Merge benchmark artifacts into nightly-a3.zip
+    needs: [parse-trigger, single-node-tests, multi-node-tests]
+    if: >-
+      always() &&
+      needs.parse-trigger.result == 'success' &&
+      (needs.single-node-tests.result != 'skipped' ||
+       needs.multi-node-tests.result != 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge all benchmark result artifacts
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: nightly-a3
+          pattern: nightly-test-benchmark-results-*
+          compression-level: 0
+          delete-merged: true

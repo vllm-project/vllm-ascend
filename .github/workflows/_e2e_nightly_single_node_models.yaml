@@ -26,7 +26,7 @@ on:
       vllm-ascend:
         required: false
         type: string
-        default: main
+        default: releases/v0.18.0
       runner:
         required: true
         type: string
@@ -93,6 +93,8 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.vllm-ascend }}
 
       - name: Install system dependencies
         run: |

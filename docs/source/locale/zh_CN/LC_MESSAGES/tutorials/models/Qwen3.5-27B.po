@@ -1,0 +1,443 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:1
+msgid "Qwen3.5-27B"
+msgstr "Qwen3.5-27B"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:5
+msgid ""
+"Qwen3.5 represents a significant leap forward, integrating breakthroughs "
+"in multimodal learning, architectural efficiency, reinforcement learning "
+"scale, and global accessibility to empower developers and enterprises "
+"with unprecedented capability and efficiency."
+msgstr ""
+"Qwen3.5 代表了一次重大的飞跃，它整合了多模态学习、架构效率、强化学习规模和全球可访问性方面的突破，"
+"为开发者和企业提供了前所未有的能力和效率。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr ""
+"本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度评估和性能评估。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:9
+msgid "The `Qwen3.5-27B` model is first supported in `vllm-ascend:v0.17.0rc1`."
+msgstr "`Qwen3.5-27B` 模型从 `vllm-ascend:v0.17.0rc1` 版本开始首次支持。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:11
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:13
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:15
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:17
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:19
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:21
+msgid ""
+"`Qwen3.5-27B`(BF16 version): requires 1 Atlas 800 A3 (64G × 16) node or 1"
+" Atlas 800 A2 (64G × 8) node. [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen3.5-27B)"
+msgstr ""
+"`Qwen3.5-27B`（BF16 版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 1 个 Atlas 800 A2（64G × 8）节点。"
+"[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3.5-27B)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:22
+msgid ""
+"`Qwen3.5-27B-w8a8`(Quantized version): requires 1 Atlas 800 A3 (64G × 16)"
+" node or 1 Atlas 800 A2 (64G × 8) node. [Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)"
+msgstr ""
+"`Qwen3.5-27B-w8a8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 1 个 Atlas 800 A2（64G × 8）节点。"
+"[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:24
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:26
+msgid "Verify Multi-node Communication(Optional)"
+msgstr "验证多节点通信（可选）"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:28
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../../installation.md#verify-multi-node-communication)."
+msgstr ""
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:30
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md
+msgid "Use docker image"
+msgstr "使用 Docker 镜像"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:36
+msgid ""
+"For example, using images `quay.io/ascend/vllm-ascend:v0.17.0rc1`(for "
+"Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.17.0rc1-a3`(for Atlas "
+"800 A3)."
+msgstr ""
+"例如，使用镜像 `quay.io/ascend/vllm-ascend:v0.17.0rc1`（适用于 Atlas 800 A2）"
+"和 `quay.io/ascend/vllm-ascend:v0.17.0rc1-a3`（适用于 Atlas 800 A3）。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:38
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md
+msgid "Build from source"
+msgstr "从源码构建"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:78
+msgid "You can build all from source."
+msgstr "您可以从源码构建所有组件。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:80
+msgid ""
+"Install `vllm-ascend`, refer to [set up using "
+"python](../../installation.md#set-up-using-python)."
+msgstr ""
+"安装 `vllm-ascend`，请参考[使用 Python 设置](../../installation.md#set-up-using-python)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:84
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:86
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:88
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:90
+msgid ""
+"`Qwen3.5-27B` and `Qwen3.5-27B-w8a8` can both be deployed on 1 Atlas 800 "
+"A3(64G × 16), 1 Atlas 800 A2(64G × 8). Quantized version needs to start "
+"with parameter --quantization ascend."
+msgstr ""
+"`Qwen3.5-27B` 和 `Qwen3.5-27B-w8a8` 都可以部署在 1 台 Atlas 800 A3（64G × 16）或 1 台 Atlas 800 A2（64G × 8）上。"
+"量化版本需要使用 --quantization ascend 参数启动。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:92
+msgid "Run the following script to execute online 128k inference."
+msgstr "运行以下脚本执行 128k 长度的在线推理。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:125
+msgid "**Notice:**"
+msgstr "**注意：**"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:127
+msgid "The parameters are explained as follows:"
+msgstr "参数解释如下："
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:129
+msgid ""
+"`--data-parallel-size` 1 and `--tensor-parallel-size` 2 are common "
+"settings for data parallelism (DP) and tensor parallelism (TP) sizes."
+msgstr "`--data-parallel-size` 1 和 `--tensor-parallel-size` 2 是数据并行（DP）和张量并行（TP）大小的常见设置。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:130
+msgid ""
+"`--max-model-len` represents the context length, which is the maximum "
+"value of the input plus output for a single request."
+msgstr "`--max-model-len` 表示上下文长度，即单个请求的输入加输出的最大值。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:131
+msgid ""
+"`--max-num-seqs` indicates the maximum number of requests that each DP "
+"group is allowed to process. If the number of requests sent to the "
+"service exceeds this limit, the excess requests will remain in a waiting "
+"state and will not be scheduled. Note that the time spent in the waiting "
+"state is also counted in metrics such as TTFT and TPOT. Therefore, when "
+"testing performance, it is generally recommended that `--max-num-seqs` * "
+"`--data-parallel-size` >= the actual total concurrency."
+msgstr ""
+"`--max-num-seqs` 表示每个 DP 组允许处理的最大请求数。如果发送到服务的请求数超过此限制，超出部分将处于等待状态而不会被调度。"
+"请注意，等待状态所花费的时间也会计入 TTFT 和 TPOT 等指标中。因此，在测试性能时，通常建议 `--max-num-seqs` * `--data-parallel-size` >= 实际总并发数。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:132
+msgid ""
+"`--max-num-batched-tokens` represents the maximum number of tokens that "
+"the model can process in a single step. Currently, vLLM v1 scheduling "
+"enables ChunkPrefill/SplitFuse by default, which means:"
+msgstr ""
+"`--max-num-batched-tokens` 表示模型单步能处理的最大 token 数量。目前，vLLM v1 调度默认启用了 ChunkPrefill/SplitFuse，这意味着："
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:133
+msgid ""
+"(1) If the input length of a request is greater than `--max-num-batched-"
+"tokens`, it will be divided into multiple rounds of computation according"
+" to `--max-num-batched-tokens`;"
+msgstr ""
+"（1）如果请求的输入长度大于 `--max-num-batched-tokens`，将按照 `--max-num-batched-tokens` 拆分为多轮计算；"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:134
+msgid ""
+"(2) Decode requests are prioritized for scheduling, and prefill requests "
+"are scheduled only if there is available capacity."
+msgstr ""
+"（2）解码请求优先调度，仅在有剩余容量时才调度预填充请求。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:135
+msgid ""
+"Generally, if `--max-num-batched-tokens` is set to a larger value, the "
+"overall latency will be lower, but the pressure on GPU memory (activation"
+" value usage) will be greater."
+msgstr ""
+"通常，`--max-num-batched-tokens` 设置得越大，整体延迟越低，但对 GPU 内存（激活值占用）的压力越大。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:136
+msgid ""
+"`--gpu-memory-utilization` represents the proportion of HBM that vLLM "
+"will use for actual inference. Its essential function is to calculate the"
+" available kv_cache size. During the warm-up phase (referred to as "
+"profile run in vLLM), vLLM records the peak GPU memory usage during an "
+"inference process with an input size of `--max-num-batched-tokens`. The "
+"available kv_cache size is then calculated as: `--gpu-memory-utilization`"
+" * HBM size - peak GPU memory usage. Therefore, the larger the value of "
+"`--gpu-memory-utilization`, the more kv_cache can be used. However, since"
+" the GPU memory usage during the warm-up phase may differ from that "
+"during actual inference (e.g., due to uneven EP load), setting `--gpu-"
+"memory-utilization` too high may lead to OOM (Out of Memory) issues "
+"during actual inference. The default value is `0.9`."
+msgstr ""
+"`--gpu-memory-utilization` 表示 vLLM 将用于实际推理的 HBM 占比。其核心作用是计算可用的 kv_cache 大小。"
+"在预热阶段（vLLM 中称为 profile run），vLLM 会记录输入大小为 `--max-num-batched-tokens` 的推理过程中的峰值 GPU 内存使用量。"
+"然后按如下方式计算可用 kv_cache 大小：`--gpu-memory-utilization` * HBM 大小 - 峰值 GPU 内存使用量。"
+"因此，`--gpu-memory-utilization` 的值越大，可用的 kv_cache 就越多。"
+"然而，由于预热阶段的 GPU 内存使用量可能与实际推理时不同（例如由于 EP 负载不均），"
+"将 `--gpu-memory-utilization` 设置过高可能会导致实际推理时出现 OOM（内存不足）问题。默认值为 `0.9`。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:137
+msgid ""
+"`--no-enable-prefix-caching` indicates that prefix caching is disabled. "
+"To enable it, for mamba-like models Qwen3.5, set `--enable-prefix-"
+"caching` and `--mamba-cache-mode align`. Notice the current "
+"implementation of hybrid kv cache might result in a very large block_size"
+" when scheduling. For example, the block_size may be adjusted to 2048, "
+"which means that any prefix shorter than 2048 will never be cached."
+msgstr ""
+"`--no-enable-prefix-caching` 表示禁用前缀缓存。要启用前缀缓存，对于类似 Mamba 的 Qwen3.5 模型，"
+"需要设置 `--enable-prefix-caching` 和 `--mamba-cache-mode align`。请注意，当前混合 KV 缓存的实现"
+"在调度时可能会导致 block_size 非常大。例如，block_size 可能被调整为 2048，这意味着任何短于 2048 的前缀都不会被缓存。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:138
+msgid ""
+"`--quantization` \"ascend\" indicates that quantization is used. To "
+"disable quantization, remove this option."
+msgstr ""
+"`--quantization` \"ascend\" 表示使用量化。要禁用量化，请移除该选项。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:139
+msgid ""
+"`--compilation-config` contains configurations related to the aclgraph "
+"graph mode. The most significant configurations are \"cudagraph_mode\" "
+"and \"cudagraph_capture_sizes\", which have the following meanings: "
+"\"cudagraph_mode\": represents the specific graph mode. Currently, "
+"\"PIECEWISE\" and \"FULL_DECODE_ONLY\" are supported. The graph mode is "
+"mainly used to reduce the cost of operator dispatch. Currently, "
+"\"FULL_DECODE_ONLY\" is recommended."
+msgstr ""
+"`--compilation-config` 包含与 aclgraph 图模式相关的配置。最重要的配置是 \"cudagraph_mode\" 和 \"cudagraph_capture_sizes\"，其含义如下："
+"\"cudagraph_mode\"：表示具体的图模式。目前支持 \"PIECEWISE\" 和 \"FULL_DECODE_ONLY\"。"
+"图模式主要用于降低算子下发开销。目前推荐使用 \"FULL_DECODE_ONLY\"。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:141
+msgid ""
+"\"cudagraph_capture_sizes\": represents different levels of graph modes. "
+"The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. "
+"In the graph mode, the input for graphs at different levels is fixed, and"
+" inputs between levels are automatically padded to the next level. "
+"Currently, the default setting is recommended. Only in some scenarios is "
+"it necessary to set this separately to achieve optimal performance."
+msgstr ""
+"\"cudagraph_capture_sizes\"：表示图模式的不同级别。默认值为 [1, 2, 4, 8, 16, 24, 32, 40, ..., `--max-num-seqs`]。"
+"在图模式下，不同级别的图输入是固定的，级别之间的输入会自动填充到下一级别。"
+"目前推荐使用默认设置。仅在少数场景下需要单独设置以获得最佳性能。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:143
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:145
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:158
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:160
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:162
+#: ../../source/tutorials/models/Qwen3.5-27B.md:174
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:164
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr ""
+"详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:166
+msgid ""
+"After execution, you can get the result, here is the result of `Qwen3.5"
+"-27B-w8a8` in `vllm-ascend:v0.17.0rc1` for reference only."
+msgstr ""
+"执行后即可获得结果，以下是 `Qwen3.5-27B-w8a8` 在 `vllm-ascend:v0.17.0rc1` 上的结果，仅供参考。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "version"
+msgstr "版本"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "mode"
+msgstr "模式"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "vllm-api-general-chat"
+msgstr "vllm-api-general-chat"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "gsm8k"
+msgstr "gsm8k"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "-"
+msgstr "-"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "accuracy"
+msgstr "准确率"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "gen"
+msgstr "生成"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:76
+msgid "96.74"
+msgstr "96.74"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:172
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:176
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:178
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM 基准测试"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:180
+msgid "Run performance evaluation of `Qwen3.5-27B-w8a8` as an example."
+msgstr "以 `Qwen3.5-27B-w8a8` 为例运行性能评估。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:182
+msgid ""
+"Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
+"for more details."
+msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:184
+msgid "There are three `vllm bench` subcommands:"
+msgstr "有三个 `vllm bench` 子命令："
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:186
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:187
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：基准测试在线服务的吞吐量。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:188
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：基准测试离线推理的吞吐量。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:190
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例，运行如下代码。"
+
+#: ../../source/tutorials/models/Qwen3.5-27B.md:197
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result."
+msgstr "大约几分钟后，即可获得性能评估结果。"

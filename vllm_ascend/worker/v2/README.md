@@ -4,6 +4,3 @@ This directory contains the new model runner which is under active development.
 
 please see [Model Runner V2](https://github.com/vllm-project/vllm-ascend/issues/5208)
 to get specific plans.
-
-supported vllm version: main@14acf429ac08b6d538ca6feb3e06b6d13895804d
-related PR: <https://github.com/vllm-project/vllm-ascend/pull/7709>
