@@ -258,6 +258,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.v_quant_buffer = v_quant_buffer
         self.ready_event = ready_event
         self.callback_func = callback_func
+        self.failed_reqs: set[str] = set()
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -447,6 +448,9 @@ class KVCacheSendingLayerThread(threading.Thread):
         # Merge transmission tasks of the same session
         session_meta: dict[str, TransferMeta] = {}
         for req_id, req_meta in send_task.send_request.items():
+            if req_id in self.failed_reqs:
+                logger.debug(f"Request {req_id} is in failed requests set,skipping layer {send_task.layer_idx}.")
+                continue
             session_id = f"{req_meta.remote_host}:{req_meta.remote_te_rpc_port}"
             if session_id not in session_meta:
                 session_meta[session_id] = TransferMeta(src=[], dst=[], length=[], req_ids=[])
@@ -481,29 +485,41 @@ class KVCacheSendingLayerThread(threading.Thread):
                     logger.error(
                         f"Mooncake transfer failed for send requests {transfer_meta.req_ids} kv cache to {session_id}"
                     )
+                    for req_id in transfer_meta.req_ids:
+                        self.failed_reqs.add(req_id)
+                        req_meta = send_task.send_request[req_id]
+                        self.callback_func(req_id, req_meta, layer_group_idx, success=False)
+                else: # ret >= 0 的情况
+                    # ... 原有成功打 log 的逻辑 ...
                     if send_task.layer_idx == (self.total_layers - 1):
                         for req_id in transfer_meta.req_ids:
                             req_meta = send_task.send_request[req_id]
                             if req_meta.chunk_finish:
-                                self.callback_func(
-                                    req_id, req_meta, layer_group_idx
-                                )  # TODO Send a signal indicating transmission failure
-                else:
-                    req_end_time = time.perf_counter()
-                    total_transfer_size = sum(transfer_meta.length) / 1024
-                    req_transfer_elapsed = (req_end_time - req_start_time) * 1000
-                    logger.debug(
-                        "Layer%d KV cache transfer task %dKB to remote_session_id [%s] took %.3f ms.",
-                        send_task.layer_idx,
-                        total_transfer_size,
-                        session_id,
-                        req_transfer_elapsed,
-                    )
-                    if send_task.layer_idx == (self.total_layers - 1):
-                        for req_id in transfer_meta.req_ids:
-                            req_meta = send_task.send_request[req_id]
-                            if req_meta.chunk_finish:
-                                self.callback_func(req_id, req_meta, layer_group_idx)
+                                # 原有逻辑：全部层级发送完毕，发送成功信号
+                                self.callback_func(req_id, req_meta, layer_group_idx, success=True)
+                    # if send_task.layer_idx == (self.total_layers - 1):
+                    #     for req_id in transfer_meta.req_ids:
+                    #         req_meta = send_task.send_request[req_id]
+                    #         if req_meta.chunk_finish:
+                    #             self.callback_func(
+                    #                 req_id, req_meta, layer_group_idx
+                    #             )  # TODO Send a signal indicating transmission failure
+                # else:
+                #     req_end_time = time.perf_counter()
+                #     total_transfer_size = sum(transfer_meta.length) / 1024
+                #     req_transfer_elapsed = (req_end_time - req_start_time) * 1000
+                #     logger.debug(
+                #         "Layer%d KV cache transfer task %dKB to remote_session_id [%s] took %.3f ms.",
+                #         send_task.layer_idx,
+                #         total_transfer_size,
+                #         session_id,
+                #         req_transfer_elapsed,
+                #     )
+                #     if send_task.layer_idx == (self.total_layers - 1):
+                #         for req_id in transfer_meta.req_ids:
+                #             req_meta = send_task.send_request[req_id]
+                #             if req_meta.chunk_finish:
+                #                 self.callback_func(req_id, req_meta, layer_group_idx)
 
 
 class KVCacheRecvingLayerThread(threading.Thread):
@@ -527,6 +543,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.lock = threading.Lock()
         self.done_requests = set[str]()
         self.task_tracker = dict[str, int]()
+        self.failed_requests = set[str]()
         self.ready_event = ready_event
         self.metadata = metadata
 
@@ -583,6 +600,11 @@ class KVCacheRecvingLayerThread(threading.Thread):
                         trans_count = msg[2]
                         self.update_task(request_id, trans_count)
                         sock.send_multipart((identity, b"", b"ACK"))
+                    elif msg[0] ==b"failed_sending_msg":
+                        request_id = msg[1]
+                        logger.error(f"Received FAILED signal from sender for request {request_id}, Aborting KV load.")
+                        sock.send_multipart((identity, b"", b"ACK"))
+                        self.handle_failed_request(request_id)
                     else:
                         logger.error("Connection listener got unexpected message %s", msg)
                 except Exception as e:
@@ -1749,10 +1771,14 @@ class MooncakeLayerwiseConnectorWorker:
         req_meta.remote_layer_metadata = self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port]
         return req_meta
 
-    def send_done_send_signal(self, req_id, req_meta, group_idx):
+    def send_done_send_signal(self, req_id, req_meta, group_idx, success:bool = True):
         external_req_id = get_external_request_id(req_id)
+        FAILED_SENDING_MSG = b"failed_sending_msg"
+        msg_type = DONE_SENDING_MSG if success else FAILED_SENDING_MSG
+        status_str = "done" if success else "FAILED"
         logger.info(
             "Sending done sending signal for request %s to %s:%d",
+            status_str,
             external_req_id,
             req_meta.remote_host,
             req_meta.remote_port,
@@ -1760,7 +1786,7 @@ class MooncakeLayerwiseConnectorWorker:
         try:
             path = make_zmq_path("tcp", req_meta.remote_host, req_meta.remote_port)
             msg_encoder = msgspec.msgpack.Encoder()
-            encoded_data = msg_encoder.encode((DONE_SENDING_MSG, external_req_id, req_meta.trans_count[group_idx]))
+            encoded_data = msg_encoder.encode((msg_type, external_req_id, req_meta.trans_count[group_idx]))
             with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore
                 ensure_zmq_send(sock, encoded_data, f"{req_meta.remote_host}:{req_meta.remote_port}")
                 # Avoid blocking forever waiting for the REQ/ACK response.
