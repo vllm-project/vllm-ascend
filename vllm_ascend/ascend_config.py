@@ -100,7 +100,7 @@ class AscendConfig:
             if self.pd_tp_ratio > 1:
                 # Total KV heads from vLLM's resolved architecture (ModelArchConfigConvertor).
                 num_kv_head = vllm_config.model_config.get_total_num_kv_heads()
-                if num_kv_head < 1:
+                if not num_kv_head or num_kv_head < 1:
                     raise ValueError(
                         "Could not determine a positive total KV head count for PD "
                         "disaggregation (pd_tp_ratio > 1). Check that the model config "
