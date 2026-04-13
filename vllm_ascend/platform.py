@@ -242,10 +242,7 @@ class NPUPlatform(Platform):
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None and kv_transfer_config.kv_role != "kv_producer":
-            raise ValueError(
-                "additional_config.layer_sharding can only be enabled in "
-                "PD-disaggregated's P node."
-            )
+            raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
