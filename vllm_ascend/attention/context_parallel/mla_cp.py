@@ -239,8 +239,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
 
         # actual_seq_lengths_q should be [1, 2, 3, ...] for each decode request
-        actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
-        decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
+        # actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
+        # decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
 
         return decode_metadata
 
