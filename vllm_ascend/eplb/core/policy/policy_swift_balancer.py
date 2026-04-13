@@ -735,9 +735,10 @@ class SwiftBalanceEplb(EplbPolicy):
 
         layer_changed_ratio = []
         for layer_idx in range(self.num_layers):
-            layer_changed_ratio.append(
-                self.safe_divide(max_heat_per_layer_after[layer_idx], max_heat_per_layer_before[layer_idx])
-            )
+            if max_heat_per_layer_before[layer_idx] > 0:
+                layer_changed_ratio.append(max_heat_per_layer_after[layer_idx] / max_heat_per_layer_before[layer_idx])
+            else:
+                layer_changed_ratio.append(1.0)
 
         per_layer_priority = np.argsort(layer_changed_ratio)
         npu_heat_all_after = sum(max_heat_per_layer_after)
