@@ -646,6 +646,19 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_pe = q_pe.view(num_tokens, num_heads, -1)
             sparse_mode = 3
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
+            B = spec_attn_mask.shape[0]  # batch size
+            L = spec_attn_mask.shape[1]  # length
+
+            # 获取目标 length
+            target_length = 16384
+
+            # 创建目标 shape 的 mask，初始为 False
+            new_mask = torch.zeros(1, B, target_length, dtype=torch.bool, device=spec_attn_mask.device)
+
+            # 填充原始数据到新 mask 的前 L 个位置
+            new_mask[:, :, :L] = spec_attn_mask
+            spec_attn_mask = new_mask
+
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
