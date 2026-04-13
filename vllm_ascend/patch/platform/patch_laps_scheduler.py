@@ -1,10 +1,11 @@
 # mypy: ignore-errors
 
-import vllm
+from vllm.v1.core.sched import scheduler as scheduler_module
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm_ascend.core.laps_scheduler import LAPSSchedulerMixin
 
 
-BaseScheduler = vllm.v1.core.sched.scheduler.Scheduler
+BaseScheduler = Scheduler
 
 
 class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
@@ -14,4 +15,4 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
         self._init_laps_waiting_queue()
 
 
-vllm.v1.core.sched.scheduler.Scheduler = LAPSScheduler
+scheduler_module.Scheduler = LAPSScheduler
