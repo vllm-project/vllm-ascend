@@ -1662,10 +1662,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.is_multimodal_model and _EXTRA_CTX.flash_comm_v1_enabled:
-            return hidden_states, positions
         if self.method == "mtp":
-            if _EXTRA_CTX.flash_comm_v1_enabled:
+            if _EXTRA_CTX.flash_comm_v1_enabled and not self.is_multimodal_model:
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
                 positions = positions.unsqueeze(-1)
                 positions = torch.ops.vllm.maybe_pad_and_reduce(positions)

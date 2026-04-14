@@ -82,6 +82,7 @@ jobs:
               - 'vllm_ascend/worker/**'
               - 'vllm_ascend/attention/attention_v1.py'
               - 'vllm_ascend/ops/fused_moe/**'
+              - 'vllm_ascend/patch/**'
               - 'CMakeLists.txt'
 
   ut:
