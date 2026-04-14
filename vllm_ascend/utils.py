@@ -1066,7 +1066,23 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     # Determine whether decode must use MC2. Use max cudagraph capture size
     # if available, otherwise use the maximal uniform decode token count.
     if compilation_config.cudagraph_capture_sizes:
-        potential_max_tokens = compilation_config.max_cudagraph_capture_size
+        potential_max_tokens = max(
+            compilation_config.max_cudagraph_capture_size,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len,
+            ),
+        )
+        if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
+            logger.warning_once(
+                "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
+                "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
+                compilation_config.max_cudagraph_capture_size,
+                potential_max_tokens,
+            )
     else:
         potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
 
