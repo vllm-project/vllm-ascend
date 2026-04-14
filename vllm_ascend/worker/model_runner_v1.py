@@ -3412,7 +3412,7 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
 
-            elif isinstance(attn_module, MLAAttention): 
+            elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
                     # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
                     # Re-importing it at runtime will therefore resolve to the patched class.
