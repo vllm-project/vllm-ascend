@@ -262,14 +262,12 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.dcp_size, 2)
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method",
-           return_value=MagicMock())
-    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
+    @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method", return_value=MagicMock())
+    @patch("vllm_ascend.attention.mla_v1.get_forward_context")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_mla_preprocess_dcp(self, mock_get_forward_context,
-                                mock_get_weight_prefetch_method,
-                                mock_maybe_all_gather_and_maybe_unpad):
-
+    def test_mla_preprocess_dcp(
+        self, mock_get_forward_context, mock_get_weight_prefetch_method, mock_maybe_all_gather_and_maybe_unpad
+    ):
         self.impl.num_kv_heads = 1
         self.impl.num_heads = 16
         self.impl.qk_rope_head_dim = 64
@@ -335,13 +333,15 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.get_forward_context")
-    @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method",
-           return_value=MagicMock())
+    @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method", return_value=MagicMock())
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
-    def test_mla_preprocess_pcp(self, mock_get_weight_prefetch_method,
-                                mock_get_forward_context,
-                                mock_maybe_all_gather_and_maybe_unpad,
-                                mock_npu_reshape_and_cache):
+    def test_mla_preprocess_pcp(
+        self,
+        mock_get_weight_prefetch_method,
+        mock_get_forward_context,
+        mock_maybe_all_gather_and_maybe_unpad,
+        mock_npu_reshape_and_cache,
+    ):
         self.impl.num_kv_heads = 1
         self.impl.num_heads = 16
         self.impl.qk_rope_head_dim = 64
