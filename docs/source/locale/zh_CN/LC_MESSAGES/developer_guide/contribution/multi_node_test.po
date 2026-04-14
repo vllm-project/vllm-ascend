@@ -1,0 +1,222 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:1
+msgid "Multi Node Test"
+msgstr "多节点测试"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:3
+msgid ""
+"Multi-Node CI is designed to test distributed scenarios of very large "
+"models, eg: disaggregated_prefill multi DP across multi nodes and so on."
+msgstr "多节点CI旨在测试超大规模模型的分布式场景，例如：跨多节点的解耦预填充（disaggregated_prefill）、多数据并行（multi DP）等。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:5
+msgid "How it works"
+msgstr "工作原理"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:7
+msgid ""
+"The following picture shows the basic deployment view of the multi-node "
+"CI mechanism. It shows how the GitHub action interacts with "
+"[lws](https://lws.sigs.k8s.io/docs/overview/) (a kind of kubernetes crd "
+"resource)."
+msgstr "下图展示了多节点CI机制的基本部署视图。它说明了GitHub Action如何与[lws](https://lws.sigs.k8s.io/docs/overview/)（一种Kubernetes CRD资源）进行交互。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:9
+msgid "![alt text](../../assets/deployment.png)"
+msgstr "![替代文本](../../assets/deployment.png)"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:9
+#: ../../source/developer_guide/contribution/multi_node_test.md:13
+msgid "alt text"
+msgstr "替代文本"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:11
+msgid ""
+"From the workflow perspective, we can see how the final test script is "
+"executed, The key point is that these two [lws.yaml and "
+"run.sh](https://github.com/vllm-project/vllm-"
+"ascend/tree/main/tests/e2e/nightly/multi_node/scripts), The former "
+"defines how our k8s cluster is pulled up, and the latter defines the "
+"entry script when the pod is started, Each node executes different logic "
+"according to the "
+"[LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-"
+"annotations-and-environment-variables/) environment variable, so that "
+"multiple nodes can form a distributed cluster to perform tasks."
+msgstr "从工作流的角度，我们可以看到最终的测试脚本是如何执行的。关键在于这两个文件：[lws.yaml和run.sh](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/scripts)。前者定义了我们的k8s集群如何被拉起，后者定义了Pod启动时的入口脚本。每个节点根据[LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/)环境变量执行不同的逻辑，从而使多个节点能够组成一个分布式集群来执行任务。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:13
+msgid "![alt text](../../assets/workflow.png)"
+msgstr "![替代文本](../../assets/workflow.png)"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:15
+msgid "How to contribute"
+msgstr "如何贡献"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:17
+msgid "Upload custom weights"
+msgstr "上传自定义权重"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:19
+msgid ""
+"If you need customized weights, for example, you quantized a w8a8 weight "
+"for DeepSeek-V3 and you want your weight to run on CI, uploading weights "
+"to ModelScope's [vllm-ascend](https://www.modelscope.cn/organization"
+"/vllm-ascend) organization is welcome. If you do not have permission to "
+"upload, please contact @Potabk"
+msgstr "如果您需要自定义权重，例如，您为DeepSeek-V3量化了一个w8a8权重，并希望您的权重能在CI上运行，欢迎将权重上传至ModelScope的[vllm-ascend](https://www.modelscope.cn/organization/vllm-ascend)组织。如果您没有上传权限，请联系@Potabk。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:21
+msgid "Add config yaml"
+msgstr "添加配置YAML"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:23
+msgid ""
+"As the entrypoint script [run.sh](https://github.com/vllm-project/vllm-"
+"ascend/blob/0bf3f21a987aede366ec4629ad0ffec8e32fe90d/tests/e2e/nightly/multi_node/scripts/run.sh#L106)"
+" shows, a k8s pod startup means traversing all *.yaml files in the "
+"[directory](https://github.com/vllm-project/vllm-"
+"ascend/tree/main/tests/e2e/nightly/multi_node/config/), reading and "
+"executing according to different configurations, so what we need to do is"
+" just add \"yamls\" like [DeepSeek-V3.yaml](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml)."
+msgstr "如入口脚本[run.sh](https://github.com/vllm-project/vllm-ascend/blob/0bf3f21a987aede366ec4629ad0ffec8e32fe90d/tests/e2e/nightly/multi_node/scripts/run.sh#L106)所示，一个k8s Pod的启动意味着遍历[目录](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/config/)中的所有*.yaml文件，并根据不同的配置读取和执行。因此，我们需要做的就是添加类似[DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml)的\"yaml\"文件。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:25
+msgid ""
+"Suppose you have **2 nodes** running a 1P1D setup (1 Prefillers + 1 "
+"Decoder):"
+msgstr "假设您有**2个节点**运行1P1D设置（1个预填充器 + 1个解码器）："
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:27
+msgid "you may add a config file looks like:"
+msgstr "您可以添加一个类似这样的配置文件："
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:73
+msgid "Add the case to nightly workflow"
+msgstr "将用例添加到夜间工作流"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:75
+msgid ""
+"Currently, the multi-node test workflow is defined in the "
+"[nightly_test_a3.yaml](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)"
+msgstr "目前，多节点测试工作流定义在[nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)中。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:110
+msgid ""
+"The matrix above defines all the parameters required to add a multi-"
+"machine use case. The parameters worth noting (if you are adding a new "
+"use case) are `size` and the path to the yaml configuration file. The "
+"former defines the number of nodes required for your use case, and the "
+"latter defines the path to the configuration file you have completed in "
+"step 2."
+msgstr "上面的矩阵定义了添加一个多机用例所需的所有参数。值得注意的参数（如果您正在添加一个新用例）是`size`和yaml配置文件的路径。前者定义了您的用例所需的节点数量，后者定义了您在步骤2中完成的配置文件的路径。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:112
+msgid "Run Multi-Node tests locally"
+msgstr "本地运行多节点测试"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:114
+msgid "1. Use kubernetes"
+msgstr "1. 使用Kubernetes"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:116
+msgid ""
+"This section assumes that you already have a "
+"[Kubernetes](https://kubernetes.io/docs/setup/) NPU cluster environment "
+"locally. Then you can easily start our test with one click."
+msgstr "本节假设您本地已经有一个[Kubernetes](https://kubernetes.io/docs/setup/) NPU集群环境。然后您可以轻松地一键启动我们的测试。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:118
+msgid "Step 1. Install LWS CRD resources"
+msgstr "步骤 1. 安装LWS CRD资源"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:120
+msgid ""
+"See <https://lws.sigs.k8s.io/docs/installation/> Which can be used as a "
+"reference"
+msgstr "参考<https://lws.sigs.k8s.io/docs/installation/>"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:122
+msgid "Step 2. Deploy the following yaml file `lws.yaml` as what you want"
+msgstr "步骤 2. 按需部署以下yaml文件`lws.yaml`"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:258
+msgid "Verify the status of the pods:"
+msgstr "验证Pod的状态："
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:264
+msgid "Should get an output similar to this:"
+msgstr "应该会得到类似这样的输出："
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:272
+msgid "Verify that the distributed inference works:"
+msgstr "验证分布式推理是否正常工作："
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:278
+msgid "Should get something similar to this:"
+msgstr "应该会得到类似这样的结果："
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:312
+msgid "2. Test without kubernetes"
+msgstr "2. 不使用Kubernetes进行测试"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:314
+msgid ""
+"Since our script is Kubernetes-friendly, we need to actively pass in some"
+" cluster information if you don't have a Kubernetes environment."
+msgstr "由于我们的脚本对Kubernetes友好，如果您没有Kubernetes环境，则需要主动传入一些集群信息。"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:316
+msgid "Step 1. Add cluster_hosts to config yamls"
+msgstr "步骤 1. 向配置YAML文件添加cluster_hosts"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:318
+msgid ""
+"Modify on every cluster host, commands just like "
+"[DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-"
+"ascend/blob/e760aae1df7814073a4180172385505c1ec0fd83/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml#L25)"
+" after the configure item `num_nodes` , for example:   `cluster_hosts: "
+"[\"xxx.xxx.xxx.188\", \"xxx.xxx.xxx.212\"]`"
+msgstr "在每个集群主机上进行修改，就像[DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/e760aae1df7814073a4180172385505c1ec0fd83/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml#L25)那样，在配置项`num_nodes`之后添加，例如：`cluster_hosts: [\"xxx.xxx.xxx.188\", \"xxx.xxx.xxx.212\"]`"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:321
+msgid "Step 2. Install develop environment"
+msgstr "步骤 2. 安装开发环境"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:322
+msgid "Install vllm-ascend develop packages on every cluster host"
+msgstr "在每个集群主机上安装vllm-ascend开发包"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:329
+msgid "Install AISBench on the first host(leader node) in cluster_hosts"
+msgstr "在cluster_hosts中的第一个主机（主节点）上安装AISBench"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:341
+msgid "Step 3. Running test locally"
+msgstr "步骤 3. 本地运行测试"
+
+#: ../../source/developer_guide/contribution/multi_node_test.md:343
+msgid "Run the script on **each node separately**"
+msgstr "在**每个节点上分别**运行脚本"
