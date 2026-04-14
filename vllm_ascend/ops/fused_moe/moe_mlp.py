@@ -27,6 +27,8 @@ from vllm_ascend.device.mxfp_compat import (
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
+from vllm_ascend.quantization.quant_type import QuantType
+
 from vllm_ascend.utils import (
     dispose_tensor,
     enable_custom_op,
@@ -96,6 +98,7 @@ def quant_apply_mlp(
     fusion: bool = False,
     dynamic_eplb: bool = False,
     use_mxfp_quant: bool = False,
+    mxfp_quant_dtype: QuantType | None = None,
     act_quant_type: torch.dtype = torch.float8_e4m3fn,
     weight_quant_type: torch.dtype | None = None,
     scale_type: torch.dtype | None = None,
@@ -214,6 +217,7 @@ def quant_apply_mlp(
             use_mxfp_quant=use_mxfp_quant,
             bias=None,
             fallback_output_dtype=w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype,
+            mxfp_quant_dtype=mxfp_quant_dtype,
         )
     elif w1_offset is not None:
         # gmm1: gate_up_proj
@@ -337,6 +341,7 @@ def quant_apply_mlp(
             use_mxfp_quant=use_mxfp_quant,
             bias=bias2,
             fallback_output_dtype=_output_dtype,
+            mxfp_quant_dtype=mxfp_quant_dtype,
         )
     return hidden_states, before_gmm2_evt
 
@@ -437,12 +442,15 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     per_token_scale_type = None
     use_bf16 = hidden_states.dtype == torch.bfloat16
     use_mxfp_quant = mlp_compute_input.quant.is_mxfp
+    mxfp_quant_dtype = mlp_compute_input.quant.quant_type
 
     if use_mxfp_quant:
         mxfp = mlp_compute_input.quant.mxfp
         assert mxfp is not None, "mlp_compute_input.quant.mxfp is required for MXFP quant types."
         act_quant_type = mxfp.act_quant_type or act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
+        if mxfp_quant_dtype == QuantType.W4A8MXFP:
+            weight_quant_type = mxfp.weight_quant_type
         scale_type = mxfp.scale_dtype
         per_token_scale_type = mxfp.per_token_scale_dtype
         use_bf16 = mxfp.use_bf16
@@ -463,6 +471,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         fusion=fusion,
         dynamic_eplb=dynamic_eplb,
         use_mxfp_quant=use_mxfp_quant,
+        mxfp_quant_dtype=mxfp_quant_dtype,
         act_quant_type=act_quant_type,
         weight_quant_type=weight_quant_type,
         scale_type=scale_type,

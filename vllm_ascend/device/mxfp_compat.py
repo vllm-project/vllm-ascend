@@ -5,6 +5,7 @@ import torch_npu
 # releases do not expose the required dtype attributes yet. Simplify or remove this
 # file after the torch_npu release in March 2026 includes those dtype symbols.
 FLOAT8_E8M0FNU_DTYPE = getattr(torch_npu, "float8_e8m0fnu", getattr(torch, "float8_e8m0fnu", None))
+FLOAT8_E4M3FN_DTYPE = getattr(torch_npu, "float8_e4m3fn", getattr(torch, "float8_e4m3fn", None))
 FLOAT4_E2M1FN_X2_DTYPE = getattr(torch_npu, "float4_e2m1fn_x2", getattr(torch, "float4_e2m1fn_x2", None))
 HIFLOAT8_DTYPE = getattr(torch_npu, "hifloat8", None)
 
@@ -12,7 +13,7 @@ HIFLOAT8_DTYPE = getattr(torch_npu, "hifloat8", None)
 # TODO(zzzzzz198): Currently three formats(float8_e8m0fnu, float4_e2m1fn_x2, hifloat8) have to be
 # specified for some operators like GMM in Ascend950, while float8_e4m3fn does not. Remove these
 # filterations when operators allow to pass data with these three dtypes directly.
-QUANT_DTYPES = tuple(dtype for dtype in (FLOAT4_E2M1FN_X2_DTYPE, HIFLOAT8_DTYPE) if dtype is not None)
+QUANT_DTYPES = tuple(dtype for dtype in (FLOAT8_E4M3FN_DTYPE, FLOAT4_E2M1FN_X2_DTYPE, HIFLOAT8_DTYPE) if dtype is not None)
 SCALE_DTYPES = tuple(dtype for dtype in (FLOAT8_E8M0FNU_DTYPE,) if dtype is not None)
 
 
