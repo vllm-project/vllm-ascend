@@ -321,10 +321,12 @@ def _native_select_experts(
         topk_ids = topk_ids.to(torch.int32)
         return topk_weights, topk_ids
 
-    assert e_score_correction_bias is not None
-    gate_prob_with_bias = topk_weights + e_score_correction_bias.unsqueeze(0)
-    _, topk_ids = gate_prob_with_bias.topk(top_k, dim=-1)
-    topk_weights = torch.gather(topk_weights, 1, topk_ids)
+    if e_score_correction_bias is not None:
+        gate_prob_with_bias = topk_weights + e_score_correction_bias.unsqueeze(0)
+        _, topk_ids = gate_prob_with_bias.topk(top_k, dim=-1)
+        topk_weights = torch.gather(topk_weights, 1, topk_ids)
+    else:
+        topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
     topk_weights = topk_weights.to(hidden_states.dtype)
 
     # Required by npu_moe_init_routing

@@ -407,7 +407,7 @@ def unquant_apply_mlp(
     # Default to "silu" to match fused_moe default behavior.
     act: MoEActivation = activation or MoEActivation.SILU
 
-    if act == "swigluoai":
+    if act == MoEActivation.SWIGLUOAI:
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     else:
@@ -449,6 +449,8 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     w1_offset = mlp_compute_input.weights.w1_offset
     w2_offset = mlp_compute_input.weights.w2_offset
     activation = mlp_compute_input.activation
+    if isinstance(activation, str):
+        activation = MoEActivation(activation)
     need_trans = mlp_compute_input.need_trans
     dynamic_eplb = mlp_compute_input.dynamic_eplb
     fusion = mlp_compute_input.fusion
