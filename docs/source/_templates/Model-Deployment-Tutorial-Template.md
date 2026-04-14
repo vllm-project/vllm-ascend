@@ -37,7 +37,11 @@ This section introduces the features supported by the model, including supported
 | ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ------------- | ------------- | ---------- |
 | DeepSeek V3/3.1 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
 | DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
+<<<<<<< HEAD
 | DeepSeek R1 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 128k | | [DeepSeek R1](../../tutorials/models/DeepSeek-R1.md) |
+=======
+| DeepSeek R1 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 128k | | [DeepSeek R1](../../tutorials/DeepSeek-R1.md) |
+>>>>>>> a93f04b2... Correcting the document and uploading the model deployment template
 | Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | ✅ | [Qwen3](../../tutorials/models/Qwen3-Dense.md) |
 
 **Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
@@ -185,7 +189,11 @@ Provide recommended configurations for three scenarios (long sequence, low laten
 
 **Content Writing Requirements:**
 
+<<<<<<< HEAD
 - Summarize key optimization techniques and parameter tuning experiences for the model to help users achieve optimal performance in specific scenarios. Include optimization technique descriptions, enablement methods, parameter tuning recommendations, and typical configuration examples.
+=======
+- Summarize key optimization techniques and parameter tuning experiences for the model to help users achieve optimal performance in specific scenarios. Include optimization technique descriptions, enablement methods, parameter tuning recommendations, and typical configuration examples. 
+>>>>>>> a93f04b2... Correcting the document and uploading the model deployment template
 - Hyperlinks to the features guide may be used to allow users to view detailed descriptions of specific features.
 
 ### 10.1 Key Optimization Points
@@ -228,6 +236,10 @@ During the actual tuning process, the following points are most critical for per
 
 ## 11 FAQ
 
+<<<<<<< HEAD
 **Content Writing Requirements:**
 
  Provide solutions to common problems, including but not limited to problem phenomenon description, cause analysis, and solution measures.
+=======
+**Content Writing Requirements:** Provide solutions to common problems, including but not limited to problem phenomenon description, cause analysis, and solution measures.
+>>>>>>> a93f04b2... Correcting the document and uploading the model deployment template

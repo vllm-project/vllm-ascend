@@ -147,12 +147,6 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel**:
 # Install vllm-project/vllm. The newest supported version is |vllm_version|.
 pip install vllm==|pip_vllm_version|
 
-<<<<<<< HEAD
-# Install vllm-project/vllm-ascend from pypi.
-pip install vllm-ascend==|pip_vllm_ascend_version|
-```
-
-=======
 # Install vllm-project/vllm-ascend.
 pip install \
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/simple  \
@@ -189,7 +183,6 @@ vllm-ascend==|pip_vllm_ascend_version|
 ::::
 :::::
 
->>>>>>> 5ba14492... DTS trouble ticket modification
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 

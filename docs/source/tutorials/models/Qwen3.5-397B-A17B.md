@@ -276,247 +276,247 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
 
 1. Prefill Node 0 `run_p.sh` script
 
-```shell
-unset ftp_proxy
-unset https_proxy
-unset http_proxy
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
+       ```shell
+       unset ftp_proxy
+       unset https_proxy
+       unset http_proxy
+       # this obtained through ifconfig
+       # nic_name is the network interface name corresponding to local_ip of the current node
+       nic_name="xxx"
+       local_ip="xxx"
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export VLLM_ENGINE_READY_TIMEOUT_S=30000
-export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
-export IP_ADDRESS=$local_ip
-export NETWORK_CARD_NAME=$nic_name
-export HCCL_IF_IP=$IP_ADDRESS
-export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=1536
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export TASK_QUEUE_ENABLE=1
+       # [Optional] jemalloc
+       # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
+       # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+       export VLLM_ENGINE_READY_TIMEOUT_S=30000
+       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       export IP_ADDRESS=$local_ip
+       export NETWORK_CARD_NAME=$nic_name
+       export HCCL_IF_IP=$IP_ADDRESS
+       export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export VLLM_USE_V1=1
+       export HCCL_BUFFSIZE=1536
+       export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+       export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+       export VLLM_TORCH_PROFILER_WITH_STACK=0
+       export TASK_QUEUE_ENABLE=1
 
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export HCCL_OP_EXPANSION_MODE="AIV"
+       export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+       export HCCL_OP_EXPANSION_MODE="AIV"
 
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --host ${IP_ADDRESS} \
-  --port 30060 \
-  --no-enable-prefix-caching \
-  --enable-expert-parallel \
-  --data-parallel-size 8 \
-  --data-parallel-size-local 8 \
-  --api-server-count 1 \
-  --data-parallel-address ${IP_ADDRESS} \
-  --max-num_seqs 64 \
-  --data-parallel-rpc-port 6884 \
-  --tensor-parallel-size 2 \
-  --seed 1024 \
-  --distributed-executor-backend mp \
-  --served-model-name qwen3.5 \
-  --max-model-len 16384 \
-  --max-num-batched-tokens 4096 \
-  --trust-remote-code \
-  --quantization ascend \
-  --no-disable-hybrid-kv-cache-manager \
-  --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}' \
-  --gpu-memory-utilization 0.9 \
-  --enforce-eager \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
-  "kv_role": "kv_producer",
-  "kv_port": "23010",
-  "engine_id": "0",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 8,
-                    "tp_size": 2
-             },
-             "decode": {
-                    "dp_size": 16,
-                    "tp_size": 2
-             }
-      }
-   }'
-```
+       export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+       vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
+       --host ${IP_ADDRESS} \
+       --port 30060 \
+       --no-enable-prefix-caching \
+       --enable-expert-parallel \
+       --data-parallel-size 8 \
+       --data-parallel-size-local 8 \
+       --api-server-count 1 \
+       --data-parallel-address ${IP_ADDRESS} \
+       --max-num_seqs 64 \
+       --data-parallel-rpc-port 6884 \
+       --tensor-parallel-size 2 \
+       --seed 1024 \
+       --distributed-executor-backend mp \
+       --served-model-name qwen3.5 \
+       --max-model-len 16384 \
+       --max-num-batched-tokens 4096 \
+       --trust-remote-code \
+       --quantization ascend \
+       --no-disable-hybrid-kv-cache-manager \
+       --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+       --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}' \
+       --gpu-memory-utilization 0.9 \
+       --enforce-eager \
+       --kv-transfer-config \
+       '{"kv_connector": "MooncakeLayerwiseConnector",
+       "kv_role": "kv_producer",
+       "kv_port": "23010",
+       "engine_id": "0",
+       "kv_connector_extra_config": {
+              "prefill": {
+                     "dp_size": 8,
+                     "tp_size": 2
+              },
+              "decode": {
+                     "dp_size": 16,
+                     "tp_size": 2
+              }
+       }
+       }'
+       ```
 
-3. Decode Node 0 `run_d0.sh` script
+2. Decode Node 0 `run_d0.sh` script
 
-```shell
-unset ftp_proxy
-unset https_proxy
-unset http_proxy
-#!/bin/bash
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+       ```shell
+       unset ftp_proxy
+       unset https_proxy
+       unset http_proxy
+       #!/bin/bash
+       # this obtained through ifconfig
+       # nic_name is the network interface name corresponding to local_ip of the current node
+       nic_name="xxx"
+       local_ip="xxx"
+       # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+       node0_ip="xxxx"
 
-export VLLM_ENGINE_READY_TIMEOUT_S=30000
-export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
-export MASTER_IP_ADDRESS=$node0_ip
-export IP_ADDRESS=$local_ip
+       export VLLM_ENGINE_READY_TIMEOUT_S=30000
+       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       export MASTER_IP_ADDRESS=$node0_ip
+       export IP_ADDRESS=$local_ip
 
-export NETWORK_CARD_NAME=$nic_name
+       export NETWORK_CARD_NAME=$nic_name
 
-export HCCL_IF_IP=$IP_ADDRESS
-export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export HCCL_IF_IP=$IP_ADDRESS
+       export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
 
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=1536
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export TASK_QUEUE_ENABLE=1
+       export VLLM_USE_V1=1
+       export HCCL_BUFFSIZE=1536
+       export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+       export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+       export VLLM_TORCH_PROFILER_WITH_STACK=0
+       export TASK_QUEUE_ENABLE=1
 
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --host ${IP_ADDRESS} \
-  --port 30050 \
-  --no-enable-prefix-caching \
-  --enable-expert-parallel \
-  --data-parallel-size 16 \
-  --data-parallel-size-local 8 \
-  --data-parallel-start-rank 0 \
-  --api-server-count 1 \
-  --data-parallel-address ${MASTER_IP_ADDRESS} \
-  --max-num_seqs 32 \
-  --data-parallel-rpc-port 6884 \
-  --tensor-parallel-size 2 \
-  --seed 1024 \
-  --distributed-executor-backend mp \
-  --served-model-name qwen3.5 \
-  --max-model-len 16384 \
-  --max-num-batched-tokens 128 \
-  --trust-remote-code \
-  --quantization ascend \
-  --no-disable-hybrid-kv-cache-manager \
-  --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --gpu-memory-utilization 0.96 \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
-  "kv_buffer_device": "npu",
-  "kv_role": "kv_consumer",
-  "kv_port": "36010",
-  "engine_id": "1",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 8,
-                    "tp_size": 2
-             },
-             "decode": {
-                    "dp_size": 16,
-                    "tp_size": 2
-             }
-      }
-   }'
-```
+       export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+       export HCCL_OP_EXPANSION_MODE="AIV"
+       export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+       vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
+       --host ${IP_ADDRESS} \
+       --port 30050 \
+       --no-enable-prefix-caching \
+       --enable-expert-parallel \
+       --data-parallel-size 16 \
+       --data-parallel-size-local 8 \
+       --data-parallel-start-rank 0 \
+       --api-server-count 1 \
+       --data-parallel-address ${MASTER_IP_ADDRESS} \
+       --max-num_seqs 32 \
+       --data-parallel-rpc-port 6884 \
+       --tensor-parallel-size 2 \
+       --seed 1024 \
+       --distributed-executor-backend mp \
+       --served-model-name qwen3.5 \
+       --max-model-len 16384 \
+       --max-num-batched-tokens 128 \
+       --trust-remote-code \
+       --quantization ascend \
+       --no-disable-hybrid-kv-cache-manager \
+       --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+       --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}' \
+       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+       --gpu-memory-utilization 0.96 \
+       --kv-transfer-config \
+       '{"kv_connector": "MooncakeLayerwiseConnector",
+       "kv_buffer_device": "npu",
+       "kv_role": "kv_consumer",
+       "kv_port": "36010",
+       "engine_id": "1",
+       "kv_connector_extra_config": {
+              "prefill": {
+                     "dp_size": 8,
+                     "tp_size": 2
+              },
+              "decode": {
+                     "dp_size": 16,
+                     "tp_size": 2
+              }
+       }
+       }'
+       ```
 
-5. Decode Node 1 `run_d1.sh` script
+3. Decode Node 1 `run_d1.sh` script
 
-```shell
-unset ftp_proxy
-unset https_proxy
-unset http_proxy
-#!/bin/bash
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxx"
-local_ip="xxx"
-# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
-node0_ip="xxxx"
+       ```shell
+       unset ftp_proxy
+       unset https_proxy
+       unset http_proxy
+       #!/bin/bash
+       # this obtained through ifconfig
+       # nic_name is the network interface name corresponding to local_ip of the current node
+       nic_name="xxx"
+       local_ip="xxx"
+       # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+       node0_ip="xxxx"
 
-export VLLM_ENGINE_READY_TIMEOUT_S=30000
-export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
-export MASTER_IP_ADDRESS=$node0_ip
-export IP_ADDRESS=$local_ip
+       export VLLM_ENGINE_READY_TIMEOUT_S=30000
+       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       export MASTER_IP_ADDRESS=$node0_ip
+       export IP_ADDRESS=$local_ip
 
-export NETWORK_CARD_NAME=$nic_name
+       export NETWORK_CARD_NAME=$nic_name
 
-export HCCL_IF_IP=$IP_ADDRESS
-export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export HCCL_IF_IP=$IP_ADDRESS
+       export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
+       export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
 
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=1536
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export TASK_QUEUE_ENABLE=1
+       export VLLM_USE_V1=1
+       export HCCL_BUFFSIZE=1536
+       export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+       export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+       export VLLM_TORCH_PROFILER_WITH_STACK=0
+       export TASK_QUEUE_ENABLE=1
 
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --host ${IP_ADDRESS} \
-  --port 30050 \
-  --headless \
-  --no-enable-prefix-caching \
-  --enable-expert-parallel \
-  --data-parallel-size 16 \
-  --data-parallel-size-local 8 \
-  --data-parallel-start-rank 8 \
-  --data-parallel-address ${MASTER_IP_ADDRESS} \
-  --max-num_seqs 32 \
-  --data-parallel-rpc-port 6884 \
-  --tensor-parallel-size 2 \
-  --seed 1024 \
-  --distributed-executor-backend mp \
-  --served-model-name qwen3.5 \
-  --max-model-len 16384 \
-  --max-num-batched-tokens 128 \
-  --trust-remote-code \
-  --quantization ascend \
-  --no-disable-hybrid-kv-cache-manager \
-  --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --gpu-memory-utilization 0.96 \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
-  "kv_buffer_device": "npu",
-  "kv_role": "kv_consumer",
-  "kv_port": "36010",
-  "engine_id": "2",
-  "kv_connector_extra_config": {
-            "prefill": {
-                    "dp_size": 8,
-                    "tp_size": 2
-             },
-             "decode": {
-                    "dp_size": 16,
-                    "tp_size": 2
-             }
-      }
-   }'
-```
+       export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+       export HCCL_OP_EXPANSION_MODE="AIV"
+       vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
+       --host ${IP_ADDRESS} \
+       --port 30050 \
+       --headless \
+       --no-enable-prefix-caching \
+       --enable-expert-parallel \
+       --data-parallel-size 16 \
+       --data-parallel-size-local 8 \
+       --data-parallel-start-rank 8 \
+       --data-parallel-address ${MASTER_IP_ADDRESS} \
+       --max-num_seqs 32 \
+       --data-parallel-rpc-port 6884 \
+       --tensor-parallel-size 2 \
+       --seed 1024 \
+       --distributed-executor-backend mp \
+       --served-model-name qwen3.5 \
+       --max-model-len 16384 \
+       --max-num-batched-tokens 128 \
+       --trust-remote-code \
+       --quantization ascend \
+       --no-disable-hybrid-kv-cache-manager \
+       --speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+       --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}' \
+       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+       --gpu-memory-utilization 0.96 \
+       --kv-transfer-config \
+       '{"kv_connector": "MooncakeLayerwiseConnector",
+       "kv_buffer_device": "npu",
+       "kv_role": "kv_consumer",
+       "kv_port": "36010",
+       "engine_id": "2",
+       "kv_connector_extra_config": {
+              "prefill": {
+                     "dp_size": 8,
+                     "tp_size": 2
+              },
+              "decode": {
+                     "dp_size": 16,
+                     "tp_size": 2
+              }
+       }
+       }'
+       ```
 
-**Notice:**
-The parameters are explained as follows:
+       **Notice:**
+       The parameters are explained as follows:
 
-- `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
-- `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
-- `no-enable-prefix-caching`: The prefix-cache feature is enabled by default. You can use the `--no-enable-prefix-caching` parameter to disable this feature. Notice: for Prefill-Decode disaggregation feature, known issue on D node: [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944)
+       - `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
+       - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
+       - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+       - `no-enable-prefix-caching`: The prefix-cache feature is enabled by default. You can use the `--no-enable-prefix-caching` parameter to disable this feature. Notice: for Prefill-Decode disaggregation feature, known issue on D node: [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944)
 
-7. Run the `proxy.sh` script on the prefill master node
+4. Run the `proxy.sh` script on the prefill master node
 
 Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 

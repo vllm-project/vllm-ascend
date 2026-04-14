@@ -259,7 +259,7 @@ The performance of `torch_npu.npu_fused_infer_attention_score` in small batch sc
 
 ```bash
 bash tools/install_flash_infer_attention_score_ops_a2.sh
-## change to run the following instruction if you're using A3 machine
+# change to run the following instruction if you're using A3 machine
 # bash tools/install_flash_infer_attention_score_ops_a3.sh
 ```
 
