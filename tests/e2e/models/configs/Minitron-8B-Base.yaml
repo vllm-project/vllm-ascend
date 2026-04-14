@@ -1,5 +1,5 @@
 test_cases:
-  - model: "nvidia/Minitron-8B-Base"
+  - model: "nv-community/Minitron-8B-Base"
     server_cmd:
       - --served-model-name
       - minitron-8b-base
