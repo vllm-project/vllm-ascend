@@ -1354,6 +1354,7 @@ class MooncakeConnectorWorker:
         remote_cp_size = remote_pcp_size * meta.remote_dcp_size
         local_cp_size = local_pcp_size * self.dcp_size  # decode pcp is not supported now
         local_block_ids = meta.local_block_ids[self.dp_rank] if decode_dycp_enable else meta.local_block_ids
+        meta_remote_block_ids = copy.deepcopy(meta.remote_block_ids)
 
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1 and not prefill_dycp_enable and not decode_dycp_enable:
             chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
@@ -1532,7 +1533,7 @@ class MooncakeConnectorWorker:
                 for remote_rank_idx, remote_blk_list in enumerate(remote_rank_list):
                     if local_blk_id in remote_blk_list:
                         local_blocks.append(local_block_ids[local_block])
-                        remote_block_ids = meta.remote_block_ids[remote_rank_idx] if prefill_dycp_enable else meta.remote_block_ids
+                        remote_block_ids = meta_remote_block_ids[remote_rank_idx] if prefill_dycp_enable else meta_remote_block_ids
                         remote_blocks.append(remote_block_ids[remote_blk_list.index(local_blk_id)])
                         break
             local_block_ids_list.append(local_blocks)
@@ -1568,9 +1569,9 @@ class MooncakeConnectorWorker:
             if final_block_idx is not None:
                 final_block_num = remote_block_nums.pop(final_block_idx)
                 remote_block_nums.append(final_block_num)
-                # if prefill_dycp_enable:
-                #     remote_block_ids = meta_remote_block_ids.pop(final_block_idx) if prefill_dycp_enable else meta_remote_block_ids
-                #     meta_remote_block_ids.append(remote_block_ids)
+                if prefill_dycp_enable:
+                    remote_block_ids = meta_remote_block_ids.pop(final_block_idx) if prefill_dycp_enable else meta_remote_block_ids
+                    meta_remote_block_ids.append(remote_block_ids)
                 for mapping in local_remote_block_port_mapping:
                     final_block_port = mapping.pop(final_block_idx)
                     mapping.append(final_block_port)
@@ -1590,7 +1591,7 @@ class MooncakeConnectorWorker:
 
             for remote_kv_id in range(len(remote_handshake_port_list)):
                 num_blocks_to_pull = remote_block_nums[remote_kv_id]
-                remote_block_ids = meta.remote_block_ids[remote_kv_id] if prefill_dycp_enable else meta.remote_block_ids
+                remote_block_ids = meta_remote_block_ids[remote_kv_id] if prefill_dycp_enable else meta_remote_block_ids
                 assert num_blocks_to_pull <= len(remote_block_ids)
                 remote_block_ids_list.append(remote_block_ids[:num_blocks_to_pull])   # [[1,2],[4,5]]
                 local_block_ids_list.append(

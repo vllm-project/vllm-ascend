@@ -1429,6 +1429,11 @@ class NPUModelRunner(GPUModelRunner):
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
 
+                num_cp_request = 0
+                if self.dycp_size > 1:
+                    num_cp_request = scheduler_output.num_cp_request
+                elif self.pcp_size > 1:
+                    num_cp_request = self.input_batch.num_reqs
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
                     if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
@@ -1444,7 +1449,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     total_num_pcp_scheduled_tokens=total_num_pcp_scheduled_tokens,
-                    num_dycp_reqs=scheduler_output.num_cp_request,
+                    num_dycp_reqs=num_cp_request,
                 )
 
             (
@@ -1524,11 +1529,11 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
         with record_function_or_nullcontext("post process"):
-            if kv_connector_output.finished_sending:
+            if kv_connector_output.finished_sending and self.dycp_size > 1:
                 for req_id in kv_connector_output.finished_sending:
                     kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(req_id)
             
-            if kv_connector_output.finished_recving:
+            if kv_connector_output.finished_recving and self.dycp_size > 1:
                 for req_id in kv_connector_output.finished_recving:
                     kv_connector_output.req_id_to_cp_size[req_id] = self._get_req_cp_size(req_id)
             aux_hidden_states = None

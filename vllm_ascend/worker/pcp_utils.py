@@ -88,6 +88,13 @@ class PCPManager:
         self.dcp_world_rank = dcp_rank
         self.dycp_world_size = dycp_world_size
         self.dycp_world_rank = dycp_rank
+        kv_role = getattr(vllm_config.kv_transfer_config, "kv_role", None)
+        if self.dycp_world_size > 1 and kv_role == 'kv_consumer':
+            self.decode_dycp_word_size = self.dycp_world_size
+            self.decode_dycp_world_rank = self.dycp_world_rank
+        else:
+            self.decode_dycp_word_size = 1
+            self.decode_dycp_world_rank = 0
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
         self.vllm_config = vllm_config
@@ -803,7 +810,7 @@ class PCPManager:
             prefill_context_lens = input_batch.num_computed_tokens_cpu[self.num_decode_reqs : self.num_dycp_reqs]
             context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
             num_computed_tokens_of_pcp_dcp = torch.zeros(
-                [self.num_dycp_reqs * self.decode_threshold, self.pcp_world_size, self.dcp_world_size*self.dycp_world_size],
+                [self.num_dycp_reqs * self.decode_threshold, self.pcp_world_size, self.dcp_world_size*self.decode_dycp_word_size],
                 dtype=torch.int32,
             )
             # For pcp + spec decode, we flatten seq_lens
@@ -816,7 +823,7 @@ class PCPManager:
                         self._get_cp_local_seq_lens(
                             torch.tensor(context_lens) - decode_idx,
                             self.pcp_world_size,
-                            self.dycp_world_size,
+                            self.decode_dycp_word_size,
                             self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
                         )
                     )[:self.num_dycp_reqs]

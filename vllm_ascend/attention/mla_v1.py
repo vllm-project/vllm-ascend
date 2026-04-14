@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeVar, Any
 
 import numpy as np
 import torch
@@ -114,6 +114,7 @@ class ChunkedContextMetadata:
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
     chunk_actual_seq_lengths_kv_list: list[list[int]]
+    cu_seq_lens_lst: list[list[int]] | None = None
 
 
 @dataclass
@@ -199,6 +200,8 @@ class AscendMLAMetadata:
     # num dycp reqs
     num_dycp_reqs: int = 0
     dycp_mask: torch.Tensor = None
+    dp_metadata: Any | None = None
+    dycp_metadata: Any | None = None
 
     def __post_init__(self):
         # 根据 num_dycp_reqs 生成 dycp_mask
@@ -515,6 +518,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             max_seq_lens=self.chunk_seq_lens.max(dim=1).values.tolist(),
             chunk_seq_lens=self.chunk_seq_lens,
             chunk_seq_lens_npu=self.chunk_seq_lens.npu(),
+            cu_seq_lens_lst=self.cu_seq_lens_cpu.tolist(),
             workspace=self.chunked_prefill_workspace,
             chunk_actual_seq_lengths_kv_list=chunk_actual_seq_lengths_kv_list,
         )
