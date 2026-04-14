@@ -1078,8 +1078,8 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
                 "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
                 "decode (%d). This may lead to suboptimal performance. Consider adjusting"
                 "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
-                "to ensure max_cudagraph_capture_size can accommodate the decode workload. "
-                "For more details, see the issue #xxx(link to issue).",
+                "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
+                "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
                 compilation_config.max_cudagraph_capture_size,
                 potential_max_tokens,
             )
