@@ -69,9 +69,7 @@ def run_test(
     # Validate outputs
     for generated, expected in zip(generated_texts, expected_outputs):
         print(generated)
-        assert expected.startswith(generated), (
-            f"Generated text {generated} doesn't match expected pattern {expected}"
-        )
+        assert expected.startswith(generated), f"Generated text {generated} doesn't match expected pattern {expected}"
 
 
 def run_beam_search_test(
@@ -99,7 +97,7 @@ def run_beam_search_test(
 
     for output_obj, expected_texts in zip(outputs, expected_outputs):
         output_texts = [seq.text for seq in output_obj.sequences]
-        
+
         for output_text, expected_text in zip(output_texts, expected_texts):
             # NOTE beam search .text contains the whole text including inputs
             assert output_text.endswith(expected_text), (
