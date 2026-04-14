@@ -24,12 +24,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         k: torch.Tensor,
         p: torch.Tensor,
     ) -> torch.Tensor:
-        # npu_top_k_top_p uses the operator aclnnApplyTopKTopP, but 
-aclnnApplyTopKTopP currently does not support 310P
+        # npu_top_k_top_p uses the operator aclnnApplyTopKTopP, but aclnnApplyTopKTopP currently does not support 310P
         if not is_310p() and p is not None and k is not None and 1 <= int(
                 k.max()) <= 1024:
-            # npu_top_k_top_p's parameter order is (logits, p, k), not (logits, 
-k, p)
+            # npu_top_k_top_p's parameter order is (logits, p, k), not (logits, k, p)
             return torch_npu.npu_top_k_top_p(logits, p, k)
         if p is None and k is None:
             return logits
@@ -58,7 +56,6 @@ k, p)
 
    def forward_native(self, logits, generators, k, p):
         """Override pytorch native implementation to torch_npu"""
-        print(self.logprobs_mode)
         logits_to_return = None
         if (not is_310p() 
             and p is not None 
