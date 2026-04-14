@@ -726,21 +726,12 @@ class NPUModelRunner(GPUModelRunner):
                     # PCP can split one request into non-contiguous token positions.
                     # We must gather prompt embeds by actual scheduled positions.
                     req_positions_np = positions_np[output_idx : output_idx + num_sched]
-                    valid_mask_np = req_positions_np < req_embeds.shape[0]
-
-                    if valid_mask_np.any():
-                        dst_slice = self.inputs_embeds.cpu[output_idx : output_idx + num_sched]
-                        if valid_mask_np.all():
-                            torch.index_select(
-                                req_embeds,
-                                0,
-                                torch.from_numpy(req_positions_np.astype(np.int64)),
-                                out=dst_slice,
-                            )
-                        else:
-                            src_positions = torch.from_numpy(req_positions_np[valid_mask_np].astype(np.int64))
-                            dst_positions = torch.from_numpy(np.nonzero(valid_mask_np)[0].astype(np.int64))
-                            dst_slice.index_copy_(0, dst_positions, req_embeds.index_select(0, src_positions))
+                    dst_slice = self.inputs_embeds.cpu[output_idx : output_idx + num_sched]
+                    self.pcp_manager.fill_prompt_embeds_for_pcp(
+                        req_embeds=req_embeds,
+                        req_positions_np=req_positions_np,
+                        dst_slice=dst_slice,
+                    )
                 else:
                     start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
 
@@ -988,8 +979,17 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
         # Cache local scheduled token layout for PCP-aware multimodal preprocess.
-        self._local_num_scheduled_tokens = num_scheduled_tokens[:base_num_reqs].copy()
-        self._local_total_num_scheduled_tokens = int(total_num_scheduled_tokens)
+        if (
+            self.pcp_size > 1
+            and self.supports_mm_inputs
+            and get_pp_group().is_first_rank
+            and not self.model_config.is_encoder_decoder
+        ):
+            self.pcp_manager.cache_local_schedule_layout(
+                num_scheduled_tokens=num_scheduled_tokens,
+                num_reqs=base_num_reqs,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+            )
 
         return (
             logits_indices,
@@ -1010,54 +1010,7 @@ class NPUModelRunner(GPUModelRunner):
         dict[str, Any],
         ECConnectorOutput | None,
     ]:
-        def build_local_mm_schedule(
-            local_num_scheduled_tokens: np.ndarray,
-        ) -> tuple[dict[str, list[int]], set[str]]:
-            scheduled_encoder_inputs: dict[str, list[int]] = {}
-            needed_mm_hashes: set[str] = set()
-
-            req_start_idx = 0
-            for req_idx, req_id in enumerate(self.input_batch.req_ids):
-                if req_idx >= local_num_scheduled_tokens.shape[0]:
-                    break
-
-                num_sched = int(local_num_scheduled_tokens[req_idx])
-                if num_sched <= 0:
-                    req_start_idx += num_sched
-                    continue
-
-                req_positions = self.positions.np[req_start_idx : req_start_idx + num_sched]
-                req_state = self.requests[req_id]
-                mm_input_ids = list[int]()
-
-                for mm_input_id, mm_feature in enumerate(req_state.mm_features):
-                    pos_info = mm_feature.mm_position
-                    start_pos = pos_info.offset
-                    end_pos = start_pos + pos_info.length
-                    mm_hash = mm_feature.identifier
-
-                    local_mask = (req_positions >= start_pos) & (req_positions < end_pos)
-                    if not local_mask.any():
-                        continue
-
-                    local_indices = np.nonzero(local_mask)[0]
-                    rel_positions = req_positions[local_indices] - start_pos
-                    is_embed = pos_info.is_embed
-                    if is_embed is not None:
-                        is_embed_np = is_embed.cpu().numpy()
-                        if not is_embed_np[rel_positions].any():
-                            continue
-
-                    needed_mm_hashes.add(mm_hash)
-                    if mm_hash not in self.encoder_cache:
-                        mm_input_ids.append(mm_input_id)
-
-                if mm_input_ids:
-                    scheduled_encoder_inputs[req_id] = mm_input_ids
-
-                req_start_idx += num_sched
-
-            return scheduled_encoder_inputs, needed_mm_hashes
+        restore_state = None
 
         # For PCP, local worker token count can differ from scheduler global count.
         # Multimodal preprocessing must use local scheduled token count.
@@ -1067,52 +1020,36 @@ class NPUModelRunner(GPUModelRunner):
             and get_pp_group().is_first_rank
             and not self.model_config.is_encoder_decoder
         ):
-            local_total = getattr(self, "_local_total_num_scheduled_tokens", None)
-            local_num_sched = getattr(self, "_local_num_scheduled_tokens", None)
-            need_localize = (
-                local_total is not None
-                and local_total != scheduler_output.total_num_scheduled_tokens
+            positions_np = (
+                self.positions.np
+                if hasattr(self.positions, "np")
+                else self._positions_np_buf
             )
-            if not need_localize and local_num_sched is not None:
-                for req_idx, req_id in enumerate(self.input_batch.req_ids):
-                    if req_idx >= local_num_sched.shape[0]:
-                        break
-                    global_sched = scheduler_output.num_scheduled_tokens.get(req_id)
-                    if global_sched is None or int(global_sched) != int(local_num_sched[req_idx]):
-                        need_localize = True
-                        break
+            local_num_sched, local_total = self.pcp_manager.get_local_schedule_layout()
+            restore_state = self.pcp_manager.maybe_localize_scheduler_output_for_mm_preprocess(
+                scheduler_output=scheduler_output,
+                req_ids=self.input_batch.req_ids,
+                requests=self.requests,
+                positions_np=positions_np,
+                local_num_scheduled_tokens=local_num_sched,
+                local_total_num_scheduled_tokens=local_total,
+                encoder_cache=self.encoder_cache,
+            )
 
-            if need_localize:
-                scheduler_output = copy(scheduler_output)
-                if local_total is not None:
-                    scheduler_output.total_num_scheduled_tokens = local_total
-                if local_num_sched is not None:
-                    num_sched_by_req = dict(scheduler_output.num_scheduled_tokens)
-                    for req_idx, req_id in enumerate(self.input_batch.req_ids):
-                        if req_idx >= local_num_sched.shape[0]:
-                            break
-                        num_sched_by_req[req_id] = int(local_num_sched[req_idx])
-                    scheduler_output.num_scheduled_tokens = num_sched_by_req
-                    (
-                        scheduler_output.scheduled_encoder_inputs,
-                        local_needed_mm_hashes,
-                    ) = build_local_mm_schedule(local_num_sched)
-
-                    # Under PCP, global free list can be earlier than local
-                    # consumption. Keep MM hashes for all active requests.
-                    active_mm_hashes = {
-                        mm_feature.identifier
-                        for req_state in self.requests.values()
-                        for mm_feature in req_state.mm_features
-                    }
-                    keep_hashes = active_mm_hashes | local_needed_mm_hashes
-                    scheduler_output.free_encoder_mm_hashes = [
-                        mm_hash
-                        for mm_hash in scheduler_output.free_encoder_mm_hashes
-                        if mm_hash not in keep_hashes
-                    ]
-
-        return super()._preprocess(scheduler_output, num_input_tokens, intermediate_tensors)
+        try:
+            return super()._preprocess(
+                scheduler_output, num_input_tokens, intermediate_tensors
+            )
+        finally:
+            if (
+                self.pcp_size > 1
+                and self.supports_mm_inputs
+                and get_pp_group().is_first_rank
+                and not self.model_config.is_encoder_decoder
+            ):
+                self.pcp_manager.restore_scheduler_output_after_mm_preprocess(
+                    scheduler_output, restore_state
+                )
 
     def _gather_mm_embeddings(
         self,
@@ -1122,11 +1059,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_size <= 1:
             return super()._gather_mm_embeddings(scheduler_output, shift_computed_tokens)
 
-        local_num_scheduled_tokens = getattr(self, "_local_num_scheduled_tokens", None)
+        local_num_scheduled_tokens, _ = self.pcp_manager.get_local_schedule_layout()
         if local_num_scheduled_tokens is None:
             return super()._gather_mm_embeddings(scheduler_output, shift_computed_tokens)
 
         total_num_scheduled_tokens = int(np.sum(local_num_scheduled_tokens))
+        positions_np = self.positions.np if hasattr(self.positions, "np") else self._positions_np_buf
 
         # Swap to the other buffer to avoid race condition with previous
         # iteration's async copy that may still be reading from CPU.
@@ -1135,104 +1073,23 @@ class NPUModelRunner(GPUModelRunner):
         is_mm_embed = is_mm_embed_buf.cpu
         is_mm_embed[:total_num_scheduled_tokens] = False
 
-        mm_embeds = list[torch.Tensor]()
-        req_start_idx = 0
-        should_sync_mrope_positions = False
-        should_sync_xdrope_positions = False
-
-        for req_idx, req_id in enumerate(self.input_batch.req_ids):
-            num_sched = int(local_num_scheduled_tokens[req_idx])
-            req_positions = self.positions.np[req_start_idx : req_start_idx + num_sched]
-            if shift_computed_tokens:
-                req_positions = req_positions + shift_computed_tokens
-            req_state = self.requests[req_id]
-            req_taken_mask = np.zeros(num_sched, dtype=np.bool_)
-            mm_embeds_req: list[torch.Tensor] = []
-            req_mm_local_indices: list[np.ndarray] = []
-
-            for mm_feature in req_state.mm_features:
-                pos_info = mm_feature.mm_position
-                start_pos = pos_info.offset
-                end_pos = start_pos + pos_info.length
-                mm_hash = mm_feature.identifier
-
-                local_mask = (req_positions >= start_pos) & (req_positions < end_pos)
-                if not local_mask.any():
-                    continue
-
-                local_indices = np.nonzero(local_mask)[0]
-                rel_positions = req_positions[local_indices] - start_pos
-
-                is_embed = pos_info.is_embed
-                if is_embed is not None:
-                    is_embed_np = is_embed.cpu().numpy()
-                    keep_mask = is_embed_np[rel_positions]
-                    if not keep_mask.any():
-                        continue
-                    local_indices = local_indices[keep_mask]
-                    rel_positions = rel_positions[keep_mask]
-                    embed_index_map = np.cumsum(is_embed_np.astype(np.int64)) - 1
-                    embed_indices = embed_index_map[rel_positions]
-                else:
-                    embed_indices = rel_positions
-
-                # OR semantics for overlapping mm features: keep first writer.
-                keep_new = ~req_taken_mask[local_indices]
-                if not keep_new.any():
-                    continue
-                local_indices = local_indices[keep_new]
-                embed_indices = embed_indices[keep_new]
-                req_taken_mask[local_indices] = True
-
-                encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
-                embed_index_tensor = torch.from_numpy(embed_indices.astype(np.int64)).to(
-                    device=encoder_output.device,
-                    non_blocking=True,
-                )
-                mm_embeds_item = torch.index_select(encoder_output, 0, embed_index_tensor)
-                mm_embeds_req.append(mm_embeds_item)
-                req_mm_local_indices.append(local_indices.astype(np.int64, copy=False))
-                is_mm_embed[req_start_idx + local_indices] = True
-
-            if self.is_multimodal_pruning_enabled and self.uses_mrope:
-                assert req_state.mrope_positions is not None
-                should_sync_mrope_positions = True
-                mm_embeds_req, new_mrope_positions, new_delta = (
-                    self.model.recompute_mrope_positions(
-                        input_ids=req_state.prompt_token_ids,
-                        multimodal_embeddings=mm_embeds_req,
-                        mrope_positions=req_state.mrope_positions,
-                        num_computed_tokens=req_state.num_computed_tokens,
-                    )
-                )
-                req_state.mrope_positions.copy_(new_mrope_positions)
-                req_state.mrope_position_delta = new_delta
-
-            # Keep multimodal embedding order aligned with is_mm_embed scanning order.
-            # Under PCP, request positions may be non-monotonic; concatenating by
-            # feature order can misalign embeddings with boolean mask traversal.
-            if len(mm_embeds_req) > 1:
-                total_local_idx = sum(x.size for x in req_mm_local_indices)
-                total_embed_rows = sum(x.shape[0] for x in mm_embeds_req)
-                if total_local_idx == total_embed_rows and total_local_idx > 0:
-                    local_idx_cat = np.concatenate(req_mm_local_indices, axis=0)
-                    embed_cat = torch.cat(mm_embeds_req, dim=0)
-                    order = np.argsort(local_idx_cat, kind="stable")
-                    order_t = torch.from_numpy(order.astype(np.int64)).to(
-                        device=embed_cat.device,
-                        non_blocking=True,
-                    )
-                    mm_embeds_req = [embed_cat.index_select(0, order_t)]
-                else:
-                    logger.warning_once(
-                        "PCP MM reorder skipped due to size mismatch: local_idx=%d, embed_rows=%d",
-                        total_local_idx,
-                        total_embed_rows,
-                    )
-
-            mm_embeds.extend(mm_embeds_req)
-            req_start_idx += num_sched
+        (
+            mm_embeds,
+            should_sync_mrope_positions,
+            should_sync_xdrope_positions,
+        ) = self.pcp_manager.gather_mm_embeddings_for_pcp(
+            req_ids=self.input_batch.req_ids,
+            requests=self.requests,
+            positions_np=positions_np,
+            local_num_scheduled_tokens=local_num_scheduled_tokens,
+            shift_computed_tokens=shift_computed_tokens,
+            encoder_cache=self.encoder_cache,
+            is_mm_embed=is_mm_embed,
+            model=self.model,
+            is_multimodal_pruning_enabled=self.is_multimodal_pruning_enabled,
+            uses_mrope=self.uses_mrope,
+            warning_once=logger.warning_once,
+        )
 
         is_mm_embed_gpu = is_mm_embed_buf.copy_to_gpu(total_num_scheduled_tokens)
         if should_sync_mrope_positions:
