@@ -406,7 +406,6 @@ jobs:
       - name: Merge all benchmark result artifacts
         continue-on-error: true
         uses: actions/upload-artifact/merge@v4
-        continue-on-error: true
         with:
           name: nightly-a3
           pattern: nightly-test-benchmark-results-*
