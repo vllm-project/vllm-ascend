@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -61,6 +62,7 @@ class AscendInputBuffers(InputBuffers):
         # seq_len_np and seq_lens_cpu share the same memory.
         # define seq_lens_np for easier calculation with numpy.
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
+        self.extra_kwargs: dict[str, Any] = {}
 
 
 @dataclass
@@ -72,6 +74,7 @@ class AscendInputBatch(InputBatch):
     seq_lens_np: np.ndarray
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
+    extra_kwargs: dict[str, Any]
 
     @classmethod
     def make_dummy(

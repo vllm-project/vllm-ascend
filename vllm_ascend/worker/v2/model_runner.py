@@ -17,6 +17,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from typing import Any
+
 import numpy as np
 import torch
 from vllm.config import VllmConfig
@@ -30,8 +32,10 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.attention import op_constraint
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -40,7 +44,6 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.spec_decode.eagle import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -123,6 +126,21 @@ class NPUModelRunner(GPUModelRunner):
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
 
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        super().initialize_kv_cache(kv_cache_config)
+        for backend in self.attn_backends:
+            impl_cls = backend.get_impl_cls()
+            if not hasattr(impl_cls, "get_op_prefix"):
+                continue
+            op_prefix = impl_cls.get_op_prefix()
+            self.op_prefix.add(op_prefix)
+            gpu_key, _, _ = op_constraint.op_constraint_extra_kw_keys(op_prefix)
+            self.input_buffers.extra_kwargs[gpu_key] = torch.zeros(
+                self.max_num_reqs + 2,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
@@ -200,28 +218,41 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         num_reqs_padded = batch_desc.num_reqs or num_reqs
-        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
-
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # This is only required for vllm-ascend.
-            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_after_padding,
-                num_reqs_padded,
-                num_reqs,
-                query_start_loc_np,
-                batch_desc.cg_mode,
-                batch_desc.num_reqs,
-            )
-
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
-
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+
+        # Backend-specific padding (e.g. FIA TND): needs the full (max_num_reqs+2) CPU buffer;
+        # `FiaOpConstrait.padding` returns None in FULL graph mode (no extra_kw entries then).
+        extra_kwargs: dict[str, Any] = {}
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            for op_prefix in self.op_prefix:
+                constraint_cls = getattr(op_constraint, f"{op_prefix}OpConstrait", None)
+                if constraint_cls is None:
+                    continue
+                nreq_pad, qsl_np = constraint_cls.padding(
+                    num_reqs,
+                    query_start_loc_np.copy(),
+                    self.decode_query_len,
+                    batch_desc,
+                )
+                qsl_key, qsl_np_key, nreq_pad_key = op_constraint.op_constraint_extra_kw_keys(op_prefix)
+                async_copy_to_gpu(qsl_np, out=self.input_buffers.extra_kwargs[qsl_key])
+                qsl_np = qsl_np[: nreq_pad + 1]
+                extra_kwargs[qsl_key] = self.input_buffers.extra_kwargs[qsl_key]
+                extra_kwargs[qsl_np_key] = qsl_np
+                extra_kwargs[nreq_pad_key] = nreq_pad
+
+                if nreq_pad > num_reqs_padded:
+                    num_reqs_padded = nreq_pad
+                    query_start_loc = self.input_buffers.extra_kwargs[qsl_key][: nreq_pad + 1]
+                    query_start_loc_np = qsl_np
 
         # Get prefill tokens if any.
         if self.req_states.any_prefills(idx_mapping_np):
@@ -290,6 +321,7 @@ class NPUModelRunner(GPUModelRunner):
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
+            extra_kwargs=extra_kwargs,
         )
         return self.input_batch
 
