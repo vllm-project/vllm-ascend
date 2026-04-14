@@ -127,7 +127,7 @@ Below is a recommended startup configuration for short-context condition like 3.
 Notes:
 
 - If you only care about short-context low latency, you can explicitly set `--max-model-len 32768`. You may also set `tensor-parallel-size` to 16 and set `data-parallel-size` to 1.
-- `export VLLM_ASCEND_BALANCE_SCHEDULING=1` is used to enhance scheduling capacity between prefill and decode. This will work remarkably with a lager `data-parallel-size`. This can increace performance when cuncurrency gets closer to values equals to `data-parallel-size` times `max-num-seqs`.
+- `export VLLM_ASCEND_BALANCE_SCHEDULING=1` is used to enhance scheduling capacity between prefill and decode. This will work remarkably with a larger `data-parallel-size`. This can increace performance when concurrency gets closer to values equals to `data-parallel-size` times `max-num-seqs`.
 
 ```{code-block} bash
 export HCCL_OP_EXPANSION_MODE="AIV"
