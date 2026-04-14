@@ -28,6 +28,10 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!csrc/cmake/third_party/build/
+!csrc/cmake/third_party/build/modules/
+!csrc/cmake/third_party/build/modules/patch/
+!csrc/cmake/third_party/build/modules/patch/*.patch
 develop-eggs/
 dist/
 downloads/
