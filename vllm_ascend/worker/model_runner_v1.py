@@ -125,11 +125,10 @@ from vllm_ascend.utils import (
     enable_sp,
     enable_sp_by_pass,
     global_stream,
-    is_drafter_moe_model,
-    is_moe_model,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     set_weight_prefetch_method,
+    should_skip_allreduce_across_dp_group,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
@@ -481,46 +480,6 @@ class NPUModelRunner(GPUModelRunner):
             and not self.model_config.enforce_eager
         )
 
-    def _skip_all_reduce_across_dp_group(self, is_draft_model=False) -> bool:
-        """
-        Decide whether to skip the all-reduce across the data-parallel (DP) group.
-
-        Skipping is applicable for all dense models and for moe models only on ranks
-        that act as KV consumers. We skip the DP all-reduce when either:
-        - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
-        - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
-        """
-        # For dense models, since we don't actually need dp communication, we simply skip it.
-        # This usually happens when main model is moe while eagle draft model is dense.
-        is_context_moe_model = (
-            is_drafter_moe_model(self.vllm_config) if is_draft_model else is_moe_model(self.vllm_config)
-        )
-        if not is_context_moe_model:
-            return True
-
-        # Only applicable to MoE models on KV consumer ranks.
-        if not self.is_kv_consumer:
-            return False
-
-        def needs_mc2(num_tokens: int) -> bool:
-            return select_moe_comm_method(num_tokens, self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
-
-        # Determine whether decode must use MC2. Use max cudagraph capture size
-        # if available, otherwise use the maximal uniform decode token count.
-        if self.compilation_config.cudagraph_capture_sizes:
-            potential_max_tokens = self.compilation_config.max_cudagraph_capture_size
-        else:
-            potential_max_tokens = self.max_num_reqs * self.uniform_decode_query_len
-        decode_must_use_mc2 = needs_mc2(potential_max_tokens)
-
-        # For prefill, use the scheduler's max_num_batched_tokens for a single
-        # batch.
-        prefill_must_use_mc2 = needs_mc2(self.vllm_config.scheduler_config.max_num_batched_tokens)
-
-        # Skip all-reduce if decode requires MC2 and either prefill also
-        # requires MC2 or recompute-based scheduler is enabled.
-        return decode_must_use_mc2 and (prefill_must_use_mc2 or self.ascend_config.recompute_scheduler_enable)
-
     def _sync_metadata_across_dp(
         self, num_tokens: int, with_prefill: bool = False, is_draft_model: bool = False
     ) -> tuple[int, torch.Tensor | None, bool]:
@@ -533,7 +492,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, with_prefill
 
-        if self._skip_all_reduce_across_dp_group(is_draft_model):
+        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, with_prefill
 
@@ -1446,10 +1405,22 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded = self._pad_query_start_loc_for_fia(
                         num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_mode, batch_desc.num_reqs
                     )
-                    if enable_sp() and num_tokens_padded == num_tokens_unpadded:
-                        if num_reqs_padded > old_num_reqs_padded:
+                    
+                    
+                    # FIA may add a virtual request in Mixed Batch scenarios.
+                    # here we revert the request added by _pad_query_start_loc_for_fia if SP is enabled.
+                    # RELAXED CONDITION: Check if num_reqs_padded was actually increased, rather than
+                    # strictly checking token equality. This handles cases where num_tokens_padded
+                    # != num_tokens_unpadded due to SP alignment (e.g., 29292 vs 29290).
+                    if enable_sp() and num_reqs_padded > old_num_reqs_padded:
+                        if num_tokens_padded == num_tokens_unpadded:
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
+                        if num_tokens_padded != num_tokens_unpadded and not self.speculative_config:
+                            num_reqs_padded = old_num_reqs_padded
+                            self.query_start_loc.np[num_reqs_padded + 1] = 0
+                            self.query_start_loc.np[num_reqs_padded] = num_tokens_padded
+                            self.query_start_loc.gpu[num_reqs_padded] = num_tokens_padded
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
@@ -2049,7 +2020,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return False, None, cudagraph_mode
 
-        if self._skip_all_reduce_across_dp_group():
+        if should_skip_allreduce_across_dp_group(self.vllm_config):
             num_tokens_after_padding = torch.tensor([num_tokens_padded] * self.dp_size, device="cpu", dtype=torch.int32)
             return False, num_tokens_after_padding, cudagraph_mode
 

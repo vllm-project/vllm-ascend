@@ -19,14 +19,12 @@
 
 from __future__ import annotations
 
-import atexit
 import functools
 import math
 import os
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
-from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -54,6 +52,7 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
+_DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _WEIGHT_PREFETCH_METHOD = None
@@ -69,9 +68,6 @@ _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
-_SUBSCRIBED_COMPUTE_STREAMS = set()
-_GRAPH_PRINT_STREAM = None
-_GRAPH_PRINT_STREAM_LOCK = Lock()
 _HAS_ROPE = None
 
 
@@ -79,60 +75,83 @@ def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
 
-def _print_callback_on_stream(*args):
-    """Callback function to print arguments on the dedicated print stream."""
-    global _GRAPH_PRINT_STREAM
-    with torch_npu.npu.stream(_GRAPH_PRINT_STREAM):
-        print(*args, flush=True)
+def _mark_op_side_effectful(op: Any) -> None:
+    torch.fx.node.has_side_effect(op)
+    default_overload = getattr(op, "default", None)
+    if default_overload is not None:
+        torch.fx.node.has_side_effect(default_overload)
 
 
-def acl_graph_print(*args):
+def _ensure_device_print_registered() -> None:
+    global _DEVICE_PRINT_OP_REGISTERED
+
+    if _DEVICE_PRINT_OP_REGISTERED:
+        return
+
+    if not enable_custom_op():
+        raise RuntimeError(
+            "device_print requires _C_ascend.device_print ops to be available "
+            "when custom ops are enabled in the current Ascend build."
+        )
+
+    try:
+        # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
+        _mark_op_side_effectful(torch.ops._C_ascend.device_print)
+        _mark_op_side_effectful(torch.ops._C_ascend.device_print_tensor)
+        _DEVICE_PRINT_OP_REGISTERED = True
+    except AttributeError as exc:
+        raise RuntimeError(
+            "device_print requires _C_ascend.device_print ops to be available "
+            "when custom ops are enabled in the current Ascend build."
+        ) from exc
+
+
+def device_print(
+    value: torch.Tensor | int | float | bool | str | torch.dtype | torch.device | torch.Size,
+) -> None:
+    """Print one value from a device callback.
+
+    This helper is intended for debugging. To stay replay-safe under
+    ``torch.npu.graph`` capture/replay, the underlying callback payloads are
+    retained instead of being reclaimed after the first host callback runs.
+    Avoid using it in hot paths or long-running high-frequency loops, otherwise
+    there may be memory issues due to too many retained payloads.
+
+    Supported usage:
+
+        >>> from vllm_ascend.utils import device_print
+        >>> device_print(x)
+        >>> device_print("already formatted text")
+        >>> device_print(7)
+
+    Unsupported usage:
+
+        >>> device_print("x =", x)
+        >>> device_print("This is ", x, "and this is ", y)
+
+    If you need device-time tensor values, pass the tensor itself. If you need
+    text, pass one final string that is already formatted.
+
+    Tensor values are copied to host on the current stream before the callback
+    prints them, so printing remains ordered with respect to the surrounding
+    device work.
+
+    DO NOT FORMAT A DEVICE TENSOR INTO A STRING YOURSELF AND THEN PRINT, for example:
+
+        >>> device_print(f"x = {x}")
+        >>> device_print("x = " + str(x))
     """
-    Prints arguments from within an ACL graph.
+    _ensure_device_print_registered()
 
-    This function is provided for developers to print debug information when encountering
-    issues within an ACL graph, pretty handy for dumping input/output tensor values, or
-    resolving unexpected hangs. Usage:
-    ```python
-    from vllm_ascend.utils import acl_graph_print
-
-    ...
-    acl_graph_print("Debug info")
-    ```
-
-    This function launches a host function on the current compute stream to print
-    the given arguments. It uses a dedicated stream for printing to avoid
-    interfering with computation.
-
-    NOTE: torch.compile does not support this function, only use this in non-compiled code.
-    For example, those custom ops like `unified_attention_with_output` or `moe_forward`.
-    """
-    global _SUBSCRIBED_COMPUTE_STREAMS
-    global _GRAPH_PRINT_STREAM
-
-    current_compute_stream = torch_npu.npu.current_stream()
-
-    with _GRAPH_PRINT_STREAM_LOCK:
-        if _GRAPH_PRINT_STREAM is None:
-            _GRAPH_PRINT_STREAM = torch_npu.npu.Stream()
-
-        if current_compute_stream not in _SUBSCRIBED_COMPUTE_STREAMS:
-            # Subscribe the compute stream to allow launching host functions.
-            torch_npu.npu._subscribe_report(current_compute_stream)
-            _SUBSCRIBED_COMPUTE_STREAMS.add(current_compute_stream)
-
-    torch_npu.npu._launch_host_func(current_compute_stream, _print_callback_on_stream, args)
-
-
-def _unregister_print_streams_on_exit():
-    """Unsubscribe all compute streams used for printing at exit."""
-    global _SUBSCRIBED_COMPUTE_STREAMS
-    with _GRAPH_PRINT_STREAM_LOCK:
-        for stream in _SUBSCRIBED_COMPUTE_STREAMS:
-            torch_npu.npu._unsubscribe_report(stream)
-
-
-atexit.register(_unregister_print_streams_on_exit)
+    if isinstance(value, torch.Tensor):
+        torch.ops._C_ascend.device_print_tensor(value)
+    elif isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
+        torch.ops._C_ascend.device_print(str(value))
+    else:
+        raise TypeError(
+            f"Unsupported device_print value type: {type(value)!r}. "
+            "Use exactly one argument: device_print(tensor), device_print('formatted text')."
+        )
 
 
 def _should_trans_nz(weight: torch.Tensor) -> bool:
@@ -1003,6 +1022,62 @@ def is_hierarchical_communication_enabled():
     ) or get_ascend_config().enable_mc2_hierarchy_comm
 
 
+def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
+    """Decide whether to skip the all-reduce across the DP group.
+
+    Skipping is applicable for all dense models and for moe models only on ranks
+    that act as KV consumers. We skip the DP all-reduce when either:
+    - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
+    - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+
+    Skipping means each rank may have a different number of tokens, so MC2 needs
+    a non-zero global_bs and must NOT receive mc2_mask.
+
+    Returns False when hierarchy comm is enabled because hierarchy requires
+    global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
+    """
+    if is_hierarchical_communication_enabled():
+        return False
+
+    # For dense models, since we don't actually need dp communication, we simply skip it.
+    # This usually happens when main model is moe while eagle draft model is dense.
+    is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
+    if not is_context_moe_model:
+        return True
+
+    # Only applicable to MoE models on KV consumer ranks.
+    is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+    if not is_kv_consumer:
+        return False
+
+    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+    def needs_mc2(n: int) -> bool:
+        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+
+    compilation_config = vllm_config.compilation_config
+    scheduler_config = vllm_config.scheduler_config
+    speculative_config = vllm_config.speculative_config
+    uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
+    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
+    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
+
+    # Determine whether decode must use MC2. Use max cudagraph capture size
+    # if available, otherwise use the maximal uniform decode token count.
+    if compilation_config.cudagraph_capture_sizes:
+        potential_max_tokens = compilation_config.max_cudagraph_capture_size
+    else:
+        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+
+    decode_must_use_mc2 = needs_mc2(potential_max_tokens)
+    # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
+    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
+    # Skip all-reduce if decode requires MC2 and either prefill also
+    # requires MC2 or recompute-based scheduler is enabled.
+    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+
+
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
@@ -1194,7 +1269,9 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     vllm_config = get_current_vllm_config()
     # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
     # effectively hidden, it is enabled only during the prefill stage.
-    is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
+    is_prefill_instance = (
+        vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_producer"
+    )
     return is_prefill_instance
 
 
@@ -1256,10 +1333,7 @@ def get_rope_dim(vllm_config):
 
 def calc_split_factor(num_list: list[int]):
     total = sum(num_list)
-    split_factor_list = []
-    for num in num_list:
-        split_factor_list.append(total / num)
-    return split_factor_list
+    return [total / num for num in num_list]
 
 
 # NOTE: The last two dimensions of ND are transferred to NZ
