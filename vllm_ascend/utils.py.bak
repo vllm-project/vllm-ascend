@@ -18,7 +18,6 @@
 #
 
 from __future__ import annotations
-import warnings
 
 import atexit
 import functools
@@ -581,20 +580,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    try:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    except ModuleNotFoundError as exc:
-        if exc.name == "vllm.model_executor.layers.fused_moe.runner":
-            warnings.warn(
-                "Skip fused_moe custom op registration because current vllm lacks "
-                "vllm.model_executor.layers.fused_moe.runner. "
-                "Continuing for non-MoE llama lora reproduction.",
-                RuntimeWarning,
-            )
-            AscendFusedMoE = None
-            AscendSharedFusedMoE = None
-        else:
-            raise
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,

@@ -1097,13 +1097,13 @@ class HfRunner:
 
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
+    return "/vllm-workspace/models/sql-lora"
 
 
 @pytest.fixture(scope="session")
 def llama32_lora_files():
     from huggingface_hub import snapshot_download as hf_snapshot_download
-    return hf_snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider", local_files_only=True)
+    return "/vllm-workspace/models/sql-lora"
 
 
 def qwen_prompt(questions: list[str]) -> list[str]:

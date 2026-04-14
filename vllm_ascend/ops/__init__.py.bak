@@ -15,22 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import warnings
 import torch
 from vllm.triton_utils import HAS_TRITON
 
-try:
-    import vllm_ascend.ops.fused_moe.fused_moe  # noqa
-except ModuleNotFoundError as exc:
-    if exc.name == "vllm.model_executor.layers.fused_moe.runner":
-        warnings.warn(
-            "Skip fused_moe registration because current vllm lacks "
-            "vllm.model_executor.layers.fused_moe.runner. "
-            "This is acceptable for llama lora e2e reproduction.",
-            RuntimeWarning,
-        )
-    else:
-        raise
+import vllm_ascend.ops.fused_moe.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
 

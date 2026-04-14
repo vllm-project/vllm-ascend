@@ -1759,7 +1759,6 @@ class NPUModelRunner(GPUModelRunner):
         # be improved in model runner v2)
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
-        force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
@@ -1774,19 +1773,13 @@ class NPUModelRunner(GPUModelRunner):
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
-        num_active_loras = (
-            force_num_active_loras
-            if force_num_active_loras is not None
-            else len(self.input_batch.lora_id_to_lora_request)
-        )
-        has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
+        has_lora = len(self.input_batch.lora_id_to_lora_request) > 0 if force_has_lora is None else force_has_lora
 
         # ruff: noqa: E731
         dispatch_cudagraph = (
             lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
-                num_active_loras=num_active_loras,
                 uniform_decode=uniform_decode,
                 disable_full=disable_full,
             )
@@ -2128,11 +2121,8 @@ class NPUModelRunner(GPUModelRunner):
             force_uniform_decode=uniform_decode,
             # `force_has_lora` is used for cudagraph capture; because LoRA is
             # activated later in the context manager, but we need to know the
-            # LoRA state when determining the batch descriptor for capture.
-            force_has_lora=num_active_loras > 0,
-            # `force_num_active_loras` is used for cudagraph capture; because we
-            # need to capture graphs for specific num_active_loras counts.
-            force_num_active_loras=num_active_loras,
+            # LoRA state when determining the batch descriptor for capture
+            force_has_lora=activate_lora,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -2207,7 +2197,6 @@ class NPUModelRunner(GPUModelRunner):
             self.lora_config,
             num_scheduled_tokens,
             num_sampled_tokens,
-            num_active_loras=num_active_loras,
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
@@ -2316,11 +2305,9 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_list = [min_tokens_per_req] * self.max_num_reqs
         num_scheduled_tokens_list[-1] += self.max_num_tokens % self.max_num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
-        # Ascend workaround: avoid host<->device index transfer in profile path.
-        # Keep one token per request via pure slicing on device.
-        num_reqs = len(num_scheduled_tokens)
-        if num_reqs > 0:
-            hidden_states = hidden_states[-num_reqs:]
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        # TODO: need to rum a dummy sampler for generate task
+        hidden_states = hidden_states[logit_indices]
         output = self.model.compute_logits(hidden_states)
         return output
 

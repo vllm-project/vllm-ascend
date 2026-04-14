@@ -22,9 +22,10 @@ find_package(Torch REQUIRED)
 
 run_python(TORCH_VERSION
   "import torch; print(torch.__version__)" "Failed to locate torch path")
-# check torch version is 2.9.0
-if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.9.0")
-  message(FATAL_ERROR "Expected PyTorch version 2.9.0, but found ${TORCH_VERSION}")
+string(REGEX REPLACE "\\+.*$" "" TORCH_VERSION_CLEAN "${TORCH_VERSION}")
+# accept torch 2.9.x, including local version suffixes such as +cpu
+if(TORCH_VERSION_CLEAN VERSION_LESS "2.9.0" OR TORCH_VERSION_CLEAN VERSION_GREATER_EQUAL "2.10.0")
+  message(FATAL_ERROR "Expected PyTorch version 2.9.x, but found ${TORCH_VERSION}")
 endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
@@ -40,7 +41,13 @@ if (CMAKE_INSTALL_PREFIX STREQUAL /usr/local)
 endif()
 
 set(ASCEND_CANN_PACKAGE_PATH ${ASCEND_HOME_PATH})
-if(EXISTS ${ASCEND_HOME_PATH}/tools/tikcpp/ascendc_kernel_cmake)
+if(DEFINED ASCENDC_CMAKE_DIR AND NOT ASCENDC_CMAKE_DIR STREQUAL "")
+    message(STATUS "Use user specified ASCENDC_CMAKE_DIR: ${ASCENDC_CMAKE_DIR}")
+elseif(EXISTS ${ASCEND_HOME_PATH}/aarch64-linux/tikcpp/ascendc_kernel_cmake)
+    set(ASCENDC_CMAKE_DIR ${ASCEND_HOME_PATH}/aarch64-linux/tikcpp/ascendc_kernel_cmake)
+elseif(EXISTS ${ASCEND_HOME_PATH}/tikcpp/ascendc_kernel_cmake)
+    set(ASCENDC_CMAKE_DIR ${ASCEND_HOME_PATH}/tikcpp/ascendc_kernel_cmake)
+elseif(EXISTS ${ASCEND_HOME_PATH}/tools/tikcpp/ascendc_kernel_cmake)
     set(ASCENDC_CMAKE_DIR ${ASCEND_HOME_PATH}/tools/tikcpp/ascendc_kernel_cmake)
 elseif(EXISTS ${ASCEND_HOME_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
     set(ASCENDC_CMAKE_DIR ${ASCEND_HOME_PATH}/compiler/tikcpp/ascendc_kernel_cmake)

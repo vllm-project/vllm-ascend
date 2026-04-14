@@ -120,3 +120,185 @@ def sgmv_expand_slice(
     return torch.ops._C_ascend.sgmv_expand(
         inputs, lora_b_weights, lora_indices_tensor, seq_len_tensor, output_tensor, slice_offset, slice_size
     )
+
+
+def bgmv_shrink_v2(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    active_lora_ids: torch.Tensor,
+    num_active_loras: int,
+    scaling: float = 1.0,
+):
+    return torch.ops._C_ascend.bgmv_shrink_v2(
+        inputs,
+        lora_a_weights,
+        lora_indices_tensor,
+        token_indices_sorted_by_lora_ids,
+        num_tokens_per_lora,
+        lora_token_start_loc,
+        active_lora_ids,
+        num_active_loras,
+        output_tensor,
+        scaling,
+    )
+
+
+def bgmv_expand_v2(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    active_lora_ids: torch.Tensor,
+    num_active_loras: int,
+    add_inputs: bool = True,
+):
+    return torch.ops._C_ascend.bgmv_expand_v2(
+        inputs,
+        lora_b_weights,
+        lora_indices_tensor,
+        token_indices_sorted_by_lora_ids,
+        num_tokens_per_lora,
+        lora_token_start_loc,
+        active_lora_ids,
+        num_active_loras,
+        output_tensor,
+        0,
+        output_tensor.size(1),
+    )
+
+
+def bgmv_expand_slice_v2(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    active_lora_ids: torch.Tensor,
+    num_active_loras: int,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool = True,
+):
+    return torch.ops._C_ascend.bgmv_expand_v2(
+        inputs,
+        lora_b_weights,
+        lora_indices_tensor,
+        token_indices_sorted_by_lora_ids,
+        num_tokens_per_lora,
+        lora_token_start_loc,
+        active_lora_ids,
+        num_active_loras,
+        output_tensor,
+        slice_offset,
+        slice_size,
+    )
+
+
+def sgmv_shrink_v2(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    active_lora_ids: torch.Tensor,
+    num_active_loras: int,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    scaling: float,
+):
+    return torch.ops._C_ascend.sgmv_shrink_v2(
+        inputs,
+        lora_a_weights,
+        lora_indices_tensor,
+        seq_len_tensor,
+        token_indices_sorted_by_lora_ids,
+        num_tokens_per_lora,
+        lora_token_start_loc,
+        active_lora_ids,
+        num_active_loras,
+        output_tensor,
+        scaling,
+    )
+
+
+def sgmv_expand_v2(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    active_lora_ids: torch.Tensor,
+    num_active_loras: int,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    add_inputs: bool = False,
+):
+    return torch.ops._C_ascend.sgmv_expand_v2(
+        inputs,
+        lora_b_weights,
+        lora_indices_tensor,
+        seq_len_tensor,
+        token_indices_sorted_by_lora_ids,
+        num_tokens_per_lora,
+        lora_token_start_loc,
+        active_lora_ids,
+        num_active_loras,
+        output_tensor,
+        0,
+        output_tensor.size(1),
+    )
+
+
+def sgmv_expand_slice_v2(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    active_lora_ids: torch.Tensor,
+    num_active_loras: int,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool = False,
+):
+    return torch.ops._C_ascend.sgmv_expand_v2(
+        inputs,
+        lora_b_weights,
+        lora_indices_tensor,
+        seq_len_tensor,
+        token_indices_sorted_by_lora_ids,
+        num_tokens_per_lora,
+        lora_token_start_loc,
+        active_lora_ids,
+        num_active_loras,
+        output_tensor,
+        slice_offset,
+        slice_size,
+    )

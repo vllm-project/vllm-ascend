@@ -1,3 +1,4 @@
+import os
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
@@ -332,7 +333,10 @@ class NPUWorker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
-            self.model_runner.profile_run()
+            if os.environ.get("VLLM_ASCEND_SKIP_PROFILE_RUN", "0") == "1":
+                logger.warning("Skip profile_run on Ascend due to startup sync instability.")
+            else:
+                self.model_runner.profile_run()
             free_memory, total_memory = torch.npu.mem_get_info()
             torch_memory = torch.npu.memory_reserved()
             non_torch_memory_before_empty_cache = total_memory - free_memory - torch_memory

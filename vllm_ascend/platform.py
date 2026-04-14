@@ -218,6 +218,17 @@ class NPUPlatform(Platform):
 
         from vllm.config.compilation import CUDAGraphMode
 
+        lora_config = getattr(vllm_config, "lora_config", None)
+        if lora_config is not None:
+            logger.warning(
+                "LoRA on Ascend currently falls back to eager mode because "
+                "ACL graph replay is not yet aligned with eager execution."
+            )
+            enforce_eager = True
+            if model_config is not None:
+                model_config.enforce_eager = True
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         if ascend_config.xlite_graph_config.enabled and ascend_config.xlite_graph_config.full_mode:
             logger.info("ACLGraph is disabled under xlite full mode")
             enforce_eager = True
