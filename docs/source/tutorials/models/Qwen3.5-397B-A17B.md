@@ -87,7 +87,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-`Qwen3.5-397B-A17B` can be deployed on 2 Atlas 800 A3(64G*16) or 4 Atlas 800 A2(64G*8).
 `Qwen3.5-397B-A17B-w8a8` can be deployed on 1 Atlas 800 A3(64G*16) or 2 Atlas 800 A2(64G*8), need to start with parameter `--quantization ascend`.
 
 Run the following script to execute online 128k inference On 1 Atlas 800 A3(64G*16).
@@ -152,7 +151,7 @@ The parameters are explained as follows:
 
 ### Multi-node Deployment with MP (Recommended)
 
-Assume you have 2 Atlas 800 A2 nodes, and want to deploy the `Qwen3.5-397B-A17B` model across multiple nodes.
+Assume you have 2 Atlas 800 A2 nodes, and want to deploy the `Qwen3.5-397B-A17B-w8a8-mtp` model across multiple nodes.
 
 Node 0
 
