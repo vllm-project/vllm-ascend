@@ -13,7 +13,7 @@ test_cases:
       - --port
       - "8000"
 
-model_name: "nvidia/Minitron-8B-Base"
+model_name: "nv-community/Minitron-8B-Base"
 hardware: "Atlas A2 Series"
 trust_remote_code: true
 tasks:
