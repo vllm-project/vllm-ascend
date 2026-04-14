@@ -556,9 +556,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         ):
             mtp_mask = attn_metadata.decode_meta.mtp_attn_mask
             B = mtp_mask.shape[0]
-            target_length = 16384
-            new_mask = torch.zeros(1, B, target_length, dtype=torch.bool, device=query.device)
-            new_mask[:, :, : mtp_mask.shape[1]] = mtp_mask
+            L = mtp_mask.shape[1]
+            target_length = 2048
+            new_mask = torch.zeros(target_length, target_length, dtype=torch.bool, device=query.device)
+            new_mask[: B, : L] = mtp_mask
             spec_attn_mask = new_mask
 
         common_kwargs = {
@@ -569,6 +570,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "scale": self.scale,
             "antiquant_mode": 0,
             "antiquant_scale": None,
+            "sparse_mode":3,
             "softmax_lse_flag": True,
             "block_table": attn_metadata.decode_meta.block_tables,
             "block_size": self.key_cache.shape[1],
