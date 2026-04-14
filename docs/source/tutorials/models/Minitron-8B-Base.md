@@ -75,7 +75,7 @@ Start the online serving service with the following command:
 :sync-target: test_cases[0].model test_cases[0].server_cmd
 :sync-class: cmd
 
-vllm serve "nvidia/Minitron-8B-Base" \
+vllm serve "nv-community/Minitron-8B-Base" \
   --served-model-name minitron-8b-base \
   --tensor-parallel-size 1 \
   --max-model-len 4096 \
