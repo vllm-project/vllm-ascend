@@ -709,6 +709,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         # Try to import AscendGatedDeltaNetAttention310 if available
         try:
             from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+
             has_gdn_310 = True
         except ImportError:
             # AscendGatedDeltaNetAttention310 is not available in this vLLM version
