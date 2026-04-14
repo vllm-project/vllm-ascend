@@ -642,9 +642,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 weak_ref_tensors(layer._c8_k_aq_offset),
                 weak_ref_tensors(layer._c8_v_aq_scale),
                 weak_ref_tensors(layer._c8_v_aq_offset),
-            )
+            )  # type: ignore
         else:
-            attn_params = attn_params + (None, None, None, None)
+            attn_params = attn_params + (None, None, None, None)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
