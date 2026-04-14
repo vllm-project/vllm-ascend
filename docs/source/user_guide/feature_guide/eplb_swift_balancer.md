@@ -83,7 +83,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 
 3. Model Compatibility:
    - Only MoE models with explicit expert parallelism support (e.g., Qwen3 MoE models) are compatible.
-   - Verify model architecture supports dynamic expert routing through --enable-expert-parallel.
+   - Verify model architecture supports dynamic expert routing through `--enable-expert-parallel`.
 
 4. Monitoring & Validation:
    - Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and gpu_utilization.

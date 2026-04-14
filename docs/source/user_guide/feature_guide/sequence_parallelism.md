@@ -14,11 +14,11 @@ Currently, vllm-ascend has implemented Sequence Parallelism for VL-class models 
 ```bash
 vllm serve Qwen/Qwen3-VL-2B-Instruct \
     --tensor-parallel-size 2 \
-    --compilation-config '{"pass_config": {"enable_sp": true, , "sp_min_token_num": 1000}}'
+    --compilation-config '{"pass_config": {"enable_sp": true , "sp_min_token_num": 1000}}'
 ```
 
 - `"enable_sp"`: This is the switch for SP. Since SP relies on graph mode, it is not supported in eager mode.
-- `sp_min_token_num` (from upstream vllm's `pass_config`): Based on our experiments, when the number of tokens is small (empirical value is less than 1000), SP can actually bring negative benefits. This is because when the communication volume is small, the fixed overhead of the communication operator becomes the dominant factor. SP will only take effect when `num_tokens >= sp_min_token_num`. **The default value is 1000 on Ascend, which generally does not need to be modified.** To customize, use `--compilation-config '{"pass_config": {"enable_sp": true, "sp_min_token_num": 512}}'`. The value will be appended into `compile_ranges_split_points`, which splits the graph compilation range and checks whether the pass is applicable per range.
+- `sp_min_token_num` (from upstream vllm's `pass_config`): Based on our experiments, when the number of tokens is small (empirical value is less than 1000), SP can actually bring negative impact. This is because when the communication volume is small, the fixed overhead of the communication operator becomes the dominant factor. SP will only take effect when `num_tokens >= sp_min_token_num`. **The default value is 1000 on Ascend, which generally does not need to be modified.** To customize, use `--compilation-config '{"pass_config": {"enable_sp": true, "sp_min_token_num": 512}}'`. The value will be appended into `compile_ranges_split_points`, which splits the graph compilation range and checks whether the pass is applicable per range.
 
 Without modifying `sp_min_token_num`, the simplest way and recommended way to enable SP is:
 

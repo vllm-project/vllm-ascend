@@ -26,6 +26,9 @@
 import json
 import os
 
+from docutils.parsers.rst import directives
+from sphinx.directives.code import CodeBlock
+
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
@@ -80,9 +83,9 @@ myst_substitutions = {
     "ci_vllm_version": "v0.18.0",
     # main branch compatibility matrix - updated dynamically
     # vLLM commit hash for main branch
-    "main_vllm_commit": "35141a7eeda941a60ad5a4956670c60fd5a77029",
+    "main_vllm_commit": "5af684c31912232e5c89484c2e8259e0fac6c55b",
     # vLLM tag for main branch
-    "main_vllm_tag": "",
+    "main_vllm_tag": "v0.19.0",
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.12",
     # CANN version for main branch
@@ -151,8 +154,18 @@ if READTHEDOCS_VERSION_TYPE == "tag":
         os.remove(header_file)
 
 
+class SyncMetadataCodeBlock(CodeBlock):
+    """Code block supporting docs-to-YAML sync metadata."""
+
+    option_spec = CodeBlock.option_spec | {
+        "sync-yaml": directives.unchanged_required,
+        "sync-target": directives.unchanged_required,
+        "sync-class": directives.unchanged_required,
+    }
+
+
 def setup(app):
-    pass
+    app.add_directive("test", SyncMetadataCodeBlock)
 
 
 if __name__ == "__main__":

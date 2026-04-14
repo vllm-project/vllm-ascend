@@ -28,12 +28,16 @@ spec:
                 value: {{ fail_tag | default("FAIL_TAG") }}
               - name: IS_PR_TEST
                 value: "{{ is_pr_test | default("false") }}"
-              - name: VLLM_VERSION
-                value: {{ vllm_version | default("latest") }}
               - name: VLLM_ASCEND_REF
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: BENCHMARK_JOB_NAME
+                value: {{ benchmark_job_name | default("") }}
+              - name: VLLM_CI_RUNNER
+                value: {{ runner | default("linux-aarch64-a3-0") }}
+              - name: VLLM_ASCEND_VERSION
+                value: {{ vllm_ascend_ref | default("main") }}
             command:
               - sh
               - -c
@@ -90,12 +94,14 @@ spec:
                 value: {{ fail_tag | default("FAIL_TAG") }}
               - name: IS_PR_TEST
                 value: "{{ is_pr_test | default("false") }}"
-              - name: VLLM_VERSION
-                value: {{ vllm_version | default("latest") }}
               - name: VLLM_ASCEND_REF
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: BENCHMARK_JOB_NAME
+                value: {{ benchmark_job_name | default("") }}
+              - name: VLLM_CI_RUNNER
+                value: {{ runner | default("linux-aarch64-a3-0") }}
             command:
               - sh
               - -c

@@ -148,3 +148,41 @@ def _npu_attention_update(head_size, attn_out_lse: torch.Tensor) -> torch.Tensor
     attn_out, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
     attn_out = attn_out.view(-1, H, D)
     return attn_out
+
+
+def _npu_attn_out_lse_update(attn_lse_mask, attn_lse_nomask, attn_out_mask, attn_out_nomask):
+    T = attn_out_mask.shape[0]
+    N = attn_out_mask.shape[1]
+    D = attn_out_mask.shape[2]
+    attn_out_mask, attn_lse_mask = _out_lse_reshape(attn_out_mask, attn_lse_mask)
+    attn_out_nomask, attn_lse_nomask = _out_lse_reshape(attn_out_nomask, attn_lse_nomask)
+    attn_out_mask = attn_out_mask.to(torch.float32)
+    attn_out_nomask = attn_out_nomask.to(torch.float32)
+    attn_lse_mask = attn_lse_mask.to(torch.float32)
+    attn_lse_nomask = attn_lse_nomask.to(torch.float32)
+    attn_output = [attn_out_nomask, attn_out_mask]
+    attn_lse = [attn_lse_nomask, attn_lse_mask]
+    update_type = 0
+    output, _ = torch_npu.npu_attention_update(attn_lse, attn_output, update_type)
+    output = output.view(T, N, D)
+    return output
+
+
+def _out_lse_reshape(attn_out: torch.Tensor, attn_lse: torch.Tensor) -> torch.Tensor:
+    attn_out = attn_out.contiguous().view(attn_out.shape[0] * attn_out.shape[1], attn_out.shape[2])
+    attn_lse = attn_lse.contiguous().view(attn_lse.shape[0] * attn_lse.shape[1] * attn_lse.shape[2])
+    return attn_out, attn_lse
+
+
+def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> torch.Tensor:
+    """LSE_final = log(sum(exp(LSE_i))), O_final = sum(exp(LSE_i - LSE_final) * O_i)
+    Args:
+        out_list: shape = [N, batch_size, num_heads, head_size]
+        lse_list: shape = [N, batch_size, num_heads, 1]
+    Returns:
+        out_final: shape = [batch_size, num_heads, head_size]
+        lse_final: shape = [batch_size, num_heads, 1]
+    """
+    lse_final = torch.logsumexp(lse_list, dim=0, keepdim=False)
+    out_final = torch.sum(torch.exp(lse_list - lse_final) * out_list, dim=0)
+    return out_final, lse_final

@@ -1,0 +1,108 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"PO-Revision-Date: 2026-01-22 16:30+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:1
+msgid "Dynamic Batch"
+msgstr "动态批处理"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:3
+msgid ""
+"Dynamic batch is a technique that dynamically adjusts the chunksize "
+"during each inference iteration within the chunked prefilling strategy "
+"according to the resources and SLO targets, thereby improving the "
+"effective throughput and decreasing the TBT."
+msgstr ""
+"动态批处理是一种在分块预填充策略中，根据资源状况和服务等级目标，动态调整每次推理迭代块大小的技术，旨在提高有效吞吐量并降低令牌间延迟。"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:5
+msgid ""
+"Dynamic batch is controlled by the value of the "
+"`--SLO_limits_for_dynamic_batch`. Notably, only 910 B3 is supported with "
+"decode token number scales below 2048 so far. Especially, the "
+"improvements are quite obvious on Qwen, Llama models. We are working on "
+"further improvements and this feature will support more XPUs in the "
+"future."
+msgstr ""
+"动态批处理由 `--SLO_limits_for_dynamic_batch` 参数的值控制。值得注意的是，目前仅支持昇腾 910 B3，且解码令牌数量需低于 2048。特别是在 Qwen 和 Llama 模型上，性能提升非常明显。我们正在进行进一步的改进，未来该功能将支持更多型号的 XPU。"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:10
+msgid "Getting started"
+msgstr "快速入门"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:12
+msgid "Prerequisites"
+msgstr "前提条件"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:14
+msgid ""
+"Dynamic batch now depends on an offline cost model saved in a lookup "
+"table to refine the token budget. The lookup table is saved in a '.csv' "
+"file, which should be first downloaded from [A2-B3-BLK128.csv](https"
+"://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-"
+"ascend/dynamic_batch_scheduler/A2-B3-BLK128.csv), renamed, and saved to "
+"the path `vllm_ascend/core/profile_table.csv`"
+msgstr ""
+"动态批处理目前依赖于一个存储在查找表中的离线开销模型来优化令牌预算。该查找表保存在一个 '.csv' 文件中，需要先从 [A2-B3-BLK128.csv](https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/dynamic_batch_scheduler/A2-B3-BLK128.csv) 下载，重命名后保存到路径 `vllm_ascend/core/profile_table.csv`。"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:16
+msgid ""
+"`Pandas` is needed to load the lookup table, in case pandas is not "
+"installed."
+msgstr "加载查找表需要 `Pandas` 库，请确保已安装。"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:22
+msgid "Tuning Parameters"
+msgstr "调优参数"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:24
+msgid ""
+"`--SLO_limits_for_dynamic_batch` is the tuning parameter (integer type) "
+"for the dynamic batch feature, larger values impose more constraints on "
+"the latency limitation, leading to higher effective throughput. The "
+"parameter can be selected according to the specific models or service "
+"requirements."
+msgstr ""
+"`--SLO_limits_for_dynamic_batch` 是动态批处理功能的调优参数（整数类型），值越大对延迟限制的约束越强，从而带来更高的有效吞吐量。可以根据具体模型或服务需求选择该参数。"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:32
+msgid "Supported Models"
+msgstr "支持的模型"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:34
+msgid ""
+"So far, dynamic batch performs better on several dense models including "
+"Qwen and Llama (from 8B to 32B) with `tensor_parallel_size=8`. For "
+"different models, a proper `SLO_limits_for_dynamic_batch` parameter is "
+"needed. The empirical value of this parameter is generally `35, 50, or "
+"75`. Therefore, some additional tests are needed to select the best "
+"parameter."
+msgstr ""
+"目前，动态批处理在 `tensor_parallel_size=8` 的多个稠密模型上表现更好，包括 Qwen 和 Llama（从 8B 到 32B）。对于不同的模型，需要设置合适的 `SLO_limits_for_dynamic_batch` 参数。该参数的经验值通常为 `35、50 或 75`。因此，需要进行一些额外测试以选择最佳参数。"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:36
+msgid "Usage"
+msgstr "用法"
+
+#: ../../source/user_guide/feature_guide/dynamic_batch.md:38
+msgid ""
+"Dynamic batch is used in the online inference. A fully executable example"
+" is as follows:"
+msgstr "动态批处理用于在线推理。一个完整的可执行示例如下："
