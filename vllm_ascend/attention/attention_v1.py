@@ -1104,7 +1104,6 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     float_key, float_value = key, value
                 key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
                 query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
-
             # pooling model branch
             if attn_metadata.model_runner_type == "pooling":
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
@@ -1154,7 +1153,6 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
-
                 if output_padded is not None:
                     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
                 else:
