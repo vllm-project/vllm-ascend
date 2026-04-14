@@ -16,6 +16,7 @@
 #
 
 import torch
+import torch.nn.functional as F
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SwigluOAIAndMul
 
 from vllm_ascend.utils import get_weight_prefetch_method
@@ -49,3 +50,17 @@ class AscendSwigluOAIAndMul:
 
         layer = MinimalSwigluOAIAndMul()
         return SwigluOAIAndMul.forward_native(layer, x)
+
+
+def swiglustep_and_mul(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
+    """Out-variant of swiglustep activation.
+
+    Writes into `out`:
+      silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+    """
+    gate, up = x.chunk(2, dim=-1)
+    gate = F.silu(gate)
+    gate = gate.clamp(max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    out = gate * up
+    return out

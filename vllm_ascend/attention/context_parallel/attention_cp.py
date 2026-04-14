@@ -50,7 +50,11 @@ from vllm_ascend.attention.utils import (
     filter_chunked_req_indices,
     split_decodes_and_prefills,
 )
-from vllm_ascend.compilation.acl_graph import get_graph_params, update_graph_params_workspaces
+from vllm_ascend.compilation.acl_graph import (
+    get_graph_params,
+    update_graph_params_layer_name,
+    update_graph_params_workspaces,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
@@ -296,11 +300,19 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         draft_attn_metadatas=None,
     ):
         graph_params = get_graph_params()
+        # Use capture order layer names for correct replay ordering
+        # For hybrid models, attn_metadata.keys() order differs from capture order
+        captured_layer_names = graph_params.attn_layer_names.get(num_tokens, [])
+        if captured_layer_names:
+            attn_keys = captured_layer_names
+        else:
+            # Fallback to metadata keys if no captured names (backward compatibility)
+            attn_keys = list(forward_context.attn_metadata.keys())
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
-                forward_context.attn_metadata,
+                attn_keys,
                 graph_params.attn_params[num_tokens],
                 graph_params.handles[num_tokens],
                 graph_params.events[num_tokens],
@@ -504,7 +516,17 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             attn_lse = torch.index_select(torch.cat(lses, dim=0), 0, q_full_idx)
         return output, attn_lse
 
-    def _forward_decode_pcp_dcp(self, query: torch.Tensor, attn_metadata: AscendMetadata) -> torch.Tensor:
+    def _out_lse_reshape(self, attn_out: torch.Tensor, attn_lse: torch.Tensor) -> torch.Tensor:
+        attn_out = attn_out.contiguous().view(attn_out.shape[0] * attn_out.shape[1], attn_out.shape[2])
+        attn_lse = attn_lse.contiguous().view(attn_lse.shape[0] * attn_lse.shape[1] * attn_lse.shape[2])
+        return attn_out, attn_lse
+
+    def _forward_decode_pcp_dcp(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        layer_name: str | None = None,
+    ) -> torch.Tensor:
         assert self.key_cache is not None
         assert self.value_cache is not None
 
@@ -570,6 +592,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     self.dcp_rank,
                 )
             )
+            # Record layer name in capture order for correct replay ordering
+            if layer_name is not None:
+                update_graph_params_layer_name(num_tokens, layer_name)
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(
                 query, k_nope, value, **common_kwargs, workspace=workspace, out=[attn_out, attn_lse]
@@ -860,6 +885,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        layer_name: str | None = None,
     ) -> torch.Tensor:
         assert attn_metadata is not None
         has_decode = attn_metadata.num_decodes > 0
@@ -871,7 +897,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             pcp_use_hybrid_attn = attn_metadata.prefill.pcp_metadata.pcp_use_hybrid_attn
         if has_decode:
             decode_query = query[:num_decode_tokens].contiguous()
-            output_decode = self._forward_decode_pcp_dcp(decode_query, attn_metadata)
+            output_decode = self._forward_decode_pcp_dcp(decode_query, attn_metadata, layer_name)
             output[:num_decode_tokens] = output_decode
         if has_prefill:
             assert attn_metadata.prefill is not None

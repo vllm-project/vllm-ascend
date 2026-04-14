@@ -19,6 +19,8 @@ def _swiglu_quant_kernel(
     NUM_CORES: tl.constexpr,
     DTYPE_MAX: tl.constexpr,
     SCALE: tl.constexpr,
+    USE_STEP: tl.constexpr,
+    LIMIT: tl.constexpr,
 ):
     # calc real total_rows
     if GROUP_LIST_TYPE == 0:  # cusum
@@ -42,7 +44,13 @@ def _swiglu_quant_kernel(
         cur_x = tl.load(x_ptr + x_offsets)
         x1 = extract_slice(cur_x, offsets=(0,), sizes=(HALF_COLS,), strides=(1,))
         x2 = extract_slice(cur_x, offsets=(HALF_COLS,), sizes=(HALF_COLS,), strides=(1,))
-        out = x1 * tl.sigmoid(x1) * x2
+        if USE_STEP:
+            gate = x1 * tl.sigmoid(x1)
+            gate = tl.minimum(gate, LIMIT)
+            up = tl.maximum(tl.minimum(x2, LIMIT), -LIMIT)
+            out = gate * up
+        else:
+            out = x1 * tl.sigmoid(x1) * x2
 
         # quant
         if SCALE:
@@ -63,7 +71,7 @@ def _swiglu_quant_kernel(
             tl.store(out_ptr + o_offsets, out.to(out_ptr.dtype.element_ty))
 
 
-def swiglu_quant(x, group_list, group_list_type, need_quant=True):
+def swiglu_quant(x, group_list, group_list_type, need_quant=True, use_step=False, limit=7.0):
     # group_list_type must be 0 cusum or 1 count
     if group_list_type not in [0, 1]:
         raise ValueError(f"group_list_type must be 0 or 1, but got {group_list_type}")
@@ -95,6 +103,8 @@ def swiglu_quant(x, group_list, group_list_type, need_quant=True):
         NUM_CORES=num_vectorcore,
         DTYPE_MAX=127,
         SCALE=need_quant,
+        USE_STEP=use_step,
+        LIMIT=limit,
         multibuffer=True,
     )
     return out, scale
