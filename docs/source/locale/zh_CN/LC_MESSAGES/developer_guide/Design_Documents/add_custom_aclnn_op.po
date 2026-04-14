@@ -1,0 +1,88 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-09 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:1
+msgid "Adding a custom aclnn operation"
+msgstr "添加自定义 aclnn 算子"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:3
+msgid ""
+"This document describes how to add a custom aclnn operation to vllm-"
+"ascend."
+msgstr ""
+"本文档介绍如何向 vllm-ascend 添加自定义 aclnn 算子。"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:5
+msgid "How custom aclnn operation works in vllm-ascend?"
+msgstr "自定义 aclnn 算子在 vllm-ascend 中如何工作？"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:7
+msgid ""
+"Custom aclnn operations are built and installed into "
+"`vllm_ascend/cann_ops_custom` directory during the build process of vllm-"
+"ascend. Then the aclnn operators are bound to `torch.ops._C_ascend` "
+"module, enabling users to invoke them in vllm-ascend python code."
+msgstr ""
+"自定义 aclnn 算子在 vllm-ascend 构建过程中会被编译并安装到 `vllm_ascend/cann_ops_custom` 目录。"
+"然后，aclnn 算子会被绑定到 `torch.ops._C_ascend` 模块，使用户能够在 vllm-ascend 的 Python 代码中调用它们。"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:9
+msgid "To enable custom operations, use the following code:"
+msgstr "要启用自定义算子，请使用以下代码："
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:17
+msgid "How to add a custom aclnn operation?"
+msgstr "如何添加自定义 aclnn 算子？"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:19
+msgid "Create a new operation folder under `csrc` directory."
+msgstr "在 `csrc` 目录下创建一个新的算子文件夹。"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:20
+msgid ""
+"Create `op_host` and `op_kernel` directories for host and kernel source "
+"code."
+msgstr "创建 `op_host` 和 `op_kernel` 目录，分别存放主机端和内核端源代码。"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:21
+msgid ""
+"Add build options in `csrc/build_aclnn.sh` for supported SOC. Note that "
+"multiple ops should be separated with `;`, i.e. `CUSTOM_OPS=op1;op2;op3`."
+msgstr ""
+"在 `csrc/build_aclnn.sh` 中为支持的 SOC 添加编译选项。注意，多个算子应使用 `;` 分隔，例如：`CUSTOM_OPS=op1;op2;op3`。"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:22
+msgid ""
+"Bind aclnn operators to torch.ops._C_ascend module in "
+"`csrc/torch_binding.cpp`."
+msgstr "在 `csrc/torch_binding.cpp` 中将 aclnn 算子绑定到 `torch.ops._C_ascend` 模块。"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:23
+msgid ""
+"Write a meta implementation in `csrc/torch_binding_meta.cpp` for the op "
+"to be captured into the aclgraph."
+msgstr "在 `csrc/torch_binding_meta.cpp` 中为算子编写 meta 实现，以便算子能够被捕获到 ACL 计算图中。"
+
+#: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:25
+msgid ""
+"After a successful build of vllm-ascend, the custom aclnn operation can "
+"be invoked in python code."
+msgstr "成功构建 vllm-ascend 后，即可在 Python 代码中调用自定义的 aclnn 算子。"

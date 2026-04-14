@@ -17,6 +17,7 @@
 # CANN-mem-based pytorch pluggable allocator to implement sleep mode.
 #
 import dataclasses
+import gc
 import os
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -202,6 +203,9 @@ class CaMemAllocator:
                 memcpy(cpu_ptr, dest_max, ptr, size_in_bytes, ACL_MEMCPY_DEVICE_TO_HOST)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+
+        gc.collect()
+        torch.npu.empty_cache()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """

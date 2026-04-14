@@ -1,0 +1,62 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/npugraph_ex.md:1
+msgid "Npugraph_ex"
+msgstr "Npugraph_ex"
+
+#: ../../source/user_guide/feature_guide/npugraph_ex.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/user_guide/feature_guide/npugraph_ex.md:5
+msgid ""
+"As introduced in the [RFC](https://github.com/vllm-project/vllm-"
+"ascend/issues/4715), this is a simple ACLGraph graph mode acceleration "
+"solution based on Fx graphs."
+msgstr ""
+如 [RFC](https://github.com/vllm-project/vllm-ascend/issues/4715) 中所述，这是一个基于 Fx 图的简单 ACLGraph 图模式加速方案。"
+
+#: ../../source/user_guide/feature_guide/npugraph_ex.md:7
+msgid "Using npugraph_ex"
+msgstr "使用 npugraph_ex"
+
+#: ../../source/user_guide/feature_guide/npugraph_ex.md:9
+msgid ""
+"Npugraph_ex will be enabled by default in the future, Take Qwen series "
+"models as an example to show how to configure it."
+msgstr "Npugraph_ex 未来将默认启用，以 Qwen 系列模型为例展示如何配置。"
+
+#: ../../source/user_guide/feature_guide/npugraph_ex.md:11
+msgid "Offline example:"
+msgstr "离线示例："
+
+#: ../../source/user_guide/feature_guide/npugraph_ex.md:28
+msgid "Online example:"
+msgstr "在线示例："
+
+#: ../../source/user_guide/feature_guide/npugraph_ex.md:35
+msgid ""
+"You can find more details about "
+"[npugraph_ex](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)"
+msgstr ""
+您可以在以下链接找到关于 [npugraph_ex]"
+"(https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html) 的更多详细信息"

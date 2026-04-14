@@ -88,7 +88,7 @@ def _build_mxfp_params(
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
 ) -> _stage_params.MoEMxfpParams | None:
-    if quant_type != QuantType.MXFP8:
+    if quant_type not in [QuantType.MXFP8, QuantType.MXFP4]:
         return None
 
     has_explicit_mxfp_args = any(
@@ -102,7 +102,7 @@ def _build_mxfp_params(
         )
     )
     if not has_explicit_mxfp_args:
-        raise ValueError("primitive MXFP params are required when quant_type is QuantType.MXFP8.")
+        raise ValueError("primitive MXFP params are required when quant_type is an MXFP quant type.")
 
     return _stage_params.MoEMxfpParams(
         act_quant_type=mxfp_act_quant_type,
@@ -208,7 +208,7 @@ def build_mlp_compute_input(
     use_fusion_ops: bool,
 ) -> MoEMlpComputeInput:
     if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
-        raise ValueError("fused_experts_input.quant.mxfp is required when quant_type is QuantType.MXFP8.")
+        raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
 
     return MoEMlpComputeInput(
         hidden_states=token_dispatch_output.hidden_states,

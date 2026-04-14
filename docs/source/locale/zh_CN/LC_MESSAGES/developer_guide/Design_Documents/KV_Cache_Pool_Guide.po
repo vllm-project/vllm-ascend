@@ -1,0 +1,359 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-09 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:1
+msgid "KV Cache Pool"
+msgstr "KV 缓存池"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:3
+msgid "Why KV Cache Pool?"
+msgstr "为什么需要 KV 缓存池？"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:5
+msgid ""
+"Prefix caching is an important feature in LLM inference that can reduce "
+"prefill computation time drastically."
+msgstr ""
+"前缀缓存是 LLM 推理中的一个重要特性，可以显著减少预填充计算时间。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:7
+msgid ""
+"However, the performance gain from prefix caching is highly dependent on "
+"the cache hit rate, while the cache hit rate can be limited if one only "
+"uses HBM for KV cache storage."
+msgstr ""
+"然而，前缀缓存的性能提升高度依赖于缓存命中率，而如果仅使用 HBM 进行 KV 缓存存储，缓存命中率可能会受到限制。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:9
+msgid ""
+"Hence, KV Cache Pool is proposed to utilize various types of storage "
+"including HBM, DRAM, and SSD, making a pool for KV Cache storage while "
+"making the prefix of requests visible across all nodes, increasing the "
+"cache hit rate for all requests."
+msgstr ""
+"因此，提出了 KV 缓存池方案，利用包括 HBM、DRAM 和 SSD 在内的多种存储类型构建 KV 缓存存储池，"
+"同时使请求前缀在所有节点间可见，从而提高所有请求的缓存命中率。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:11
+msgid ""
+"vLLM Ascend currently supports [MooncakeStore](https://github.com"
+"/kvcache-ai/Mooncake), one of the most recognized KV Cache storage "
+"engines."
+msgstr ""
+"vLLM Ascend 目前支持 [MooncakeStore](https://github.com/kvcache-ai/Mooncake)，"
+"这是最受认可的 KV 缓存存储引擎之一。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:13
+msgid ""
+"While one can utilize Mooncake Store in vLLM V1 engine by setting it as a"
+" remote backend of LMCache with GPU (see "
+"[Tutorial](https://github.com/LMCache/LMCache/blob/dev/examples/kv_cache_reuse/remote_backends/mooncakestore/README.md)),"
+" we find it would be better to integrate a connector that directly "
+"supports Mooncake Store and can utilize the data transfer strategy that "
+"best fits Huawei NPU hardware."
+msgstr ""
+"虽然可以通过将 Mooncake Store 设置为 LMCache 的远程后端来在 vLLM V1 引擎中使用它（参见"
+"[教程](https://github.com/LMCache/LMCache/blob/dev/examples/kv_cache_reuse/remote_backends/mooncakestore/README.md)）"
+"，但我们发现最好还是集成一个直接支持 Mooncake Store 的连接器，该连接器能够利用最适合华为 NPU 硬件的数据传输策略。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:15
+msgid ""
+"Hence, we propose to integrate Mooncake Store with a brand new "
+"**MooncakeStoreConnectorV1**, which is indeed largely inspired by "
+"**LMCacheConnectorV1** (see the `How is MooncakeStoreConnectorV1 "
+"Implemented?` section)."
+msgstr ""
+"因此，我们提出将 Mooncake Store 与全新的 **MooncakeStoreConnectorV1** 集成，"
+"该连接器在很大程度上受到 **LMCacheConnectorV1** 的启发（参见 `MooncakeStoreConnectorV1 是如何实现的？` 部分）。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:17
+msgid "Usage"
+msgstr "使用方法"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:19
+msgid ""
+"vLLM Ascend currently supports Mooncake Store for KV Cache Pool. To "
+"enable Mooncake Store, one needs to configure `kv-transfer-config` and "
+"choose `MooncakeStoreConnector` as the KV Connector."
+msgstr ""
+"vLLM Ascend 目前支持 Mooncake Store 作为 KV 缓存池。要启用 Mooncake Store，"
+"需要配置 `kv-transfer-config` 并选择 `MooncakeStoreConnector` 作为 KV 连接器。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:21
+msgid ""
+"For step-by-step deployment and configuration, please refer to the [KV "
+"Pool User "
+"Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_pool.html)."
+msgstr ""
+"有关逐步部署和配置，请参阅 [KV 池用户指南]"
+"(https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_pool.html)。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:23
+msgid "How it works?"
+msgstr "工作原理是什么？"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:25
+msgid ""
+"The KV Cache Pool integrates multiple memory tiers (HBM, DRAM, SSD, etc.)"
+" through a connector-based architecture."
+msgstr ""
+"KV 缓存池通过基于连接器的架构集成了多个内存层级（HBM、DRAM、SSD 等）。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:27
+msgid ""
+"Each connector implements a unified interface for storing, retrieving, "
+"and transferring KV blocks between tiers, depending on access frequency "
+"and hardware bandwidth."
+msgstr ""
+"每个连接器实现统一的接口，根据访问频率和硬件带宽在不同层级之间存储、检索和传输 KV 块。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:29
+msgid ""
+"When combined with vLLM’s Prefix Caching mechanism, the pool enables "
+"efficient caching both locally (in HBM) and globally (via Mooncake), "
+"ensuring that frequently used prefixes remain hot while less frequently "
+"accessed KV data can spill over to lower-cost memory."
+msgstr ""
+"当与 vLLM 的前缀缓存机制结合使用时，该池支持本地（HBM 中）和全局（通过 Mooncake）的高效缓存，"
+"确保常用前缀保持热状态，而访问较少的 KV 数据可以溢出到成本更低的内存中。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:31
+msgid "1. Combining KV Cache Pool with HBM Prefix Caching"
+msgstr "1. KV 缓存池与 HBM 前缀缓存的结合"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:33
+msgid ""
+"Prefix Caching with HBM is already supported by the vLLM V1 Engine. By "
+"introducing KV Connector V1, users can seamlessly combine HBM-based "
+"Prefix Caching with Mooncake-backed KV Pool."
+msgstr ""
+"vLLM V1 引擎已支持基于 HBM 的前缀缓存。通过引入 KV Connector V1，"
+"用户可以无缝地将基于 HBM 的前缀缓存与 Mooncake 支持的 KV 池结合使用。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:36
+msgid ""
+"The user can enable both features simply by enabling Prefix Caching, "
+"which is enabled by default in vLLM V1 unless the "
+"`--no_enable_prefix_caching` flag is set, and setting up the KV Connector"
+" for KV Pool (e.g., the MooncakeStoreConnector)."
+msgstr ""
+"用户只需启用前缀缓存（除非设置了 `--no_enable_prefix_caching` 标志，否则 vLLM V1 中默认启用）"
+"并为 KV 池设置 KV 连接器（例如 MooncakeStoreConnector），即可同时启用这两个特性。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:38
+msgid "**Workflow**:"
+msgstr "**工作流程**："
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:40
+msgid "The engine first checks for prefix hits in the HBM cache."
+msgstr "引擎首先检查 HBM 缓存中的前缀命中。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:42
+msgid ""
+"After getting the number of hit tokens on HBM, it queries the KV Pool via"
+" the connector. If there are additional hits in the KV Pool, we get the "
+"**additional blocks only** from the KV Pool, and get the rest of the "
+"blocks directly from HBM to minimize the data transfer latency."
+msgstr ""
+"获取 HBM 上的命中 token 数量后，通过连接器查询 KV 池。如果 KV 池中有额外的命中，"
+"我们**仅从 KV 池获取额外的块**，而直接从 HBM 获取其余块，以最小化数据传输延迟。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:44
+msgid ""
+"After the KV Caches in the KV Pool are loaded into HBM, the remaining "
+"process is the same as Prefix Caching in HBM."
+msgstr ""
+"KV 池中的 KV 缓存加载到 HBM 后，剩余过程与 HBM 中的前缀缓存相同。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:46
+msgid "2. Combining KV Cache Pool with Mooncake PD Disaggregation"
+msgstr "2. KV 缓存池与 Mooncake PD 分离的结合"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:48
+msgid ""
+"When used together with Mooncake PD (Prefill-Decode) Disaggregation, the "
+"KV Cache Pool can further decouple prefill and decode stages across "
+"devices or nodes."
+msgstr ""
+"当与 Mooncake PD（预填充-解码）分离一起使用时，KV 缓存池可以进一步解耦跨设备或节点的预填充和解码阶段。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:50
+msgid ""
+"Currently, we only perform put and get operations of KV Pool for "
+"**Prefill Nodes**, and Decode Nodes get their KV Cache from Mooncake P2P "
+"KV Connector, i.e., MooncakeConnector."
+msgstr ""
+"目前，我们仅对**预填充节点**执行 KV 池的 put 和 get 操作，而解码节点从 Mooncake P2P KV 连接器（即 MooncakeConnector）获取其 KV 缓存。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:52
+msgid ""
+"The key benefit of doing this is that we can keep the gain in performance"
+" by computing less with Prefix Caching from HBM and KV Pool for Prefill "
+"Nodes, while not sacrificing the data transfer efficiency between Prefill"
+" and Decode nodes with P2P KV Connector that transfers KV Caches between "
+"NPU devices directly."
+msgstr ""
+"这样做的主要好处是，通过 HBM 和 KV 池的前缀缓存减少预填充节点的计算量来保持性能提升，"
+"同时不会牺牲预填充节点和解码节点之间的数据传输效率——P2P KV 连接器直接在 NPU 设备之间传输 KV 缓存。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:54
+msgid ""
+"To enable this feature, we need to set up both Mooncake Connector and "
+"Mooncake Store Connector with a Multi Connector, which is a KV Connector "
+"class provided by vLLM that can call multiple KV Connectors in a specific"
+" order."
+msgstr ""
+"要启用此特性，我们需要使用 Multi Connector 同时设置 Mooncake Connector 和 Mooncake Store Connector，"
+"Multi Connector 是 vLLM 提供的 KV 连接器类，可以按特定顺序调用多个 KV 连接器。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:56
+msgid ""
+"For details, please also refer to the Mooncake Connector Store Deployment"
+" Guide."
+msgstr ""
+"有关详细信息，请参阅 Mooncake Connector Store 部署指南。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:58
+msgid "How is MooncakeStoreConnectorV1 Implemented?"
+msgstr "MooncakeStoreConnectorV1 是如何实现的？"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:60
+msgid ""
+"**MooncakeStoreConnectorV1** inherits the KV Connector V1 class in vLLM "
+"V1: through implementing the required methods defined in the KV connector"
+" V1 base class, one can integrate a third-party KV cache transfer/storage"
+" backend into the vLLM framework."
+msgstr ""
+"**MooncakeStoreConnectorV1** 继承 vLLM V1 中的 KV Connector V1 类：通过实现 KV connector V1 基类中定义的必需方法，"
+"可以将第三方 KV 缓存传输/存储后端集成到 vLLM 框架中。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:62
+msgid ""
+"MooncakeStoreConnectorV1 is also largely inspired by LMCacheConnectorV1 "
+"in terms of the `Lookup Engine`/`Lookup Client` design for looking up KV "
+"cache keys, and the `ChunkedTokenDatabase` class for processing tokens "
+"into prefix-aware hashes as well as other hashing related designs. On top"
+" of this, we have also added our own design including `KVTransferThread` "
+"that allows async `get` and `put` of KV caches with multi-threading, and "
+"NPU-related data transfer optimization such as removing the `LocalBuffer`"
+" in LMCache to remove redundant data transfer."
+msgstr ""
+"MooncakeStoreConnectorV1 在查找 KV 缓存键的 `Lookup Engine`/`Lookup Client` 设计，"
+"以及将 token 处理为前缀感知哈希的 `ChunkedTokenDatabase` 类和其他哈希相关设计方面，"
+"也很大程度上受到了 LMCacheConnectorV1 的启发。在此基础上，我们还添加了自己的设计，"
+"包括支持多线程异步 `get` 和 `put` KV 缓存的 `KVTransferThread`，"
+"以及与 NPU 相关的数据传输优化，例如移除 LMCache 中的 `LocalBuffer` 以消除冗余数据传输。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:64
+msgid ""
+"The KV Connector methods that need to be implemented can be categorized "
+"into scheduler-side methods that are called in V1 scheduler and worker-"
+"side methods that are called in V1 worker, namely:"
+msgstr ""
+"需要实现的 KV Connector 方法可以分为调度器侧方法（在 V1 调度器中调用）和工作器侧方法（在 V1 工作器中调用），即："
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:66
+msgid "KV Connector Scheduler-Side Methods"
+msgstr "KV 连接器调度器侧方法"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:68
+msgid ""
+"`get_num_new_matched_tokens`: Get prefix cache hit in number of tokens "
+"through looking up into the KV pool.   `update_states_after_alloc`:  "
+"Update KVConnector state after temporary buffer alloc.   "
+"`build_connector_meta`: Attach the connector metadata to the request "
+"object.   `request_finished`: Once a request is finished, determine "
+"whether request blocks should be freed now or will be sent asynchronously"
+" and freed later."
+msgstr ""
+"`get_num_new_matched_tokens`：通过查找 KV 池获取前缀缓存命中的 token 数量。\n"
+"`update_states_after_alloc`：临时缓冲区分配后更新 KVConnector 状态。\n"
+"`build_connector_meta`：将连接器元数据附加到请求对象。\n"
+"`request_finished`：请求完成后，确定请求块是应立即释放，还是将异步发送并在稍后释放。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:73
+msgid "Connector Worker-Side Methods"
+msgstr "连接器工作器侧方法"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:75
+msgid ""
+"`register_kv_caches`: Register KV cache buffers needed for KV cache "
+"transfer. `start_load_kv`: Perform KV cache load operation that transfers"
+" KV cache from storage to device. `wait_for_layer_load`: Optional; Wait "
+"for layer load in layerwise + async KV load scenario. `save_kv_layer`: "
+"Optional; Do layerwise KV cache put into KV Pool. `wait_for_save`: Wait "
+"for KV Save to finish if async KV cache save/put. `get_finished`: Get "
+"request that finished KV transfer, `done_sending` if `put` finished, "
+"`done_receiving` if `get` finished."
+msgstr ""
+"`register_kv_caches`：注册 KV 缓存传输所需的 KV 缓存缓冲区。\n"
+"`start_load_kv`：执行 KV 缓存加载操作，将 KV 缓存从存储传输到设备。\n"
+"`wait_for_layer_load`：可选；在逐层 + 异步 KV 加载场景中等待层加载完成。\n"
+"`save_kv_layer`：可选；执行逐层 KV 缓存放入 KV 池的操作。\n"
+"`wait_for_save`：如果是异步 KV 缓存保存/放入，等待 KV 保存完成。\n"
+"`get_finished`：获取完成 KV 传输的请求，如果 `put` 完成则为 `done_sending`，"
+"如果 `get` 完成则为 `done_receiving`。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:82
+msgid "DFX"
+msgstr "DFX"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:84
+msgid ""
+"When looking up a key in KV Pool, if we cannot find the key, there is no "
+"Cache Hit for this specific block; we return no hit for this block and do"
+" not look up further blocks for the current request."
+msgstr ""
+"在 KV 池中查找键时，如果找不到该键，则该特定块没有缓存命中；我们返回该块未命中，"
+"并且不再为当前请求查找后续块。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:85
+msgid ""
+"Similarly, when we are trying to put a block into KV Pool and it fails, "
+"we do not put further blocks (subject to change)."
+msgstr ""
+"类似地，当我们尝试将块放入 KV 池但失败时，我们不会放入后续块（此行为可能更改）。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:87
+msgid "Limitations"
+msgstr "限制"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:89
+msgid ""
+"Currently, Mooncake Store for vLLM-Ascend only supports DRAM as the "
+"storage for KV Cache pool."
+msgstr ""
+"目前，vLLM-Ascend 的 Mooncake Store 仅支持 DRAM 作为 KV 缓存池的存储。"
+
+#: ../../source/developer_guide/Design_Documents/KV_Cache_Pool_Guide.md:91
+msgid ""
+"For now, if we successfully looked up a key and found it exists, but "
+"failed to get it when calling KV Pool's get function, we just output a "
+"log indicating the get operation failed and keep going; hence, the "
+"accuracy of that specific request may be affected. We will handle this "
+"situation by falling back the request and re-compute everything assuming "
+"there's no prefix cache hit (or even better, revert only one block and "
+"keep using the Prefix Caches before that)."
+msgstr ""
+"目前，如果我们成功查找到一个键且确认其存在，但在调用 KV Pool 的 get 函数时获取失败，"
+"我们仅输出一条日志表明 get 操作失败并继续执行；因此，该特定请求的准确性可能会受到影响。"
+"我们将通过回退请求并假设没有前缀缓存命中来重新计算所有内容来处理这种情况"
+"（或者更好的做法是仅回退一个块并继续使用该块之前的前缀缓存）。"

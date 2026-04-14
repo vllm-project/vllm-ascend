@@ -1,0 +1,240 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-01-22 17:09+0800\n"
+"PO-Revision-Date: 2026-01-22 16:25+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:1
+msgid "UCM-Enhanced Prefix Caching Deployment Guide"
+msgstr "UCM增强的前缀缓存部署"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:5
+msgid ""
+"Unified Cache Management (UCM) provides an external KV-cache storage "
+"layer designed for prefix-caching scenarios in vLLM/vLLM-Ascend. Unlike "
+"KV Pooling, which expands prefix-cache capacity only by aggregating "
+"device memory and therefore remains limited by HBM/DRAM size and lacks "
+"persistence, UCM decouples compute from storage and adopts a tiered "
+"design. Each node uses local DRAM as a fast cache, while a shared "
+"backend—such as 3FS or enterprise-grade storage—serves as the persistent "
+"KV store. This approach removes the capacity ceiling imposed by device "
+"memory, enables durable and reliable prefix caching, and allows cache "
+"capacity to scale with the storage system rather than with compute "
+"resources."
+msgstr ""
+"Unified Cache Management (UCM) 为 vLLM/vLLM-Ascend 中的 prefix-caching "
+"场景提供了一个外部 KV-cache 存储层。与仅通过聚合设备内存来扩展前缀缓存容量的 KV Pooling 不同（后者仍受 HBM/DRAM "
+"大小限制且缺乏持久性），UCM 实现了计算与存储的解耦，并采用了分层设计。每个节点使用本地 DRAM 作为快速缓存，而共享后端（如 3FS "
+"或企业级存储）作为持久化 KV 存储。这种方法消除了设备内存带来的容量上限，实现了持久且可靠的前缀缓存，并允许缓存容量随存储系统而非计算资源扩展。"
+"\n"
+"\n"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:7
+msgid "Prerequisites"
+msgstr "前置条件"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:9
+msgid "OS: Linux"
+msgstr "操作系统：Linux"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:10
+msgid "A hardware with Ascend NPU. It’s usually the Atlas 800 A2 series."
+msgstr "配备 Ascend NPU 的硬件。通常为 Atlas 800 A2 系列。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:11
+msgid "**vLLM: main branch**"
+msgstr "**vLLM：main 分支**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:12
+msgid "**vLLM Ascend: main branch**"
+msgstr "**vLLM Ascend：main 分支**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:14
+msgid "UCM Installation"
+msgstr "UCM 安装"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:16
+msgid ""
+"**Please refer to the [official UCM installation guide for Ascend "
+"NPU](https://ucm.readthedocs.io/en/latest/getting-"
+"started/quickstart_vllm_ascend.html)**"
+msgstr ""
+"**请参考 [针对 Ascend NPU 的官方 UCM 安装指南](https://ucm.readthedocs.io/en/latest"
+"/getting-started/quickstart_vllm_ascend.html)**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:18
+msgid "Configure UCM for Prefix Caching"
+msgstr "为 Prefix Caching 配置 UCM"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:20
+msgid ""
+"Modify the UCM configuration file to specify which UCM connector to use "
+"and where KV blocks should be stored.   You may directly edit the example"
+" file at:"
+msgstr "修改 UCM 配置文件以指定使用的 UCM connector 以及 KV block 的存储位置。您可以直接编辑以下示例文件："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:23
+msgid "`unified-cache-management/examples/ucm_config_example.yaml`"
+msgstr "`unified-cache-management/examples/ucm_config_example.yaml`"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:25
+msgid ""
+"**For updated configuration options, please refer to the [official UCM "
+"documentation for prefix-caching](https://ucm.readthedocs.io/en/latest"
+"/user-guide/prefix-cache/nfs_store.html)**"
+msgstr ""
+"**有关更新的配置选项，请参考 [针对 prefix-caching 的官方 UCM "
+"文档](https://ucm.readthedocs.io/en/latest/user-guide/prefix-"
+"cache/nfs_store.html)**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:27
+msgid "A minimal configuration looks like this:"
+msgstr "最小化配置如下所示："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:39
+msgid "Explanation:"
+msgstr "参数说明："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:41
+msgid ""
+"ucm_connector_name: \"UcmNfsStore\": Specifies `UcmNfsStore` as the UCM "
+"connector."
+msgstr "ucm_connector_name: \"UcmNfsStore\": 指定 `UcmNfsStore` 作为 UCM connector。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:44
+msgid ""
+"storage_backends: Specify the directory used for storing KV blocks. It "
+"can be a local directory or an NFS-mounted path. UCM will store KV blocks"
+" here.  **⚠️ Make sure to replace `\"/mnt/test\"` with your actual "
+"storage directory.**"
+msgstr ""
+"storage_backends: 指定用于存储 KV block 的目录。它可以是本地目录或 NFS 挂载路径。UCM 将在此处存储 KV "
+"block。**⚠️ 请务必将 `\"/mnt/test\"` 替换为您实际的存储目录。**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:48
+msgid "use_direct: Whether to enable direct I/O (optional). Default is `false`."
+msgstr "use_direct: 是否启用 Direct I/O（可选）。默认为 `false`。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:51
+msgid ""
+"load_only_first_rank: Controls whether only rank 0 loads KV cache and "
+"broadcasts it to other ranks.   This feature is currently not supported "
+"on Ascend, so it must be set to `false` (all ranks load/dump "
+"independently)."
+msgstr ""
+"load_only_first_rank: 控制是否仅由 rank 0 加载 KV cache 并广播给其他 rank。此特性目前在 Ascend"
+" 上暂不支持，因此必须设置为 `false`（所有 rank 独立进行加载/转储）。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:55
+msgid "Launching Inference"
+msgstr "启动推理"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:57
+msgid ""
+"In this guide, we describe **online inference** using vLLM with the UCM "
+"connector, deployed as an OpenAI-compatible server. For best performance "
+"with UCM, it is recommended to set `block_size` to 128."
+msgstr ""
+"在本指南中，我们介绍使用带有 UCM connector 的 vLLM 进行**在线推理**，并部署为兼容 OpenAI 标准的服务。为了获得 "
+"UCM 的最佳性能，建议将 `block_size` 设置为 128。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:59
+msgid "To start the vLLM server with the Qwen/Qwen2.5-14B-Instruct model, run:"
+msgstr "使用 Qwen/Qwen2.5-14B-Instruct 模型启动 vLLM server，运行："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:79
+msgid ""
+"**⚠️ Make sure to replace `\"/vllm-workspace/unified-cache-"
+"management/examples/ucm_config_example.yaml\"` with your actual config "
+"file path.**"
+msgstr ""
+"**⚠️ 请务必将 `\"/vllm-workspace/unified-cache-"
+"management/examples/ucm_config_example.yaml\"` 替换为您实际的配置文件路径。**"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:81
+msgid "If you see log as below:"
+msgstr "如果您看到如下日志："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:89
+msgid ""
+"Congratulations, you have successfully started the vLLM server with UCM "
+"connector!"
+msgstr "恭喜，您已成功启动带有 UCM connector 的 vLLM server！"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:91
+msgid "Evaluating UCM Prefix Caching Performance"
+msgstr "评估 UCM Prefix Caching 性能"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:92
+msgid ""
+"After launching the vLLM server with `UCMConnector` enabled, the easiest "
+"way to observe the prefix caching effect is to run the built-in `vllm "
+"bench` CLI. Executing the following command **twice** in a separate "
+"terminal shows the improvement clearly."
+msgstr ""
+"在启动启用 `UCMConnector` 的 vLLM server 后，观察前缀缓存效果最简单的方法是运行内置的 `vllm bench` "
+"CLI。在另一个终端中执行以下命令**两次**，可以清晰地看到性能提升。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:111
+msgid "After the first execution"
+msgstr "第一次执行后"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:112
+msgid "The `vllm bench` terminal prints the benchmark result:"
+msgstr "`vllm bench` 终端打印基准测试结果："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:119
+msgid "Inspecting the vLLM server logs reveals entries like:"
+msgstr "检查 vLLM server 日志会发现如下条目："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:125
+msgid ""
+"This indicates that for the first inference request, UCM did not hit any "
+"cached KV blocks. As a result, the full 16K-token prefill must be "
+"computed, leading to a relatively large TTFT."
+msgstr ""
+"这表明对于第一个推理请求，UCM 未命中任何缓存的 KV block。因此，必须计算完整的 16K-token 预填充（prefill），导致 "
+"TTFT 相对较大。"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:127
+msgid "After the second execution"
+msgstr "第二次执行后"
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:128
+msgid "Running the same benchmark again produces:"
+msgstr "再次运行相同的基准测试会产生："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:135
+msgid "The vLLM server logs now contain similar entries:"
+msgstr "vLLM server 日志现在包含类似的条目："
+
+#: ../../source/user_guide/feature_guide/ucm_deployment.md:141
+msgid ""
+"This indicates that during the second request, UCM successfully retrieved"
+" all 125 cached KV blocks from the storage backend. Leveraging the fully "
+"cached prefix significantly reduces the initial latency observed by the "
+"model, yielding an approximate **8× improvement in TTFT** compared to the"
+" initial run."
+msgstr ""
+"这表明在第二个请求期间，UCM 成功地从存储后端检索了所有 125 个缓存的 KV "
+"block。利用完全缓存的前缀显著降低了模型的初始延迟，与初始运行相比，TTFT 提升了约 **8 倍**。"
+

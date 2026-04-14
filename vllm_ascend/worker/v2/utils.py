@@ -23,3 +23,18 @@ def torch_cuda_wrapper():
         yield
     finally:
         pass
+
+
+@contextmanager
+def communicator_switch():
+    import vllm.distributed.device_communicators.cuda_communicator
+
+    from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
+
+    CudaCommunicator = vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator
+    vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator = NPUCommunicator
+
+    try:
+        yield
+    finally:
+        vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator = CudaCommunicator

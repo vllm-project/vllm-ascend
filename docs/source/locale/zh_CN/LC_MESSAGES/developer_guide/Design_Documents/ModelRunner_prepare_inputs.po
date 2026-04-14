@@ -1,0 +1,688 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-09 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:1
+msgid "Prepare inputs for model forwarding"
+msgstr "为模型前向传播准备输入"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:3
+msgid "Purpose"
+msgstr "目的"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:5
+msgid "Information required to perform model forward pass:"
+msgstr "执行模型前向传播所需的信息："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:7
+msgid "the inputs"
+msgstr "输入"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:8
+msgid "the corresponding attention metadata of the inputs"
+msgstr "输入对应的注意力元数据"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:10
+msgid "The following diagram shows what we should prepare for model inference."
+msgstr "下图展示了模型推理需要准备的内容。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:20
+msgid ""
+"Therefore, as long as we have these two pieces of information mentioned "
+"above, we can perform the model's forward propagation."
+msgstr ""
+"因此，只要有了上述两条信息，我们就可以执行模型的前向传播。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:22
+msgid ""
+"This document will explain **how we obtain the inputs and their "
+"corresponding attention metadata**."
+msgstr ""
+"本文档将解释**如何获取输入及其对应的注意力元数据**。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:24
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:26
+msgid "1. Obtain inputs"
+msgstr "1. 获取输入"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:28
+msgid "The workflow of obtaining inputs:"
+msgstr "获取输入的工作流程："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:30
+msgid ""
+"Get `token positions`: relative position of each token within its request"
+" sequence."
+msgstr ""
+"获取 `token positions`：每个 token 在其请求序列中的相对位置。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:32
+msgid "Get `token indices`: index of each scheduled token in the token table."
+msgstr "获取 `token indices`：每个调度 token 在 token 表中的索引。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:34
+msgid ""
+"Get `Token IDs`: using token indices to retrieve the Token IDs from "
+"**token id table**."
+msgstr ""
+"获取 `Token IDs`：使用 token indices 从 **token id table** 中检索 Token ID。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:36
+msgid ""
+"At last, these `Token IDs` are required to be fed into a model, and "
+"`positions` should also be sent into the model to create `Rope` (Rotary "
+"positional embedding). Both of them are the inputs of the model."
+msgstr ""
+"最后，需要将这些 `Token IDs` 输入模型，同时 `positions` 也应传入模型以创建 `Rope`（旋转位置编码）。"
+"这两者都是模型的输入。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:38
+msgid ""
+"**Note**: The `Token IDs` are the inputs of a model, so we also call them"
+" `Inputs IDs`."
+msgstr ""
+"**注意**：`Token IDs` 是模型的输入，因此我们也称之为 `Inputs IDs`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:40
+msgid "2. Build inputs attention metadata"
+msgstr "2. 构建输入的注意力元数据"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:42
+msgid "A model requires these attention metadata during the forward pass:"
+msgstr "模型在前向传播过程中需要以下注意力元数据："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:44
+msgid ""
+"`query start location`: start and end location of each request "
+"corresponding to the scheduled tokens."
+msgstr ""
+"`query start location`：每个请求对应调度 token 的起始和结束位置。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:45
+msgid ""
+"`sequence length`: length of each request including both computed tokens "
+"and newly scheduled tokens."
+msgstr ""
+"`sequence length`：每个请求的长度，包括已计算的 token 和新调度的 token。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:46
+msgid "`number of computed tokens`: number of computed tokens for each request."
+msgstr "`number of computed tokens`：每个请求已计算的 token 数量。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:47
+msgid "`number of requests`: number of requests in this batch."
+msgstr "`number of requests`：此批次中的请求数量。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:48
+msgid "`number of tokens`: total number of scheduled tokens in this batch."
+msgstr "`number of tokens`：此批次中调度的 token 总数。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:49
+msgid ""
+"**`block table`**: translates the logical address (within its sequence) "
+"of each block to its global physical address in the device's memory."
+msgstr ""
+"**`block table`**：将每个块的逻辑地址（在其序列内）转换为设备内存中的全局物理地址。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:50
+msgid ""
+"`max query len`: the longest scheduled tokens length in this request "
+"batch."
+msgstr ""
+"`max query len`：此请求批次中最长的调度 token 长度。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:51
+msgid ""
+"`slot mapping`: indices of each token that input token will be stored "
+"into."
+msgstr ""
+"`slot mapping`：每个输入 token 将被存储到的索引位置。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:52
+msgid ""
+"`attention mask`: mask matrix applied to attention scores before softmax "
+"to control which tokens can attend to each other (usually a causal "
+"attention)."
+msgstr ""
+"`attention mask`：在 softmax 之前应用于注意力分数的掩码矩阵，用于控制哪些 token 可以相互关注（通常是因果注意力）。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:54
+msgid "Before start"
+msgstr "开始之前"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:56
+msgid "There are mainly three types of variables."
+msgstr "主要有三种类型的变量。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:58
+msgid ""
+"token level: represents one attribute corresponding to each scheduled "
+"token, so the length of this variable is the number of scheduled tokens."
+msgstr ""
+"token 级别：表示每个调度 token 对应的一个属性，因此该变量的长度等于调度 token 的数量。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:59
+msgid ""
+"request level: represents one attribute of each scheduled request, whose "
+"length usually is the number of scheduled requests. (`query start "
+"location` is a special case, which has one more element.)"
+msgstr ""
+"request 级别：表示每个调度请求的一个属性，其长度通常等于调度请求的数量。（`query start location` 是特殊情况，多一个元素。）"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:60
+msgid "system level:"
+msgstr "系统级别："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:61
+msgid ""
+"**Token IDs table**: stores the token IDs (i.e. the inputs of a model) of"
+" each request. The shape of this table is `(max num request, max model "
+"len)`. Here, `max num request` is the maximum count of concurrent "
+"requests allowed in a forward batch and `max model len` is the maximum "
+"token count that can be handled at one request sequence in this model."
+msgstr ""
+"**Token IDs table**：存储每个请求的 token ID（即模型的输入）。该表的形状为 `(max num request, max model len)`。"
+"其中，`max num request` 是前向批次中允许的最大并发请求数，`max model len` 是该模型中单个请求序列能处理的最大 token 数量。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:62
+msgid ""
+"**Block table**: translates the logical address (within its sequence) of "
+"each block to its global physical address in the device's memory. The "
+"shape of this table is `(max num request, max model len / block size)`"
+msgstr ""
+"**Block table**：将每个块的逻辑地址（在其序列内）转换为设备内存中的全局物理地址。"
+"该表的形状为 `(max num request, max model len / block size)`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:64
+msgid ""
+"**Note**: Both of these two tables come from the `_update_states` method "
+"before **preparing inputs**. You can take a look if you need more "
+"inspiration."
+msgstr ""
+"**注意**：这两个表都来自**准备输入**之前的 `_update_states` 方法。如果需要更多灵感，可以查看一下。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:66
+msgid "Tips"
+msgstr "提示"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:68
+msgid ""
+"Simply put, a `token ID` is an **integer** (usually `int32`), which "
+"represents a token. Example of `Token ID`:"
+msgstr ""
+"简单来说，`token ID` 是一个**整数**（通常是 `int32`），代表一个 token。`Token ID` 示例："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:88
+msgid "Go through details"
+msgstr "详细说明"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:90
+msgid "Assumptions:"
+msgstr "假设条件："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:92
+msgid "maximum number of tokens that can be scheduled at once: 10"
+msgstr "单次最多可调度的 token 数量：10"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:93
+msgid "`block size`: 2"
+msgstr "`block size`：2"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:94
+msgid ""
+"Totally schedule 3 requests. Their prompt lengths are 3, 2, and 8 "
+"respectively."
+msgstr ""
+"总共调度 3 个请求。它们的 prompt 长度分别为 3、2 和 8。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:95
+msgid ""
+"`max model length`: 12 (the maximum token count that can be handled at "
+"one request sequence in a model)."
+msgstr ""
+"`max model length`：12（模型中单个请求序列能处理的最大 token 数量）。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:97
+msgid ""
+"These assumptions are configured at the beginning when starting vLLM. "
+"They are not fixed, so you can manually set them."
+msgstr ""
+"这些假设条件在启动 vLLM 时配置。它们不是固定的，可以手动设置。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:99
+msgid "Step 1: All requests in the prefill phase"
+msgstr "步骤 1：所有请求处于预填充阶段"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:101
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:213
+msgid "Obtain inputs"
+msgstr "获取输入"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:103
+#, python-brace-format
+msgid ""
+"As the maximum number of tokens that can be scheduled is 10, the "
+"scheduled tokens of each request can be represented as `{'0': 3, '1': 2, "
+"'2': 5}`. Note that `request_2` uses chunked prefill, leaving 3 prompt "
+"tokens unscheduled."
+msgstr ""
+"由于单次最多可调度的 token 数量为 10，每个请求的调度 token 可表示为 `{'0': 3, '1': 2, '2': 5}`。"
+"注意，`request_2` 使用了分块预填充，剩余 3 个 prompt token 未被调度。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:105
+msgid "1. Get token positions"
+msgstr "1. 获取 token positions"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:107
+msgid ""
+"First, determine which request each token belongs to: tokens 0–2 are "
+"assigned to **request_0**, tokens 3–4 to **request_1**, and tokens 5–9 to"
+" **request_2**. To represent this mapping, we use `request indices`, for "
+"example, `request indices`: `[0, 0, 0, 1, 1, 2, 2, 2, 2, 2]`."
+msgstr ""
+"首先，确定每个 token 属于哪个请求：token 0–2 分配给 **request_0**，token 3–4 分配给 **request_1**，"
+"token 5–9 分配给 **request_2**。为了表示这种映射关系，我们使用 `request indices`，例如 `request indices`：`[0, 0, 0, 1, 1, 2, 2, 2, 2, 2]`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:109
+msgid ""
+"For each request, use **the number of computed tokens** + **the relative "
+"position of current scheduled tokens** (`request_0: [0 + 0, 0 + 1, 0 + "
+"2]`, `request_1: [0 + 0, 0 + 1]`, `request_2: [0 + 0, 0 + 1,..., 0 + 4]`)"
+" and then concatenate them together (`[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`)."
+msgstr ""
+"对于每个请求，使用**已计算的 token 数量** + **当前调度 token 的相对位置**"
+"（`request_0: [0 + 0, 0 + 1, 0 + 2]`，`request_1: [0 + 0, 0 + 1]`，`request_2: [0 + 0, 0 + 1, ..., 0 + 4]`），"
+"然后将它们连接在一起（`[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`）。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:111
+msgid ""
+"Note: there is a more efficient way (using `request indices`) to create "
+"positions in actual code."
+msgstr ""
+"注意：在实际代码中，有一种更高效的方法（使用 `request indices`）来创建 positions。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:113
+msgid ""
+"Finally, `token positions` can be obtained as `[0, 1, 2, 0, 1, 0, 1, 2, "
+"3, 4]`. This variable is **token level**."
+msgstr ""
+"最终，`token positions` 为 `[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`。该变量是 **token 级别**的。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:115
+msgid "2. Get token indices"
+msgstr "2. 获取 token indices"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:117
+msgid ""
+"The shape of the current **Token IDs table** is `(max num request, max "
+"model len)`."
+msgstr ""
+"当前 **Token IDs table** 的形状为 `(max num request, max model len)`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:119
+msgid ""
+"Why are these `T_3_5`, `T_3_6`, `T_3_7` in this table without being "
+"scheduled?"
+msgstr ""
+"为什么表中的 `T_3_5`、`T_3_6`、`T_3_7` 没有被调度？"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:121
+msgid ""
+"We fill all Token IDs in one request sequence to this table at once, but "
+"we only retrieve the tokens we scheduled this time. Then we retrieve the "
+"remaining Token IDs next time."
+msgstr ""
+"我们一次性将某个请求序列中的所有 Token ID 填入表中，但只检索本次调度的 token。剩余的 Token ID 将在下次检索。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:133
+msgid "Note that `T_x_x` is an `int32`."
+msgstr "注意，`T_x_x` 是 `int32` 类型。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:135
+msgid ""
+"Let's say `M = max model len`. Then we can use `token positions` together"
+" with `request indices` of each token to construct `token indices`."
+msgstr ""
+"设 `M = max model len`。然后我们可以使用 `token positions` 和每个 token 的 `request indices` 来构造 `token indices`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:137
+msgid ""
+"So `token indices` = `[0 + 0 * M, 1 + 0 * M, 2 + 0 * M, 0 + 1 * M, 1 + 1 "
+"* M, 0 + 2 * M, 1 + 2 * M, 2 + 2 * M, 3 + 2 * M, 4 + 2 * M]` = `[0, 1, 2,"
+" 12, 13, 24, 25, 26, 27, 28]`"
+msgstr ""
+"因此 `token indices` = `[0 + 0 * M, 1 + 0 * M, 2 + 0 * M, 0 + 1 * M, 1 + 1 * M, 0 + 2 * M, 1 + 2 * M, 2 + 2 * M, 3 + 2 * M, 4 + 2 * M]` = `[0, 1, 2, 12, 13, 24, 25, 26, 27, 28]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:139
+msgid "3. Retrieve the Token IDs"
+msgstr "3. 检索 Token IDs"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:141
+msgid ""
+"We use `token indices` to select out the corresponding `Input IDs` from "
+"the token table. The pseudocode is as follows:"
+msgstr ""
+"我们使用 `token indices` 从 token 表中选出对应的 `Input IDs`。伪代码如下："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:147
+msgid "As mentioned before, we refer to these `Token IDs` as `Input IDs`."
+msgstr "如前所述，我们将这些 `Token IDs` 称为 `Input IDs`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:149
+msgid ""
+"`Input IDs` = `[T_0_0, T_0_1, T_0_2, T_1_0, T_1_1, T_2_0, T_2_1, T_3_2, "
+"T_3_3, T_3_4]`"
+msgstr "`Input IDs` = `[T_0_0, T_0_1, T_0_2, T_1_0, T_1_1, T_2_0, T_2_1, T_3_2, T_3_3, T_3_4]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:151
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:237
+msgid "Build inputs attention metadata"
+msgstr "构建输入的注意力元数据"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:153
+msgid ""
+"In the current **Block Table**, we use the first block (i.e. block_0) to "
+"mark the unused block. The shape of the block is `(max num request, max "
+"model len / block size)`, where `max model len / block size = 12 / 2 = "
+"6`."
+msgstr ""
+"在当前 **Block Table** 中，我们使用第一个块（即 block_0）来标记未使用的块。"
+"该表的形状为 `(max num request, max model len / block size)`，其中 `max model len / block size = 12 / 2 = 6`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:165
+msgid "The KV cache block in the device memory is like:"
+msgstr "设备内存中的 KV 缓存块如下所示："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:171
+msgid ""
+"Let's say `K = max model len / block size = 6`, and we can get token "
+"`device block number`."
+msgstr ""
+"设 `K = max model len / block size = 6`，然后我们可以获取 token 的 `device block number`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:173
+msgid "The workflow of achieving slot mapping:"
+msgstr "获取 slot mapping 的工作流程："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:175
+msgid "Get `block table indices` using `K`, `positions` and `request indices`."
+msgstr "使用 `K`、`positions` 和 `request indices` 获取 `block table indices`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:177
+msgid ""
+"Purpose: For each token, it could be used to select `device block number`"
+" from `block table`."
+msgstr ""
+"目的：对于每个 token，用于从 `block table` 中选择 `device block number`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:179
+msgid "Get `device block number` using `block table indices`."
+msgstr "使用 `block table indices` 获取 `device block number`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:181
+msgid ""
+"Purpose: `device block number` indicates which device block each token "
+"belongs to."
+msgstr ""
+"目的：`device block number` 表示每个 token 属于哪个设备块。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:183
+msgid "Get `block offsets` using `positions` and `block size`."
+msgstr "使用 `positions` 和 `block size` 获取 `block offsets`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:185
+msgid ""
+"Purpose: `block offsets` indicates the offsets of each token within a "
+"block."
+msgstr ""
+"目的：`block offsets` 表示每个 token 在块内的偏移量。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:187
+msgid "construct `slot mapping` using `device block number` and `block offsets`."
+msgstr "使用 `device block number` 和 `block offsets` 构建 `slot mapping`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:189
+msgid "Purpose: we can use `slot mapping` to store Token IDs into token slots."
+msgstr "目的：我们可以使用 `slot mapping` 将 Token ID 存储到 token 槽位中。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:191
+msgid "Details:"
+msgstr "详细步骤："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:193
+msgid ""
+"(**Token level**) Use a simple formula to calculate `block table "
+"indices`: `request indices * K + positions / block size`. So it equals "
+"`[0 * 6 + 0 / 2, 0 * 6 + 1 / 2, 0 * 6 + 2 / 2, 1 * 6 + 0 / 2, 1 * 6 + 1 /"
+" 2, 2 * 6 + 0 / 2, 2 * 6 + 1 / 2, 2 * 6 + 2 / 2, 2 * 6 + 3 / 2, 2 * 6 + 4"
+" / 2] = [0, 0, 1, 6, 6, 12, 12, 13, 13, 14]`. This could be used to "
+"select `device block number` from `block table`."
+msgstr ""
+"（**Token 级别**）使用简单公式计算 `block table indices`：`request indices * K + positions / block size`。"
+"因此等于 `[0 * 6 + 0 / 2, 0 * 6 + 1 / 2, 0 * 6 + 2 / 2, 1 * 6 + 0 / 2, 1 * 6 + 1 / 2, 2 * 6 + 0 / 2, 2 * 6 + 1 / 2, 2 * 6 + 2 / 2, 2 * 6 + 3 / 2, 2 * 6 + 4 / 2] = [0, 0, 1, 6, 6, 12, 12, 13, 13, 14]`。"
+"这可用于从 `block table` 中选择 `device block number`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:194
+msgid ""
+"(**Token level**) Use `block table indices` to select out `device block "
+"number` for each scheduled token. The pseudocode is `block_numbers = "
+"block_table[block_table_indices]`. So `device block number=[1, 1, 2, 3, "
+"3, 4, 4, 5, 5, 6]`"
+msgstr ""
+"（**Token 级别**）使用 `block table indices` 为每个调度 token 选出 `device block number`。"
+"伪代码为 `block_numbers = block_table[block_table_indices]`。因此 `device block number=[1, 1, 2, 3, 3, 4, 4, 5, 5, 6]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:195
+msgid ""
+"(**Token level**) `block offsets` could be computed by `block offsets = "
+"positions % block size = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0]`."
+msgstr ""
+"（**Token 级别**）`block offsets` 可通过 `block offsets = positions % block size = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0]` 计算。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:196
+msgid ""
+"Finally, use `block offsets` and `device block number` to create `slot "
+"mapping`: `device block number * block size + block_offsets = [2, 3, 4, "
+"6, 7, 8, 9, 10, 11, 12]`"
+msgstr ""
+"最后，使用 `block offsets` 和 `device block number` 创建 `slot mapping`："
+"`device block number * block size + block_offsets = [2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:198
+msgid "(**Request level**) As we know the scheduled token count is `[3, 2, 5]`:"
+msgstr "（**Request 级别**）已知调度 token 数量为 `[3, 2, 5]`："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:200
+msgid ""
+"(**Request level**) Use prefix sum to calculate `query start location`: "
+"`[0, 3, 5, 10]`."
+msgstr ""
+"（**Request 级别**）使用前缀和计算 `query start location`：`[0, 3, 5, 10]`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:201
+msgid ""
+"(**Request level**) All tokens in step 1 are in the prefill stage, and "
+"the computed tokens count is 0; then `sequence length` = `[3, 2, 5]`."
+msgstr ""
+"（**Request 级别**）步骤 1 中的所有 token 都处于预填充阶段，已计算的 token 数量为 0；因此 `sequence length` = `[3, 2, 5]`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:202
+msgid ""
+"(**Request level**) As mentioned above, `number of computed tokens` are "
+"all 0s: `[0, 0, 0]`."
+msgstr ""
+"（**Request 级别**）如上所述，`number of computed tokens` 全为 0：`[0, 0, 0]`。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:203
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:272
+msgid "`number of requests`: `3`"
+msgstr "`number of requests`：`3`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:204
+msgid "(**Request level**) `number of tokens`: `[3, 2, 5]`"
+msgstr "（**Request 级别**）`number of tokens`：`[3, 2, 5]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:205
+msgid "`max query len`: `5`"
+msgstr "`max query len`：`5`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:206
+msgid "(**Token level**) `slot mapping`: `[2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`"
+msgstr "（**Token 级别**）`slot mapping`：`[2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:207
+msgid ""
+"`attention mask`: For all requests that initiate a prefill process, we "
+"simply create only one mask matrix for reuse across different requests. "
+"The shape of this mask matrix is `5 * 5`:"
+msgstr ""
+"`attention mask`：对于所有启动预填充过程的请求，我们只创建一个掩码矩阵，供不同请求复用。"
+"该掩码矩阵的形状为 `5 * 5`："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:209
+msgid "Step 2: Chunked prefill"
+msgstr "步骤 2：分块预填充"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:211
+msgid ""
+"In Step 2, we no longer provide explanations or perform calculations; "
+"instead, we directly present the final result."
+msgstr ""
+"在步骤 2 中，我们不再提供解释或进行计算，而是直接给出最终结果。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:215
+#, python-brace-format
+msgid "Scheduled token of each request: `{'0': 1, '1': 1, '2': 3}`"
+msgstr "每个请求的调度 token：`{'0': 1, '1': 1, '2': 3}`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:217
+msgid "`request indices`: `[0, 1, 2, 2, 2]`"
+msgstr "`request indices`：`[0, 1, 2, 2, 2]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:218
+msgid "`token positions`: `[3, 2, 5, 6, 7]`"
+msgstr "`token positions`：`[3, 2, 5, 6, 7]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:220
+msgid "Current **Token IDs table**:"
+msgstr "当前 **Token IDs table**："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:232
+msgid ""
+"**Note**: **T_0_3**, **T_1_2** are new Token IDs of **request_0** and "
+"**request_1** respectively. They are sampled from the output of the "
+"model."
+msgstr ""
+"**注意**：**T_0_3** 和 **T_1_2** 分别是 **request_0** 和 **request_1** 的新 Token ID。它们是从模型输出中采样得到的。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:234
+msgid "`token indices`: `[3, 14, 29, 30, 31]`"
+msgstr "`token indices`：`[3, 14, 29, 30, 31]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:235
+msgid "`Input IDs`: `[T_0_3, T_1_2, T_3_5, T_3_6, T_3_7]`"
+msgstr "`Input IDs`：`[T_0_3, T_1_2, T_3_5, T_3_6, T_3_7]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:239
+msgid ""
+"We allocate the blocks `7` and `8` to `request_1` and `request_2` "
+"respectively, as they need more space in device to store KV cache "
+"following token generation or chunked prefill."
+msgstr ""
+"我们将块 `7` 和 `8` 分别分配给 `request_1` 和 `request_2`，"
+"因为在 token 生成或分块预填充之后，它们需要更多设备空间来存储 KV 缓存。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:241
+msgid "Current **Block Table**:"
+msgstr "当前 **Block Table**："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:253
+msgid "KV cache block in the device memory:"
+msgstr "设备内存中的 KV 缓存块："
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:259
+msgid "(**Token level**) `block table indices`: `[1, 7, 14, 15, 15]`"
+msgstr "（**Token 级别**）`block table indices`：`[1, 7, 14, 15, 15]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:260
+msgid "(**Token level**) `device block number`: `[2, 7, 6, 8, 8]`"
+msgstr "（**Token 级别**）`device block number`：`[2, 7, 6, 8, 8]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:261
+msgid "(**Token level**) `block offsets`: `[1, 0, 1, 0, 1]`"
+msgstr "（**Token 级别**）`block offsets`：`[1, 0, 1, 0, 1]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:262
+msgid "(**Token level**) `slot mapping`: `[5, 14, 13, 16, 17]`"
+msgstr "（**Token 级别**）`slot mapping`：`[5, 14, 13, 16, 17]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:264
+msgid "Scheduled token count: `[1, 1, 3]`"
+msgstr "调度 token 数量：`[1, 1, 3]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:266
+msgid "`query start location`: `[0, 1, 2, 5]`"
+msgstr "`query start location`：`[0, 1, 2, 5]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:268
+msgid "`sequence length`: `[4, 3, 8]`"
+msgstr "`sequence length`：`[4, 3, 8]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:270
+msgid "`number of computed tokens`: `[3, 2, 5]`"
+msgstr "`number of computed tokens`：`[3, 2, 5]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:274
+msgid "`max query len`: `3`"
+msgstr "`max query len`：`3`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:276
+msgid "`slot mapping`: `[5, 14, 13, 16, 17]`"
+msgstr "`slot mapping`：`[5, 14, 13, 16, 17]`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:278
+msgid "`attention mask`: `5 * 8`"
+msgstr "`attention mask`：`5 * 8`"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:280
+msgid "Each token has a `1 * 8` vector, and there are 5 scheduled tokens."
+msgstr "每个 token 有一个 `1 * 8` 的向量，共有 5 个调度 token。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:282
+msgid "At last"
+msgstr "最后"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:284
+msgid ""
+"If you understand step 1 and step 2, you will know all the following "
+"steps."
+msgstr ""
+"如果你理解了步骤 1 和步骤 2，那么后续的所有步骤你都会明白。"
+
+#: ../../source/developer_guide/Design_Documents/ModelRunner_prepare_inputs.md:286
+msgid ""
+"Hope this document helps you better understand how vLLM prepares inputs "
+"for model forwarding. If you have any good ideas, you are welcome to "
+"contribute to us."
+msgstr ""
+"希望本文档能帮助你更好地理解 vLLM 如何为模型前向传播准备输入。如果你有任何好的想法，欢迎向我们贡献。"

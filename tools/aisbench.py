@@ -20,6 +20,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import filelock
@@ -35,7 +36,7 @@ DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")
 
 
 class AisbenchRunner:
-    RESULT_MSG = {"performance": "Performance Result files locate in ", "accuracy": "write csv to "}
+    RESULT_MSG = {"performance": "Performance Result files located in ", "accuracy": "write csv to "}
     DATASET_RENAME = {"aime2024": "aime", "gsm8k-lite": "gsm8k", "textvqa-lite": "textvqa"}
 
     def _run_aisbench_task(self):
@@ -52,12 +53,12 @@ class AisbenchRunner:
                 "--mode",
                 "perf",
             ]
-            if self.num_prompts:
-                aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
-        print(f"running aisbench cmd: {' '.join(aisbench_cmd)}")
-        self.proc: subprocess.Popen = subprocess.Popen(
-            aisbench_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        if self.num_prompts:
+            aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
+        self.stdout_file = f"output_{self.task_type}.txt"
+        aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
+        print(f"running aisbench cmd: {aisbench_cmd}")
+        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, shell=True)
 
     def __init__(self, model: str, port: int, aisbench_config: dict, host_ip: str = "localhost", verify=True):
         self.model = model
@@ -79,12 +80,14 @@ class AisbenchRunner:
         self.max_out_len = aisbench_config["max_out_len"]
         self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
-        self.trust_remote_code = aisbench_config.get("trust_remote_code", False)
+        self.trust_remote_code = aisbench_config.get("trust_remote_code", True)
         self.temperature = aisbench_config.get("temperature")
         self.top_k = aisbench_config.get("top_k")
         self.top_p = aisbench_config.get("top_p")
         self.seed = aisbench_config.get("seed")
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
+        self.no_pred = aisbench_config.get("no_pred")
+        self.thinking = aisbench_config.get("thinking")
         self.exp_folder = None
         self.result_line = None
         self._init_dataset_conf()
@@ -103,7 +106,7 @@ class AisbenchRunner:
     def _init_dataset_conf(self):
         if self.task_type == "accuracy":
             dataset_name = os.path.basename(self.dataset_path)
-            dataset_rename = self.DATASET_RENAME.get(dataset_name, "")
+            dataset_rename = self.DATASET_RENAME.get(dataset_name, dataset_name)
             dst_dir = os.path.join(DATASET_DIR, dataset_rename)
             command = ["cp", "-r", self.dataset_path, dst_dir]
             subprocess.call(command)
@@ -123,31 +126,37 @@ class AisbenchRunner:
         with open(conf_path, encoding="utf-8") as f:
             content = f.read()
         content = re.sub(r"model=.*", f'model="{self.model}",', content)
-        content = re.sub(r"host_port.*", f"host_port = {self.port},", content)
-        content = re.sub(r"host_ip.*", f'host_ip = "{self.host_ip}",', content)
-        content = re.sub(r"max_out_len.*", f"max_out_len = {self.max_out_len},", content)
-        content = re.sub(r"batch_size.*", f"batch_size = {self.batch_size},", content)
+        content = re.sub(r"host_port.*", f"host_port={self.port},", content)
+        content = re.sub(r"host_ip.*", f'host_ip="{self.host_ip}",', content)
+        content = re.sub(r"max_out_len.*", f"max_out_len={self.max_out_len},", content)
+        content = re.sub(r"batch_size.*", f"batch_size={self.batch_size},", content)
         content = re.sub(r"trust_remote_code=.*", f"trust_remote_code={self.trust_remote_code},", content)
-        content = content.replace("top_k", "#top_k")
-        content = content.replace("seed", "#seed")
-        content = content.replace("repetition_penalty", "#repetition_penalty")
+        if self.top_p:
+            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            top_p={self.top_p},", content)
+        if self.top_k:
+            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            top_k={self.top_k},", content)
+        if self.seed:
+            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            seed={self.seed},", content)
+        if self.repetition_penalty:
+            content = re.sub(
+                r"ignore_eos.*",
+                f"ignore_eos=False,\n            repetition_penalty={self.repetition_penalty},",
+                content,
+            )
+        if self.thinking:
+            field_thinking = 'chat_template_kwargs={"thinking": True}'
+            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            {field_thinking},", content)
         if self.task_type == "performance":
             content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
-            content = re.sub(r"request_rate.*", f"request_rate = {self.request_rate},", content)
-            content = re.sub(r"temperature.*", "temperature = 0,\n            ignore_eos = True,", content)
-            content = content.replace("top_p", "#top_p")
+            content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)
+            content = re.sub(r"temperature.*", "temperature=0,", content)
+            content = re.sub(r"ignore_eos.*", "ignore_eos=True,", content)
         if self.task_type == "accuracy":
-            content = re.sub(r"temperature.*", "temperature = 0.6,\n            ignore_eos = False,", content)
+            content = re.sub(r"temperature.*", "temperature=0.6,", content)
         if self.temperature:
-            content = re.sub(r"temperature.*", f"temperature = {self.temperature},", content)
-        if self.top_p:
-            content = re.sub(r"#?top_p.*", f"top_p = {self.top_p},", content)
-        if self.top_k:
-            content = re.sub(r"#top_k.*", f"top_k = {self.top_k},", content)
-        if self.seed:
-            content = re.sub(r"#seed.*", f"seed = {self.seed},", content)
-        if self.repetition_penalty:
-            content = re.sub(r"#repetition_penalty.*", f"repetition_penalty = {self.repetition_penalty},", content)
+            content = re.sub(r"temperature.*", f"temperature={self.temperature},", content)
+        if self.no_pred:
+            content = re.sub(r"pred_postprocessor.*", "#pred_postprocessor", content)
         conf_path_new = os.path.join(REQUEST_CONF_DIR, f"{self.request_conf}_custom.py")
         with open(conf_path_new, "w", encoding="utf-8") as f:
             f.write(content)
@@ -166,33 +175,41 @@ class AisbenchRunner:
 
     def _wait_for_exp_folder(self):
         while True:
-            line = self.proc.stdout.readline().strip()
-            print(line)
+            line = self._check_runtime_stdout()
             if "Current exp folder: " in line:
                 self.exp_folder = re.search(r"Current exp folder: (.*)", line).group(1)
+                print(f"Current exp folder: {self.exp_folder}")
                 return
-            if "ERROR" in line:
-                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
-                raise RuntimeError(error_msg) from None
+            self._check_runtime_error(line)
 
     def _wait_for_task(self):
         self._wait_for_exp_folder()
         result_msg = self.RESULT_MSG[self.task_type]
         while True:
-            line = self.proc.stdout.readline().strip()
-            print(line)
+            line = self._check_runtime_stdout()
             if result_msg in line:
+                print(line)
                 self.result_line = line
                 return
-            if "ERROR" in line:
-                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
-                raise RuntimeError(error_msg) from None
+            self._check_runtime_error(line)
+
+    def _check_runtime_stdout(self):
+        time.sleep(5)
+        cmd = f"tail -100 {self.stdout_file}"
+        return subprocess.check_output(cmd, shell=True).decode()
+
+    @staticmethod
+    def _check_runtime_error(line):
+        if "ERROR" in line:
+            print(line)
+            error_msg = "Some errors happened to Aisbench runtime"
+            raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
-        result_dir = re.search(r"Performance Result files locate in (.*)", self.result_line).group(1)[:-1]
+        result_dir = re.search(r"Performance Result files located in (.*)", self.result_line).group(1)[:-1]
         dataset_type = self.dataset_conf.split("/")[0]
-        result_csv_file = os.path.join(result_dir, f"{dataset_type}dataset.csv")
-        result_json_file = os.path.join(result_dir, f"{dataset_type}dataset.json")
+        result_csv_file = os.path.join(result_dir, f"{dataset_type}.csv")
+        result_json_file = os.path.join(result_dir, f"{dataset_type}.json")
         self.result_csv = pd.read_csv(result_csv_file, index_col=0)
         print("Getting performance results from file: ", result_json_file)
         with open(result_json_file, encoding="utf-8") as f:
@@ -202,7 +219,7 @@ class AisbenchRunner:
     def _get_result_accuracy(self):
         acc_file = re.search(r"write csv to (.*)", self.result_line).group(1)
         df = pd.read_csv(acc_file)
-        self.result = float(df.loc[0][-1])
+        self.result = float(df.iloc[0, -1])
 
     def _performance_verify(self):
         self._get_result_performance()
@@ -226,15 +243,25 @@ class AisbenchRunner:
 def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="localhost"):
     aisbench_results = []
     aisbench_errors = []
+    total = sum(1 for c in aisbench_cases if c)
+    idx = 0
     for aisbench_case in aisbench_cases:
         if not aisbench_case:
             continue
+        idx += 1
+        case_name = aisbench_case.get("case_name", "unknown")
+        case_type = aisbench_case.get("case_type", "unknown")
+        logging.info("=" * 60)
+        logging.info("[%d/%d] Starting benchmark: %s (type=%s)", idx, total, case_name, case_type)
+        logging.info("=" * 60)
         try:
             with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
+            logging.info("[%d/%d] Finished benchmark: %s", idx, total, case_name)
         except Exception as e:
             aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])
+            logging.error("[%d/%d] Benchmark failed: %s, reason: %s", idx, total, case_name, e)
             print(e)
     for failed_case, error_info in aisbench_errors:
         error_msg = f"The following aisbench case failed: {failed_case}, reason is {error_info}"

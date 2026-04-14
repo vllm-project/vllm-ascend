@@ -21,6 +21,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+pow = triton.language.extra.ascend.libdevice.pow
+
 
 @triton.jit
 def _penalties_kernel(
@@ -157,4 +159,87 @@ def apply_penalties(
         BLOCK_SIZE=BLOCK_SIZE,
         INNER_BLOCK_SIZE=INNER_BLOCK_SIZE,
         MAX_SPEC_LEN=num_speculative_tokens,
+    )
+
+
+# In the current CANN version 8.5.1, the atomic_or and atomic_add operators may encounter deadlock issues.
+# This issue will be fixed in the subsequent CANN version 9.0.0
+@triton.jit
+def _bincount_kernel(
+    expanded_idx_mapping_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    prompt_len_ptr,
+    prefill_len_ptr,
+    prompt_bin_mask_ptr,
+    prompt_bin_mask_stride,
+    output_bin_counts_ptr,
+    output_bin_counts_stride,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    block_idx = tl.program_id(1)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+
+    prefill_len = tl.load(prefill_len_ptr + req_state_idx)
+    if block_idx * BLOCK_SIZE >= prefill_len:
+        return
+
+    prompt_len = tl.load(prompt_len_ptr + req_state_idx)
+    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    if block_idx * BLOCK_SIZE < prompt_len:
+        mask = block < prompt_len
+        prompt_tokens = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask)
+        idx = prompt_tokens // 32
+
+        # replace modulus with multiply and subtract
+        # origin code: bit_idx = prompt_tokens % 32
+        bit_idx = prompt_tokens - 32 * idx
+
+        # replace multiply with left shift
+        # origin code: bit = tl.full((BLOCK_SIZE,), 1, tl.int32) << bit_idx
+        bit = pow(2.0, bit_idx)
+
+        tl.atomic_or(
+            prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + idx,
+            bit,
+            mask=mask,
+        )
+
+    if (block_idx + 1) * BLOCK_SIZE >= prompt_len:
+        mask = block < prefill_len
+        mask &= block >= prompt_len
+        output_tokens = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask)
+        tl.atomic_add(
+            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + output_tokens,
+            1,
+            mask=mask,
+        )
+
+
+def bincount(
+    expanded_idx_mapping: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prompt_len: torch.Tensor,
+    prefill_len: torch.Tensor,
+    prompt_bin_mask: torch.Tensor,
+    output_bin_counts: torch.Tensor,
+    max_prefill_len: int,
+) -> None:
+    prompt_bin_mask[expanded_idx_mapping] = 0
+    output_bin_counts[expanded_idx_mapping] = 0
+    num_tokens = expanded_idx_mapping.shape[0]
+    BLOCK_SIZE = 1024
+    num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
+    _bincount_kernel[(num_tokens, num_blocks)](
+        expanded_idx_mapping,
+        all_token_ids,
+        all_token_ids.stride(0),
+        prompt_len,
+        prefill_len,
+        prompt_bin_mask,
+        prompt_bin_mask.stride(0),
+        output_bin_counts,
+        output_bin_counts.stride(0),
+        BLOCK_SIZE=BLOCK_SIZE,
     )

@@ -267,6 +267,3 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertIn("model.layers.0.weight", config.quant_description)
         self.assertEqual(config.quant_description["model.layers.0.weight"],
                          "INT8")
-
-    def test_get_scaled_act_names(self):
-        self.assertEqual(self.ascend_config.get_scaled_act_names(), [])

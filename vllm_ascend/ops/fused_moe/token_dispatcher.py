@@ -28,6 +28,7 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import async_all_to_all, gather_from_sequence_parallel_region
@@ -39,7 +40,12 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoETokenDispatchOutput,
     TMoECombineMetadata,
 )
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, is_hierarchical_communication_enabled
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+    is_hierarchical_communication_enabled,
+    should_skip_allreduce_across_dp_group,
+)
 
 
 class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
@@ -96,6 +102,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
+        # When enable hierarchical communication, param `expert_scales` need to be passed in.
         self.need_expert_scale = is_hierarchical_communication_enabled()
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
@@ -113,7 +120,21 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         else:
             max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
+        _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
+
+        # When allreduce across DP is not skipped, tokens are uniform across ranks:
+        # use global_bs=0 (uniform mode) and pass mc2_mask.
+        # When allreduce is skipped, tokens may differ per rank:
+        # use the real global_bs and do NOT pass mc2_mask.
+        self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
+
+        # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
+        self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
+
+        if not self.enable_dispatch_v2 and self.need_comm_alg:
+            raise RuntimeError(
+                "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
+            )
 
     def get_dispatch_mc2_kwargs(
         self,
@@ -129,7 +150,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         assert expert_map is not None, "expert_map is required for MC2 token dispatch."
         # NOTE: quant_mode differs by quant feature:
         # - Legacy int communication quantization uses quant_mode=2.
-        # - A5 MXFP8 communication uses quant_mode=4.
+        # - A5 MXFP communication uses quant_mode=4 only for dispatch-enabled
+        #   MXFP paths (currently MXFP8).
+        # - MXFP4 keeps quant_mode=0 which means that activations are quantized in
+        #   the MoE MLP path instead of during MC2 dispatch.
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif token_dispatch_input.quant.dispatch_with_quant:
@@ -146,6 +170,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "global_bs": self.global_bs,
             "expert_token_nums_type": 0,
         }
+        if self.global_bs == 0:
+            kwargs_mc2["x_active_mask"] = token_dispatch_input.routing.mc2_mask
 
         stage1_kwargs = {
             "scales": None,
@@ -162,7 +188,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp:
+        # Only dispatch-enabled MXFP paths pass y_dtype through MC2. MXFP4
+        # keeps dispatch unquantized and quantizes again inside the MLP path.
+        if (
+            self.a5_need_extra_args
+            and token_dispatch_input.quant.is_mxfp
+            and token_dispatch_input.quant.dispatch_with_quant
+        ):
             y_dtype = torch.float8_e4m3fn
             if (
                 token_dispatch_input.quant.mxfp is not None
@@ -176,6 +208,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "expert_scales": topk_weights.to(torch.float32),
                 }
             )
+        if self.need_comm_alg:
+            stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -201,6 +235,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             expand_scales,
         ) = output[0:7]
 
+        # The dispatch operator may still return a non-None dynamic_scale when
+        # quant_mode=0. Clear it for unquantized dispatch paths such as MXFP4.
+        if not token_dispatch_input.quant.dispatch_with_quant:
+            dynamic_scale = None
+
         group_list_type = 0
         return MoETokenDispatchOutput(
             hidden_states=expand_x,
@@ -216,6 +255,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                 assist_info_for_combine=assist_info_for_combine,
                 expand_scales=expand_scales,
                 dispatch_with_quant=token_dispatch_input.quant.dispatch_with_quant,
+                mc2_mask=token_dispatch_input.routing.mc2_mask if self.global_bs == 0 else None,
             ),
         )
 
@@ -239,6 +279,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "moe_expert_num": self.moe_expert_num,
             "global_bs": self.global_bs,
         }
+        if self.global_bs == 0:
+            kwargs_mc2["x_active_mask"] = combine_metadata.mc2_mask
 
         if combine_metadata.dispatch_with_quant:
             tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
@@ -265,6 +307,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
+        if self.need_comm_alg:
+            stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2

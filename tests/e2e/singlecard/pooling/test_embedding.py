@@ -57,6 +57,32 @@ def test_embed_models_correctness(model: str):
         tol=1e-2,
     )
 
+def test_causal_embed_models_using_prefix_caching_correctness():
+    # This test is to verify the correctness of prefix caching for embedding models. 
+    # We compare the outputs of vLLM with and without prefix caching enabled, and check if they are close enough.
+    # We set the input query to be very long to make sure prefix caching is triggered.
+    queries = ['What is the capital of China?' * 256, 'Explain gravity']
+
+    model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
+    with VllmRunner(
+            model_name,
+            runner="pooling",
+            max_model_len=None,
+            cudagraph_capture_sizes=[4],
+            enable_prefix_caching=True,
+    ) as vllm_runner_using_caching:
+        vllm_outputs_without_caching = vllm_runner_using_caching.embed(queries)
+        vllm_outputs_with_caching = vllm_runner_using_caching.embed(queries)
+
+
+    check_embeddings_close(
+        embeddings_0_lst=vllm_outputs_without_caching,
+        embeddings_1_lst=vllm_outputs_with_caching,
+        name_0="without_caching",
+        name_1="with_caching",
+        tol=1e-2,
+    )
+
 
 def test_bge_m3_correctness():
     queries = ['What is the capital of China?', 'Explain gravity']

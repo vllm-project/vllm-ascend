@@ -1,5 +1,6 @@
 import gc
 
+import pytest
 import torch
 import torch_npu
 
@@ -7,7 +8,9 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-
+@pytest.mark.skip(
+    reason="Failure of an individual operator use case causes failures of other operators."
+)
 @torch.inference_mode()
 def test_mla_preprocess_kernel():
     token_num = 1

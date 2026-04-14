@@ -111,3 +111,36 @@ ignore = [
 
 [tool.ruff.format]
 docstring-code-format = true
+
+[tool.check_docs_yaml_sync]
+exclude = [
+    "docs/source/tutorials/models/DeepSeek-R1.md",
+    "docs/source/tutorials/models/DeepSeek-V3.1.md",
+    "docs/source/tutorials/models/DeepSeek-V3.2.md",
+    "docs/source/tutorials/models/DeepSeekOCR2.md",
+    "docs/source/tutorials/models/GLM4.x.md",
+    "docs/source/tutorials/models/GLM5.md",
+    "docs/source/tutorials/models/Kimi-K2.5.md",
+    "docs/source/tutorials/models/MiniMax-M2.5.md",
+    "docs/source/tutorials/models/PaddleOCR-VL.md",
+    "docs/source/tutorials/models/Qwen-VL-Dense.md",
+    "docs/source/tutorials/models/Qwen2.5-7B.md",
+    "docs/source/tutorials/models/Qwen2.5-Omni.md",
+    "docs/source/tutorials/models/Qwen3-235B-A22B.md",
+    "docs/source/tutorials/models/Qwen3-30B-A3B.md",
+    "docs/source/tutorials/models/Qwen3-32B-W4A4.md",
+    "docs/source/tutorials/models/Qwen3-8B-W4A8.md",
+    "docs/source/tutorials/models/Qwen3-Coder-30B-A3B.md",
+    "docs/source/tutorials/models/Qwen3-Dense.md",
+    "docs/source/tutorials/models/Qwen3-Next.md",
+    "docs/source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md",
+    "docs/source/tutorials/models/Qwen3-VL-235B-A22B-Instruct.md",
+    "docs/source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md",
+    "docs/source/tutorials/models/Qwen3-VL-Embedding.md",
+    "docs/source/tutorials/models/Qwen3-VL-Reranker.md",
+    "docs/source/tutorials/models/Qwen3.5-27B.md",
+    "docs/source/tutorials/models/Qwen3.5-397B-A17B.md",
+    "docs/source/tutorials/models/Qwen3_embedding.md",
+    "docs/source/tutorials/models/Qwen3_reranker.md",
+    "docs/source/tutorials/models/index.md",
+]

@@ -41,3 +41,16 @@ def ensure_mxfp8_moe_available(feature: str) -> None:
         feature,
         ("float8_e8m0fnu", "npu_dynamic_mx_quant", "npu_grouped_matmul_swiglu_quant_v2"),
     )
+
+
+def ensure_mxfp4_linear_available(feature: str) -> None:
+    _ensure_symbols_available(
+        feature, ("float4_e2m1fn_x2", "float8_e8m0fnu", "npu_dynamic_mx_quant", "npu_quant_matmul")
+    )
+
+
+def ensure_mxfp4_moe_available(feature: str) -> None:
+    _ensure_symbols_available(
+        feature,
+        ("float4_e2m1fn_x2", "float8_e8m0fnu", "npu_dynamic_mx_quant", "npu_grouped_matmul_swiglu_quant_v2"),
+    )

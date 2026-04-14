@@ -20,14 +20,32 @@
 | HeXiang Wang| [@whx-sjtu](https://github.com/whx-sjtu) | 2026/01 |
 
 ## Contributors
-<!-- last_commit: 23bf5d4d48e6ec09e2b4f726279591a1b42f033b -->
+<!-- last_commit: 8e3f8bab57cff0a98dc75ad43d8bf5bb4113f34e -->
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
-Updated on 2026-03-09:
+Updated on 2026-03-25:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
+| 363 | [@GoMarck](https://github.com/GoMarck) | 2026/03/25 | [17da966](https://github.com/vllm-project/vllm-ascend/commit/17da96658f0b53a7e9b5932e64ced69a334f035c) |
+| 362 | [@drizzlezyk](https://github.com/drizzlezyk) | 2026/03/24 | [5487946](https://github.com/vllm-project/vllm-ascend/commit/54879467c41784a446aa5b486a391d9bfbf488fa) |
+| 361 | [@liuhy1213-cell](https://github.com/liuhy1213-cell) | 2026/03/23 | [fb283b5](https://github.com/vllm-project/vllm-ascend/commit/fb283b5820effe930d7f60952aca48177d710e94) |
+| 360 | [@ZhuQi-seu](https://github.com/ZhuQi-seu) | 2026/03/23 | [e942b62](https://github.com/vllm-project/vllm-ascend/commit/e942b62d742ebc5bf128e85bc086d728df8d4935) |
+| 359 | [@ksiyuan](https://github.com/ksiyuan) | 2026/03/20 | [a16c991](https://github.com/vllm-project/vllm-ascend/commit/a16c99141b0830240eeff0cbe01bfc3c833c62fb) |
+| 358 | [@idouba](https://github.com/idouba) | 2026/03/20 | [f39f566](https://github.com/vllm-project/vllm-ascend/commit/f39f566e22b87ee75bd1205f982e4255a882c3a4) |
+| 357 | [@yesyue-w](https://github.com/yesyue-w) | 2026/03/20 | [c860535](https://github.com/vllm-project/vllm-ascend/commit/c860535246cc751b6be7d1da2092e4380013598c) |
+| 356 | [@jiangmengyu18](https://github.com/jiangmengyu18) | 2026/03/18 | [305820f](https://github.com/vllm-project/vllm-ascend/commit/305820f1a982ed9597932778891b5da64ecccae9) |
+| 355 | [@SparrowMu](https://github.com/SparrowMu) | 2026/03/18 | [fb8e22e](https://github.com/vllm-project/vllm-ascend/commit/fb8e22ec00aef2b2d42a5f2d3ae7267848ec5016) |
+| 354 | [@ppppeng](https://github.com/ppppeng) | 2026/03/17 | [a457d0f](https://github.com/vllm-project/vllm-ascend/commit/a457d0f0e8d91060c62d7ff2b1741bfc74d79560) |
+| 353 | [@asunxiao](https://github.com/asunxiao) | 2026/03/17 | [a370dfa](https://github.com/vllm-project/vllm-ascend/commit/a370dfa9623e648439b724569931988a852e462e) |
+| 352 | [@GGGGua](https://github.com/GGGGua) | 2026/03/16 | [b1a7888](https://github.com/vllm-project/vllm-ascend/commit/b1a78886a928cd7b5881026302fba79609972bd2) |
+| 351 | [@bazingazhou233-hub](https://github.com/bazingazhou233-hub) | 2026/03/14 | [9e6c547](https://github.com/vllm-project/vllm-ascend/commit/9e6c547d9808eb5fa532d49102969c91b79be905) |
+| 350 | [@tfhddd](https://github.com/tfhddd) | 2026/03/12 | [21fea86](https://github.com/vllm-project/vllm-ascend/commit/21fea86b08edf4a016749a0d637d18cf7017dd2a) |
+| 349 | [@ZRJ026](https://github.com/ZRJ026) | 2026/03/10 | [a398fa6](https://github.com/vllm-project/vllm-ascend/commit/a398fa6a0b024f59aaa823c483529bcf2357540f) |
+| 348 | [@xmpp777](https://github.com/xmpp777) | 2026/03/10 | [9216e1b](https://github.com/vllm-project/vllm-ascend/commit/9216e1b0505c7e290d8c02cc64cb8817bfdd49f5) |
+| 347 | [@wanghuanjun2113](https://github.com/wanghuanjun2113) | 2026/03/09 | [dec04ec](https://github.com/vllm-project/vllm-ascend/commit/dec04ec8d884a45f1946b72dea129bc686cc2f44) |
+| 346 | [@liuchenbing2026](https://github.com/liuchenbing2026) | 2026/03/09 | [542258a](https://github.com/vllm-project/vllm-ascend/commit/542258ac9d9229aab4e8822de42443245a93f001) |
 | 345 | [@chenxi-hh](https://github.com/chenxi-hh) | 2026/03/09 | [737dfcf](https://github.com/vllm-project/vllm-ascend/commit/737dfcf638eae71d6c24c340dee20ff205f21ed9) |
 | 344 | [@xiaocongtou6](https://github.com/xiaocongtou6) | 2026/03/06 | [bc0fd7c](https://github.com/vllm-project/vllm-ascend/commit/bc0fd7ca7217498d5faa91504b0e8c3f822a5cc6) |
 | 343 | [@wanghengkang](https://github.com/wanghengkang) | 2026/03/06 | [c49ce18](https://github.com/vllm-project/vllm-ascend/commit/c49ce18ea544970510ebb04fff49a484533fe2a3) |

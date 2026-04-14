@@ -99,7 +99,7 @@ Qwen2.5-7B-Instruct supports single-node single-card deployment on the 910B4 pla
 ```shell
 #!/bin/sh
 export ASCEND_RT_VISIBLE_DEVICES=0
-export MODEL_PATH="Qwen/Qwen2.5-7B-Instruct"
+export MODEL_PATH="./Qwen2.5-7B-Instruct"
 
 vllm serve ${MODEL_PATH} \
           --host 0.0.0.0 \
@@ -156,7 +156,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen2.5-7B-Instruct` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -177,4 +177,4 @@ vllm bench serve \
   --result-dir ./perf_results/
 ```
 
-After about several minutes, you can get the performance evaluation result.
+After several minutes, you can get the performance evaluation result.

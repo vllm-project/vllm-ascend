@@ -24,20 +24,47 @@ on:
         required: false
         type: string
         default: linux-aarch64-a2b3-0
+      parse_e2e_comment:
+        required: false
+        type: boolean
+        default: false
+      test_cases:
+        required: false
+        type: string
+        default: ''
     outputs:
       run:
         description: "Whether nightly tests should run"
-        value: ${{ jobs.parse.outputs.run }}
+        value: ${{ jobs.parse_nightly_trigger.outputs.run }}
       filter:
         description: "Comma-wrapped test name filter (e.g. ',name1,name2,'), or 'all'"
-        value: ${{ jobs.parse.outputs.filter }}
+        value: ${{ jobs.parse_nightly_trigger.outputs.filter }}
       ref:
         description: "The vllm-ascend ref (commit SHA for PRs, branch/tag name otherwise)"
-        value: ${{ jobs.parse.outputs.ref }}
+        value: ${{ jobs.parse_nightly_trigger.outputs.ref }}
+      allowed:
+        description: "Whether the actor is allowed to trigger e2e tests"
+        value: ${{ jobs.parse_e2e_comment.outputs.allowed }}
+      pr_sha:
+        description: "The PR HEAD SHA"
+        value: ${{ jobs.parse_e2e_comment.outputs.pr_sha }}
+      singlecard_tests:
+        description: "Singlecard tests from /e2e comment"
+        value: ${{ jobs.parse_e2e_comment.outputs.singlecard_tests }}
+      multicard_2_tests:
+        description: "2-card tests from /e2e comment"
+        value: ${{ jobs.parse_e2e_comment.outputs.multicard_2_tests }}
+      multicard_4_tests:
+        description: "4-card tests from /e2e comment"
+        value: ${{ jobs.parse_e2e_comment.outputs.multicard_4_tests }}
+      p310_tests:
+        description: "310P tests from /e2e comment"
+        value: ${{ jobs.parse_e2e_comment.outputs.p310_tests }}
 
 jobs:
-  parse:
-    name: Parse trigger and determine test scope
+  parse_nightly_trigger:
+    name: Parse nightly trigger and determine test scope
+    if: ${{ !inputs.parse_e2e_comment }}
     runs-on: ${{ inputs.runner }}
     outputs:
       run: ${{ steps.parse.outputs.run }}
@@ -50,6 +77,7 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
+            const workflowDispatchTestCases = '${{ inputs.test_cases }}'.trim();
 
             function parseNightlyComment(body) {
               if (!body) return null;
@@ -65,19 +93,36 @@ jobs:
               if (eventName === 'pull_request') {
                 return context.payload.pull_request.head.sha;
               }
+              // For schedule and workflow_dispatch, return the commit SHA
+              if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
+                return context.sha || 'unknown';
+              }
               return (context.ref || '').replace(/^refs\/(heads|tags)\//, '') || 'main';
             }
 
             core.setOutput('ref', getRef());
 
-            // 1. schedule / workflow_dispatch: run all tests with pre-built image
-            if (eventName === 'schedule' || eventName === 'workflow_dispatch') {
+            // 1. workflow_dispatch: use input test_cases
+            if (eventName === 'workflow_dispatch' && workflowDispatchTestCases) {
+              core.setOutput('run', 'true');
+              // Convert comma-separated list to the filter format
+              if (workflowDispatchTestCases === 'all') {
+                core.setOutput('filter', 'all');
+              } else {
+                const filter = ',' + workflowDispatchTestCases.split(',').map(s => s.trim()).join(',') + ',';
+                core.setOutput('filter', filter);
+              }
+              return;
+            }
+
+            // 2. schedule: run all tests with pre-built image
+            if (eventName === 'schedule') {
               core.setOutput('run', 'true');
               core.setOutput('filter', 'all');
               return;
             }
 
-            // 2. pull_request (labeled / synchronize)
+            // 3. pull_request (labeled / synchronize)
             if (eventName === 'pull_request') {
               const labels = context.payload.pull_request.labels.map(l => l.name);
               if (!labels.includes('nightly-test')) {
@@ -113,3 +158,100 @@ jobs:
             // Fallback
             core.setOutput('run', 'false');
             core.setOutput('filter', '');
+
+  parse_e2e_comment:
+    name: Parse /e2e comment
+    if: ${{ inputs.parse_e2e_comment }}
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      allowed: ${{ steps.resolve.outputs.allowed }}
+      pr_sha: ${{ steps.resolve.outputs.pr_sha }}
+      singlecard_tests: ${{ steps.parse.outputs.singlecard_tests }}
+      multicard_2_tests: ${{ steps.parse.outputs.multicard_2_tests }}
+      multicard_4_tests: ${{ steps.parse.outputs.multicard_4_tests }}
+      p310_tests: ${{ steps.parse.outputs.p310_tests }}
+    steps:
+      - name: Resolve actor, SHA and /e2e comment body
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let actor, prSha, prNumber, prAuthor, commentBody;
+
+            // pull_request event with 'ready' label: search comments for the latest /e2e command.
+            prNumber = context.payload.pull_request.number;
+            prAuthor = context.payload.pull_request.user.login;
+            prSha = context.payload.pull_request.head.sha;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            for (let i = comments.length - 1; i >= 0; i--) {
+              if (comments[i].body && comments[i].body.trim().match(/^\/e2e/m)) {
+                commentBody = comments[i].body;
+                actor = comments[i].user.login;
+                break;
+              }
+            }
+            if (!actor) {
+              core.setOutput('allowed', 'false');
+              core.info('No /e2e comment found; skipping.');
+              return;
+            }
+
+            // Allow PR author or any collaborator with write/admin access
+            const isPRAuthor = actor === prAuthor;
+            let hasWriteAccess = false;
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: actor,
+              });
+              hasWriteAccess = ['admin', 'write'].includes(data.permission);
+            } catch (e) {
+              hasWriteAccess = false;
+            }
+            const allowed = isPRAuthor || hasWriteAccess;
+            if (!allowed) {
+              core.warning(`User ${actor} is not authorized to trigger E2E tests`);
+            }
+            core.setOutput('allowed', allowed.toString());
+            core.setOutput('pr_sha', prSha);
+            core.setOutput('comment_body', commentBody);
+
+      - name: Parse /e2e command and categorize tests by runner
+        id: parse
+        if: steps.resolve.outputs.allowed == 'true'
+        env:
+          COMMENT_BODY: ${{ steps.resolve.outputs.comment_body }}
+        run: |
+          # Strip /e2e prefix and normalize whitespace (handles space/newline separated lists)
+          TESTS=$(echo "$COMMENT_BODY" | sed 's|^/e2e[[:space:]]*||' | tr '\n' ' ' | xargs)
+          echo "All specified tests: $TESTS"
+
+          SINGLECARD_TESTS=""
+          MULTICARD_2_TESTS=""
+          MULTICARD_4_TESTS=""
+          P310_TESTS=""
+
+          for TEST in $TESTS; do
+            if echo "$TEST" | grep -q "multicard/2-cards"; then
+              MULTICARD_2_TESTS="$MULTICARD_2_TESTS $TEST"
+            elif echo "$TEST" | grep -q "multicard/4-cards"; then
+              MULTICARD_4_TESTS="$MULTICARD_4_TESTS $TEST"
+            elif echo "$TEST" | grep -q "310p"; then
+              P310_TESTS="$P310_TESTS $TEST"
+            else
+              SINGLECARD_TESTS="$SINGLECARD_TESTS $TEST"
+            fi
+          done
+
+          {
+            echo "singlecard_tests=$(echo "$SINGLECARD_TESTS" | xargs || true)"
+            echo "multicard_2_tests=$(echo "$MULTICARD_2_TESTS" | xargs || true)"
+            echo "multicard_4_tests=$(echo "$MULTICARD_4_TESTS" | xargs || true)"
+            echo "p310_tests=$(echo "$P310_TESTS" | xargs || true)"
+          } >> "$GITHUB_OUTPUT"

@@ -47,6 +47,7 @@ target_sources(optiling PRIVATE
 
 target_include_directories(optiling PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/utils/inc/kernel
 )
 
 target_sources(opsproto PRIVATE

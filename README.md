@@ -53,7 +53,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - OS: Linux
 - Software:
     - Python >= 3.10, < 3.12
-    - CANN == 8.5.0 (Ascend HDK version refers to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
+    - CANN == 8.5.1 (Ascend HDK version refers to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC2/releasenote/releasenote_0000.html))
     - PyTorch == 2.9.0, torch-npu == 2.9.0
     - vLLM (the same version as vllm-ascend)
 
@@ -63,7 +63,7 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-| v0.17.0rc1 | Latest release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) for more details |
+| v0.18.0rc1 | Latest release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) for more details |
 | v0.13.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.13.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.13.0/installation.html) for more details |
 
 ## Contributing
@@ -86,7 +86,7 @@ Below are the maintained branches:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM v0.17.0 tag   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM v0.18.0 tag   |
 | v0.7.1-dev | Unmaintained | Only doc fixes are allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version, only bug fixes are allowed, and no new release tags anymore. |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version |

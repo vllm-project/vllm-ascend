@@ -214,7 +214,7 @@ Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 
 ## Use Offline Datasets
 
-Take GSM8K (single dataset) and MMLU (multi-subject dataset) as examples, and you can see more from [here][2].
+Take GSM8K (single dataset) and MMLU (multi-subject dataset) as examples, and you can see more from [using-local-datasets][2].
 
 ```bash
 # set HF_DATASETS_OFFLINE when using offline datasets

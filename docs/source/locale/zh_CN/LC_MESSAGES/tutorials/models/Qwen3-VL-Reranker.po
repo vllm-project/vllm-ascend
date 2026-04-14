@@ -1,0 +1,199 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:1
+msgid "Qwen3-VL-Reranker"
+msgstr "Qwen3-VL-Reranker"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:5
+msgid ""
+"The Qwen3-VL-Embedding and Qwen3-VL-Reranker model series are the latest "
+"additions to the Qwen family, built upon the recently open-sourced and "
+"powerful Qwen3-VL foundation model. Specifically designed for multimodal "
+"information retrieval and cross-modal understanding, this suite accepts "
+"diverse inputs including text, images, screenshots, and videos, as well "
+"as inputs containing a mixture of these modalities. This guide describes "
+"how to run the model with vLLM Ascend."
+msgstr ""
+"Qwen3-VL-Embedding 和 Qwen3-VL-Reranker 模型系列是 Qwen 家族的最新成员，构建于最近开源且功能强大的 Qwen3-VL 基础模型之上。"
+"该系列专为多模态信息检索和跨模态理解而设计，接受多种输入，包括文本、图像、截图和视频，以及包含这些模态混合的输入。"
+"本指南介绍如何使用 vLLM Ascend 运行该模型。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:7
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:9
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:11
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:13
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:15
+msgid ""
+"`Qwen3-VL-Reranker-8B` [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)"
+msgstr "`Qwen3-VL-Reranker-8B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:16
+msgid ""
+"`Qwen3-VL-Reranker-2B` [Download model "
+"weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)"
+msgstr "`Qwen3-VL-Reranker-2B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:18
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:20
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:22
+msgid ""
+"You can use our official docker image to run `Qwen3-VL-Reranker` series "
+"models."
+msgstr "您可以使用官方 Docker 镜像运行 `Qwen3-VL-Reranker` 系列模型。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:24
+msgid ""
+"Start the docker image on your node, refer to [using "
+"docker](../../installation.md#set-up-using-docker)."
+msgstr ""
+"在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:26
+msgid ""
+"If you don't want to use the docker image as above, you can also build "
+"all from source:"
+msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建："
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:28
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../../installation.md)."
+msgstr "从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:30
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:32
+msgid "Using the Qwen3-VL-Reranker-8B model as an example:"
+msgstr "以 Qwen3-VL-Reranker-8B 模型为例："
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:34
+msgid "Chat Template"
+msgstr "对话模板"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:36
+msgid ""
+"The Qwen3-VL-Reranker model requires a specific chat template for proper "
+"formatting. Create a file named `qwen3_vl_reranker.jinja` with the "
+"following content:"
+msgstr ""
+"Qwen3-VL-Reranker 模型需要特定的对话模板才能正确格式化。创建一个名为 `qwen3_vl_reranker.jinja` 的文件，内容如下："
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:64
+msgid ""
+"Save this file to a location of your choice (e.g., "
+"`./qwen3_vl_reranker.jinja`)."
+msgstr "将此文件保存到您选择的位置（例如 `./qwen3_vl_reranker.jinja`）。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:66
+msgid "Online Inference"
+msgstr "在线推理"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:68
+msgid "Start the server with the following command:"
+msgstr "使用以下命令启动服务器："
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:78
+msgid "Once your server is started, you can send request with follow examples."
+msgstr "服务器启动后，您可以按照以下示例发送请求。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:118
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:203
+msgid ""
+"If you run this script successfully, you will see a list of scores "
+"printed to the console, similar to this:"
+msgstr "如果您成功运行此脚本，您将在控制台看到类似如下的分数列表："
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:124
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:212
+msgid "For more examples, refer to the vLLM official examples:"
+msgstr "更多示例，请参考 vLLM 官方示例："
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:214
+msgid ""
+"[Offline Vision Embedding Example](https://github.com/vllm-"
+"project/vllm/blob/main/examples/pooling/score/vision_reranker_offline.py)"
+msgstr ""
+"[离线视觉重排序示例](https://github.com/vllm-"
+"project/vllm/blob/main/examples/pooling/score/vision_reranker_offline.py)"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:215
+msgid ""
+"[Online Vision Embedding Example](https://github.com/vllm-"
+"project/vllm/blob/main/examples/pooling/score/vision_rerank_api_online.py)"
+msgstr ""
+"[在线视觉重排序示例](https://github.com/vllm-"
+"project/vllm/blob/main/examples/pooling/score/vision_rerank_api_online.py)"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:217
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:219
+msgid ""
+"Run performance of `Qwen3-VL-Reranker-8B` as an example. Refer to [vllm "
+"benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more "
+"details."
+msgstr "以 `Qwen3-VL-Reranker-8B` 为例运行性能测试。更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/cli/)。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:222
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例，运行如下代码。"
+
+#: ../../source/tutorials/models/Qwen3-VL-Reranker.md:228
+msgid ""
+"After about several minutes, you can get the performance evaluation "
+"result. With this tutorial, the performance result is:"
+msgstr "大约几分钟后，即可获得性能评估结果。根据本教程，性能结果如下："

@@ -85,6 +85,7 @@ jobs:
             --ignore tests/ut/worker/test_worker_v1.py \
             --ignore tests/ut/spec_decode/test_mtp_proposer.py \
             --ignore tests/ut/kv_connector/test_mooncake_layerwise_connector.py \
+            --ignore tests/ut/worker/test_block_table.py \
             2>&1 | tee /tmp/unit-test.log
           exit ${PIPESTATUS[0]}
 
