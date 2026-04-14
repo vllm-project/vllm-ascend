@@ -100,6 +100,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Mistral3                       | 🔵            |                                                                      | A2/A3 |
 | Phi-3-Vision/Phi-3.5-Vision    | 🔵            |                                                                      | A2/A3 |
 | Gemma3                         | 🔵            |                                                                      | A2/A3 |
+| Molmo2                         | 🔵            | `Molmo2ForConditionalGeneration`; see [Molmo2-8B](../../tutorials/models/Molmo2-8B.md) | A2/A3 |
 | Llama3.2                       | 🔵            |                                                                      | A2/A3 |
 | PaddleOCR-VL                   | 🔵            |                                                                      | A2/A3 |
 | Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |       |

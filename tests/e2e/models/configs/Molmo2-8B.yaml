@@ -1,0 +1,15 @@
+model_name: "allenai/Molmo2-8B"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+  - name: "mmmu_val"
+    metrics:
+      - name: "acc,none"
+        # Reference: Ai2 Molmo2 family reports ~53.0% on MMMU (public model card / tech report).
+        # Harness-specific scores may differ slightly; rtol in test_lm_eval_correctness is 0.05.
+        value: 0.53
+max_model_len: 16384
+dtype: "bfloat16"
+trust_remote_code: True
+gpu_memory_utilization: 0.75
+enforce_eager: True

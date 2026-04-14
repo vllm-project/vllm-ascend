@@ -79,7 +79,7 @@ workflow matrix.
 | `qwen3-next-80b-a3b-instruct` | Qwen3-Next-80B-A3B-Instruct model test |
 | `qwen3-32b-int8` | Qwen3-32B INT8 quantization test |
 | `accuracy-group-1` | Accuracy tests: Qwen3-VL-8B, Qwen3-8B, Qwen2-Audio-7B, etc. |
-| `accuracy-group-2` | Accuracy tests: ERNIE-4.5, InternVL3_5-8B, Molmo-7B, Llama-3.2-3B, etc. |
+| `accuracy-group-2` | Accuracy tests: ERNIE-4.5, InternVL3_5-8B, Molmo-7B, Molmo2-8B, Llama-3.2-3B, etc. |
 | `accuracy-group-3` | Accuracy tests: Qwen3-30B-A3B, Qwen3-VL-30B-A3B, etc. |
 | `accuracy-group-4` | Accuracy tests: Qwen3-Next-80B-A3B, Qwen3-Omni-30B-A3B, etc. |
 
