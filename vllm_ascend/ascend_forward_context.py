@@ -214,7 +214,6 @@ def create_ascend_forward_context(
     new_forward_context = ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         attn_metadata=attn_metadata,
-        virtual_engine=virtual_engine,
         slot_mapping={},
         dp_metadata=dp_metadata,
         skip_compiled=skip_compiled,

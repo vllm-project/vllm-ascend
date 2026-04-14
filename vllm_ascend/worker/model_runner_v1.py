@@ -524,7 +524,7 @@ class NPUModelRunner(GPUModelRunner):
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         allow_dp_padding: bool = False,
-    ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
+    ) -> tuple[bool, int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
         # include them in the all_reduce operation, and more over, we CANNOT skip it
@@ -543,7 +543,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
-            return num_tokens, num_tokens_after_padding, cudagraph_mode
+            return False, num_tokens, num_tokens_after_padding, cudagraph_mode
 
         packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
         packed_tensor[0][self.dp_rank] = num_tokens
@@ -1461,42 +1461,6 @@ class NPUModelRunner(GPUModelRunner):
 
         return draft_token_ids
 
-    def sync_and_slice_intermediate_tensors(
-        self,
-        num_tokens: int,
-        intermediate_tensors: IntermediateTensors | None,
-        sync_self: bool,
-    ) -> IntermediateTensors:
-        assert self.intermediate_tensors is not None
-        tp = self.vllm_config.parallel_config.tensor_parallel_size
-        is_rs = enable_sp(self.vllm_config)
-
-        # When sequence parallelism is enabled, the "residual" tensor is sharded
-        # across tensor parallel ranks, so each rank only needs its own slice.
-        if sync_self:
-            assert intermediate_tensors is not None
-            for k, v in intermediate_tensors.items():
-                if self.ubatch_slices is None:
-                    copy_len = num_tokens // tp if is_rs else num_tokens
-                else:
-                    copy_len = (
-                        ((self.ubatch_slices[0].num_tokens + tp - 1) // tp)
-                        + ((self.ubatch_slices[1].num_tokens + tp - 1) // tp)
-                        if is_rs
-                        else (self.ubatch_slices[0].num_tokens + self.ubatch_slices[1].num_tokens)
-                    )
-                    intermediate_tensor_size = next(iter(self.intermediate_tensors.tensors.values())).size(0)
-                    if intermediate_tensor_size < copy_len:
-                        self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                            batch_size=copy_len, dtype=self.dtype, device=self.device
-                        )
-
-                self.intermediate_tensors[k][:copy_len].copy_(v[:copy_len], non_blocking=True)
-        else:
-            copy_len = num_tokens // tp if is_rs else num_tokens
-
-        return IntermediateTensors({k: v[:copy_len] for k, v in self.intermediate_tensors.items()})
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1763,7 +1727,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 # TODO(zxdu):check it, if we use padded ubatch here but use unpadded ubatch in attn split
                 # shape errors may occurs
-                ubatch_slices=ubatch_slices
+                ubatch_slices=ubatch_slices_padded,
             ),
             self.maybe_get_kv_connector_output(
                 scheduler_output,
@@ -2303,7 +2267,20 @@ class NPUModelRunner(GPUModelRunner):
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                if self.ubatch_slices is None:
+                    copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                else:
+                    copy_len = (
+                        ((self.ubatch_slices[0].num_tokens + tp - 1) // tp)
+                        + ((self.ubatch_slices[1].num_tokens + tp - 1) // tp)
+                        if enable_sp()
+                        else (self.ubatch_slices[0].num_tokens + self.ubatch_slices[1].num_tokens)
+                    )
+                    intermediate_tensor_size = next(iter(self.intermediate_tensors.tensors.values())).size(0)
+                    if intermediate_tensor_size < copy_len:
+                        self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                            batch_size=copy_len, dtype=self.dtype, device=self.device
+                        )
                 self.intermediate_tensors[k][:copy_len].copy_(
                     v[:copy_len], non_blocking=True
                 )
@@ -2765,7 +2742,13 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
-        _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = self._determine_batch_execution_and_padding(
+        (
+            _cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            _,
+        ) = self._determine_batch_execution_and_padding(
             num_tokens=num_tokens_unpadded,
             num_reqs=num_reqs,
             num_scheduled_tokens_np=num_scheduled_tokens,
