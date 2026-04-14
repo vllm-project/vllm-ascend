@@ -16,7 +16,7 @@ Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user
 
 ### Model Weight
 
-- `Qwen3-Omni-30B-A3B-Thinking` requires 2 NPU Cards(64G × 2).[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
+- `Qwen3-Omni-30B-A3B-Thinking` requires 2 NPU Cards (64G × 2).[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation
