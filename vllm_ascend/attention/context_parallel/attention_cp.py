@@ -557,7 +557,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             mtp_mask = attn_metadata.decode_meta.mtp_attn_mask
             B = mtp_mask.shape[0]
             target_length = 16384
-            new_mask = torch.zeros(1, B, target_length, dtype=torch.bool, device=mtp_mask.device)
+            new_mask = torch.zeros(1, B, target_length, dtype=torch.bool, device=query.device)
             new_mask[:, :, : mtp_mask.shape[1]] = mtp_mask
             spec_attn_mask = new_mask
 
