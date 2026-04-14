@@ -228,7 +228,7 @@ msgstr "限制"
 msgid ""
 "Disable `--mm-processor-cache-gb 0` if you want to use cross-process "
 "caching"
-msgstr "如果要使用跨进程缓存，请设置 `--mm-processor-cache-gb 0`"
+msgstr "如果要使用跨进程缓存，请禁用 `--mm-processor-cache-gb 0`"
 
 #: ../../source/user_guide/feature_guide/epd_disaggregation.md:73
 msgid ""
