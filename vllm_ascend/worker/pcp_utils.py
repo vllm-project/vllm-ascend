@@ -963,11 +963,10 @@ class PCPManager:
                     long_seq_metadata.head_attn_nomask_seqlens = head_attn_nomask_seqlens_list
                     long_seq_metadata.tail_attn_nomask_seqlens = tail_attn_nomask_seqlens_list
 
-        # Generate MTP attention masks for decode requests when dcp_size > 1 with MTP
+        # Generate MTP attention masks for decode requests when dcp_size > 1 with speculative decoding
         if (
             self.dcp_world_size > 1
             and self.speculative_config
-            and self.speculative_config.method == "mtp"
             and self.num_decode_reqs > 0
             and num_scheduled_tokens is not None
         ):
