@@ -43,10 +43,20 @@ from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
+def _disable_prefix_caching_for_pooling_models(vllm_config: VllmConfig) -> None:
+    """Disable prefix caching for pooling workloads to avoid partial-state reuse."""
+    if vllm_config.model_config.runner_type != "pooling":
+        return
+    if vllm_config.cache_config.enable_prefix_caching:
+        logger.warning("Prefix caching is not supported for pooling models. Disabling prefix caching automatically.")
+        vllm_config.cache_config.enable_prefix_caching = False
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        _disable_prefix_caching_for_pooling_models(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 

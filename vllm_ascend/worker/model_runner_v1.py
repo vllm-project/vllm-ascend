@@ -223,6 +223,19 @@ class ExecuteModelState(NamedTuple):
 
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Disable prefix caching for pooling models to avoid embedding
+        # inconsistency. When prefix cache hits, the model only forward-passes
+        # new (non-cached) tokens, producing partial hidden_states. The pooler
+        # (e.g., LastTokenPooler) then incorrectly uses these partial states,
+        # resulting in wrong embeddings on subsequent identical queries.
+        # See: https://github.com/vllm-project/vllm-ascend/issues/5725
+        if vllm_config.model_config.runner_type == "pooling":
+            if vllm_config.cache_config.enable_prefix_caching:
+                logger.warning(
+                    "Prefix caching is not supported for pooling models. Disabling prefix caching automatically."
+                )
+                vllm_config.cache_config.enable_prefix_caching = False
+
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
         # the following PR is merged:
