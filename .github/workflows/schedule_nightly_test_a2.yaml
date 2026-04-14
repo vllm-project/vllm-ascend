@@ -276,9 +276,6 @@ jobs:
           )
         }}
       upload: false
-    secrets:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
@@ -306,9 +303,6 @@ jobs:
           contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
         }}
       upload: false
-    secrets:
-      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
-      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
   doc-test:
     name: doc-test

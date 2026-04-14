@@ -42,9 +42,9 @@ on:
         type: boolean
     secrets:
       OBS_ACCESS_KEY:
-        required: true
+        required: false
       OBS_SECRET_KEY:
-        required: true
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -255,7 +255,7 @@ jobs:
       - name: Upload Report (GitHub Artifacts)
         if: ${{ inputs.upload == true }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
           path: /vllm-workspace/vllm-ascend/benchmarks/accuracy/

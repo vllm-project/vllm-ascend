@@ -46,9 +46,9 @@ on:
         description: branch name used as prefix in artifact/benchmark names to distinguish dual-branch test runs
     secrets:
       OBS_ACCESS_KEY:
-        required: true
+        required: false
       OBS_SECRET_KEY:
-        required: true
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
