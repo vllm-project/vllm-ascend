@@ -55,12 +55,14 @@ class TestDeviceInfo(unittest.TestCase):
 
         self.assertEqual(output, 'command-output')
         self.assertEqual(return_code, 7)
-        mock_popen.assert_called_once_with(
-            ['dummy', 'cmd'],
-            shell=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        mock_popen.assert_called_once()
+        _, kwargs = mock_popen.call_args
+        self.assertEqual(kwargs["shell"], False)
+        self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(kwargs["stderr"], subprocess.PIPE)
+        self.assertEqual(kwargs["env"]["LC_ALL"], "C")
+        self.assertEqual(kwargs["env"]["LANG"], "C")
+        self.assertEqual(kwargs["env"]["LC_MESSAGES"], "C")
 
     @patch('vllm_ascend.cpu_binding.execute_command')
     def setUp(self, mock_execute_command):
