@@ -228,10 +228,16 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 if mtp_masks and mtp_masks[0] is not None:
                     mtp_attn_mask = mtp_masks[0]
             # TODO: numpy array mode of the shared memory is used to improve performance
+
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+
+            # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
+            actual_seq_lengths_q = query_start_loc_cpu[1 : num_decodes + 1].tolist()
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
                 block_tables=block_table[: self.num_decodes_flatten],
                 mtp_attn_mask=mtp_attn_mask,
+                actual_seq_lengths_q=actual_seq_lengths_q,
             )
 
         attn_metadata = AscendMetadata(
@@ -577,7 +583,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
                 :, self.pcp_rank, self.dcp_rank
             ],
-            "actual_seq_lengths": torch.arange(attn_metadata.num_decodes_flatten) + 1,
+            "actual_seq_lengths": attn_metadata.decode_meta.actual_seq_lengths_q,
         }
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
