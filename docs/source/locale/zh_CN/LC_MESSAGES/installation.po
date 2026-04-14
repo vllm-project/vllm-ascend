@@ -8,9 +8,9 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-11 21:00+0800\n"
-"PO-Revision-Date: 2026-04-11 21:00+0800\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"PO-Revision-Date: 2025-07-18 10:09+0800\n"
+"Last-Translator: \n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
@@ -67,8 +67,7 @@ msgstr "Ascend HDK"
 msgid ""
 "Refer to the documentation [CANN "
 "8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html)"
-msgstr ""
-"请参考文档 [CANN 8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html)"
+msgstr "参考文档 [CANN 8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html)"
 
 #: ../../source/installation.md
 msgid "Required for CANN"
@@ -124,8 +123,7 @@ msgstr "有两种安装方式："
 msgid ""
 "**Using pip**: first prepare the environment manually or via a CANN "
 "image, then install `vllm-ascend` using pip."
-msgstr ""
-"**使用 pip**：首先手动或通过 CANN 镜像准备环境，然后使用 pip 安装 `vllm-ascend`。"
+msgstr "**使用 pip**：首先手动或通过 CANN 镜像准备环境，然后使用 pip 安装 `vllm-ascend`。"
 
 #: ../../source/installation.md:23
 msgid "**Using docker**: use the `vllm-ascend` pre-built docker image directly."
@@ -160,7 +158,7 @@ msgid ""
 "Refer to [Ascend Environment Setup "
 "Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) "
 "for more details."
-msgstr "更多详情请参考 [Ascend 环境搭建指南](https://ascend.github.io/docs/sources/ascend/quick_install.html)。"
+msgstr "更多详情请参考[Ascend环境搭建指南](https://ascend.github.io/docs/sources/ascend/quick_install.html)。"
 
 #: ../../source/installation.md:39
 msgid "Configure software environment"
@@ -245,9 +243,7 @@ msgid ""
 "The `uv-wheelnext` installation downloads only the delta on top of vllm, "
 "resulting in a smaller download size. First install `uv-wheelnext` to "
 "support incremental wheels:"
-msgstr ""
-"`uv-wheelnext` 安装方式仅下载 vLLM 之上的增量部分，从而减少下载量。请先安装 `uv-wheelnext` 以支持增量 "
-"wheel 包："
+msgstr "`uv-wheelnext` 安装方式仅下载基于 vllm 的增量部分，从而减少下载量。首先安装 `uv-wheelnext` 以支持增量 wheel 包："
 
 #: ../../source/installation.md
 msgid "Click here to see \"Build from source code\""
@@ -263,7 +259,8 @@ msgid ""
 "submodule update --init --recursive` manually, or ensure your environment"
 " has internet access."
 msgstr ""
-"如果您正在为 Atlas A3 构建自定义算子，请手动执行 `git submodule update --init --recursive`，或确保您的环境可以访问互联网。"
+"如果您正在为 Atlas A3 构建自定义算子，请手动执行 `git submodule update --init "
+"--recursive`，或确保您的环境可以访问互联网。"
 
 #: ../../source/installation.md:218
 msgid ""
@@ -286,9 +283,7 @@ msgid ""
 "unavailable, you need to set `SOC_VERSION` before `pip install -e .` so "
 "the build can target the correct chip. You can refer to `Dockerfile*` "
 "defaults, for example:"
-msgstr ""
-"如果在没有 `npu-smi` 的纯 CPU 环境中进行构建，则需要在执行 `pip install -e .` 之前设置 "
-"`SOC_VERSION`，以使构建过程能够针对正确的芯片进行目标适配。可参考 `Dockerfile*` 中的默认配置，例如："
+msgstr "如果您在仅 CPU 的环境（无法使用 `npu-smi`）中构建，需要在执行 `pip install -e .` 之前设置 `SOC_VERSION`，以便构建过程针对正确的芯片。您可以参考 `Dockerfile*` 中的默认值，例如："
 
 #: ../../source/installation.md:223
 msgid "Atlas A2: `export SOC_VERSION=ascend910b1`"
@@ -511,17 +506,16 @@ msgstr "在每个节点运行以下命令启动容器（您应提前将模型权
 #~ msgstr "镜像标签"
 
 #~ msgid "image-tag-openeuler"
-#~ msgstr "image-tag-openeuler"
+#~ msgstr "镜像标签-openeuler"
 
 #~ msgid "image-tag-a3"
-#~ msgstr "image-tag-a3"
+#~ msgstr "镜像标签-a3"
 
 #~ msgid "image-tag-a3-openeuler"
-#~ msgstr "image-tag-a3-openeuler"
+#~ msgstr "镜像标签-a3-openeuler"
 
 #~ msgid "image-tag-310p"
-#~ msgstr "image-tag-310p"
+#~ msgstr "镜像标签-310p"
 
 #~ msgid "image-tag-310p-openeuler"
-#~ msgstr "image-tag-310p-openeuler"
-
+#~ msgstr "镜像标签-310p-openeuler"

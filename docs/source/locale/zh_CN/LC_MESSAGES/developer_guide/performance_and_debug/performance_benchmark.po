@@ -8,8 +8,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 21:00+0800\n"
-"PO-Revision-Date: 2026-04-11 21:00+0800\n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -29,7 +29,10 @@ msgid ""
 " evaluating the performance under a variety of workloads. To maintain "
 "alignment with vLLM, we use the [benchmark](https://github.com/vllm-"
 "project/vllm/tree/main/benchmarks) script provided by the vllm project."
-msgstr "本文档详细介绍了 vllm-ascend 的基准测试方法，旨在评估其在多种工作负载下的性能。为与 vLLM 保持一致，我们使用 vLLM 项目提供的 [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) 脚本。"
+msgstr ""
+"本文档详细介绍了 vllm-ascend 的基准测试方法，旨在评估其在多种工作负载下的性能。为与 vLLM 保持一致，我们使用 vllm "
+"项目提供的 [benchmark](https://github.com/vllm-"
+"project/vllm/tree/main/benchmarks) 脚本。"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:5
 msgid ""
@@ -37,7 +40,10 @@ msgid ""
 "and fixed-QPS online serving benchmarks. For more details, see [vllm-"
 "ascend benchmark scripts](https://github.com/vllm-project/vllm-"
 "ascend/tree/main/benchmarks)."
-msgstr "**基准测试覆盖范围**：我们测量离线端到端延迟与吞吐量，以及固定 QPS 的在线服务基准测试。更多详情，请参阅 [vllm-ascend 基准测试脚本](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks)。"
+msgstr ""
+"**基准测试覆盖范围**：我们测量离线端到端延迟与吞吐量，以及固定 QPS 的在线服务基准测试。更多详情，请参阅 [vllm-ascend "
+"基准测试脚本](https://github.com/vllm-project/vllm-"
+"ascend/tree/main/benchmarks)。"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:7
 msgid "**Legend Description**:"
@@ -45,11 +51,11 @@ msgstr "**图例说明**："
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:9
 msgid "✅ = Supported"
-msgstr "✅ = 支持"
+msgstr "✅ = 已支持"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:10
 msgid "🟡 = Partial / Work in progress"
-msgstr "🟡 = 部分支持/进行中"
+msgstr "🟡 = 部分支持 / 开发中"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:11
 msgid "🚧 = Under development"
@@ -81,7 +87,9 @@ msgstr "3.1 数据集"
 msgid ""
 "VLLM supports a variety of [datasets](https://github.com/vllm-"
 "project/vllm/blob/main/vllm/benchmarks/datasets.py)."
-msgstr "VLLM 支持多种[数据集](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets.py)。"
+msgstr ""
+"VLLM 支持多种[数据集](https://github.com/vllm-"
+"project/vllm/blob/main/vllm/benchmarks/datasets.py)。"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "Dataset"
@@ -111,7 +119,9 @@ msgstr "✅"
 msgid ""
 "`wget "
 "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json`"
-msgstr "`wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json`"
+msgstr ""
+"`wget "
+"https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "ShareGPT4V (Image)"
@@ -124,7 +134,11 @@ msgid ""
 " that the images need to be downloaded separately. For example, to "
 "download COCO's 2017 Train images:<br>`wget "
 "http://images.cocodataset.org/zips/train2017.zip`"
-msgstr "`wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>注意：图像需要单独下载。例如，要下载 COCO 2017 训练图像：<br>`wget http://images.cocodataset.org/zips/train2017.zip`"
+msgstr ""
+"`wget https://huggingface.co/datasets/Lin-"
+"Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>注意：图像需要单独下载。例如，要下载"
+" COCO 2017 训练图像：<br>`wget "
+"http://images.cocodataset.org/zips/train2017.zip`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "ShareGPT4Video (Video)"
@@ -142,7 +156,9 @@ msgstr "BurstGPT"
 msgid ""
 "`wget "
 "https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv`"
-msgstr "`wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv`"
+msgstr ""
+"`wget "
+"https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "Sonnet (deprecated)"
@@ -212,7 +228,9 @@ msgstr "HuggingFace-AIMO"
 msgid ""
 "`AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-"
 "CoT`"
-msgstr "`AI-MO/aimo-validation-aime`、`AI-MO/NuminaMath-1.5`、`AI-MO/NuminaMath-CoT`"
+msgstr ""
+"`AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-"
+"CoT`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "HuggingFace-Other"
@@ -220,7 +238,7 @@ msgstr "HuggingFace-其他"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "`lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered`"
-msgstr "`lmms-lab/LLaVA-OneVision-Data`、`Aeala/ShareGPT_Vicuna_unfiltered`"
+msgstr "`lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "HuggingFace-MTBench"
@@ -236,7 +254,7 @@ msgstr "HuggingFace-Blazedit"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "`vdaita/edit_5k_char`, `vdaita/edit_10k_char`"
-msgstr "`vdaita/edit_5k_char`、`vdaita/edit_10k_char`"
+msgstr "`vdaita/edit_5k_char`, `vdaita/edit_10k_char`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "Spec Bench"
@@ -246,7 +264,9 @@ msgstr "Spec Bench"
 msgid ""
 "`wget https://raw.githubusercontent.com/hemingkx/Spec-"
 "Bench/refs/heads/main/data/spec_bench/question.jsonl`"
-msgstr "`wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl`"
+msgstr ""
+"`wget https://raw.githubusercontent.com/hemingkx/Spec-"
+"Bench/refs/heads/main/data/spec_bench/question.jsonl`"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "Custom"
@@ -261,7 +281,9 @@ msgid ""
 "The datasets mentioned above are all links to datasets on huggingface. "
 "The dataset's `dataset-name` should be set to `hf`. For local `dataset-"
 "path`, please set `hf-name` to its Hugging Face ID like"
-msgstr "上述数据集均为 Hugging Face 上数据集的链接。数据集的 `dataset-name` 应设置为 `hf`。对于本地的 `dataset-path`，请将其 `hf-name` 设置为对应的 Hugging Face ID，例如："
+msgstr ""
+"上述数据集均为 Hugging Face 上数据集的链接。数据集的 `dataset-name` 应设置为 `hf`。对于本地的 "
+"`dataset-path`，请将其 `hf-name` 设置为对应的 Hugging Face ID，例如："
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:93
 msgid "3.2 Run basic benchmark"
@@ -298,31 +320,3 @@ msgstr "3.2.4 多模态基准测试"
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:216
 msgid "3.2.5 Embedding Benchmark"
 msgstr "3.2.5 嵌入基准测试"
-
-#~ msgid "3. (Optional)Prepare model weights"
-#~ msgstr "3.（可选）准备模型权重"
-
-#~ msgid ""
-#~ "For faster running speed, we recommend"
-#~ " downloading the model in advance："
-#~ msgstr "为获得更快的运行速度，建议提前下载模型："
-
-#~ msgid ""
-#~ "You can also replace all model "
-#~ "paths in the [json](https://github.com/vllm-"
-#~ "project/vllm-ascend/tree/main/benchmarks/tests) files "
-#~ "with your local paths:"
-#~ msgstr ""
-#~ "您也可以将 [json](https://github.com/vllm-project/vllm-"
-#~ "ascend/tree/main/benchmarks/tests) 文件中的所有模型路径替换为本地路径："
-
-#~ msgid "After about 10 mins, the output is as shown below:"
-#~ msgstr "大约 10 分钟后，输出如下所示："
-
-#~ msgid ""
-#~ "The result json files are generated "
-#~ "into the path `benchmark/results` These "
-#~ "files contain detailed benchmarking results"
-#~ " for further analysis."
-#~ msgstr "结果 JSON 文件将生成到 `benchmark/results` 路径下。这些文件包含详细的基准测试结果，可用于进一步分析。"
-

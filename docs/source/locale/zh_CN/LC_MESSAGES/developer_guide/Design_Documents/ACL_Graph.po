@@ -8,8 +8,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-11 14:05+0800\n"
-"PO-Revision-Date: 2026-04-11 21:00+0800\n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"PO-Revision-Date: 2026-04-09 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -38,10 +38,9 @@ msgid ""
 "introduced by ACL graph capture, and the mechanisms used to keep "
 "attention parameters correct during replay."
 msgstr ""
-"ACL 计算图是 vLLM 静态图执行在 Ascend 上的实现。上游 vLLM 和 PyTorch 文档已描述了通用图模型，"
-"包括 `CUDAGraphMode`、运行时调度、批次描述符、分桶与填充，以及全图和分段图的定义。"
-"本文档聚焦于 `vllm-ascend` 中 Ascend 特有的内容：平台集成点、ACL 图捕获引入的额外约束，"
-"以及在回放期间保持注意力参数正确的机制。"
+"ACL 计算图是 vLLM 静态图执行在 Ascend 平台上的实现。上游 vLLM 和 PyTorch "
+"文档已经描述了通用的计算图模型，包括 `CUDAGraphMode`、运行时调度、批次描述符、分桶与填充，以及完整图和分段图的定义。本文档重点介绍 "
+"`vllm-ascend` 中 Ascend 特有的内容：平台集成点、ACL 计算图捕获引入的额外约束，以及在重放期间保持注意力参数正确的机制。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:7
 msgid ""
@@ -52,38 +51,43 @@ msgid ""
 " capture-size trimming, and attention-specific update logic needed by ACL"
 " graph replay."
 msgstr ""
-"在 Ascend 上，设计目标与上游静态图执行相同：减少中小运行时形状的主机下发开销。"
-"但实现边界有所不同。vLLM 提供通用分发路径，而 `vllm-ascend` 提供平台包装器、"
-"捕获大小裁剪以及 ACL 图回放所需的注意力专用更新逻辑。"
+"在 Ascend 上，设计目标与上游静态图执行相同：减少中小型运行时形状的主机启动开销。实现边界有所不同。vLLM 提供通用的调度路径，而 "
+"`vllm-ascend` 则提供平台封装器、捕获大小裁剪以及 ACL 计算图重放所需的注意力特定更新逻辑。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:9
 msgid "Prerequisites and References"
-msgstr "前置条件与参考资料"
+msgstr "先决条件与参考资料"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:11
 msgid ""
 "Upstream vLLM design doc for generic graph concepts: [CUDA "
 "Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs.html)."
-msgstr "上游 vLLM 关于通用图概念的设计文档：[CUDA 计算图](https://docs.vllm.ai/en/latest/design/cuda_graphs.html)。"
+msgstr ""
+"上游 vLLM 关于通用计算图概念的设计文档：[CUDA "
+"计算图](https://docs.vllm.ai/en/latest/design/cuda_graphs.html)。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:12
 msgid ""
 "PyTorch graph documentation for generic capture and replay semantics: "
 "[Accelerating PyTorch with CUDA Graphs](https://pytorch.org/blog"
 "/accelerating-pytorch-with-cuda-graphs/)."
-msgstr "PyTorch 关于通用捕获与回放语义的图文档：[使用 CUDA 计算图加速 PyTorch](https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/)。"
+msgstr ""
+"PyTorch 关于通用捕获和重放语义的计算图文档：[使用 CUDA 计算图加速 "
+"PyTorch](https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/)。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:13
 msgid ""
 "Ascend user guide for operational enablement: [Graph Mode "
 "Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html)."
-msgstr "Ascend 操作启用用户指南：[图模式指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html)。"
+msgstr ""
+"Ascend 用户指南中的操作启用说明：[计算图模式指南](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html)。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:14
 msgid ""
 "Existing repo design note: "
 "`docs/source/developer_guide/Design_Documents/ACL_Graph.md`."
-msgstr "现有仓库设计说明：`docs/source/developer_guide/Design_Documents/ACL_Graph.md`。"
+msgstr ""
+"现有仓库设计说明：`docs/source/developer_guide/Design_Documents/ACL_Graph.md`。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:16
 msgid ""
@@ -92,8 +96,7 @@ msgid ""
 " capture bucketing, padding policy, or the generic meaning of full versus"
 " piecewise execution."
 msgstr ""
-"本文档有意不重新解释上游主题，例如图模式选择、分发器行为、批次描述符构建、捕获分桶、填充策略，"
-"或全图与分段执行的一般含义。"
+"本文档有意不再重新解释上游主题，例如计算图模式选择、调度器行为、批次描述符构建、捕获分桶、填充策略，或完整执行与分段执行的通用含义。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:18
 msgid "How ACL Graph Fits into vLLM"
@@ -106,8 +109,8 @@ msgid ""
 "`vllm_ascend.compilation.acl_graph.ACLGraphWrapper`, which is the "
 "platform-specific wrapper used when vLLM enables static graph mode."
 msgstr ""
-"vLLM 拥有通用静态图流程。在 Ascend 上，`NPUPlatform.get_static_graph_wrapper_cls()` 返回 "
-"`vllm_ascend.compilation.acl_graph.ACLGraphWrapper`，这是 vLLM 启用静态图模式时使用的平台特定包装器。"
+"vLLM 拥有通用的静态图流程。在 Ascend 上，`NPUPlatform.get_static_graph_wrapper_cls()` "
+"返回 `vllm_ascend.compilation.acl_graph.ACLGraphWrapper`，这是 vLLM 启用静态图模式时使用的平台特定封装器。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:22
 msgid "`ACLGraphWrapper` is responsible for:"
@@ -121,17 +124,17 @@ msgstr "从前向上下文中读取运行时模式和 `batch_descriptor`，"
 msgid ""
 "deciding whether to run eagerly, capture a new ACL graph, or replay a "
 "cached ACL graph,"
-msgstr "决定是 eager 运行、捕获新的 ACL 计算图，还是回放缓存的 ACL 计算图，"
+msgstr "决定是立即执行、捕获新的 ACL 计算图，还是重放缓存的 ACL 计算图，"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:26
 msgid "caching graph entries per batch descriptor,"
-msgstr "按批次描述符缓存图条目，"
+msgstr "按批次描述符缓存计算图条目，"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:27
 msgid ""
 "preserving the graph pool and replay bookkeeping needed by the Ascend "
 "backend."
-msgstr "保留 Ascend 后端所需的图池和回放记账信息。"
+msgstr "维护 Ascend 后端所需的计算图池和重放簿记。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:29
 msgid ""
@@ -139,9 +142,7 @@ msgid ""
 "runtime mode and batch descriptor have already been chosen correctly by "
 "vLLM, then applies Ascend capture or replay to that concrete runtime "
 "shape."
-msgstr ""
-"该包装器不定义上游分发策略。它假设 vLLM 已正确选择了运行时模式和批次描述符，"
-"然后对该具体运行时形状应用 Ascend 捕获或回放。"
+msgstr "该封装器不定义上游调度策略。它假设运行时模式和批次描述符已由 vLLM 正确选择，然后对该具体的运行时形状应用 Ascend 捕获或重放。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:31
 msgid "Capture Sizes and Bucketing"
@@ -155,17 +156,15 @@ msgid ""
 "size. If the runtime batch is larger than the largest configured capture "
 "size, graph mode is skipped and execution falls back to eager mode."
 msgstr ""
-"vLLM 图回放需要稳定的运行时形状，因此 vLLM 不会尝试捕获所有可能的批次形状。"
-"相反，它准备一个有限的捕获大小集合，并将运行时批次分发到最近的支持大小。"
-"如果运行时批次大于配置的最大捕获大小，则跳过图模式并回退到 eager 模式。"
+"vLLM 计算图重放需要稳定的运行时形状，因此 vLLM 不会尝试捕获所有可能的批次形状。相反，它会准备一组有限的捕获大小，并将运行时批次调度到最接近的受支持大小。如果运行时批次大于配置的最大捕获大小，则跳过计算图模式，执行回退到立即执行模式。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:35
 msgid "By default, vLLM builds capture sizes as:"
-msgstr "默认情况下，vLLM 构建的捕获大小为："
+msgstr "默认情况下，vLLM 构建的捕获大小如下："
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:37
 msgid "`1`, `2`, `4`"
-msgstr "`1`、`2`、`4`"
+msgstr "`1`, `2`, `4`"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:38
 msgid "multiples of `8` from `8` up to `255`"
@@ -177,23 +176,21 @@ msgstr "从 `256` 到 `max_cudagraph_capture_size` 的 `16` 的倍数"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:41
 msgid "Conceptually, the default list looks like:"
-msgstr "概念上，默认列表如下所示："
+msgstr "从概念上讲，默认列表如下所示："
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:47
 msgid ""
 "The smaller step at small batch sizes reduces padding overhead where "
 "latency is most sensitive, while the larger step at bigger sizes keeps "
 "the number of captured graphs under control."
-msgstr ""
-"小批次尺寸下的较小步长减少了延迟最敏感处的填充开销，而大批次尺寸下的较大步长则将捕获的图数量控制在合理范围内。"
+msgstr "在批次较小时使用较小的步长，可以在延迟最敏感的地方减少填充开销，而在批次较大时使用较大的步长，可以控制捕获的计算图数量。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:49
 msgid ""
 "On Ascend, this generic upstream bucketing strategy is still the starting"
 " point, but the final capture sizes may be reduced further by platform-"
 "specific constraints:"
-msgstr ""
-"在 Ascend 上，这种通用的上游分桶策略仍然是起点，但最终的捕获大小可能会因平台特定约束而进一步减少："
+msgstr "在 Ascend 上，这种通用的上游分桶策略仍然是起点，但最终的捕获大小可能会因平台特定的约束而进一步减少："
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:51
 msgid "sequence-parallel filtering may remove unsupported sizes,"
@@ -203,7 +200,7 @@ msgstr "序列并行过滤可能会移除不支持的大小，"
 msgid ""
 "stream-budget trimming may reduce the number of sizes that can be "
 "captured,"
-msgstr "流预算裁剪可能会减少可捕获的大小数量，"
+msgstr "流预算裁剪可能会减少可捕获大小的数量，"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:53
 msgid "some runtime modes may be normalized before capture begins."
@@ -215,7 +212,7 @@ msgstr "Ascend 特定的设计约束"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:57
 msgid "Stream budget constrains capture breadth"
-msgstr "流预算限制捕获广度"
+msgstr "流预算限制了捕获的广度"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:59
 msgid ""
@@ -228,10 +225,8 @@ msgid ""
 "representative size set when the requested range would exceed the "
 "supported budget."
 msgstr ""
-"与 CUDA 图不同，ACL 图捕获受流资源限制。当前实现将图数量视为流预算问题，"
-"并在 `vllm_ascend.utils.update_aclgraph_sizes()` 中相应裁剪捕获大小。"
-"裁剪逻辑从配置的捕获大小开始，根据模型深度和通信结构估算每个图的资源成本，"
-"并在请求的范围超出支持的预算时采样一个较小的代表性大小集合。"
+"与 CUDA 计算图不同，ACL 计算图捕获受流资源限制。当前实现将计算图数量视为流预算问题，并在 "
+"`vllm_ascend.utils.update_aclgraph_sizes()` 中相应地裁剪捕获大小。裁剪逻辑从配置的捕获大小开始，根据模型深度和通信结构估算每个计算图的资源成本，并在请求的范围超过支持的预算时，采样一个较小的代表性大小集合。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:61
 msgid ""
@@ -241,8 +236,7 @@ msgid ""
 "Piecewise mode is more constrained because each captured segment consumes"
 " resources independently, roughly one graph per layer."
 msgstr ""
-"当前实现使用约 1800 的实际最大图数量预算（低于设备流限制），并进一步减少通信密集型场景（如上下文并行执行）的预算。"
-"分段模式受到更多限制，因为每个捕获的段独立消耗资源，大约每层一个图。"
+"当前实现使用约 1800 个计算图的实用最大数量预算，低于设备流限制，并进一步减少通信密集型情况（如上下文并行执行）的预算。分段模式约束更大，因为每个捕获的段独立消耗资源，大约每层一个计算图。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:63
 msgid ""
@@ -252,19 +246,18 @@ msgid ""
 "supported capture sizes, while the default communication unfolding path "
 "is more restrictive and reduces the supported runtime shape range."
 msgstr ""
-"通信执行模式也很重要。`update_aclgraph_sizes()` 根据 `HCCL_OP_EXPANSION_MODE` 使用不同的公式。"
-"实践中，`HCCL_OP_EXPANSION_MODE=AIV` 可以增加支持的捕获大小数量，"
-"而默认的通信展开路径限制更多，会减少支持的运行时形状范围。"
+"通信执行模式也很重要。`update_aclgraph_sizes()` 根据 `HCCL_OP_EXPANSION_MODE` "
+"使用不同的公式。实际上，`HCCL_OP_EXPANSION_MODE=AIV` 可以增加支持的捕获大小数量，而默认的通信展开路径限制更严格，会减少支持的运行时形状范围。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:65
 msgid "Platform mode normalization is stricter than generic upstream behavior"
-msgstr "平台模式规范化比通用上游行为更严格"
+msgstr "平台模式规范化比通用的上游行为更严格"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:67
 msgid ""
 "Ascend currently narrows some generic upstream modes in "
 "`vllm_ascend.platform.NPUPlatform.check_and_update_config()`."
-msgstr "Ascend 目前在 `vllm_ascend.platform.NPUPlatform.check_and_update_config()` 中收窄了一些通用上游模式。"
+msgstr "Ascend 当前在 `vllm_ascend.platform.NPUPlatform.check_and_update_config()` 中收窄了一些通用的上游模式。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:69
 msgid "`FULL_AND_PIECEWISE` is normalized to `PIECEWISE`."
@@ -276,17 +269,17 @@ msgstr "编码器-解码器模型被强制使用 `PIECEWISE`。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:71
 msgid "`use_inductor` is disabled for ACL graph paths."
-msgstr "ACL 图路径禁用 `use_inductor`。"
+msgstr "对于 ACL 计算图路径，`use_inductor` 被禁用。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:72
 msgid "`ASCEND_LAUNCH_BLOCKING=1` is rejected when ACL graph is enabled."
-msgstr "启用 ACL 图时，`ASCEND_LAUNCH_BLOCKING=1` 被拒绝。"
+msgstr "当启用 ACL 计算图时，`ASCEND_LAUNCH_BLOCKING=1` 会被拒绝。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:73
 msgid ""
 "Xlite graph mode can disable ACL graph full mode or fall back to "
 "`FULL_DECODE_ONLY`, depending on configuration."
-msgstr "Xlite 图模式可以根据配置禁用 ACL 图全模式或回退到 `FULL_DECODE_ONLY`。"
+msgstr "Xlite 计算图模式可以禁用 ACL 计算图完整模式，或回退到 `FULL_DECODE_ONLY`，具体取决于配置。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:75
 msgid ""
@@ -294,17 +287,15 @@ msgid ""
 "current Ascend backend can execute safely. Some of them are long-term "
 "platform constraints, while others are clearly transitional in the "
 "current implementation."
-msgstr ""
-"这些检查记录了当前 Ascend 后端可以安全执行的上游图行为的子集。"
-"其中一些是长期的平台约束，而另一些在当前实现中显然是过渡性的。"
+msgstr "这些检查记录了当前 Ascend 后端可以安全执行的上游计算图行为的子集。其中一些是长期的平台约束，而另一些在当前实现中显然是过渡性的。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:77
 msgid "Key Ascend-Specific Mechanisms"
-msgstr "关键 Ascend 特定机制"
+msgstr "关键的 Ascend 特定机制"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:79
 msgid "Host-side attention parameter update for full graph replay"
-msgstr "全图回放的主机侧注意力参数更新"
+msgstr "用于完整图重放的主机端注意力参数更新"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:81
 msgid ""
@@ -314,9 +305,8 @@ msgid ""
 "Ascend implementation handles this by separating graph capture from host-"
 "side task parameter updates."
 msgstr ""
-"Ascend 上的全图回放有一个额外的上游通用文档未详细涵盖的问题："
-"即使整体图是静态的，某些注意力算子仍需要运行时元数据更新。"
-"Ascend 实现通过将图捕获与主机侧任务参数更新分离来处理此问题。"
+"Ascend 上的完整图重放有一个上游通用文档未详细涵盖的额外问题：即使整体计算图是静态的，某些注意力算子也需要运行时元数据更新。Ascend "
+"实现通过将计算图捕获与主机端任务参数更新分离来处理此问题。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:83
 msgid "The flow is:"
@@ -327,13 +317,13 @@ msgid ""
 "During capture, attention backends record per-graph task handles, events,"
 " workspaces, and weak references to the tensors or metadata that must be "
 "refreshed."
-msgstr "在捕获期间，注意力后端记录每个图的任务句柄、事件、工作空间以及对必须刷新的张量或元数据的弱引用。"
+msgstr "在捕获期间，注意力后端记录每个计算图的任务句柄、事件、工作空间，以及对必须刷新的张量或元数据的弱引用。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:86
 msgid ""
 "Before replay, `update_full_graph_params()` calls the backend specific "
 "`update_graph_params()` implementation."
-msgstr "在回放之前，`update_full_graph_params()` 调用后端特定的 `update_graph_params()` 实现。"
+msgstr "在重放之前，`update_full_graph_params()` 调用后端特定的 `update_graph_params()` 实现。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:87
 msgid ""
@@ -341,18 +331,17 @@ msgid ""
 "`torch.npu.graph_task_update_begin(...)` and "
 "`torch.npu.graph_task_update_end(...)` around the underlying attention "
 "operator launch."
-msgstr "该后端在更新流上运行参数刷新，在底层注意力算子启动前后分别调用 "
-"`torch.npu.graph_task_update_begin(...)` 和 `torch.npu.graph_task_update_end(...)`。"
+msgstr "该后端在更新流上运行参数刷新，在底层注意力算子启动前后使用 `torch.npu.graph_task_update_begin(...)` 和 `torch.npu.graph_task_update_end(...)`。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:88
 msgid ""
 "`torch.npu.ExternalEvent` objects are used to enforce ordering between "
 "the host-side update stream and the replay stream."
-msgstr "`torch.npu.ExternalEvent` 对象用于强制主机侧更新流和回放流之间的顺序。"
+msgstr "`torch.npu.ExternalEvent` 对象用于强制主机端更新流和重放流之间的顺序。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:90
 msgid "This mechanism is implemented in attention backends such as:"
-msgstr "该机制在以下注意力后端中实现："
+msgstr "此机制在注意力后端中实现，例如："
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:92
 msgid "`vllm_ascend/attention/attention_v1.py`"
@@ -375,13 +364,11 @@ msgid ""
 "The important design point is that Ascend full graph support depends on "
 "backend-provided `update_graph_params()` hooks. Without that hook, "
 "capture alone is not enough to replay the correct attention state."
-msgstr ""
-"重要的设计点是：Ascend 全图支持依赖于后端提供的 `update_graph_params()` 钩子。"
-"没有这个钩子，仅靠捕获不足以回放正确的注意力状态。"
+msgstr "重要的设计点是，Ascend 完整图支持依赖于后端提供的 `update_graph_params()` 钩子。没有这个钩子，仅靠捕获不足以重放正确的注意力状态。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:99
 msgid "Replay ordering and synchronization"
-msgstr "回放顺序与同步"
+msgstr "重放顺序与同步"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:101
 msgid ""
@@ -389,9 +376,7 @@ msgid ""
 "common path to ensure that host-side parameter updates stay aligned with "
 "the graph execution that will consume them. This is especially relevant "
 "in asynchronous scheduling or multi-threaded execution."
-msgstr ""
-"`ACLGraphWrapper` 在公共路径的回放前同步当前流，以确保主机侧参数更新与将要消耗它们的图执行保持一致。"
-"这在异步调度或多线程执行中尤为重要。"
+msgstr "`ACLGraphWrapper` 在通用路径的回放前同步当前流，以确保主机侧参数更新与将要使用它们的图执行保持对齐。这在异步调度或多线程执行中尤为重要。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:103
 msgid ""
@@ -403,24 +388,18 @@ msgid ""
 "hangs. The code keeps a narrower path for the main full-graph eagle case,"
 " but the general design assumption is the same: replay must not overtake "
 "pending parameter update work."
-msgstr ""
-"如果不保持顺序，第 *i* 次迭代的参数更新可能被第 *i-1* 次迭代的回放观察到，"
-"或者第 *i* 次迭代的回放可能在其自身参数更新完成之前开始。"
-"实践中，这意味着注意力算子可能以不匹配的运行时元数据运行，"
-"这可能导致不正确的结果、精度问题甚至挂起。"
-"代码为主要全图 EAGLE 情况保留了一条较窄的路径，但总体设计假设相同：回放不能超过待处理的参数更新工作。"
+msgstr "如果顺序未得到保持，迭代 *i* 的参数更新可能被迭代 *i-1* 的回放观察到，或者迭代 *i* 的回放可能在它自身的参数更新完成之前就开始。实际上，这意味着注意力算子可能在运行时元数据不匹配的情况下运行，这可能导致错误结果、精度问题甚至挂起。代码为主流的完整图 eagle 情况保留了一条更窄的路径，但通用的设计假设是相同的：回放不得超越待处理的参数更新工作。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:105
 msgid "Full vs Piecewise on Ascend"
-msgstr "Ascend 上的全图与分段"
+msgstr "Ascend 上的完整图与分段图"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:107
 msgid ""
 "Upstream docs already define full graph and piecewise graph semantically."
 " On Ascend, the practical difference is driven by backend support and "
 "resource cost."
-msgstr ""
-"上游文档已在语义上定义了全图和分段图。在 Ascend 上，实际差异由后端支持和资源成本驱动。"
+msgstr "上游文档已经在语义上定义了完整图和分段图。在 Ascend 上，实际差异由后端支持和资源成本驱动。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:109
 msgid "Piecewise mode"
@@ -434,14 +413,11 @@ msgid ""
 " is currently the more widely supported option, but it is also the most "
 "sensitive to stream pressure because the number of captured graphs scales"
 " with model depth."
-msgstr ""
-"分段模式是保守路径。它依赖于通用的 vLLM 拆分执行策略，然后对编译路径选择的非注意力段应用 ACL 图捕获。"
-"在 Ascend 上，该模式目前是更广泛支持的选项，但它也是对流压力最敏感的，"
-"因为捕获的图数量随模型深度线性增长。"
+msgstr "分段模式是保守路径。它依赖通用的 vLLM 拆分执行策略，然后将 ACL 图捕获应用于编译路径选择的非注意力片段。在 Ascend 上，此模式是目前更广泛支持的选项，但它也对流压力最敏感，因为捕获的图数量随模型深度而增加。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:113
 msgid "Full graph mode"
-msgstr "全图模式"
+msgstr "完整图模式"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:115
 msgid ""
@@ -450,9 +426,7 @@ msgid ""
 "`update_graph_params()`. On Ascend, full graph support is tied to those "
 "attention-specific update hooks, workspace caching, and replay ordering "
 "guarantees."
-msgstr ""
-"当注意力后端能够通过 `update_graph_params()` 支持运行时参数修补时，全图模式是更面向性能的路径。"
-"在 Ascend 上，全图支持与那些注意力特定的更新钩子、工作空间缓存和回放顺序保证紧密相关。"
+msgstr "完整图模式是更注重性能的路径，前提是注意力后端能够通过 `update_graph_params()` 支持运行时参数修补。在 Ascend 上，完整图支持与那些注意力特定的更新钩子、工作空间缓存和回放顺序保证紧密相关。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:117
 msgid "Diagnostics and Operational Notes"
@@ -465,26 +439,20 @@ msgid ""
 "`--cudagraph-metrics` and do not pass `--disable-log-stats`. In Python "
 "usage, set `cudagraph_metrics=True` and `disable_log_stats=False`. Then "
 "inspect the emitted metrics and logs."
-msgstr ""
-"确认图模式已激活的最简单方法是启用 cudagraph 指标并保持日志统计启用。"
-"在 CLI 使用中，使用 `--cudagraph-metrics` 且不传递 `--disable-log-stats`。"
-"在 Python 使用中，设置 `cudagraph_metrics=True` 和 `disable_log_stats=False`。"
-"然后检查输出的指标和日志。"
+msgstr "确认图模式是否激活的最简单方法是启用 cudagraph 指标并保持日志统计开启。在 CLI 使用中，使用 `--cudagraph-metrics` 且不传递 `--disable-log-stats`。在 Python 使用中，设置 `cudagraph_metrics=True` 和 `disable_log_stats=False`。然后检查输出的指标和日志。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:120
 msgid ""
 "Profiling can also confirm whether replay is happening, and developers "
 "can add temporary prints before replay when debugging locally, but those "
 "are secondary methods and are not expanded here."
-msgstr ""
-"性能分析也可以确认回放是否发生，开发者在本地调试时可以在回放前添加临时打印语句，"
-"但这些是辅助方法，此处不展开说明。"
+msgstr "性能分析也可以确认回放是否发生，开发者可以在本地调试时在回放前添加临时打印，但这些都是次要方法，此处不展开说明。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:121
 msgid ""
 "`update_aclgraph_sizes()` is the main implementation point for stream-"
 "budget-driven capture-size trimming."
-msgstr "`update_aclgraph_sizes()` 是流预算驱动的捕获大小裁剪的主要实现点。"
+msgstr "`update_aclgraph_sizes()` 是基于流预算驱动的捕获大小调整的主要实现点。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:122
 msgid ""
@@ -503,8 +471,7 @@ msgid ""
 "For debugging inside graph execution, the repo also provides graph-aware "
 "print helpers in `vllm_ascend.utils`, but those are developer diagnostics"
 " rather than part of the execution design."
-msgstr "对于图执行内部的调试，仓库还在 `vllm_ascend.utils` 中提供了图感知的打印辅助函数，"
-"但这些是开发者诊断工具，而非执行设计的一部分。"
+msgstr "对于图执行内部的调试，代码库还在 `vllm_ascend.utils` 中提供了图感知的打印辅助工具，但这些是开发者诊断工具，而非执行设计的一部分。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:126
 msgid "Related Files"
@@ -514,43 +481,43 @@ msgstr "相关文件"
 msgid ""
 "`vllm_ascend/platform.py`, mode normalization, platform hooks, and static"
 " graph wrapper selection."
-msgstr "`vllm_ascend/platform.py`：模式规范化、平台钩子和静态图包装器选择。"
+msgstr "`vllm_ascend/platform.py`，模式规范化、平台钩子以及静态图包装器选择。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:129
 msgid ""
 "`vllm_ascend/compilation/acl_graph.py`, ACL graph wrapper, capture and "
 "replay cache, graph parameter containers, and full graph update dispatch."
-msgstr "`vllm_ascend/compilation/acl_graph.py`：ACL 图包装器、捕获与回放缓存、图参数容器和全图更新分发。"
+msgstr "`vllm_ascend/compilation/acl_graph.py`，ACL 图包装器、捕获与回放缓存、图参数容器以及完整图更新分发。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:130
 msgid ""
 "`vllm_ascend/utils.py`, capture size adjustment through "
 "`update_aclgraph_sizes()`."
-msgstr "`vllm_ascend/utils.py`：通过 `update_aclgraph_sizes()` 进行捕获大小调整。"
+msgstr "`vllm_ascend/utils.py`，通过 `update_aclgraph_sizes()` 进行捕获大小调整。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:131
 msgid ""
 "`vllm_ascend/attention/attention_v1.py`, full graph attention parameter "
 "capture and update logic."
-msgstr "`vllm_ascend/attention/attention_v1.py`：全图注意力参数捕获和更新逻辑。"
+msgstr "`vllm_ascend/attention/attention_v1.py`，完整图注意力参数捕获与更新逻辑。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:132
 msgid ""
 "`vllm_ascend/attention/mla_v1.py`, MLA specific full graph parameter "
 "capture and update logic."
-msgstr "`vllm_ascend/attention/mla_v1.py`：MLA 特定的全图参数捕获和更新逻辑。"
+msgstr "`vllm_ascend/attention/mla_v1.py`，MLA 特定的完整图参数捕获与更新逻辑。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:133
 msgid ""
 "`vllm_ascend/attention/context_parallel/attention_cp.py`, context "
 "parallel attention update path."
-msgstr "`vllm_ascend/attention/context_parallel/attention_cp.py`：上下文并行注意力更新路径。"
+msgstr "`vllm_ascend/attention/context_parallel/attention_cp.py`，上下文并行注意力更新路径。"
 
 #: ../../source/developer_guide/Design_Documents/ACL_Graph.md:134
 msgid ""
 "`vllm_ascend/attention/context_parallel/mla_cp.py`, context parallel MLA "
 "update path."
-msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`：上下文并行 MLA 更新路径。"
+msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`，上下文并行 MLA 更新路径。"
 
 #~ msgid "Why do we need ACL Graph?"
 #~ msgstr "为什么需要 ACL 计算图？"
@@ -716,11 +683,11 @@ msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`：上下文并行 MLA
 #~ "wrapper, so what we need to do "
 #~ "is implement the graph mode wrapper "
 #~ "on Ascend: `ACLGraphWrapper`."
-#~ msgstr ""
-#~ "在计算图模式下，vLLM 会调用 "
-#~ "`current_platform.get_static_graph_wrapper_cls` "
-#~ "获取当前设备的计算图模型包装器，因此我们需要在 Ascend "
-#~ "上实现计算图模式包装器：`ACLGraphWrapper`。"
+msgstr ""
+"在计算图模式下，vLLM 会调用 "
+"`current_platform.get_static_graph_wrapper_cls` "
+"获取当前设备的计算图模型包装器，因此我们需要在 Ascend "
+"上实现计算图模式包装器：`ACLGraphWrapper`。"
 
 #~ msgid ""
 #~ "vLLM has added `support_torch_compile` "
@@ -731,11 +698,11 @@ msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`：上下文并行 MLA
 #~ " inside the `ACLGraphWrapper` will be "
 #~ "executed, and it will do capture "
 #~ "or replay as mentioned above."
-#~ msgstr ""
-#~ "vLLM 已为所有模型添加了 `support_torch_compile` "
-#~ "装饰器。该装饰器会替换模型类的 `__init__` 和 `forward` 接口。当调用"
-#~ " `forward` 时，将执行 `ACLGraphWrapper` "
-#~ "内的代码，并根据上述说明进行捕获或回放。"
+msgstr ""
+"vLLM 已为所有模型添加了 `support_torch_compile` "
+"装饰器。该装饰器会替换模型类的 `__init__` 和 `forward` 接口。当调用"
+" `forward` 时，将执行 `ACLGraphWrapper` "
+"内的代码，并根据上述说明进行捕获或回放。"
 
 #~ msgid ""
 #~ "When using piecewise graph, we just "
@@ -756,12 +723,12 @@ msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`：上下文并行 MLA
 #~ " order between param updates and op"
 #~ " executions."
 #~ msgstr ""
-#~ "使用分段计算图时，我们只需遵循上述流程。但在完整计算图模式下，由于注意力的复杂性，有时需要在执行前更新注意力算子的参数。因此我们为完整计算图模式实现了"
+#~ "使用分段计算图时，只需遵循上述流程。但在完整计算图模式下，由于注意力机制的复杂性，有时需要在执行前更新注意力算子的参数。因此，我们为完整计算图模式实现了"
 #~ " `update_attn_params` 和 `update_mla_attn_params` "
-#~ "函数。在前向过程中，不同算子之间会复用内存，因此无法在前向之前更新注意力算子的参数。在 ACL 计算图中，我们使用"
+#~ "函数。在前向传播过程中，不同算子之间会复用内存，因此无法在前向传播之前更新注意力算子的参数。在 ACL 计算图中，我们使用"
 #~ " `torch.npu.graph_task_update_begin` 和 "
-#~ "`torch.npu.graph_task_update_end` 来实现，并使用 "
-#~ "`torch.npu.ExternalEvent` 确保参数更新与算子执行之间的顺序。"
+#~ "`torch.npu.graph_task_update_end` 来实现此功能，并使用 "
+#~ "`torch.npu.ExternalEvent` 来确保参数更新与算子执行之间的顺序。"
 
 #~ msgid "DFX"
 #~ msgstr "DFX"
@@ -782,7 +749,7 @@ msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`：上下文并行 MLA
 #~ "of buckets:"
 #~ msgstr ""
 #~ "目前，由于 ACL 计算图要求每个图至少需要一个独立的流，我们最多只能捕获 1800 "
-#~ "个计算图。这个数量受限于流的数量（2048 个），我们保留 248 "
+#~ "个计算图。此数量受限于流的总数（2048 个），我们保留了 248 "
 #~ "个流作为缓冲区。此外，还有许多变量会影响桶的数量："
 
 #~ msgid ""
@@ -796,7 +763,7 @@ msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`：上下文并行 MLA
 #~ "full graph mode."
 #~ msgstr ""
 #~ "分段计算图根据注意力层将模型划分为 `num_hidden_layers + 1` "
-#~ "个子模块。每个子模块是一个单独的计算图，需要消耗一个流，因此与完整计算图模式相比，分段计算图模式下的桶数量非常紧张。"
+#~ "个子模块。每个子模块是一个独立的计算图，需要消耗一个流，因此与完整计算图模式相比，分段计算图模式下的桶数量非常紧张。"
 
 #~ msgid ""
 #~ "The number of streams required for "
@@ -804,13 +771,13 @@ msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`：上下文并行 MLA
 #~ " of comm domains. Each comm domain"
 #~ " will increase one stream consumed by"
 #~ " a graph."
-#~ msgstr "计算图所需的流数量与通信域数量相关。每个通信域会增加计算图消耗的一个流。"
+#~ msgstr "计算图所需的流数量与通信域的数量相关。每个通信域会增加计算图消耗的一个流。"
 
 #~ msgid ""
 #~ "When multi-stream is explicitly called"
 #~ " in a sub module, it will "
 #~ "consume an additional stream."
-#~ msgstr "当子模块中显式调用多流时，会额外消耗一个流。"
+#~ msgstr "当在子模块中显式调用多流时，会额外消耗一个流。"
 
 #~ msgid ""
 #~ "There are some other rules about "
@@ -841,8 +808,7 @@ msgstr "`vllm_ascend/attention/context_parallel/mla_cp.py`：上下文并行 MLA
 #~ msgstr ""
 #~ "当使用 ACL 计算图和 MTP 且 "
 #~ "`num_speculative_tokens > 1` 时，由于 vLLM 在"
-#~ " v0.11.0 版本中不支持此场景，我们需要显式设置 `cudagraph_capture_sizes`。"
+#~ " v0.11.0 版本中不支持此场景，需要显式设置 `cudagraph_capture_sizes`。"
 
 #~ msgid "`use_inductor` is not supported now;"
 #~ msgstr "目前不支持 `use_inductor`；"
-

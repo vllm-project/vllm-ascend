@@ -8,8 +8,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 21:00+0800\n"
-"PO-Revision-Date: 2026-04-11 21:00+0800\n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"PO-Revision-Date: 2026-01-22 17:50+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:1
 msgid "Expert Load Balance (EPLB)"
-msgstr "专家负载均衡（EPLB）"
+msgstr "专家负载均衡 (EPLB)"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:3
 msgid "Overview"
@@ -36,13 +36,11 @@ msgid ""
 "load balancing with zero-overhead expert movement, ensuring seamless "
 "service continuity."
 msgstr ""
-"在 LLM 推理服务中，MoE 模型的专家均衡对于实现最优性能至关重要。由于“停顿整场”操作的存在，"
-"在推理过程中动态更改专家可能会对 TTFT（首 Token 时间）和 TPOT（每个输出 Token 时间）产生负面影响。"
-"SwiftBalancer 实现了异步专家负载均衡，具备零开销的专家迁移能力，确保了服务的无缝连续性。"
+"在 LLM 推理服务中，MoE 模型的专家均衡对于实现最优性能至关重要。由于“全局停顿 (stop-the-world)”操作的存在，在推理过程中动态更改专家可能会对 TTFT（首词元延迟）和 TPOT（每输出词元延迟）产生负面影响。SwiftBalancer 实现了异步专家负载均衡，具备零开销的专家迁移能力，确保了服务的无缝连续性。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:7
 msgid "EPLB Effects"
-msgstr "EPLB 的效果"
+msgstr "EPLB 效果"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:9
 msgid ""
@@ -54,7 +52,7 @@ msgstr "降低延迟：通过在专家之间均匀分配工作负载，动态平
 msgid ""
 "Enhanced Throughput: Optimizes GPU utilization, increasing token "
 "generation speed under high-concurrency scenarios."
-msgstr "提升吞吐量：优化 GPU 利用率，提高高并发场景下的 Token 生成速度。"
+msgstr "提升吞吐量：优化 GPU 利用率，提高高并发场景下的词元生成速度。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:11
 msgid ""
@@ -84,7 +82,7 @@ msgstr "模型"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:19
 msgid "DeepSeekV3/V3.1/R1, Qwen3-MoE"
-msgstr "DeepSeek V3/V3.1/R1、Qwen3-MoE"
+msgstr "DeepSeekV3/V3.1/R1, Qwen3-MoE"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:21
 msgid "MOE QuantType"
@@ -92,7 +90,7 @@ msgstr "MoE 量化类型"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:23
 msgid "W8A8-Dynamic"
-msgstr "W8A8 动态量化"
+msgstr "W8A8-Dynamic"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:25
 msgid "How to Use EPLB"
@@ -109,9 +107,7 @@ msgid ""
 "Adjust expert_heat_collection_interval and algorithm_execution_interval "
 "based on workload patterns."
 msgstr ""
-"需要添加环境变量 `export DYNAMIC_EPLB=\"true\"` 来启用 vLLM EPLB 功能。"
-"通过自动调优的参数启用动态平衡。根据工作负载模式调整 `expert_heat_collection_interval` 和 "
-"`algorithm_execution_interval`。"
+"需要添加环境变量 `export DYNAMIC_EPLB=\"true\"` 来启用 vLLM 的 EPLB 功能。通过自动调优的参数启用动态平衡。根据工作负载模式调整 `expert_heat_collection_interval` 和 `algorithm_execution_interval`。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:42
 msgid "Static EPLB"
@@ -128,8 +124,7 @@ msgid ""
 "expert_map_record_path. This creates a baseline configuration for future "
 "deployments."
 msgstr ""
-"需要添加环境变量 `export EXPERT_MAP_RECORD=\"true\"` 来记录专家映射表。"
-"使用 `expert_map_record_path` 生成初始专家分布图。这为未来的部署创建了基准配置。"
+"需要添加环境变量 `export EXPERT_MAP_RECORD=\"true\"` 来记录专家映射表。使用 `expert_map_record_path` 生成初始专家分布图。这为未来的部署创建了基准配置。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:60
 msgid "Subsequent Deployments (Use Recorded Map)"
@@ -153,21 +148,19 @@ msgstr "参数调优："
 msgid ""
 "expert_heat_collection_interval: Higher values (e.g., 400+) for stable "
 "workloads; lower values (e.g., 100-200) for fluctuating traffic."
-msgstr ""
-"`expert_heat_collection_interval`：对于稳定的工作负载，建议使用较高值（如 400+）；"
-"对于波动的流量，建议使用较低值（如 100-200）。"
+msgstr "expert_heat_collection_interval：对于稳定的工作负载，建议使用较高值（如 400+）；对于波动的流量，建议使用较低值（如 100-200）。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:77
 msgid ""
 "algorithm_execution_interval: Should be ≥ 30 to avoid premature balancing"
 " during startup."
-msgstr "`algorithm_execution_interval`：应 ≥ 30，以避免在启动阶段过早进行平衡。"
+msgstr "algorithm_execution_interval：应 ≥ 30，以避免在启动阶段过早进行平衡。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:78
 msgid ""
 "num_redundant_experts: Must match tensor-parallel size (e.g., 16 for 16 "
 "GPUs) to ensure sufficient redundancy."
-msgstr "`num_redundant_experts`：必须匹配张量并行大小（例如 16 张 GPU 则设为 16），以确保足够的冗余度。"
+msgstr "num_redundant_experts：必须匹配张量并行 (TP) 大小（例如 16 张 GPU 则设为 16），以确保足够的冗余度。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:80
 msgid "Hardware Requirements:"
@@ -209,18 +202,17 @@ msgstr "监控与验证："
 msgid ""
 "Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and "
 "gpu_utilization."
-msgstr ""
-"跟踪以下指标：`expert_load_balance_ratio`、`ttft_p99`、`tpot_avg` 以及 `gpu_utilization`。"
+msgstr "跟踪以下指标：expert_load_balance_ratio、ttft_p99、tpot_avg 以及 gpu_utilization。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:90
 msgid "Use vLLM monitor to detect imbalances during runtime."
-msgstr "使用 vLLM 监控工具检测运行时的不平衡情况。"
+msgstr "使用 vLLM monitor 检测运行时的不平衡情况。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:91
 msgid ""
 "Always verify expert map JSON structure before loading (validate with jq "
 "or similar tools)."
-msgstr "加载前务必验证专家映射表的 JSON 结构（使用 `jq` 或类似工具验证）。"
+msgstr "加载前务必验证专家映射表的 JSON 结构（使用 jq 或类似工具验证）。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:93
 msgid "Startup Behavior:"
@@ -244,25 +236,12 @@ msgstr "常见陷阱："
 msgid ""
 "Incorrect tensor-parallel-size vs. actual GPU count → causes resource "
 "underutilization."
-msgstr "张量并行大小与实际 GPU 数量不符 → 导致资源利用不足。"
+msgstr "张量并行大小 (TP size) 与实际 GPU 数量不符 → 导致资源利用不足。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:99
 msgid "Using expert_map_path without generating the map first → runtime errors."
-msgstr "在未生成映射表的情况下使用 `expert_map_path` → 导致运行时错误。"
+msgstr "在未生成映射表的情况下使用 expert_map_path → 导致运行时错误。"
 
 #: ../../source/user_guide/feature_guide/eplb_swift_balancer.md:100
 msgid "Setting num_redundant_experts > available GPUs → system failure."
-msgstr "设置 `num_redundant_experts` 大于可用 GPU 数量 → 导致系统故障。"
-
-#~ msgid "Gating Configuration:"
-#~ msgstr "门控 (Gating) 配置："
-
-#~ msgid ""
-#~ "When gate_eplb=true, validate that the "
-#~ "gating mechanism can handle expert "
-#~ "movement without routing errors."
-#~ msgstr "当 `gate_eplb=true` 时，需验证门控机制能够处理专家迁移且不发生路由错误。"
-
-#~ msgid "Test with synthetic workloads before production deployment."
-#~ msgstr "在生产部署前，请先使用合成工作负载进行测试。"
-
+msgstr "设置 num_redundant_experts 大于可用 GPU 数量 → 导致系统故障。"

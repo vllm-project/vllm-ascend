@@ -8,8 +8,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 21:00+0800\n"
-"PO-Revision-Date: 2026-04-11 21:00+0800\n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"PO-Revision-Date: 2026-01-22 16:18+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -31,23 +31,23 @@ msgstr "在此处获取最新信息：<https://github.com/vllm-project/vllm-asce
 
 #: ../../source/user_guide/support_matrix/supported_models.md:5
 msgid "**Legend Description**:"
-msgstr "**图例说明**："
+msgstr "**图例说明**:"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:7
 msgid "✅ = Supported model/feature"
-msgstr "✅ = 支持该模型/特性"
+msgstr "✅ = 支持的模型/功能"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:8
 msgid "🔵 = Experimental supported model/feature"
-msgstr "🔵 = 实验性支持该模型/特性"
+msgstr "🔵 = 实验性支持的模型/功能"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:9
 msgid "❌ = Not supported model/feature"
-msgstr "❌ = 不支持该模型/特性"
+msgstr "❌ = 不支持的模型/功能"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:10
 msgid "🟡 = Not tested or verified"
-msgstr "🟡 = 未经测试或验证"
+msgstr "🟡 = 未测试或未验证"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:12
 msgid "Text-Only Language Models"
@@ -61,7 +61,7 @@ msgstr "生成模型"
 #: ../../source/user_guide/support_matrix/supported_models.md:16
 #: ../../source/user_guide/support_matrix/supported_models.md:76
 msgid "Core Supported Models"
-msgstr "核心支持模型"
+msgstr "核心支持的模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Model"
@@ -89,7 +89,7 @@ msgstr "W8A8"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Chunked Prefill"
-msgstr "分块预填充"
+msgstr "分块预填充 (Chunked Prefill)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Automatic Prefix Cache"
@@ -101,7 +101,7 @@ msgstr "LoRA"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Speculative Decoding"
-msgstr "猜测式解码"
+msgstr "推测解码"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Async Scheduling"
@@ -215,7 +215,7 @@ msgstr "[Qwen3-Coder-30B-A3B 教程](../../tutorials/models/Qwen3-Coder-30B-A3B.
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-Moe"
-msgstr "Qwen3-MoE"
+msgstr "Qwen3-Moe"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "256k"
@@ -271,7 +271,7 @@ msgstr "[Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "DeepseekOCR2"
-msgstr "DeepSeekOCR2"
+msgstr "DeepseekOCR2"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md)"
@@ -295,7 +295,7 @@ msgstr "192k"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[DeepSeekOCR2](../../tutorials/models/MiniMax-M2.5.md)"
-msgstr "[MiniMax-M2.5](../../tutorials/models/MiniMax-M2.5.md)"
+msgstr "[DeepSeekOCR2](../../tutorials/models/MiniMax-M2.5.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:34
 #: ../../source/user_guide/support_matrix/supported_models.md:88
@@ -360,7 +360,7 @@ msgstr "Ernie4.5"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Ernie4.5-Moe"
-msgstr "Ernie4.5-MoE"
+msgstr "Ernie4.5-Moe"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Gemma-2"
@@ -404,7 +404,7 @@ msgstr "Qwen3-Embedding"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)"
-msgstr "[Qwen3-Embedding](../../tutorials/models/Qwen3_embedding.md)"
+msgstr "[Qwen3_embedding](../../tutorials/models/Qwen3_embedding.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-VL-Embedding"
@@ -420,7 +420,7 @@ msgstr "Qwen3-Reranker"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)"
-msgstr "[Qwen3-Reranker](../../tutorials/models/Qwen3_reranker.md)"
+msgstr "[Qwen3_reranker](../../tutorials/models/Qwen3_reranker.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-VL-Reranker"
@@ -444,7 +444,7 @@ msgstr "基于 XLM-RoBERTa"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Bert"
-msgstr "BERT"
+msgstr "Bert"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:72
 msgid "Multimodal Language Models"
@@ -468,11 +468,11 @@ msgstr "Qwen3-VL"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3-VL-MOE"
-msgstr "Qwen3-VL-MoE"
+msgstr "Qwen3-VL-MOE"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "[Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
-msgstr "[Qwen3-VL-MoE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
+msgstr "[Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3.5-397B-A17B"
@@ -502,7 +502,9 @@ msgstr "Qwen3-Omni-30B-A3B-Thinking"
 msgid ""
 "[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-"
 "Thinking.md)"
-msgstr "[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)"
+msgstr ""
+"[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-"
+"Thinking.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen2.5-Omni"
@@ -630,4 +632,3 @@ msgstr "Ultravox"
 
 #~ msgid "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
 #~ msgstr "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
-

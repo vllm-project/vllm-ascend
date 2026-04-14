@@ -8,8 +8,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 21:00+0800\n"
-"PO-Revision-Date: 2026-04-11 21:00+0800\n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -25,7 +25,7 @@ msgstr "使用 lm-eval"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:3
 msgid "This document guides you to conduct accuracy testing using [lm-eval][1]."
-msgstr "本文档将指导您如何使用 [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) 进行模型准确率测试。"
+msgstr "本文档将指导您如何使用 [lm-eval][1] 进行模型准确率测试。"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:5
 msgid "Online Server"
@@ -50,7 +50,7 @@ msgstr "2. 使用 lm-eval 运行 GSM8K 准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:48
 msgid "You can query the result with input prompts:"
-msgstr "您可以使用输入提示词来查询结果："
+msgstr "您可以使用输入提示（prompt）来查询结果："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:75
 msgid "The output format matches the following:"
@@ -68,9 +68,7 @@ msgid ""
 "may cause lm-eval to download datasets from ModelScope instead of "
 "HuggingFace. Setting `USE_MODELSCOPE_HUB=0` disables this behavior so "
 "that lm-eval can fetch datasets from HuggingFace correctly."
-msgstr ""
-"Docker 容器启动时设置了 `VLLM_USE_MODELSCOPE=True`，这可能导致 lm-eval 从 ModelScope 而非 HuggingFace 下载数据集。"
-"设置 `USE_MODELSCOPE_HUB=0` 可禁用此行为，从而使 lm-eval 能够正确地从 HuggingFace 获取数据集。"
+msgstr "启动 Docker 容器时设置了 `VLLM_USE_MODELSCOPE=True`，这可能导致 lm-eval 从 ModelScope 而非 HuggingFace 下载数据集。设置 `USE_MODELSCOPE_HUB=0` 可禁用此行为，使 lm-eval 能够正确从 HuggingFace 获取数据集。"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:120
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:192
@@ -105,7 +103,7 @@ msgstr "使用离线数据集"
 msgid ""
 "Take GSM8K (single dataset) and MMLU (multi-subject dataset) as examples,"
 " and you can see more from [using-local-datasets][2]."
-msgstr "以 GSM8K（单一数据集）和 MMLU（多学科数据集）为例。您可以从[使用本地数据集][2]查看更多信息。"
+msgstr "以 GSM8K（单一数据集）和 MMLU（多学科数据集）为例，您可以从 [using-local-datasets][2] 查看更多信息。"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:231
 msgid "Set [gsm8k.yaml][3] as follows:"
@@ -117,13 +115,4 @@ msgstr "请按以下方式设置 [_default_template_yaml][4] 配置文件："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:317
 msgid "You can see more usage on [Lm-eval Docs][5]."
-msgstr "您可以在 [lm-eval 官方文档][5] 上查看更多使用方法。"
-#~ msgid ""
-#~ "You can see more usage on [Lm-"
-#~ "eval Docs](https://github.com/EleutherAI/lm-evaluation-"
-#~ "harness/blob/main/docs/README.md)."
-#~ msgstr ""
-#~ "更多使用方法请参考 [lm-eval "
-#~ "官方文档](https://github.com/EleutherAI/lm-evaluation-"
-#~ "harness/blob/main/docs/README.md)。"
-
+msgstr "您可以在 [Lm-eval 官方文档][5] 上查看更多使用方法。"
