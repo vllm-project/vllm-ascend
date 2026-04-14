@@ -185,7 +185,7 @@ Provide recommended configurations for three scenarios (long sequence, low laten
 
 **Content Writing Requirements:**
 
-- Summarize key optimization techniques and parameter tuning experiences for the model to help users achieve optimal performance in specific scenarios. Include optimization technique descriptions, enablement methods, parameter tuning recommendations, and typical configuration examples. 
+- Summarize key optimization techniques and parameter tuning experiences for the model to help users achieve optimal performance in specific scenarios. Include optimization technique descriptions, enablement methods, parameter tuning recommendations, and typical configuration examples.
 - Hyperlinks to the features guide may be used to allow users to view detailed descriptions of specific features.
 
 ### 10.1 Key Optimization Points
