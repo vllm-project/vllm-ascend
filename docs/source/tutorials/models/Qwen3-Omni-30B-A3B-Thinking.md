@@ -77,6 +77,11 @@ apt-get update && apt-get install ffmpeg -y
 # Check the installation.
 ffmpeg -version
 ```
+Please ensure that the environment variables
+
+```bash
+source /usr/local/Ascend/cann/set_env.sh
+```
 
 ## Deployment
 
