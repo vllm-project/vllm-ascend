@@ -1095,9 +1095,7 @@ class MooncakeLayerwiseConnectorWorker:
             self.k_buffer = align_memory(self.k_buffer, alignment)[: first_k_cache.numel()].view(
                 -1, first_k_cache.shape[-1]
             )
-            self.v_buffer = torch.zeros(
-                first_v_cache.numel() + alignment, dtype=v_dtype, device=first_k_cache.device
-            )
+            self.v_buffer = torch.zeros(first_v_cache.numel() + alignment, dtype=v_dtype, device=first_k_cache.device)
             self.v_buffer = align_memory(self.v_buffer, alignment)[: first_v_cache.numel()].view(
                 -1, first_v_cache.shape[-1]
             )
@@ -1145,8 +1143,10 @@ class MooncakeLayerwiseConnectorWorker:
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
             if (
-                self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec)))
-            ) or self.enable_kv_quant or self.enable_c8_quant:
+                (self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))))
+                or self.enable_kv_quant
+                or self.enable_c8_quant
+            ):
                 self.attn_resharding_group_idx.add(layer_kv_group_id)
                 if use_kv_buffer is False:
                     use_kv_buffer = True
@@ -1549,10 +1549,14 @@ class MooncakeLayerwiseConnectorWorker:
             quant_keys = None
             quant_values = None
             if (
-                self.pd_head_ratio != 1
-                and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
-                and send_task.group_num_blocks[layer_group_idx] > 0
-            ) or self.enable_c8_quant or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers):
+                (
+                    self.pd_head_ratio != 1
+                    and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
+                    and send_task.group_num_blocks[layer_group_idx] > 0
+                )
+                or self.enable_c8_quant
+                or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers)
+            ):
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
                     reshape_cache_event.wait()
@@ -1582,7 +1586,9 @@ class MooncakeLayerwiseConnectorWorker:
                     if self.pd_head_ratio != 1:
                         # sort kv caches for each block
                         keys = (
-                            keys.view(send_task.group_num_blocks[layer_group_idx], self.pd_head_ratio, -1, *keys.shape[1:])
+                            keys.view(
+                                send_task.group_num_blocks[layer_group_idx], self.pd_head_ratio, -1, *keys.shape[1:]
+                            )
                             .transpose(0, 1)
                             .reshape_as(keys)
                         )
@@ -1610,7 +1616,10 @@ class MooncakeLayerwiseConnectorWorker:
                             -128,
                             127,
                         ).to(torch.int8)
-                    if self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers:
+                    if (
+                        self.enable_kv_quant
+                        and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers
+                    ):
                         layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
                         keys = torch.ops.vllm.quantize(
                             keys, layer.fak_descale, layer.fak_descale_reciprocal, layer.fak_offset

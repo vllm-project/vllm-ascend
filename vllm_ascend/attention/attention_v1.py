@@ -505,7 +505,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_k_aq_scale,
                         c8_k_aq_offset,
                         c8_v_aq_scale,
-                        c8_v_aq_offset
+                        c8_v_aq_offset,
                     ) = param
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -557,13 +557,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             flashcomm2_oshard_manager.post_process_after_loading()
 
     def full_graph_fia(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            attn_metadata: AscendMetadata,
-            output: torch.Tensor,
-            layer = None
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer=None,
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
@@ -607,7 +607,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_heads=self.num_heads,
                 sparse_mode=3,
                 scale=self.scale,
-                **extra_args
+                **extra_args,
             )
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
@@ -637,11 +637,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             weak_ref_tensors(softmax_lse),
         )
         if self.enable_c8_quant:
-            attn_params = attn_params + (weak_ref_tensors(layer._c8_k_aq_scale),
-                                         weak_ref_tensors(layer._c8_k_aq_offset),
-                                         weak_ref_tensors(layer._c8_v_aq_scale),
-                                         weak_ref_tensors(layer._c8_v_aq_offset),
-                                         )
+            attn_params = attn_params + (
+                weak_ref_tensors(layer._c8_k_aq_scale),
+                weak_ref_tensors(layer._c8_k_aq_offset),
+                weak_ref_tensors(layer._c8_v_aq_scale),
+                weak_ref_tensors(layer._c8_v_aq_offset),
+            )
         else:
             attn_params = attn_params + (None, None, None, None)
         graph_params.attn_params[num_tokens].append(attn_params)
@@ -1177,7 +1178,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer._c8_v_scale = _shard_and_reshape(layer.v_cache_scale.data)
         layer._c8_v_offset = _shard_and_reshape(layer.v_cache_offset.data)
 
-        dequant_num = self.num_kv_heads* self.head_size
+        dequant_num = self.num_kv_heads * self.head_size
         layer._c8_k_descale = layer._c8_k_scale.view(dequant_num)
         layer._c8_k_deoffset = layer._c8_k_offset.view(dequant_num)
         layer._c8_v_descale = layer._c8_v_scale.view(dequant_num)
