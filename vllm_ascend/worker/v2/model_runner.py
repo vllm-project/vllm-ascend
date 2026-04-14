@@ -37,7 +37,6 @@ from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode.eagle import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -56,7 +55,6 @@ class NPUModelRunner(GPUModelRunner):
         del self.cudagraph_manager
         del self.req_states
         del self.input_buffers
-        del self.sampler
         del self.speculator
 
         # NPU specific initializations can be added below.
@@ -91,16 +89,6 @@ class NPUModelRunner(GPUModelRunner):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
-        )
-        # we need to adjust triton operators in sampler,
-        # so reinitialize sampler here.
-        self.sampler: AscendSampler = AscendSampler(
-            max_num_reqs=self.max_num_reqs,
-            vocab_size=self.vocab_size,
-            device=self.device,
-            req_states=self.req_states,
-            logprobs_mode=self.model_config.logprobs_mode,
-            num_speculative_tokens=self.num_speculative_steps + 1,
         )
 
         # we need to copy num_computed_tokens back to cpu to help
