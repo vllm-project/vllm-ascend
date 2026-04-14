@@ -124,6 +124,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(cache_dtype_str_set) == 1, (
             "All attention layers in the same KV cache group must use the same quantization method."
         )
+        cache_sparse_c8_set = set(spec.cache_sparse_c8 for spec in specs)
+        assert len(cache_sparse_c8_set) == 1, (
+            "All attention layers in the same KV cache group must use the same sparse C8 setting."
+        )
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -131,7 +135,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             sparse_head_dim=specs[0].sparse_head_dim,
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
-            cache_sparse_c8=specs[0].cache_sparse_c8,
+            cache_sparse_c8=cache_sparse_c8_set.pop(),
         )
 
 

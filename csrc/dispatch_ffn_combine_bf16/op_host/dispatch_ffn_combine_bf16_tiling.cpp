@@ -41,6 +41,7 @@ namespace {
     constexpr uint32_t EXPERTID_INDEX = 3;
     constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
+    constexpr uint64_t MB_SIZE = 1024 * 1024UL;
 }
 
 namespace optiling {
@@ -240,7 +241,8 @@ static ge::graphStatus DispatchFFNCombineBF16TilingFuncImpl(gert::TilingContext 
                             info.maxOutputSize * n2 * sizeof(int16_t) +
                             info.maxOutputSize * info.K * sizeof(int16_t) +
                             info.maxOutputSize * k2 * sizeof(int16_t) +
-                            info.worldSize * sizeof(int32_t) * 16;
+                            info.worldSize * sizeof(int32_t) * 16 +
+                            (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
                             // std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
                             // std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
 

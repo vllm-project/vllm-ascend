@@ -20,6 +20,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: LOG_PREFIX
+                value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -32,6 +34,12 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: BENCHMARK_JOB_NAME
+                value: {{ benchmark_job_name | default("") }}
+              - name: VLLM_CI_RUNNER
+                value: {{ runner | default("linux-aarch64-a3-0") }}
+              - name: VLLM_ASCEND_VERSION
+                value: {{ vllm_ascend_ref | default("main") }}
             command:
               - sh
               - -c
@@ -67,7 +75,7 @@ spec:
             sizeLimit: 15Gi
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: nv-action-vllm-benchmarks-v2
+            claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
@@ -80,6 +88,8 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: LOG_PREFIX
+                value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
@@ -92,6 +102,12 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: BENCHMARK_JOB_NAME
+                value: {{ benchmark_job_name | default("") }}
+              - name: VLLM_CI_RUNNER
+                value: {{ runner | default("linux-aarch64-a3-0") }}
+              - name: VLLM_ASCEND_VERSION
+                value: {{ vllm_ascend_ref | default("main") }}
             command:
               - sh
               - -c
@@ -120,7 +136,7 @@ spec:
             sizeLimit: 15Gi
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: nv-action-vllm-benchmarks-v2
+            claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools

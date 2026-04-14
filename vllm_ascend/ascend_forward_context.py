@@ -53,21 +53,21 @@ def set_ascend_forward_context(
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
-        "virtual_engine": virtual_engine,
         "num_tokens": num_tokens,
         "num_tokens_across_dp": num_tokens_across_dp,
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
     }
-
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
-        moe_comm_type = select_moe_comm_method(num_tokens, vllm_config, is_draft_model)
+        max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
+        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 

@@ -723,7 +723,7 @@ class TestACLGraphWrapper(TestBase):
         with self.assertRaises(AttributeError) as context:
             _ = wrapper.non_existent_attr
 
-        self.assertIn("Attribute non_existent_attr not exists",
+        self.assertIn("Attribute non_existent_attr not found",
                       str(context.exception))
 
     def test_unwrap_method(self):
@@ -802,6 +802,7 @@ class TestPCPDCPGraphParams(TestBase):
                                      8,
                                      slot_mapping,
                                      query_start_loc,
+                                     seq_lens,
                                      seq_lens,
                                      block_tables,
                                      4,

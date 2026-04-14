@@ -139,6 +139,7 @@ checkout_src() {
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
     pip uninstall -y vllm vllm-ascend || true
+    cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
     rm -rf "$WORKSPACE/vllm" "$WORKSPACE/vllm-ascend"
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
@@ -170,19 +171,10 @@ install_vllm() {
 
 install_aisbench() {
     echo "====> Install AISBench benchmark"
-    
-    export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
-    : "${AIS_BENCH_TAG:=v3.0-20250930-master}"  
 
     BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
 
-    if [ -d "$BENCH_DIR" ]; then
-        echo "Removing existing benchmark directory..."
-        rm -rf "$BENCH_DIR"
-    fi
-
-    git clone -b "${AIS_BENCH_TAG}" --depth 1 \
-        "${AIS_BENCH_URL}" "${BENCH_DIR}"
+    cp -r /tmp/aisbench-backup "$BENCH_DIR"
 
     cd "$BENCH_DIR"
     pip install -e . \
@@ -223,8 +215,24 @@ If this is insufficient to pinpoint the error, please download and review the lo
     fi
 }
 
+clear_logs() {
+    print_section "Clearing logs from previous runs"
+    rm -fr "$HOME/ascend/log" || true
+}
+
+backup_ascend_logs() {
+    if [ -n "${LOG_PREFIX:-}" ]; then
+        local dest="${LOG_PREFIX}/node_${LWS_WORKER_INDEX:-unknown}_plogs"
+        mkdir -p "$dest"
+        cp -r /root/ascend/log/. "$dest/" 2>/dev/null || true
+        echo "Ascend logs backed up to $dest"
+    fi
+}
+
 main() {
+    trap backup_ascend_logs EXIT
     check_npu_info
+    clear_logs
     check_and_config
     if [[ "$IS_PR_TEST" == "true" ]]; then
         checkout_src

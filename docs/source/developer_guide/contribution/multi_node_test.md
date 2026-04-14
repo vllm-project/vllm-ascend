@@ -20,7 +20,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 2. Add config yaml
 
-    As the entrypoint script [run.sh](https://github.com/vllm-project/vllm-ascend/blob/0bf3f21a987aede366ec4629ad0ffec8e32fe90d/tests/e2e/nightly/multi_node/scripts/run.sh#L106) shows, A k8s pod startup means traversing all *.yaml files in the [directory](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/config/), reading and executing according to different configurations, so what we need to do is just add "yamls" like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml).
+    As the entrypoint script [run.sh](https://github.com/vllm-project/vllm-ascend/blob/0bf3f21a987aede366ec4629ad0ffec8e32fe90d/tests/e2e/nightly/multi_node/scripts/run.sh#L106) shows, a k8s pod startup means traversing all *.yaml files in the [directory](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/config/), reading and executing according to different configurations, so what we need to do is just add "yamls" like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml).
 
     Suppose you have **2 nodes** running a 1P1D setup (1 Prefillers + 1 Decoder):
 
@@ -72,7 +72,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 3. Add the case to nightly workflow
 
-Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/nightly_test_a3.yaml)
+Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)
 
    ```yaml
     multi-node-tests:
@@ -113,7 +113,7 @@ The matrix above defines all the parameters required to add a multi-machine use 
 
 ### 1. Use kubernetes
 
-This section assumes that you already have a [Kubernetes](https://kubernetes.io/docs/setup/) NPU cluster environment locally. then you can easily start our test with one click.
+This section assumes that you already have a [Kubernetes](https://kubernetes.io/docs/setup/) NPU cluster environment locally. Then you can easily start our test with one click.
 
 - Step 1. Install LWS CRD resources
 
@@ -329,8 +329,8 @@ Since our script is Kubernetes-friendly, we need to actively pass in some cluste
     - Install AISBench on the first host(leader node) in cluster_hosts
 
       ``` bash
-      export AIS_BENCH_TAG="v3.0-20250930-master"
-      export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
+      export AIS_BENCH_TAG="v3.1-20260330-master"
+      export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
       export BENCHMARK_HOME=/vllm-workspace/benchmark
 
       git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME

@@ -58,6 +58,7 @@ class TestAscendSFAMetadata(TestBase):
             num_actual_tokens=num_actual_tokens,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens,
             cum_query_lens=cum_query_lens,
             block_table=block_table,
             sin=sin,

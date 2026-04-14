@@ -16,7 +16,7 @@ Refer to [feature guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user
 
 ### Model Weight
 
-- `Qwen3-Omni-30B-A3B-Thinking` require 2 NPU Card(64G × 2).[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
+- `Qwen3-Omni-30B-A3B-Thinking` requires 2 NPU Cards(64G × 2).[Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking)
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation
@@ -239,32 +239,32 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
 1. Refer to Using evalscope(<https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#install-evalscope-using-pip>) for `evalscope`installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
-```bash
-evalscope eval \
-    --model /root/.cache/modelscope/hub/models/Qwen/Qwen3-Omni-30B-A3B-Thinking \
-    --api-url http://localhost:8000/v1 \
-    --api-key EMPTY \
-    --eval-type server \
-    --datasets omni_bench, gsm8k, bbh \
-    --dataset-args '{"omni_bench": { "extra_params": { "use_image": true, "use_audio": false}}}' \
-    --eval-batch-size 1 \
-    --generation-config '{"max_completion_tokens": 10000, "temperature": 0.6}' \
-    --limit 100
-```
+    ```bash
+    evalscope eval \
+        --model /root/.cache/modelscope/hub/models/Qwen/Qwen3-Omni-30B-A3B-Thinking \
+        --api-url http://localhost:8000/v1 \
+        --api-key EMPTY \
+        --eval-type server \
+        --datasets omni_bench, gsm8k, bbh \
+        --dataset-args '{"omni_bench": { "extra_params": { "use_image": true, "use_audio": false}}}' \
+        --eval-batch-size 1 \
+        --generation-config '{"max_completion_tokens": 10000, "temperature": 0.6}' \
+        --limit 100
+    ```
 
 3. After execution, you can get the result, here is the result of `Qwen3-Omni-30B-A3B-Thinking` in vllm-ascend:0.13.0rc1 for reference only.
 
-```bash
- +-----------------------------+------------+----------+----------+-------+---------+---------+
-| Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
-+=============================+============+==========+==========+=======+=========+=========+
-| Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
-+-----------------------------+------------+----------+----------+-------+---------+---------+ 
-| Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
-+-----------------------------+-----------+----------+----------+-------+---------+---------+
-| Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
-+-----------------------------+------------+----------+----------+-------+---------+---------+
-```
+    ```bash
+    +-----------------------------+------------+----------+----------+-------+---------+---------+
+    | Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
+    +=============================+============+==========+==========+=======+=========+=========+
+    | Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
+    +-----------------------------+------------+----------+----------+-------+---------+---------+ 
+    | Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
+    +-----------------------------+-----------+----------+----------+-------+---------+---------+
+    | Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
+    +-----------------------------+------------+----------+----------+-------+---------+---------+
+    ```
 
 ## Performance
 
@@ -272,7 +272,7 @@ evalscope eval \
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
 Refer to vllm benchmark for more details.
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 

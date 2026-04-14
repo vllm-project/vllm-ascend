@@ -4,7 +4,7 @@ This document guides you to conduct accuracy testing using [OpenCompass](https:/
 
 ## 1. Online Server
 
-You can run docker container to start the vLLM server on a single NPU:
+You can run a docker container to start the vLLM server on a single NPU:
 
 ```{code-block} bash
    :substitutions:
@@ -116,7 +116,7 @@ python3 run.py opencompass/configs/eval_vllm_ascend_demo.py --debug
 After 1 to 2 minutes, the output is shown below:
 
 ```shell
-The markdown format results is as below:
+The markdown format results are as below:
 
 | dataset | version | metric | mode | Qwen2.5-7B-Instruct-vLLM-API |
 |----- | ----- | ----- | ----- | -----|

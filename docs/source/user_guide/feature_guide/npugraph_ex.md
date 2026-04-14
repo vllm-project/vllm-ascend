@@ -32,4 +32,4 @@ vllm serve Qwen/Qwen2-7B-Instruct
 --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":false}}'
 ```
 
-You can find more details about npugraph_ex [here](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)
+You can find more details about [npugraph_ex](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)

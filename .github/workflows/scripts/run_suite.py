@@ -10,22 +10,50 @@ import yaml
 from ci_utils import TestFile, TestRecord, run_tests
 
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
+_CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config.yaml"
+
+# Each entry: (config_path, path_prefix or None)
+# path_prefix is prepended to every test name when loading that config.
+_DEFAULT_CONFIGS: list[tuple[Path, str | None]] = [
+    (_CONFIG_PATH, None),
+    (_CONFIG_UPSTREAM, "vllm-empty"),
+]
 
 
-def load_suites(config_path: Path = _CONFIG_PATH) -> dict[str, list[TestFile]]:
-    """Load all test suites from config.yaml."""
-    data = yaml.safe_load(config_path.read_text())
-    return {
-        suite_name: [
-            TestFile(
-                name=entry["name"],
-                estimated_time=entry.get("estimated_time", 60),
-                is_skipped=entry.get("is_skipped", False),
-            )
-            for entry in entries
-        ]
-        for suite_name, entries in data.items()
-    }
+def load_suites(
+    config_paths: list[tuple[Path, str | None]] | None = None,
+) -> dict[str, list[TestFile]]:
+    """Load all test suites from config yaml files.
+
+    Each entry in config_paths is a (path, path_prefix) tuple.
+    path_prefix, when set, is prepended to every test name in that config
+    (e.g. "vllm-empty" turns "tests/foo.py" into "vllm-empty/tests/foo.py").
+    """
+    if config_paths is None:
+        config_paths = _DEFAULT_CONFIGS
+
+    all_suites: dict[str, list[TestFile]] = {}
+    for config_path, path_prefix in config_paths:
+        if not config_path.exists():
+            continue
+        print(f"Loading suites from {config_path}" + (f" (prefix: {path_prefix})" if path_prefix else ""))
+        with open(config_path) as f:
+            data = yaml.safe_load(f) or {}
+        for suite_name, tests in data.items():
+            files = []
+            for entry in tests or []:
+                name = entry["name"]
+                if path_prefix:
+                    name = f"{path_prefix}/{name}"
+                files.append(
+                    TestFile(
+                        name=name,
+                        estimated_time=entry.get("estimated_time", 60),
+                        is_skipped=entry.get("is_skipped", False),
+                    )
+                )
+            all_suites[suite_name] = files
+    return all_suites
 
 
 def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
@@ -82,22 +110,29 @@ def _minimal_covered_dirs(file_paths: set[str], root: Path) -> set[Path]:
 def sanity_check(suites: dict[str, list[TestFile]]) -> None:
     """
     Verify that:
-    1. Every test file in any suite exists on disk.
+    1. Every local test file in any suite exists on disk.
     2. No test_*.py files exist on disk (in covered dirs) that are absent from all suites.
+
+    Files whose paths begin with an external prefix (e.g. "vllm-empty/") are skipped entirely —
+    they live in a separate checkout and we only register a subset of them.
     Raises SystemExit with a descriptive message on failure.
     """
+    external_prefixes = {prefix for _, prefix in _DEFAULT_CONFIGS if prefix}
     suite_files = {f.name.split("::")[0] for tests in suites.values() for f in tests}
-    root = _find_project_root()
-    covered = _minimal_covered_dirs(suite_files, root)
 
+    # Only check files that belong to this repo (no external prefix).
+    local_files = {f for f in suite_files if not any(f.startswith(p + "/") for p in external_prefixes)}
+
+    root = _find_project_root()
+    covered = _minimal_covered_dirs(local_files, root)
     disk_files = {str(p.relative_to(root)) for d in covered for p in (root / d).rglob("test_*.py")}
 
-    missing_from_suite = sorted(disk_files - suite_files)
+    missing_from_suite = sorted(disk_files - local_files)
     if missing_from_suite:
         entries = "\n".join(f'  TestFile("{f}"),' for f in missing_from_suite)
         raise SystemExit(f"Test files on disk are not in any suite (add them or mark is_skipped=True):\n{entries}")
 
-    missing_from_disk = sorted(suite_files - disk_files)
+    missing_from_disk = sorted(local_files - disk_files)
     if missing_from_disk:
         entries = "\n".join(f'  TestFile("{f}"),' for f in missing_from_disk)
         raise SystemExit(f"Test files listed in suite do not exist on disk:\n{entries}")
