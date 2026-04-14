@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
 from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
@@ -80,7 +82,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
 
         self.assertTrue(output is expected)
         mock_unquant.assert_called_once()
-        self.assertEqual(mock_unquant.call_args.kwargs["activation"], "silu")
+        self.assertEqual(mock_unquant.call_args.kwargs["activation"], MoEActivation.SILU)
         self.assertFalse(mock_unquant.call_args.kwargs["need_trans"])
         mock_quant.assert_not_called()
 
