@@ -795,6 +795,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
+        assert self.key_cache is not None
+        assert self.value_cache is not None
+        assert self.sliding_window is not None
         batch_size = attn_metadata.seq_lens.shape[0]
         num_block, block_size, _, _ = self.key_cache.shape
         key = self.key_cache.view(num_block, block_size, -1)
