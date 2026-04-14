@@ -77,10 +77,10 @@ apt-get update && apt-get install ffmpeg -y
 # Check the installation.
 ffmpeg -version
 ```
-Please ensure that the environment variables
+Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stream and shape limitations.
 
 ```bash
-source /usr/local/Ascend/cann/set_env.sh
+export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
 ## Deployment
