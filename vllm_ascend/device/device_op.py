@@ -23,6 +23,7 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
@@ -500,6 +501,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_mxfp_quant: bool = False,
         bias=None,
         fallback_output_dtype: torch.dtype | None = None,
+        mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
         if not use_mxfp_quant:
             return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
@@ -524,7 +526,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             input_dtype=input_dtype,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
-            scale_type=scale_type,
+            scale_type=scale_type if mxfp_quant_dtype != QuantType.MXFP4 else None,
             per_token_scale_type=per_token_scale_type,
             use_bf16=use_bf16,
             use_mxfp_quant=True,
@@ -538,6 +540,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
+        if mxfp_quant_dtype == QuantType.MXFP4:
+            gmm2_scale = None
+            antiquant_scale = weight_scale.reshape(
+                weight_scale.shape[0], weight_scale.shape[1] // 2 , 2, weight_scale.shape[2]
+            ).transpose(-1, -2)
+            gmm2_kwargs.update({'antiquant_scale': [antiquant_scale]})
+        
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=gmm2_weight,

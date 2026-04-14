@@ -88,7 +88,7 @@ def _build_mxfp_params(
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
 ) -> _stage_params.MoEMxfpParams | None:
-    if quant_type not in [QuantType.MXFP8, QuantType.MXFP4]:
+    if quant_type not in [QuantType.MXFP8, QuantType.MXFP4, QuantType.W4A8MXFP]:
         return None
 
     has_explicit_mxfp_args = any(
