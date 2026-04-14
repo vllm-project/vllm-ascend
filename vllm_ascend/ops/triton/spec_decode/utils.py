@@ -88,48 +88,85 @@ def copy_and_expand_dflash_inputs_kernel(
     num_query_per_req,  # tl.int32
     num_speculative_tokens,  # tl.int32
     total_input_tokens,  # tl.int32
-    batch_size,  # tl.int32
+    BLOCK_SIZE: tl.constexpr,
     HAS_NUM_REJECTED: tl.constexpr = False,
 ):
-    for req_idx in range(0, batch_size):
-        ctx_start = tl.load(query_start_loc_ptr + req_idx)
-        ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
-        num_ctx = ctx_end - ctx_start
+    """
+    Fused kernel for DFlash first-pass input setup.
 
-        for j in range(0, num_ctx):
-            ctx_pos_idx = ctx_start + j
-            pos = tl.load(target_positions_ptr + ctx_pos_idx)
-            tl.store(out_context_positions_ptr + ctx_pos_idx, pos)
+    Per request, this kernel:
+      1. Copies context positions from target_positions to
+         out_context_positions.
+      2. Computes query positions (last_target_pos + 1 + offset) and writes
+         them to out_query_positions.
+      3. Writes input_ids for query tokens: [next_token, mask, mask, ...].
+      4. Computes slot_mapping for context and query positions into separate
+         buffers via block_table lookup.
+      5. Writes token_indices_to_sample for the mask (speculative) tokens.
+    """
+    req_idx = tl.program_id(axis=0)
+    block_idx = tl.program_id(axis=1)
 
-            block_num = pos // block_size
-            block_id = tl.load(block_table_ptr + req_idx * block_table_stride + block_num).to(tl.int64)
-            slot = block_id * block_size + (pos % block_size)
-            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, slot)
+    # Load context token range for this request
+    ctx_start = tl.load(query_start_loc_ptr + req_idx)
+    ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
+    num_ctx = ctx_end - ctx_start
+    total_tokens = num_ctx + num_query_per_req
 
-        if HAS_NUM_REJECTED:
-            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
-            valid_ctx_end = ctx_end - num_rejected
-        else:
-            valid_ctx_end = ctx_end
+    j = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    in_bounds = j < total_tokens
+    is_ctx = j < num_ctx
+    is_query = (~is_ctx) & in_bounds
+    query_off = j - num_ctx  # offset within query portion (0-indexed)
 
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+    # --- Positions ---
+    # Context: load from target_positions
+    ctx_pos_idx = tl.minimum(ctx_start + j, total_input_tokens - 1)
+    ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
 
-        for q_idx in range(0, num_query_per_req):
-            query_pos = last_pos + 1 + q_idx
-            query_out_idx = req_idx * num_query_per_req + q_idx
+    # Query: last_valid_pos + 1 + query_off
+    # In padded mode, ctx_end includes rejected tokens; use valid_ctx_end
+    # to find the last accepted context position.
+    if HAS_NUM_REJECTED:
+        num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
+        valid_ctx_end = ctx_end - num_rejected
+    else:
+        valid_ctx_end = ctx_end
+    last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+    query_pos = last_pos + 1 + query_off
 
-            tl.store(out_query_positions_ptr + query_out_idx, query_pos)
+    positions = tl.where(is_ctx, ctx_pos, query_pos)
 
-            block_num_q = query_pos // block_size
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
-            slot_q = block_id_q * block_size + (query_pos % block_size)
-            tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
+    # Context and query positions go to separate buffers.
+    ctx_pos_out = ctx_start + j
+    tl.store(out_context_positions_ptr + ctx_pos_out, ctx_pos, mask=is_ctx)
+    query_out = req_idx * num_query_per_req + query_off
+    tl.store(out_query_positions_ptr + query_out, query_pos, mask=is_query)
 
-            if q_idx == 0:
-                bonus_token = tl.load(next_token_ids_ptr + req_idx)
-                tl.store(out_input_ids_ptr + query_out_idx, bonus_token)
-            else:
-                tl.store(out_input_ids_ptr + query_out_idx, parallel_drafting_token_id)
+    # --- Slot mapping (block_table lookup for all positions) ---
+    block_num = positions // block_size
+    # Clamp block_number to avoid OOB when position is at max
+    block_num = tl.minimum(block_num, block_table_stride - 1)
+    block_id = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_num,
+        mask=in_bounds,
+        other=0,
+    ).to(tl.int64)
+    slot = block_id * block_size + (positions % block_size)
+    tl.store(out_context_slot_mapping_ptr + ctx_pos_out, slot, mask=is_ctx)
+    tl.store(out_query_slot_mapping_ptr + query_out, slot, mask=is_query)
 
-                sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
-                tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
+    # --- Input IDs (query tokens only) ---
+    bonus_token = tl.load(next_token_ids_ptr + req_idx)
+    is_bonus = is_query & (query_off == 0)
+    input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
+    tl.store(out_input_ids_ptr + query_out, input_id, mask=is_query)
+
+    # --- Token indices to sample (mask tokens, skip the bonus token) ---
+    is_sample = is_query & (query_off > 0)
+    sample_out_idx = req_idx * num_speculative_tokens + (query_off - 1)
+    tl.store(
+        out_token_indices_ptr + sample_out_idx,
+        query_out,
+        mask=is_sample,
+    )
