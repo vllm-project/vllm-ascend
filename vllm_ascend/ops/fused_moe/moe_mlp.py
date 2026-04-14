@@ -103,10 +103,7 @@ def quant_apply_mlp(
     per_token_scale_type: torch.dtype | None = None,
     use_bf16: bool = True,
     activation: MoEActivation | None = None,
-    **kwargs,
 ) -> torch.Tensor:
-    # TODO(linfeng): Current massive parameter passing is quite severe; parameter differences introduced by different
-    # quantization modes will be consolidated into a dataclass in a follow-up.
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
     act: MoEActivation = activation or MoEActivation.SILU
@@ -133,12 +130,6 @@ def quant_apply_mlp(
         dispose_tensor(unquantized_hidden_states)
         quantized_hidden_states = None
     else:
-        if use_mxfp_quant and dynamic_scale.ndim == 2:
-            dynamic_scale = dynamic_scale.reshape(
-                dynamic_scale.shape[0],
-                dynamic_scale.shape[1] // 2,
-                2,
-            )
         unquantized_hidden_states = None
         pertoken_scale = (
             DeviceOperator.maybe_normalize_mxfp_scale_layout(dynamic_scale) if use_mxfp_quant else dynamic_scale
