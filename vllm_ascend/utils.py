@@ -685,7 +685,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
     }
-    
+
     # Add GatedDeltaNetAttention if available
     if AscendGatedDeltaNetAttention is not None:
         REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
@@ -705,7 +705,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             AscendParallelLMHead310,
             AscendVocabParallelEmbedding310,
         )
-        
+
         # Try to import AscendGatedDeltaNetAttention310 if available
         try:
             from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -726,11 +726,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
             "MMEncoderAttention": AscendMMEncoderAttention310,
         }
-        
+
         # Add GatedDeltaNetAttention310 if available
         if has_gdn_310:
             update_dict["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention310
-        
+
         REGISTERED_ASCEND_OPS.update(update_dict)
 
         REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
