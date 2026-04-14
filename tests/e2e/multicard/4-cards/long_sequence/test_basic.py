@@ -17,7 +17,11 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
+from unittest.mock import patch
 
+import pytest
+import torch
+from PIL import Image
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
@@ -282,3 +286,64 @@ def test_dcp_piece_wise():
                     enable_expert_parallel=True,
                     block_size=128) as runner:
         runner.model.generate(prompts, sampling_params)
+
+
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "OMP_NUM_THREADS": "1",
+        "OMP_PROC_BIND": "false",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free()
+@pytest.mark.skipif(
+    torch.npu.device_count() < 4,
+    reason="Kimi-K2.5-W4A8 multimodal test requires at least 4 NPUs.",
+)
+def test_kimi_k25_multimodal_basic():
+    image_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../310p/data/qwen.png"))
+    image = Image.open(image_path).convert("RGB")
+    prompts = [
+        (
+            "<|im_user|>user<|media_begin|>image<|media_content|><|media_pad|>"
+            "<|media_end|>What is the content of this image?<|im_end|>"
+            "<|im_assistant|>assistant<|im_middle|>"
+        ),
+        (
+            "<|im_user|>user<|media_begin|>image<|media_content|><|media_pad|>"
+            "<|media_end|>Describe the content of this image in detail.<|im_end|>"
+            "<|im_assistant|>assistant<|im_middle|>"
+        ),
+    ]
+
+    inputs = [
+        {
+            "prompt": prompt,
+            "multi_modal_data": {"vision_chunk": {"type": "image", "image": image}},
+            "multi_modal_uuids": {"vision_chunk": f"kimi_k25_image_{i}"},
+        }
+        for i, prompt in enumerate(prompts)
+    ]
+
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    model = "Eco-Tech/Kimi-K2.5-w4a8"
+    with VllmRunner(
+        model,
+        enforce_eager=True,
+        max_model_len=1024,
+        tensor_parallel_size=4,
+        prefill_context_parallel_size=4,
+        decode_context_parallel_size=1,
+        max_num_batched_tokens=1024,
+        gpu_memory_utilization=0.8,
+        enable_expert_parallel=True,
+        limit_mm_per_prompt={"vision_chunk": 1},
+        block_size=128,
+        quantization="ascend",
+    ) as runner:
+        outputs = runner.model.generate(inputs, sampling_params=sampling_params)
+        assert len(outputs) == len(prompts)
+        for output in outputs:
+            assert output.outputs and output.outputs[0].text.strip()

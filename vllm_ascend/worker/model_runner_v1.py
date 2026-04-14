@@ -1068,7 +1068,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Swap to the other buffer to avoid race condition with previous
         # iteration's async copy that may still be reading from CPU.
-        self.is_mm_embed_idx = 1 - self.is_mm_embed_idx
+        self.is_mm_embed_idx = 1 - self.is_mm_embed_idx  # type: ignore
         is_mm_embed_buf = self.is_mm_embed_buffers[self.is_mm_embed_idx]
         is_mm_embed = is_mm_embed_buf.cpu
         is_mm_embed[:total_num_scheduled_tokens] = False

@@ -17,7 +17,8 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -334,7 +335,7 @@ class PCPManager:
                 embed_indices = embed_indices[keep_new]
                 req_taken_mask[local_indices] = True
 
-                encoder_output = encoder_cache.get(mm_hash, None)
+                encoder_output = encoder_cache.get(mm_hash)
                 assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
                 embed_index_tensor = torch.from_numpy(embed_indices.astype(np.int64)).to(
                     device=encoder_output.device,
@@ -348,13 +349,11 @@ class PCPManager:
             if is_multimodal_pruning_enabled and uses_mrope:
                 assert req_state.mrope_positions is not None
                 should_sync_mrope_positions = True
-                mm_embeds_req, new_mrope_positions, new_delta = (
-                    model.recompute_mrope_positions(
-                        input_ids=req_state.prompt_token_ids,
-                        multimodal_embeddings=mm_embeds_req,
-                        mrope_positions=req_state.mrope_positions,
-                        num_computed_tokens=req_state.num_computed_tokens,
-                    )
+                mm_embeds_req, new_mrope_positions, new_delta = model.recompute_mrope_positions(
+                    input_ids=req_state.prompt_token_ids,
+                    multimodal_embeddings=mm_embeds_req,
+                    mrope_positions=req_state.mrope_positions,
+                    num_computed_tokens=req_state.num_computed_tokens,
                 )
                 req_state.mrope_positions.copy_(new_mrope_positions)
                 req_state.mrope_position_delta = new_delta
@@ -398,18 +397,14 @@ class PCPManager:
     ) -> dict[str, Any] | None:
         need_localize = (
             local_total_num_scheduled_tokens is not None
-            and local_total_num_scheduled_tokens
-            != scheduler_output.total_num_scheduled_tokens
+            and local_total_num_scheduled_tokens != scheduler_output.total_num_scheduled_tokens
         )
         if not need_localize and local_num_scheduled_tokens is not None:
             for req_idx, req_id in enumerate(req_ids):
                 if req_idx >= local_num_scheduled_tokens.shape[0]:
                     break
                 global_sched = scheduler_output.num_scheduled_tokens.get(req_id)
-                if (
-                    global_sched is None
-                    or int(global_sched) != int(local_num_scheduled_tokens[req_idx])
-                ):
+                if global_sched is None or int(global_sched) != int(local_num_scheduled_tokens[req_idx]):
                     need_localize = True
                     break
 
@@ -424,9 +419,7 @@ class PCPManager:
         }
 
         if local_total_num_scheduled_tokens is not None:
-            scheduler_output.total_num_scheduled_tokens = (
-                local_total_num_scheduled_tokens
-            )
+            scheduler_output.total_num_scheduled_tokens = local_total_num_scheduled_tokens
 
         if local_num_scheduled_tokens is None:
             return restore_state
@@ -452,15 +445,11 @@ class PCPManager:
         # Under PCP, global free list can be earlier than local consumption.
         # Keep MM hashes for all active requests.
         active_mm_hashes = {
-            mm_feature.identifier
-            for req_state in requests.values()
-            for mm_feature in req_state.mm_features
+            mm_feature.identifier for req_state in requests.values() for mm_feature in req_state.mm_features
         }
         keep_hashes = active_mm_hashes | local_needed_mm_hashes
         scheduler_output.free_encoder_mm_hashes = [
-            mm_hash
-            for mm_hash in scheduler_output.free_encoder_mm_hashes
-            if mm_hash not in keep_hashes
+            mm_hash for mm_hash in scheduler_output.free_encoder_mm_hashes if mm_hash not in keep_hashes
         ]
 
         return restore_state
@@ -473,18 +462,10 @@ class PCPManager:
         if restore_state is None:
             return
 
-        scheduler_output.total_num_scheduled_tokens = restore_state[
-            "total_num_scheduled_tokens"
-        ]
-        scheduler_output.num_scheduled_tokens = restore_state[
-            "num_scheduled_tokens"
-        ]
-        scheduler_output.scheduled_encoder_inputs = restore_state[
-            "scheduled_encoder_inputs"
-        ]
-        scheduler_output.free_encoder_mm_hashes = restore_state[
-            "free_encoder_mm_hashes"
-        ]
+        scheduler_output.total_num_scheduled_tokens = restore_state["total_num_scheduled_tokens"]
+        scheduler_output.num_scheduled_tokens = restore_state["num_scheduled_tokens"]
+        scheduler_output.scheduled_encoder_inputs = restore_state["scheduled_encoder_inputs"]
+        scheduler_output.free_encoder_mm_hashes = restore_state["free_encoder_mm_hashes"]
 
     def initialize_slot_mapping(self) -> None:
         """
