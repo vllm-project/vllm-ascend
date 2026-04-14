@@ -592,7 +592,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Get workspace from cache or calculate it if not present.
         workspace = graph_params.workspaces.get(num_tokens)
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
-        sparse_mode = _get_sparse_mode(attn_metadata.attn_mask, causal=_batch_causal)
+        sparse_mode = _get_sparse_mode(attn_metadata.attn_mask, causal=attn_metadata.causal)
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
