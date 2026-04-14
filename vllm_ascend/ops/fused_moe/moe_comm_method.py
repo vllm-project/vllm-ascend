@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+import torch_npu
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 import vllm_ascend.envs as envs_ascend
@@ -279,21 +280,41 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-            out = torch.empty_like(fused_experts_input.hidden_states)
-            torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
-                x=fused_experts_input.hidden_states,
-                weight1=fused_experts_input.weights.w1,
-                weight2=fused_experts_input.weights.w2,
-                expert_idx=topk_ids,
-                scale1=fused_experts_input.weights.w1_scale,
-                scale2=fused_experts_input.weights.w2_scale,
-                probs=fused_experts_input.topk_weights.to(torch.float32),
-                group=self.token_dispatcher.moe_all_to_all_group_name,
-                max_output_size=65536,
-                out=out,
-                expert_token_nums=self.expert_token_nums,
-            )
-            expert_tokens = self.expert_token_nums
+            if fused_experts_input.quant.is_mxfp:
+                hidden_states = fused_experts_input.hidden_states
+                out = torch_npu.npu_mega_moe(
+                    x=hidden_states,
+                    expert_ids=topk_ids,
+                    expert_scales=fused_experts_input.topk_weights,
+                    weight1=fused_experts_input.weights.w1,
+                    weight_scales1=fused_experts_input.weights.w1_scale,
+                    weight2=fused_experts_input.weights.w2,
+                    weight_scales2=fused_experts_input.weights.w2_scale,
+                    group_ep=self.token_dispatcher.moe_all_to_all_group_name,
+                    ep_rank_id=self.token_dispatcher.ep_rank_id,
+                    ep_world_size=self.token_dispatcher.ep_world_size,
+                    moe_expert_num=self.moe_config.num_experts,
+                    max_recv_token_num=65536,
+                    comm_alg="mte",
+                    scales1_type=fused_experts_input.weights.w1_scale.dtype,
+                    scales2_type=fused_experts_input.weights.w2_scale.dtype,
+                )
+            else:
+                out = torch.empty_like(fused_experts_input.hidden_states)
+                torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
+                    x=fused_experts_input.hidden_states,
+                    weight1=fused_experts_input.weights.w1,
+                    weight2=fused_experts_input.weights.w2,
+                    expert_idx=topk_ids,
+                    scale1=fused_experts_input.weights.w1_scale,
+                    scale2=fused_experts_input.weights.w2_scale,
+                    probs=fused_experts_input.topk_weights.to(torch.float32),
+                    group=self.token_dispatcher.moe_all_to_all_group_name,
+                    max_output_size=65536,
+                    out=out,
+                    expert_token_nums=self.expert_token_nums,
+                )
+                expert_tokens = self.expert_token_nums
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
