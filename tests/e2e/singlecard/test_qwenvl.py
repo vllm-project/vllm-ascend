@@ -132,7 +132,6 @@ EXPECTED_OUTPUTS_VISION_NO_CONNECTOR = [
     "A closeup shot of the Tokyo Skytree with pink flowers in the foreground.",
 ]
 
-# NOTE - beam search .text contains the whole text
 EXPECTED_BEAM_SEARCH_OUTPUTS = [
     [
         "A majestic skyscraper stands",
