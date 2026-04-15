@@ -51,7 +51,7 @@ function install_binary_test() {
     config_pip_mirror
     install_system_packages
     create_vllm_venv
-    pip install docutils
+    pip install -r ${SCRIPT_DIR}/../../docs/requirements-docs.txt
 
     PIP_VLLM_VERSION=$(get_version pip_vllm_version)
     VLLM_VERSION=$(get_version vllm_version)

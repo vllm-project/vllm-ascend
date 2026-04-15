@@ -39,6 +39,10 @@ defaults:
   run:
     shell: bash -el {0}
 
+concurrency:
+  group: "labeled_doctest-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
