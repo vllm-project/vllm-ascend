@@ -2053,7 +2053,7 @@ class NPUModelRunner(GPUModelRunner):
             logits = logits[: len(spec_decode_metadata.logits_indices)]
         if self.input_batch.top_k_cpu is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
-            self.sampler.prepare_sampling(max_topk)
+            self.rejection_sampler.prepare_sampling(max_topk)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             None,  # draft_probs
