@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     logger,
 )
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 def init_buffer(
@@ -62,7 +63,32 @@ def init_buffer(
         shape,
     )
 
+def init_routed_experts_capturer(self) -> None:
+    logger.info(
+        "Initializing routed experts capturer, enable_return_routed_experts: %s",
+        self.model_config.enable_return_routed_experts,
+    )
+    routed_experts_capturer = RoutedExpertsCapturer.create()
+
+    self.routed_experts_attn_gid = GPUModelRunner._get_attention_kv_cache_gid(self)
+    attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
+    self.max_num_kv_tokens = self.kv_cache_config.num_blocks * attn_group.kv_cache_spec.block_size
+
+    dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+    pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+    if pcp_size * dcp_size > 1:
+        self.max_num_kv_tokens *= pcp_size * dcp_size
+
+    routed_experts_capturer.init_buffer(
+        max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+        max_num_kv_tokens=self.max_num_kv_tokens,
+        vllm_config=self.vllm_config,
+    )
+    self._bind_routed_experts_capturer(routed_experts_capturer)
+    self.routed_experts_initialized = True
+
 
 # Patch for _device_buffer's initialization(device="cuda" -> device=current_platform.device_name).
 # TODO Remove this patch when pr(https://github.com/vllm-project/vllm/pull/34336) is merged.
 RoutedExpertsCapturer.init_buffer = init_buffer
+GPUModelRunner.init_routed_experts_capturer = init_routed_experts_capturer
