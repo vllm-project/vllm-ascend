@@ -889,8 +889,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            sparse_mode = _get_sparse_mode(attn_metadata.attn_mask,
-                                           causal=attn_metadata.causal)
+            sparse_mode = _get_sparse_mode(attn_metadata.attn_mask, causal=attn_metadata.causal)
             attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                 query=query,
                 key=key,
@@ -1371,8 +1370,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,
-                sparse_mode=_get_sparse_mode(attn_metadata.attn_mask,
-                                            causal=attn_metadata.causal),
+                sparse_mode=_get_sparse_mode(attn_metadata.attn_mask, causal=attn_metadata.causal),
             )
             n_prefill = num_tokens - num_decode_tokens
             attn_out = attn_out.view(n_prefill, self.num_heads, self.head_size)
@@ -1439,8 +1437,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=_get_sparse_mode(attn_metadata.attn_mask,
-                                         causal=attn_metadata.causal),
+            sparse_mode=_get_sparse_mode(attn_metadata.attn_mask, causal=attn_metadata.causal),
         )
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output

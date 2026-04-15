@@ -17,11 +17,13 @@ class _NpuRmsNormOp:
         rms_norm(out, input, weight, epsilon) -> None
     Writes the result into `out` in-place.
     """
+
     def __init__(self):
         self.default = self
 
     def __call__(self, out, input, weight, epsilon):
         import torch_npu
+
         result, _ = torch_npu.npu_rms_norm(input, weight, epsilon)
         out.copy_(result)
 
@@ -34,14 +36,15 @@ class _NpuRotaryEmbeddingOp:
                          cos_sin_cache, is_neox) -> None
     Modifies `query` (and `key` if not None) in-place.
     """
+
     def __init__(self):
         self.default = self
 
-    def __call__(self, positions, query, key, head_size,
-                 cos_sin_cache, is_neox):
+    def __call__(self, positions, query, key, head_size, cos_sin_cache, is_neox):
         from vllm.model_executor.layers.rotary_embedding import (
             RotaryEmbedding,
         )
+
         q_result, k_result = RotaryEmbedding.forward_static(
             positions=positions,
             query=query,
@@ -67,13 +70,8 @@ torch.ops._C.rms_norm = _NpuRmsNormOp()
 torch.ops._C.rotary_embedding = _NpuRotaryEmbeddingOp()
 
 # --- The rest keep the _MissingOp placeholder ---
-_set_missing(torch.ops._C, "fused_add_rms_norm",
-             "torch.ops._C.fused_add_rms_norm")
-_set_missing(torch.ops._C, "static_scaled_fp8_quant",
-             "torch.ops._C.static_scaled_fp8_quant")
-_set_missing(torch.ops._C, "dynamic_scaled_fp8_quant",
-             "torch.ops._C.dynamic_scaled_fp8_quant")
-_set_missing(torch.ops._C, "dynamic_per_token_scaled_fp8_quant",
-             "torch.ops._C.dynamic_per_token_scaled_fp8_quant")
-_set_missing(torch.ops._C, "silu_and_mul",
-             "torch.ops._C.silu_and_mul")
+_set_missing(torch.ops._C, "fused_add_rms_norm", "torch.ops._C.fused_add_rms_norm")
+_set_missing(torch.ops._C, "static_scaled_fp8_quant", "torch.ops._C.static_scaled_fp8_quant")
+_set_missing(torch.ops._C, "dynamic_scaled_fp8_quant", "torch.ops._C.dynamic_scaled_fp8_quant")
+_set_missing(torch.ops._C, "dynamic_per_token_scaled_fp8_quant", "torch.ops._C.dynamic_per_token_scaled_fp8_quant")
+_set_missing(torch.ops._C, "silu_and_mul", "torch.ops._C.silu_and_mul")
