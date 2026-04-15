@@ -1,8 +1,11 @@
-name: Scheduled docs link check
+name: Docs link check
 
 on:
-  schedule:
-    - cron: '0 3 * * 1'  # Every Monday at 03:00 UTC
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
 
 permissions:
