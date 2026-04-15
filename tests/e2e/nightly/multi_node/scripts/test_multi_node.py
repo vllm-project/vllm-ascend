@@ -4,6 +4,8 @@ import os
 import shlex
 from typing import Any
 import vllm
+import sys
+import subprocess
 
 import pytest
 
