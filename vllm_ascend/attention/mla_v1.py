@@ -1346,6 +1346,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 AscendAttentionState.SpecDecoding,
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.DecodeOnly,
+                AscendAttentionState.PrefillNoCache,  # for extremely short prefills
             ]
             and self.speculative_config is not None
         ):
