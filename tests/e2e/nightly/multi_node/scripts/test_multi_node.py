@@ -3,8 +3,9 @@ import logging
 import os
 import shlex
 from typing import Any
-import subprocess
+import vllm
 import sys
+import subprocess
 
 import pytest
 
@@ -242,8 +243,8 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
         "feature": _extract_features(config.nodes[0].server_cmd, config.envs),
-        "vllm_version": os.environ.get("VLLM_VERSION", ""),
-        "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
+        "vllm_version": vllm.__version__,
+        "vllm_ascend_version": os.environ.get("VLLM_ASCEND_REF", ""),
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config),
         "environment": _filter_environment(config.envs),

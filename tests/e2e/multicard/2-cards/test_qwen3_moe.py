@@ -74,6 +74,33 @@ def test_qwen3_moe_distributed_aiv_tp2():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("enforce_eager", [True])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_qwen3_moe_distributed_tp2_ep2_mrv2(
+    max_tokens: int,
+    enforce_eager: bool,
+) -> None:
+    example_prompts = [
+        "The president of the United States is",
+    ]
+
+    with VllmRunner(
+        "Qwen/Qwen3-30B-A3B",
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enforce_eager=enforce_eager,
+    ) as vllm_model:
+        vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    golden_results = [
+        "The president of the United States is the commander in chief of",
+    ]
+
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+
+
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"

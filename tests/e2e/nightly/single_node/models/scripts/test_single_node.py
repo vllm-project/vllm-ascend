@@ -3,6 +3,7 @@ import logging
 import os
 import shlex
 from typing import Any
+import vllm
 
 import openai
 import pytest
@@ -344,7 +345,7 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
         "feature": _extract_features(config.server_cmd, config.envs),
-        "vllm_version": os.environ.get("VLLM_VERSION", ""),
+        "vllm_version": vllm.__version__,
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config),
