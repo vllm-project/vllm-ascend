@@ -72,6 +72,7 @@ For best results, if you run inside a Docker container where `systemctl` is like
 - **Stop `irqbalance` service**:
 
     For example, on Ubuntu system, you can run the following command to stop irqbalance:
+
     ```bash
     sudo systemctl stop irqbalance
     ```
