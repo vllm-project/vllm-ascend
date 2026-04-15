@@ -24,6 +24,7 @@ import sys
 import time
 from pathlib import Path
 
+import regex as re
 from openai import AsyncOpenAI
 
 SYSTEM_PROMPT = (
@@ -45,7 +46,6 @@ Rules:
 
 Return ONLY the complete PO file content, no extra explanations.
 
-{chunk_info}
 {content}"""
 
 
@@ -56,11 +56,14 @@ class POTranslator:
 
     async def _call_api(self, content: str, chunk_info: str = "") -> str | None:
         """Make a single translation API call."""
-        prompt = TRANSLATION_PROMPT.format(content=content, chunk_info=chunk_info)
+        prompt = TRANSLATION_PROMPT.format(content=content)
+        system = SYSTEM_PROMPT
+        if chunk_info:
+            system = f"{SYSTEM_PROMPT} ({chunk_info})"
         response = await self.client.chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=8000,
@@ -84,8 +87,9 @@ class POTranslator:
             lines = content.split("\n")
             print(f"  {path.name} ({len(lines)} lines)", end=" ", flush=True)
 
-            if len(lines) > 500:
-                success = await self._translate_chunked(po_path, lines)
+            chunks = self._split_po_entries(content)
+            if len(chunks) > 1:
+                success = await self._translate_chunked(po_path, chunks)
             else:
                 result = await self._call_api(content)
                 if result:
@@ -107,23 +111,47 @@ class POTranslator:
         finally:
             Path(backup).unlink(missing_ok=True)
 
-    async def _translate_chunked(self, po_path: str, lines: list[str]) -> bool:
-        """Translate large file in parallel chunks."""
-        chunk_size = 300
-        total = (len(lines) + chunk_size - 1) // chunk_size
+    @staticmethod
+    def _split_po_entries(content: str, max_lines: int = 300) -> list[str]:
+        """Split PO content into chunks on entry boundaries (blank-line separated).
+
+        Splitting on raw line numbers can cut a msgid/msgstr pair in half,
+        causing the LLM to see an incomplete entry and produce duplicate or
+        orphaned msgstr lines.  This method keeps each entry intact.
+        """
+        # PO entries are separated by one or more blank lines.
+        entries = re.split(r"\n{2,}", content.strip())
+        chunks: list[str] = []
+        current: list[str] = []
+        current_lines = 0
+
+        for entry in entries:
+            entry_lines = entry.count("\n") + 1
+            if current_lines + entry_lines > max_lines and current:
+                chunks.append("\n\n".join(current) + "\n")
+                current = []
+                current_lines = 0
+            current.append(entry)
+            current_lines += entry_lines
+
+        if current:
+            chunks.append("\n\n".join(current) + "\n")
+
+        return chunks if len(chunks) > 1 else [content]
+
+    async def _translate_chunked(self, po_path: str, chunks: list[str]) -> bool:
+        """Translate large file in parallel entry-aligned chunks."""
+        total = len(chunks)
         sem = asyncio.Semaphore(self.max_concurrent)
 
-        async def do_chunk(idx: int) -> tuple[int, list[str] | None, str | None]:
+        async def do_chunk(idx: int) -> tuple[int, str | None, str | None]:
             async with sem:
-                start = idx * chunk_size
-                end = min((idx + 1) * chunk_size, len(lines))
-                chunk = "\n".join(lines[start:end])
-                info = f"[Chunk {idx + 1}/{total}]"
+                info = f"chunk {idx + 1}/{total}"
                 try:
-                    result = await self._call_api(chunk, chunk_info=info)
+                    result = await self._call_api(chunks[idx], chunk_info=info)
                     if result is None:
                         return (idx, None, "empty response")
-                    return (idx, result.split("\n"), None)
+                    return (idx, result, None)
                 except Exception as e:
                     return (idx, None, str(e)[:50])
 
@@ -131,15 +159,15 @@ class POTranslator:
         results = await asyncio.gather(*[do_chunk(i) for i in range(total)])
 
         # Check for failures
-        translated = [None] * total
-        for idx, chunk_lines, error in results:
+        translated: list[str | None] = [None] * total
+        for idx, chunk_text, error in results:
             if error:
                 print(f"\n    Chunk {idx + 1} failed: {error}")
                 return False
-            translated[idx] = chunk_lines
+            translated[idx] = chunk_text
 
-        # Write result
-        final = "\n".join(line for chunk in translated for line in chunk)
+        # Write result: join chunks with a single blank line between them
+        final = "\n\n".join(t.strip("\n") for t in translated) + "\n"
         Path(po_path).write_text(final, encoding="utf-8")
         return True
 
