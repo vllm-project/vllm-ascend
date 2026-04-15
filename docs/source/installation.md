@@ -151,9 +151,6 @@ pip install vllm==|pip_vllm_version|
 pip install vllm-ascend==|pip_vllm_ascend_version|
 ```
 
-::::
-:::::
-
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 
