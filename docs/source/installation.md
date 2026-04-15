@@ -147,37 +147,8 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel**:
 # Install vllm-project/vllm. The newest supported version is |vllm_version|.
 pip install vllm==|pip_vllm_version|
 
-# Install vllm-project/vllm-ascend.
-pip install \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/simple  \
-vllm-ascend==|pip_vllm_ascend_version|
-
-```
-
-::::
-
-::::{tab-item} uv-wheelnext installation
-:sync: uv-wheelnext
-
-The `uv-wheelnext` installation downloads only the delta on top of vllm, resulting in a smaller download size. First install `uv-wheelnext` to support incremental wheels:
-
-```bash
-# install uv-wheelnext
-curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
-source $HOME/.local/bin/env
-```
-
-```{code-block} bash
-   :substitutions:
-
-# Install vllm-project/vllm. The newest supported version is |vllm_version|.
-pip install vllm==|pip_vllm_version|
-
-# Install vllm-project/vllm-ascend from wheelnext index.
-uv pip install --system -v \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
-vllm-ascend==|pip_vllm_ascend_version|
-
+# Install vllm-project/vllm-ascend from pypi.
+pip install vllm-ascend==|pip_vllm_ascend_version|
 ```
 
 ::::
