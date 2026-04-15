@@ -87,7 +87,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### Single-node Deployment
 
-`Qwen3.5-27B` and `Qwen3.5-27B-w8a8` can both be deployed on 1 Atlas 800 A3(64G × 16), 1 Atlas 800 A2(64G × 8). Quantized version needs to start with parameter --quantization ascend.
+`Qwen3.5-27B` and `Qwen3.5-27B-w8a8` can both be deployed on 1 Atlas 800 A3(64G × 16), 1 Atlas 800 A2(64G × 8). Quantized version needs to start with parameter `--quantization ascend`.
 
 Run the following script to execute online 128k inference.
 
