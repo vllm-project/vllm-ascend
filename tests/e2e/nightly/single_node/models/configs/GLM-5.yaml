@@ -31,7 +31,7 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--async-scheduling"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+  - '{"fuse_muls_add": true, "multistream_overlap_shared_expert": false, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
