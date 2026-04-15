@@ -18,7 +18,6 @@
 #
 
 import math
-import os
 import sys
 import time
 from collections import defaultdict
@@ -2991,8 +2990,7 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
-            if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") != "1":
-                self.eplb_updator.warm_up_eplb()
+            self.eplb_updator.warm_up_eplb()
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

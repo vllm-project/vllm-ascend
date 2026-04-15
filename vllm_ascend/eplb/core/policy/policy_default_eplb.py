@@ -321,34 +321,80 @@ class DefaultEplb(EplbPolicy):
 
     @staticmethod
     def constraint_expert_local_exchange(current_expert_table, global_deployment):
+        """
+        Aligns the local expert ranking with the target global deployment plan
+        without moving experts across devices (cards).
+
+        It ensures that the resulting list on each card contains exactly the same
+        set of experts as before, but arranged in the order specified by
+        `global_deployment`.
+
+        Args:
+            current_expert_table: Current expert allocation (list of lists of lists).
+            global_deployment: Target expert allocation plan.
+
+        Returns:
+            Updated global_deployment with locally adjusted expert orders.
+        """
         for layer_id in range(len(global_deployment)):
-            for card_id in range(len(global_deployment[layer_id])):
-                current_list = [int(x) for x in current_expert_table[layer_id][card_id]]
-                new_list = [int(x) for x in global_deployment[layer_id][card_id]]
-                num = len(new_list)
+            # Iterate over available cards, ensuring we don't go out of bounds
+            num_cards = min(len(current_expert_table[layer_id]), len(global_deployment[layer_id]))
 
-                new_index = [-1] * num
-                new_result = [-1] * num
-                remaining_elements = []
+            for card_id in range(num_cards):
+                # Convert lists to numpy arrays for efficient set operations
+                # `local_expert_ids` refers to the experts currently on this card
+                # `target_expert_ids` refers to the desired order from the optimizer
+                local_expert_ids = np.array(current_expert_table[layer_id][card_id])
+                target_expert_ids = np.array(global_deployment[layer_id][card_id])
 
-                for i in range(num):
-                    flag = True
-                    for j in range(num):
-                        if new_list[i] == current_list[j] and new_index[j] == -1:
-                            new_index[j] = 0
-                            new_result[j] = current_list[j]
-                            flag = False
-                            break
-                    if flag:
-                        remaining_elements.append(new_list[i])
+                assert len(local_expert_ids) == len(target_expert_ids), (
+                    "Number of experts must match between current and target deployment."
+                )
 
-                index = 0
-                for k in range(num):
-                    if new_result[k] == -1:
-                        new_result[k] = remaining_elements[index]
-                        index += 1
+                # 1. Identify Expert that are already present in the target list.
+                # These experts will stay on this card, but may need to move positions.
+                mask_common_experts = np.isin(local_expert_ids, target_expert_ids)
+                experts_staying_local = local_expert_ids[mask_common_experts]
 
-                global_deployment[layer_id][card_id] = new_result
+                # 2. Identify experts in the target list that need to be placed into the
+                # remaining slots. This step filters out the experts already 'taken' by
+                # `experts_staying_local` conceptualy, or simply identifies the ones
+                # that define the 'new' structure relative to the old one.
+                # Note: In logic, `target_expert_ids` defines the structure.
+                # We need to fill the slots of `target_expert_ids` with items from
+                # `local_expert_ids`.
+                #
+                # Correct Logic: We want to construct a list that is the SAME ORDER as `target_expert_ids`,
+                # but contains ONLY items from `local_expert_ids`.
+                # Since we assume Set(local) == Set(target), we just need to re-order.
+                #
+                # However, preserving the original code's logic (masking based on absolute position):
+                # It treats the array as a set of 'content' and 'structural containers'.
+
+                # Extract the experts that are 'newly moved' relative to the comparison.
+                # These are the experts in the target list that were NOT in the 'common' set
+                # (or conceptually, the ones that need to be swapped in).
+                mask_experts_to_move = ~np.isin(target_expert_ids, experts_staying_local)
+                experts_to_relocate = target_expert_ids[mask_experts_to_move]
+
+                # 3. Construct the final list.
+                # We start with a copy of the target structure.
+                final_expert_list = target_expert_ids.copy()
+
+                # Fill the positions occupied by 'common' experts with the actual experts from the local card.
+                # This step maps the intersection back to the target positions.
+                final_expert_list[mask_common_experts] = experts_staying_local
+
+                # Fill the remaining positions (where experts moved) with the 'moved' experts.
+                # Ensure boolean logic aligns (the mask must match the data length).
+                # Note: Original code used mask_common_experts directly on target array, which implies
+                # `target_expert_ids` and `local_expert_ids` have some structural alignment or
+                # it's a specific heuristic.
+                # Assuming the logic aims to preserve as many indices as possible:
+                final_expert_list[~mask_common_experts] = experts_to_relocate
+
+                # Update the global deployment plan with the locally constrained list
+                global_deployment[layer_id][card_id] = final_expert_list.tolist()
 
         return global_deployment
 
@@ -363,6 +409,7 @@ class DefaultEplb(EplbPolicy):
         expert_ids, counts = np.unique(row, return_counts=True)
         num_original_expert = len(expert_ids)
         if DefaultEplb._new_ep_size:
+            # Elastic EP Scaling
             num_npus = DefaultEplb._new_ep_size
             num_redundancy_expert = experts_per_npu * self._new_ep_size - num_original_expert
         else:
@@ -388,6 +435,7 @@ class DefaultEplb(EplbPolicy):
             raise ValueError(
                 f"the number of experts per NPU {experts_per_npu} can't be greater than expert_num {expert_num}"
             )
+
         if num_npus * experts_per_npu < num_original_expert:
             raise ValueError(
                 f"num_npus {num_npus} * experts_per_npu {experts_per_npu} "

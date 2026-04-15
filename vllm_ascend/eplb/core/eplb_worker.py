@@ -19,9 +19,9 @@ from typing import Any
 
 import numpy as np
 import torch
-from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import logger
 
+from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
@@ -33,7 +33,7 @@ class EplbWorker:
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
-        self.rank_id = get_ep_group().rank_in_group
+        self.rank_id = get_dynamic_eplb_group().rank_in_group
         self.multi_stage = policy_type == 3
 
     def do_update(self):
@@ -62,6 +62,7 @@ class EplbWorker:
         old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
         scale = self.shared_dict.get("scale", False)
         if scale:
+            # Elastic EP Scaling
             old_ep_size = self.shared_dict["old_ep_size"]
             new_ep_size = self.shared_dict["new_ep_size"]
             assert old_ep_size != new_ep_size
@@ -89,12 +90,14 @@ class EplbWorker:
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
-        self.check_expert_placement(old_placement, new_placement)
+        if not scale:
+            self.check_expert_placement(old_placement, new_placement)
         new_expert_maps = self.local2global(new_placement)
         self.update_expert_map(new_expert_maps)
         new_expert_maps_clone = new_expert_maps.clone()
 
         if scale:
+            # Elastic EP Scaling
             shape = list(new_expert_maps.shape)
             shape[1] = abs(old_ep_size - new_ep_size)
             if old_ep_size > new_ep_size:

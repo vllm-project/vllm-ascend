@@ -16,9 +16,12 @@
 #
 from enum import Enum
 
+import torch.distributed as dist
+from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
+from vllm_ascend.distributed.utils import stateless_batch_isend_irecv
 
 
 class ExpertWeightUpdateState(Enum):
@@ -37,6 +40,7 @@ class D2DExpertWeightLoader:
         self.recv_expert_list = []
         self.num_layers = 0
         self.comm_group = get_dynamic_eplb_group()
+        self.is_stateless = isinstance(self.comm_group, StatelessGroupCoordinator)
 
     def set_adator(self, eplb_adaptor):
         self.eplb_adaptor = eplb_adaptor
@@ -51,31 +55,50 @@ class D2DExpertWeightLoader:
 
         self.layer_id = layer_id
         self.comm_op_list = []
-        has_temp = set()
+        has_send_buffer = set()
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
-            op_info = {"peer_rank": dst_rank, "tensors": [], "expert_id": global_expert_id_to_send, "op": "send"}
             for index, src_tensor in enumerate(self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]):
-                if hasattr(self.eplb_adaptor, "temp_tensor_list"):
-                    if local_expert_id not in has_temp:
-                        self.eplb_adaptor.temp_tensor_list[local_expert_id][index].copy_(src_tensor)
-                    op_info["tensors"].append(self.eplb_adaptor.temp_tensor_list[local_expert_id][index])
+                # Use the pre-allocated send buffer if available (for non-quantized fused MC2).
+                # Since the communication library requires a memory offset of 0, we copy the
+                # source tensor to this buffer to ensure the requirement is met.
+                if send_buffer_tensor_list := getattr(self.eplb_adaptor, "send_buffer_tensor_list", None):
+                    if local_expert_id not in has_send_buffer:
+                        # Only copy once per expert per weight to avoid redundant operations
+                        send_buffer_tensor_list[local_expert_id][index].copy_(src_tensor)
+                    src_tensor = send_buffer_tensor_list[local_expert_id][index]
+                if self.is_stateless:
+                    op = object.__new__(dist.P2POp)
+                    op.group = self.comm_group.device_group
+                    op.op = op.group.send
+                    op.tensor = src_tensor
+                    op.group_peer = dst_rank
+                    op.tag = global_expert_id_to_send * len(self.eplb_adaptor.expert_weight_names) + index
+                    self.comm_op_list.append(op)
                 else:
-                    op_info["tensors"].append(src_tensor)
-            has_temp.add(local_expert_id)
-            self.comm_op_list.append(op_info)
+                    self.comm_op_list.append(
+                        dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group)
+                    )
+            has_send_buffer.add(local_expert_id)
 
         for buffer_tensor_id, recv_info in enumerate(expert_recv_info):
             recv_rank, global_expert_id_to_recv = recv_info
-            op_info = {"peer_rank": recv_rank, "tensors": [], "expert_id": global_expert_id_to_recv, "op": "recv"}
-            for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
-                op_info["tensors"].append(buffer_tensor)
+            for index, buffer_tensor in enumerate(self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]):
+                if self.is_stateless:
+                    op = object.__new__(dist.P2POp)
+                    op.group = self.comm_group.device_group
+                    op.op = op.group.recv
+                    op.tensor = buffer_tensor
+                    op.group_peer = recv_rank
+                    op.tag = global_expert_id_to_recv * len(self.eplb_adaptor.expert_weight_names) + index
+                    self.comm_op_list.append(op)
+                else:
+                    self.comm_op_list.append(
+                        dist.P2POp(dist.irecv, buffer_tensor, recv_rank, group=self.comm_group.device_group)
+                    )
             local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
             self.recv_expert_list.append((local_expert_to_replace, buffer_tensor_id))
-            self.comm_op_list.append(op_info)
-
-        self.comm_op_list = sorted(self.comm_op_list, key=lambda x: x["expert_id"])
 
         self.state = ExpertWeightUpdateState.READY
 
@@ -89,18 +112,12 @@ class D2DExpertWeightLoader:
 
         # set asynchronous stream for d2d expert weight transfer
         if self.comm_op_list:
-            for op_info in self.comm_op_list:
-                peer_rank = op_info["peer_rank"]
-                tensors = op_info["tensors"]
-                expert_id = op_info["expert_id"]
-                op = op_info["op"]
-                for i, tensor in enumerate(tensors):
-                    tag = expert_id * len(tensors) + i
-                    if op == "send":
-                        worker = self.comm_group.device_group.send([tensor], peer_rank, tag=tag)
-                    else:
-                        worker = self.comm_group.device_group.recv([tensor], peer_rank, tag=tag)
-                    reqs.append(worker)
+            if self.is_stateless:
+                self.comm_op_list = sorted(self.comm_op_list, key=lambda op: op.tag)
+                ret_list = stateless_batch_isend_irecv(self.comm_op_list)
+            else:
+                ret_list = dist.batch_isend_irecv(self.comm_op_list)
+            reqs.extend(ret_list)
 
         self.state = ExpertWeightUpdateState.TRANSFERRING
 

@@ -15,12 +15,17 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
+import os
+
 import numpy
 import torch
+import torch.distributed as dist
 import vllm.envs as envs
+from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
+from vllm_ascend.distributed.utils import stateless_batch_isend_irecv
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -31,6 +36,7 @@ class EplbUpdator:
         self.eplb_config = eplb_config
         self.multi_stage = eplb_config.eplb_policy_type == 3
         self.comm_group = get_dynamic_eplb_group()
+        self.is_stateless = isinstance(self.comm_group, StatelessGroupCoordinator)
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
         self.eplb_process = eplb_process
@@ -40,12 +46,18 @@ class EplbUpdator:
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         local_load = self.adaptor.get_rank_expert_workload()
-        self.world_size = self.comm_group.world_size
+        if self.is_stateless:
+            self.world_size = self.comm_group.world_size
+        else:
+            self.world_size = dist.get_world_size()
         self.device = local_load.device
         self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path, process):
-        self.rank_id = self.comm_group.rank_in_group
+        if self.is_stateless:
+            self.rank_id = self.comm_group.rank_in_group
+        else:
+            self.rank_id = dist.get_rank()
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
         self.expert_heat_collection_interval: torch.int64 = self.eplb_config.expert_heat_collection_interval
@@ -145,31 +157,64 @@ class EplbUpdator:
         return moe_load
 
     def warm_up_eplb(self):
-        self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
+        global_expert_map = self.adaptor.get_global_expert_map()
+        if self.shared_dict["expert_maps"] is None:
+            self.shared_dict["expert_maps"] = global_expert_map
+
+        if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
+            return
+
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
 
         comm_op_list = []
+
+        if self.is_stateless:
+            tag = 0
+            tag_dict = dict()
+            for src_rank in range(self.world_size):
+                for dst_rank in range(self.world_size):
+                    if src_rank != dst_rank:
+                        tag_dict[(src_rank, dst_rank)] = tag
+                        tag += 1
+
+        for dst_rank in range(self.world_size):
+            if dst_rank == self.rank_id:
+                continue
+            if self.is_stateless:
+                op = object.__new__(dist.P2POp)
+                op.group = self.comm_group.device_group
+                op.op = op.group.send
+                op.tensor = src_tensor
+                op.group_peer = dst_rank
+                op.tag = tag_dict[(self.rank_id, dst_rank)]
+                comm_op_list.append(op)
+            else:
+                comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group))
+
         for src_rank in range(self.world_size):
-            for dst_rank in range(self.world_size):
-                if src_rank != dst_rank:
-                    comm_op_list.append({"src_rank": src_rank, "dst_rank": dst_rank, "tensor": src_tensor})
-
-        comm_op_list = sorted(comm_op_list, key=lambda x: (x["src_rank"], x["dst_rank"]))
-
-        workers = []
-        for i, op in enumerate(comm_op_list):
-            src_rank = op["src_rank"]
-            dst_rank = op["dst_rank"]
-            tensor = op["tensor"]
             if src_rank == self.rank_id:
-                workers.append(self.comm_group.device_group.send([tensor], dst_rank, tag=i))
-            elif dst_rank == self.rank_id:
-                workers.append(self.comm_group.device_group.recv([tensor], src_rank, tag=i))
+                continue
+            if self.is_stateless:
+                op = object.__new__(dist.P2POp)
+                op.group = self.comm_group.device_group
+                op.op = op.group.recv
+                op.tensor = src_tensor
+                op.group_peer = src_rank
+                op.tag = tag_dict[(src_rank, self.rank_id)]
+                comm_op_list.append(op)
+            else:
+                comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank, group=self.comm_group.device_group))
+        if comm_op_list:
+            if self.is_stateless:
+                comm_op_list = sorted(comm_op_list, key=lambda op: op.tag)
+                reqs = stateless_batch_isend_irecv(comm_op_list)
+            else:
+                reqs = dist.batch_isend_irecv(comm_op_list)
 
-        for worker in workers:
-            worker.wait()
+        for req in reqs:
+            req.wait()
 
     def shutdown(self):
         """
