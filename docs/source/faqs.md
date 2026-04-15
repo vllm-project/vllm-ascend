@@ -286,7 +286,7 @@ export SOC_VERSION="ascend310p1"
 export SOC_VERSION="<value starting with ascend950>"
 ```
 
-### 24. Compilation error occasionally encounters with triton-ascend
+### 23. Compilation error occasionally encounters with triton-ascend
 
 As shown in [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782), triton-ascend occasionally encounters compilation errors, which is a known issue in triton-ascend 3.2.0. To avoid this issue, please use the official docker images or install the specific triton-ascend version as following:
 
@@ -296,3 +296,13 @@ ARCH=$(python3 -c "import platform; machine = platform.machine().lower(); arch_m
 TRITON_ASCEND_WHEEL="triton_ascend-3.2.0.dev20260322-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl" && \
 python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${TRITON_ASCEND_WHEEL}"
 ```
+
+### 24. Why TPOT increases drastically as concurrency grows?
+
+When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
+Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:
+
+- vLLM usually logs stats on your server. You might see metrics like `GPU KV cache usage: 99.0%,`. When reaching 100%, it triggers preemption.
+- When launching a vLLM server, you will see logs like `GPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
+
+Preemption cannot be avoided completely since KV cache usage always has a limit. But there are methods to reduce the chances of preemption. As is suggested in [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption), the core strategy is to increase available KV cache. For example, one can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && `--max-num-batched-tokens`.

@@ -161,6 +161,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 
 ```
 
+In PD-disaggregated deployments, `layer_sharding` is supported only on prefill/P nodes with `kv_role="kv_producer"`. Do not enable it on decode/D nodes or `kv_role="kv_both"` nodes.
+
 ### Multi-node Deployment
 
 - `DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64G × 8).
