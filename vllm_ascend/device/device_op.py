@@ -19,11 +19,9 @@ import torch
 import torch_npu
 
 from vllm_ascend.device.mxfp_compat import (
-    FLOAT4_E2M1FN_X2_DTYPE,
     FLOAT8_E8M0FNU_DTYPE,
-    HIFLOAT8_DTYPE,
-    quant_dtypes,
-    scale_dtypes,
+    QUANT_DTYPES,
+    SCALE_DTYPES,
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -335,8 +333,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             quant_mode=2,
             dequant_dtype=torch.float32,
             quant_dtype=act_quant_type,
-            x_dtype=act_quant_type if act_quant_type in quant_dtypes else None,
-            weight_dtype=weight_quant_type if weight_quant_type in quant_dtypes else None,
+            x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
+            weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
             weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
         )
@@ -371,10 +369,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
         return {
-            "scale_dtype": scale_type if scale_type in scale_dtypes else None,
-            "per_token_scale_dtype": per_token_scale_type if per_token_scale_type in scale_dtypes else None,
-            "x_dtype": act_quant_type if act_quant_type in quant_dtypes else None,
-            "weight_dtype": weight_quant_type if weight_quant_type in quant_dtypes else None,
+            "scale_dtype": scale_type if scale_type in SCALE_DTYPES else None,
+            "per_token_scale_dtype": per_token_scale_type if per_token_scale_type in SCALE_DTYPES else None,
+            "x_dtype": act_quant_type if act_quant_type in QUANT_DTYPES else None,
+            "weight_dtype": weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
             "output_dtype": output_dtype,
         }
 
