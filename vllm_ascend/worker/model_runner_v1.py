@@ -400,6 +400,9 @@ class NPUModelRunner(GPUModelRunner):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors,
             ),
+            logitsprocs_need_output_token_ids=bool(
+                self.vllm_config.model_config.logits_processors
+            ),
             is_pooling_model=self.is_pooling_model,
             num_speculative_tokens=(
                 self.vllm_config.speculative_config.num_speculative_tokens if self.vllm_config.speculative_config else 0
@@ -970,14 +973,6 @@ class NPUModelRunner(GPUModelRunner):
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
             attn_state = AscendAttentionState.PrefillNoCache
-            # If all prompts are shorter than or equal to decode threshold, they should
-            # be treated as SpecDecoding for correct forward path in mla attention backend
-            if (
-                self.speculative_config
-                and self.speculative_config.method == "mtp"
-                and np.all(num_scheduled_tokens <= self.decode_threshold)
-            ):
-                attn_state = AscendAttentionState.SpecDecoding
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
@@ -1760,7 +1755,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if not self.use_async_scheduling:
             return model_runner_output
-        return AsyncGPUModelRunnerOutput(
+        async_output = AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
             logprobs_tensors=sampler_output.logprobs_tensors,
@@ -1768,11 +1763,17 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
         )
+        self.input_batch.set_async_sampled_token_ids(
+            async_output.sampled_token_ids_cpu,
+            async_output.async_copy_ready_event,
+        )
+        return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
+        self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
@@ -3430,7 +3431,6 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    assert isinstance(spec, MLAAttentionSpec)
                     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
