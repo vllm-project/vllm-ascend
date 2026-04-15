@@ -56,12 +56,12 @@ All related code is under `vllm/distributed/ec_transfer`.
     * *Scheduler role* – checks cache existence and schedules loads.  
     * *Worker role* – loads the embeddings into memory.
 
-* **EPD Load Balance Proxy** -
+* **EPD Load Balancing Proxy** -
     * *Multi-Path Scheduling Strategy* - dynamically diverts the multimodal request or text requests to the corresponding inference path
     * *Instance-Level Dynamic Load Balancing* -  dispatches multimodal requests based on a least-loaded strategy, using a priority queue to balance the active token workload across instances.
   
 We create the example setup with the **MooncakeLayerwiseConnector** from `vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_layerwise_connector.py` and refer to the `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py` to facilitate the kv transfer between P and D. For step-by-step deployment and configuration of Mooncake, refer to the following guide:  
-[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
+[https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
 
 For the PD disaggregation part, when using MooncakeLayerwiseConnector: The request first enters the Decoder instance,the Decoder triggers a remote prefill task in reverse via the Metaserver. The Prefill node then executes inference and pushes KV Cache layer-wise to the Decoder, overlapping computation with transmission. Once the transfer is complete, the Decoder seamlessly continues with the subsequent token generation.
 `docs/source/developer_guide/Design_Documents/disaggregated_prefill.md` shows the brief idea about the disaggregated prefill.
