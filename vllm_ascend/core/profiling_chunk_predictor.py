@@ -23,7 +23,7 @@ latency and fitting a quadratic model.
 The approach:
 1. Profile: Run forward passes with different chunk sizes to measure latency
 2. Fit: Use quadratic model f(l) = a*l^2 + b*l + c to fit the latency data
-3. Predict: Given current history_len, solve for chunk size that achieves
+3. Predict: Given current num_computed_tokens, solve for chunk size that achieves
    target latency
 """
 
@@ -60,6 +60,19 @@ class ChunkSizePredictor:
         self.min_chunk = min_chunk
         self.history_fitted = False
 
+    def clamp_quadratic_and_linear_if_negative(self, fitted_a: float, fitted_b: float) -> tuple[float, float]:
+        """In theory, for the Transfomur structure of LLM, the fitted quadratic and linear
+        terms should not be negative. Can perform zero clamping for inaccurate fitting
+        """
+        if fitted_a < 0:
+            logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
+            fitted_a = 1e-9
+        if fitted_b < 0:
+            logger.warning("Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b)
+            fitted_b = 1e-9
+
+        return fitted_a, fitted_b
+
     def fit(self, seq_lens: list[int], latencies: list[float]) -> bool:
         """Fit quadratic coefficients f(l) = al^2 + bl + c from data points.
 
@@ -68,8 +81,9 @@ class ChunkSizePredictor:
         """
         L = np.array(seq_lens, dtype=np.float64)
         T = np.array(latencies, dtype=np.float64)
+        MIN_FIT_POINTS_NO_CHUNK = 8
 
-        if len(L) < 8:
+        if len(L) < MIN_FIT_POINTS_NO_CHUNK:
             logger.warning(
                 "Not enough data points for quadratic fitting (%d < 8)",
                 len(L),
@@ -99,13 +113,7 @@ class ChunkSizePredictor:
                 logger.warning("Failed to fit quadratic model: %s", fallback_error)
                 return False
 
-        if fitted_a < 0:
-            logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
-            fitted_a = 1e-9
-
-        if fitted_b < 0:
-            logger.warning("Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b)
-            fitted_b = 0.0
+        fitted_a, fitted_b = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
 
         self.quadratic_coeff_a = fitted_a
         self.linear_coeff_b = fitted_b
@@ -126,13 +134,18 @@ class ChunkSizePredictor:
             True if fitting succeeded, False otherwise
         """
         num_points = len(chunked_data)
-        if num_points < 5:
+        # experience values, can be tuned. We don't want the online calibration process
+        # to be too long, so we have limited the amount of data.
+        # 30 data points are already sufficient.
+        MIN_FIT_POINTS_CHUNK = 5
+        MAX_FIT_POINTS_CHUNK = 30
+        if num_points < MIN_FIT_POINTS_CHUNK:
             logger.warning(
                 "Not enough data points for chunked data fitting (%d < 5)",
                 num_points,
             )
             return False
-        if num_points > 30:
+        if num_points > MAX_FIT_POINTS_CHUNK:
             self.history_fitted = True
             return False
 
@@ -149,13 +162,7 @@ class ChunkSizePredictor:
             logger.warning("Failed to fit chunked model: %s", e)
             return False
 
-        if fitted_a < 0:
-            logger.warning("Fitted a=%.2e is not positive. Setting a=1e-9.", fitted_a)
-            fitted_a = 1e-9
-
-        if fitted_b < 0:
-            logger.warning("Fitted b=%.2e is not positive. Setting b=0.0.", fitted_b)
-            fitted_b = 0.0
+        fitted_a, fitted_b = self.clamp_quadratic_and_linear_if_negative(fitted_a, fitted_b)
 
         self.quadratic_chunk_a = fitted_a
         self.linear_chunk_b = fitted_b
@@ -191,30 +198,30 @@ class ChunkSizePredictor:
     def get_time(
         self,
         query_len: int,
-        history_len: int,
+        num_computed_tokens: int,
     ) -> float:
         """Get time T based on current seq_lens, f(l) = al^2 + bl + c, f(L+x) - f(L) = T"""
 
         def f(seq_lens: float) -> float:
             return self.quadratic_coeff_a * seq_lens * seq_lens + self.linear_coeff_b * seq_lens + self.constant_coeff_c
 
-        return f(query_len + history_len) - f(history_len)
+        return f(query_len + num_computed_tokens) - f(num_computed_tokens)
 
     def get_time_with_history(
         self,
         query_len: int,
-        history_len: int,
+        num_computed_tokens: int,
     ) -> float:
         """Get time T based on current seq_lens, f(C,H) = a*C(C+H) + b*(C+H) + c = T"""
         return (
-            self.quadratic_chunk_a * query_len * (query_len + history_len)
-            + self.linear_chunk_b * (query_len + history_len)
+            self.quadratic_chunk_a * query_len * (query_len + num_computed_tokens)
+            + self.linear_chunk_b * (query_len + num_computed_tokens)
             + self.constant_chunk_c
         )
 
     def predict(
         self,
-        history_len: int,
+        num_computed_tokens: int,
         base_chunk_size: int,
         page_size: int,
     ) -> int | None:
@@ -226,7 +233,7 @@ class ChunkSizePredictor:
             return None
 
         A = self.quadratic_coeff_a
-        B = 2 * self.quadratic_coeff_a * history_len + self.linear_coeff_b
+        B = 2 * self.quadratic_coeff_a * num_computed_tokens + self.linear_coeff_b
         C = -self.target_latency
 
         discriminant = B * B - 4 * A * C
@@ -252,7 +259,7 @@ class ChunkSizePredictor:
 
     def predict_with_history(
         self,
-        history_len: int,
+        num_computed_tokens: int,
         base_chunk_size: int,
         page_size: int,
     ) -> int | None:
@@ -269,8 +276,8 @@ class ChunkSizePredictor:
 
         # a*C^2 + (a*H + b)*C + b*H + c - T = 0
         A = self.quadratic_chunk_a
-        B = self.quadratic_chunk_a * history_len + self.linear_chunk_b
-        C = self.linear_chunk_b * history_len + self.constant_chunk_c - self.target_latency
+        B = self.quadratic_chunk_a * num_computed_tokens + self.linear_chunk_b
+        C = self.linear_chunk_b * num_computed_tokens + self.constant_chunk_c - self.target_latency
 
         discriminant = B * B - 4 * A * C
         if discriminant < 0:
@@ -323,7 +330,7 @@ class ProfilingChunkManager:
     def history_ready(self) -> bool:
         return self.is_ready and self.predictor.with_history_ready
 
-    def predict_chunk_size(self, history_len: int, target_time: float) -> int | None:
+    def predict_chunk_size(self, num_computed_tokens: int, target_time: float) -> int | None:
         """Predict optimal chunk size for given history length."""
         if not self.is_ready:
             return None
@@ -334,10 +341,12 @@ class ProfilingChunkManager:
             predict_func = self.predictor.predict
         else:
             predict_func = self.predictor.predict_with_history
-        return predict_func(history_len=history_len, base_chunk_size=self.base_chunk_size, page_size=self.page_size)
+        return predict_func(
+            num_computed_tokens=num_computed_tokens, base_chunk_size=self.base_chunk_size, page_size=self.page_size
+        )
 
-    def predict_time(self, num_new_tokens: int, history_len: int) -> float:
-        """Predict optimal chunk size for given history length."""
+    def predict_time(self, num_new_tokens: int, num_computed_tokens: int) -> float:
+        """Get the consumed time of scheduled reqs for time_budget."""
         if not self.is_ready:
             return 0.0
 
@@ -345,7 +354,7 @@ class ProfilingChunkManager:
             predict_func = self.predictor.get_time
         else:
             predict_func = self.predictor.get_time_with_history
-        return predict_func(query_len=num_new_tokens, history_len=history_len)
+        return predict_func(query_len=num_new_tokens, num_computed_tokens=num_computed_tokens)
 
     def record_batch_execution_time(self, request_chunks: list, elapsed_time: float) -> bool:
         """Record batch execution time for online model refinement.
@@ -354,7 +363,7 @@ class ProfilingChunkManager:
         history-aware model once enough points are collected.
 
         Args:
-            request_chunks: List of (chunk_size, history_len) per request
+            request_chunks: List of (chunk_size, num_computed_tokens) per request
             elapsed_time: Total elapsed time in seconds
         """
         x1 = x2 = x3 = 0

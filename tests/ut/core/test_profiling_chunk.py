@@ -159,7 +159,7 @@ class TestChunkSizePredictor(TestBase):
         predictor.is_ready = True
 
         chunk = predictor.predict(
-            history_len=0, base_chunk_size=8192, page_size=128)
+            num_computed_tokens=0, base_chunk_size=8192, page_size=128)
         self.assertIsNotNone(chunk)
         self.assertEqual(chunk % 128, 0)
 

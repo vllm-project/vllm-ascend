@@ -50,7 +50,7 @@ class ProfilingChunkScheduler(Scheduler):
     chunk sizes by calling ``profile_prefill_latency`` on each worker via
     ``collective_rpc``.  A quadratic latency model is then fitted, and during
     scheduling the model predicts the optimal chunk size for each waiting
-    request based on its ``history_len`` (already-computed tokens).
+    request based on its ``num_computed_tokens``.
     """
 
     def __init__(
@@ -317,7 +317,7 @@ class ProfilingChunkScheduler(Scheduler):
                 and request.num_computed_tokens > 0
             ):
                 predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
-                    history_len=request.num_computed_tokens,
+                    num_computed_tokens=request.num_computed_tokens,
                     target_time=time_budget,
                 )
                 if predicted_chunk is not None and predicted_chunk > 0:
@@ -516,7 +516,7 @@ class ProfilingChunkScheduler(Scheduler):
                         and request.num_computed_tokens > 0
                     ):
                         predicted_chunk = self.profiling_chunk_manager.predict_chunk_size(
-                            history_len=num_computed_tokens,
+                            num_computed_tokens=num_computed_tokens,
                             target_time=time_budget,
                         )
                         if predicted_chunk is not None and predicted_chunk > 0:
