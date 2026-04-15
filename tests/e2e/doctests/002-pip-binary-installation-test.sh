@@ -29,10 +29,22 @@ function install_system_packages() {
 }
 
 function config_pip_mirror() {
-    sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
     pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
     pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        case "$ID" in
+            ubuntu|debian)
+                sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+                ;;
+            openEuler|centos|rhel|fedora)
+                sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
+                ;;
+        esac
+    fi
 }
+
 
 function install_binary_test() {
 
