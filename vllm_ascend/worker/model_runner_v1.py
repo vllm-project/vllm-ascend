@@ -150,6 +150,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
 if TYPE_CHECKING:
@@ -2040,6 +2041,9 @@ class NPUModelRunner(GPUModelRunner):
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
+            if self.input_batch.top_k_cpu is not None and get_ascend_config().enable_reduce_sample:
+                max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+                self.sampler.prepare_sampling(max_topk)
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
@@ -2047,6 +2051,9 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
+        if self.input_batch.top_k_cpu is not None and get_ascend_config().enable_reduce_sample:
+            max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
+            self.sampler.prepare_sampling(max_topk)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             None,  # draft_probs

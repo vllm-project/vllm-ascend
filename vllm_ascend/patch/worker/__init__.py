@@ -42,6 +42,7 @@ if not is_310p():
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
+import vllm_ascend.patch.worker.patch_llama_eagle3  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
 import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
