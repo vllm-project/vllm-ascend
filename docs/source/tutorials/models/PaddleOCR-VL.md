@@ -48,7 +48,7 @@ docker run --rm \
 ```
 
 :::{note}
-The 310P device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
+The Atlas inference products device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
 :::
 
 ## Deployment
@@ -57,7 +57,7 @@ The 310P device is supported from version 0.15.0rc1. You need to select the corr
 
 #### Single NPU (PaddleOCR-VL)
 
-PaddleOCR-VL supports single-node single-card deployment on the 910B4 and 310P platform. Follow these steps to start the inference service:
+PaddleOCR-VL supports single-node single-card deployment on the 910B4 and Atlas inference products platform. Follow these steps to start the inference service:
 
 1. Prepare model weights: Ensure the downloaded model weights are stored in the `PaddleOCR-VL` directory.
 2. Create and execute the deployment script (save as `deploy.sh`):
@@ -90,10 +90,10 @@ vllm serve ${MODEL_PATH} \
 ```
 
 ::::
-::::{tab-item} 310P
-:sync: 310P
+::::{tab-item} Atlas inference products
+:sync: Atlas inference products
 
-Run the following script to start the vLLM server on single 310P:
+Run the following script to start the vLLM server on single Atlas inference products:
 
 ```shell
 #!/bin/sh
@@ -112,7 +112,7 @@ vllm serve ${MODEL_PATH} \
 ```
 
 :::{note}
-The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the 310P device.
+The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the Atlas inference products device.
 :::
 
 ::::
@@ -260,7 +260,7 @@ The 910B4 device supports inference using the PaddlePaddle framework.
 ::::{tab-item} OM inference
 :sync: om
 
-The 310P device supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
+The Atlas inference products device supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
 
 ::::
 :::::

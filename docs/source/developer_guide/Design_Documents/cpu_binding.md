@@ -36,7 +36,7 @@ On multi‑socket ARM systems, the OS scheduler may place vLLM threads on CPUs f
    - Read cpuset from /proc/self/status.
    - Read topo affinity from `npu‑smi info -t topo`.
 4. **Build CPU pools**:
-   - Use **global_slice** for A3 devices; **topo_affinity** for A2 and 310P.
+   - Use **global_slice** for A3 devices; **topo_affinity** for A2 and Atlas inference products.
    - If topo affinity is missing, fall back to global_slice.
    - Ensure each NPU has at least 5 CPUs.
 5. **Allocate per‑role CPUs**:
