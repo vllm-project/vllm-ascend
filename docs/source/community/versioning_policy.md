@@ -176,4 +176,4 @@ Notes:
 - `torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable version to [PyPI](https://pypi.org/project/torch-npu)
   every 3 months, a development version (aka the POC version) every month, and a nightly version every day.
   The PyPI stable version **CAN** be used in vLLM Ascend final version, the monthly dev version **ONLY CAN** be used in
-  vLLM Ascend RC version for rapid iteration, and the nightly version **CANNOT** be used in vLLM Ascend any version or branch.
+  vLLM Ascend RC version for rapid iteration, and the nightly version **CANNOT** be used in any vLLM Ascend version or branch.
