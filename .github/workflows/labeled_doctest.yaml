@@ -19,6 +19,7 @@ name: Doc Test
 
 on:
   workflow_dispatch:
+  workflow_call:
   pull_request:
     branches:
       - 'main'
@@ -37,6 +38,10 @@ on:
 defaults:
   run:
     shell: bash -el {0}
+
+concurrency:
+  group: "labeled_doctest-${{ github.ref }}"
+  cancel-in-progress: true
 
 jobs:
   test:
