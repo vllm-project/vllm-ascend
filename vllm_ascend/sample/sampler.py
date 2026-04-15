@@ -1,5 +1,5 @@
 import torch
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+import vllm.envs as envs
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
@@ -11,7 +11,6 @@ from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhea
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
-from vllm_ascend.ascend_config import get_ascend_config
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
