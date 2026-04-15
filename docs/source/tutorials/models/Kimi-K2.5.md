@@ -809,7 +809,7 @@ In this chapter, we recommend best practices for three scenarios:
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
-  A: Clean up old processes and restart: `pkill -f VLLM*`.
+  A: Clean up old processes and restart: `pkill -f vLLM*`.
 
 - **Q: How to handle OOM or unstable startup?**
 

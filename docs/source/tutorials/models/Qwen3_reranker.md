@@ -100,7 +100,7 @@ model_name = "Qwen/Qwen3-Reranker-8B"
 # It needs to computing 151669 tokens logits, making this method extremely
 # inefficient, not to mention incompatible with the vllm score API.
 # A method for converting the original model into a sequence classification
-# model was proposed. See：https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
+# model was proposed. See: https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
 # Models converted offline using this method can not only be more efficient
 # and support the vllm score API, but also make the init parameters more
 # concise, for example.

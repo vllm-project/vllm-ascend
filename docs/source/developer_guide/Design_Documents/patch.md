@@ -60,7 +60,7 @@ Before writing a patch, following the principle above, we should patch the least
     #   1. `<The target patch module in vLLM>`
     #    Why:
     #       <Describe the reason why we need to patch>
-    #    How：
+    #    How:
     #       <Describe the way to patch>
     #    Related PR (if no, explain why):
     #       <Add a link to the related PR in vLLM. If there is no related PR, explain why>

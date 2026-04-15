@@ -111,7 +111,7 @@ sudo apt update
 sudo apt install libjemalloc2
 
 # Configure jemalloc
-export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2 $LD_PRELOAD
+export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 ```
 
 #### 2.2. Tcmalloc

@@ -69,7 +69,7 @@ docker run --rm \
 #### Single NPU (Qwen2.5-Omni-7B)
 
 :::{note}
-The **environment variable** `LOCAL_MEDIA_PATH` which **allows** API requests to read local images or videos from directories specified by the server file system. Please note this is a security risk. Should only be enabled in trusted environments.
+The environment variable `LOCAL_MEDIA_PATH` which allows API requests to read local images or videos from directories specified by the server file system. Please note this is a security risk. Should only be enabled in trusted environments.
 
 :::
 
@@ -128,7 +128,7 @@ Not supported yet.
 
 ## Functional Verification
 
-If your service **starts** successfully, you can see the info shown below:
+If your service starts successfully, you can see the info shown below:
 
 ```bash
 INFO:     Started server process [2736]

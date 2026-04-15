@@ -35,7 +35,7 @@ The workflow of obtaining inputs:
 
 At last, these `Token IDs` are required to be fed into a model, and `positions` should also be sent into the model to create `Rope` (Rotary positional embedding). Both of them are the inputs of the model.
 
-**Note**: The `Token IDs` are the inputs of a model, so we also call them `Inputs IDs`.
+**Note**: The `Token IDs` are the inputs of a model, so we also call them `Input IDs`.
 
 ### 2. Build inputs attention metadata
 

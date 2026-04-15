@@ -163,7 +163,7 @@ export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
 
-#Minimum retransmission timeout of the RDMA，equals 4.096 μs * 2 ^ timeout.
+#Minimum retransmission timeout of the RDMA, equals 4.096 μs * 2 ^ timeout.
 #Needs to satisfy the equation: ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
 #HCCL_RDMA_TIMEOUT also affects collective communication behavior and should be configured carefully.
 export HCCL_RDMA_TIMEOUT=17
