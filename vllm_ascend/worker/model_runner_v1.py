@@ -1946,23 +1946,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
 
-    def _update_full_graph_params_if_needed(
-        self,
-        forward_context,
-        num_tokens_padded: int,
-        positions: torch.Tensor | None,
-    ) -> None:
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
-            assert positions is not None
-            update_full_graph_params(
-                self.attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens_padded,
-                self.vllm_config,
-                self.speculative_config,
-                positions.shape[0],
-            )
+
 
     def _model_forward(
         self,
@@ -1977,30 +1961,41 @@ class NPUModelRunner(GPUModelRunner):
         forward_context = get_forward_context()
         assert forward_context is not None
 
-        if self.enable_enpu:
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
-            )
-            hidden_states = self.model(
+        def run_model():
+            return self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
-            )
-        else:
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
             )
 
-        if get_forward_context().flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
+        def update_full_graph_params_if_needed(
+            self,
+            forward_context,
+            num_tokens_padded: int,
+            positions: torch.Tensor | None,
+        ) -> None:
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
+                assert positions is not None
+                update_full_graph_params(
+                    self.attn_backend,
+                    self.update_stream,
+                    forward_context,
+                    num_tokens_padded,
+                    self.vllm_config,
+                    self.speculative_config,
+                    positions.shape[0],
+                )
+
+        if self.enable_enpu:
+            update_full_graph_params_if_needed()
+            hidden_states = run_model()
+        else:
+            hidden_states = run_model()
+            update_full_graph_params_if_needed()
+
+        if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
