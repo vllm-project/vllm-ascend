@@ -107,6 +107,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # When set to 1, pre-deduct estimated NPU graph memory from the KV cache
+    # budget during memory profiling. This prevents graph capture from
+    # competing with KV cache for the gpu_memory_utilization budget.
+    # Future versions will align with vLLM v0.19 and default this to True.
+    "VLLM_ASCEND_MEMORY_PROFILER_ESTIMATE_NPUGRAPHS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MEMORY_PROFILER_ESTIMATE_NPUGRAPHS", "0"))
+    ),
 }
 
 # end-env-vars-definition
