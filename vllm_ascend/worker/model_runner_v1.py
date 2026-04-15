@@ -37,7 +37,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context, ForwardContext
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -93,6 +93,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.utils import get_c_env
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -437,6 +438,9 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+        env_enpu_enable = get_c_env("ENPU_ENABLE")
+        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
+        self.enable_enpu = env_enpu_enable is not None and env_enpu_enable.lower() == "true"
 
     @property
     def use_cp(self) -> bool:
@@ -1944,7 +1948,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _update_full_graph_params_if_needed(
         self,
-        forward_context,
+        forward_context: ForwardContext,
         num_tokens_padded: int,
         positions: torch.Tensor | None,
     ) -> None:
