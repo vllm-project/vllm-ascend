@@ -110,7 +110,11 @@ You can also use the upstream script [vision_language_multi_image.py](https://gi
 
 ### OpenAI-compatible server
 
-```bash
+```{test} bash
+:sync-yaml: tests/e2e/models/configs/Molmo2-8B.yaml
+:sync-target: tutorial_vllm_serve
+:sync-class: cmd
+
 vllm serve allenai/Molmo2-8B \
   --trust-remote-code \
   --dtype bfloat16 \
