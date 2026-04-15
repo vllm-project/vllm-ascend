@@ -215,8 +215,6 @@ class AscendMetadata:
     # kvcomp
     kvcomp_metadata: Optional[KVCompMetaData] = None
 
-    chunk_sizes_for_hamming = None
-
     max_seq_len_for_hamming = None
 
     block_tables_for_hamming = None
@@ -299,7 +297,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
-        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
+        slot_mapping = common_attn_metadata.slot_mapping
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
         # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
         if isinstance(self.kv_cache_spec, CrossAttentionSpec):
@@ -355,11 +353,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             runtime_seq_lens_list = attn_metadata.seq_lens_list[:real_batch_size]
             if num_actual_tokens < real_batch_size:
                 runtime_seq_lens_list = (runtime_seq_lens_list[:num_actual_tokens] + [0] * (real_batch_size - num_actual_tokens))
+                slot_mapping[num_actual_tokens:] = -1 
             runtime_max_seq_len_for_hamming = max(runtime_seq_lens_list) if runtime_seq_lens_list else 0
             # Keep the capture-time upper bound when it exists so the graph attributes
             # used by HammingDistTopK stay stable between capture and replay.
             attn_metadata.max_seq_len_for_hamming = (attn_metadata.max_seq_len if attn_metadata.max_seq_len is not None else runtime_max_seq_len_for_hamming)
-            attn_metadata.chunk_sizes_for_hamming = kvcomp_metadata.chunk_sizes_for_hamming_full[:real_batch_size]
             attn_metadata.block_tables_for_hamming = block_table[:real_batch_size]
             top_k_for_hamming_cpu = kvcomp_metadata.topk_for_hamming_full_cpu[:real_batch_size].clone()
             if num_actual_tokens < real_batch_size:
@@ -377,7 +375,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             query_start_locs = attn_metadata.query_start_loc[:-1].to(torch.int64)
             assert query_start_locs.shape[0] == real_batch_size, "the len of query_start_locs is not equal with batch_size"
             torch.where(
-                attn_metadata.slot_mapping[query_start_locs] >= 0,
+                attn_metadata.slot_mapping[:real_batch_size] >= 0,
                 torch.ones_like(query_start_locs, dtype=torch.bool),
                 torch.zeros_like(query_start_locs, dtype=torch.bool),
                 out=kvcomp_metadata.valid_query_mask[:real_batch_size]# 强制输出到固定内存地址
@@ -842,25 +840,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
             return kvcomp_metadata.hamming_output, kvcomp_metadata.seq_lens_from_hamming
         else:
-            sink = 1
-            recent =4
             hash_encoder = kvcomp_metadata.hash_encoder
             num_actual_tokens = attn_metadata.num_actual_tokens
-            key_for_kvcomp = key[:num_actual_tokens]
-            hashk = hash_encoder.compute_hash(key_for_kvcomp)
-            hashk_op = hashk.transpose(0,1).reshape(-1, hashk.shape[-1]).clone()
-
-            hashk_cache_op = kvcomp_metadata.hashk_caches[self.layerIndex].clone()
-            slot_mapping_op = attn_metadata.slot_mapping[:num_actual_tokens].clone()
-            actual_query_lens = attn_metadata.actual_query_lens
-            query_start_locs = attn_metadata.query_start_loc[:-1].to(torch.int64)
             real_batch_size = attn_metadata.seq_lens.shape[0]
+
+            hashk = hash_encoder.compute_hash(key[:num_actual_tokens])
+            hashk_op = hashk.transpose(0,1).reshape(-1, hashk.shape[-1]).contiguous() #修改
+
+            hashk_cache_op = kvcomp_metadata.hashk_caches[self.layerIndex]
+            slot_mapping_op = attn_metadata.slot_mapping[:num_actual_tokens]
+            seq_lens_for_reshape = kvcomp_metadata.seq_lens_for_reshape[:real_batch_size]
 
             torch.ops._C_ascend.npu_reshape_and_cache_bnsd(
                 hashk_op,
                 hashk_cache_op,
                 slot_mapping_op,
-                kvcomp_metadata.seq_lens_for_reshape[:real_batch_size],
+                seq_lens_for_reshape,
                 hashk_cache_op
             )
 
@@ -868,25 +863,30 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return block_table, actual_seq_lengths_kv
 
             # run decode here
-            seq_lens_for_hamming_base = attn_metadata.seq_lens[:real_batch_size]
-            top_k_for_hamming_base = kvcomp_metadata.topk_for_hamming_full[:real_batch_size]
+            seq_lens_for_hamming = attn_metadata.seq_lens[:real_batch_size]
+            top_k_for_hamming = kvcomp_metadata.topk_for_hamming_full[:real_batch_size]
+            chunk_sizes_for_hamming = kvcomp_metadata.chunk_sizes_for_hamming_full[:real_batch_size]
+            valid_query_mask = kvcomp_metadata.valid_query_mask[:real_batch_size]
+            max_seq_len_for_hamming = attn_metadata.max_seq_len_for_hamming
+            block_tables_for_hamming = attn_metadata.block_tables_for_hamming
+
             hashq = hash_encoder.compute_hash(query[:real_batch_size])
-            hashq = hashq.unsqueeze(2).contiguous()
+            hashq_op = hashq.unsqueeze(2).contiguous()
 
             new_block_table = torch.ops._C_ascend.npu_hamming_dist_top_k(
-                hashq,
+                hashq_op,
                 hashk_cache_op,
                 None,
-                top_k_for_hamming_base,
-                seq_lens_for_hamming_base,
-                attn_metadata.chunk_sizes_for_hamming,
-                attn_metadata.max_seq_len_for_hamming,
-                sink,
-                recent,
+                top_k_for_hamming,
+                seq_lens_for_hamming,
+                chunk_sizes_for_hamming,
+                max_seq_len_for_hamming,
+                kvcomp_metadata.sink,
+                kvcomp_metadata.recent,
                 None,
-                attn_metadata.block_tables_for_hamming,
-                kvcomp_metadata.valid_query_mask[:real_batch_size],
-                kvcomp_metadata.hamming_output[:real_batch_size]
+                block_tables_for_hamming,
+                valid_query_mask,
+                kvcomp_metadata.hamming_output[:real_batch_size],
             )
 
             new_block_table = new_block_table.squeeze(1).contiguous()

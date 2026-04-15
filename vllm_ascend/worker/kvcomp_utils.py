@@ -582,7 +582,11 @@ class KVCompMetaData:
     topk_for_hamming_full_cpu: torch.Tensor 
     seq_lens_for_hamming: torch.Tensor 
     hamming_output: torch.Tensor 
-    seq_lens_from_hamming: torch.Tensor 
+    seq_lens_from_hamming: torch.Tensor
+    seq_lens_for_reshape: torch.Tensor
+    valid_query_mask: torch.Tensor
+    sink: int
+    recent: int
 
     # for GQA
     hash_encoder: Optional[HashEncoder] = None
@@ -593,8 +597,6 @@ class KVCompMetaData:
     hash_encoder_rope: Optional[HashEncoder] = None
     hashk_cache_nope: Optional[list[torch.Tensor]] = None
     hashk_cache_rope: Optional[list[torch.Tensor]] = None
-    seq_lens_for_reshape: Optional[list[torch.Tensor]] = None
-    valid_query_mask: Optional[list[torch.Tensor]] = None
 
 def build_kvcomp_metadata(
     max_num_reqs: int,
@@ -714,6 +716,8 @@ def build_kvcomp_metadata(
         seq_lens_for_reshape=seq_lens_for_reshape,
         valid_query_mask=valid_query_mask,
         seq_lens_from_hamming=seq_lens_from_hamming,
+        sink=1,
+        recent=4,
     )
 
     return kvcomp_meta_data

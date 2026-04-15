@@ -2457,6 +2457,8 @@ class NPUModelRunner(GPUModelRunner):
                 device=self.seq_lens.device,
             )
             self.seq_lens[num_reqs_padded:] = 0
+            self.optimistic_seq_lens_cpu[:num_reqs_padded] = seq_lens
+            self.optimistic_seq_lens_cpu[num_reqs_padded:] = 0
 
             cum_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
