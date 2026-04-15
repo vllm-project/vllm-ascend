@@ -333,8 +333,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             quant_mode=2,
             dequant_dtype=torch.float32,
             quant_dtype=act_quant_type,
-            x_dtype=act_quant_type,
-            weight_dtype=weight_quant_type,
+            x_dtype=act_quant_type if act_quant_type in quant_dtypes else None,
+            weight_dtype=weight_quant_type if weight_quant_type in quant_dtypes else None,
             weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
         )
@@ -361,9 +361,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 use_bf16=use_bf16,
                 use_mxfp_quant=False,
             )
-
-        quant_dtypes = tuple(dtype for dtype in (FLOAT4_E2M1FN_X2_DTYPE, HIFLOAT8_DTYPE) if dtype is not None)
-        scale_dtypes = tuple(dtype for dtype in (FLOAT8_E8M0FNU_DTYPE,) if dtype is not None)
 
         output_dtype = (
             input_dtype
