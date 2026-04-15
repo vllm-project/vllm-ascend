@@ -194,15 +194,11 @@ class BlockTable:
                 % total_cp_world_size
                 == total_cp_rank
             )
-            local_block_offsets = (
-                torch.div(
-                    virtual_block_offsets,
-                    total_cp_world_size * self.cp_kv_cache_interleave_size,
-                    rounding_mode="floor",
-                )
-                * self.cp_kv_cache_interleave_size
-                + (virtual_block_offsets % self.cp_kv_cache_interleave_size)
-            )
+            local_block_offsets = torch.div(
+                virtual_block_offsets,
+                total_cp_world_size * self.cp_kv_cache_interleave_size,
+                rounding_mode="floor",
+            ) * self.cp_kv_cache_interleave_size + (virtual_block_offsets % self.cp_kv_cache_interleave_size)
 
             slot_ids = block_numbers.to(req_positions.dtype) * self.block_size + local_block_offsets
             slot_ids = torch.where(is_local, slot_ids, torch.full_like(slot_ids, PAD_SLOT_ID))

@@ -12,6 +12,11 @@ Refer to [supported features](../../user_guide/support_matrix/supported_models.m
 
 Refer to the [feature guide](../../user_guide/feature_guide/index.md) for configuration details.
 
+## Model Test Case Links
+
+- Main accuracy config: [`tests/e2e/models/configs/Molmo2-8B.yaml`](../../../../tests/e2e/models/configs/Molmo2-8B.yaml)
+- Quick verification config: [`tests/e2e/models/configs/Molmo2-8B-quick.yaml`](../../../../tests/e2e/models/configs/Molmo2-8B-quick.yaml)
+
 ## Environment Preparation
 
 ### Model weights
@@ -165,20 +170,20 @@ tests/e2e/models/test_lm_eval_correctness.py::test_lm_eval_correctness_param \
 ### Error Logs
 
 - Stage-1 (network):
-  - `Error while downloading ... model-00005-of-00008.safetensors ... Read timed out.`
-  - `Trying to resume download...`
-  - timeout exit: `exit_code: 124`
+    - `Error while downloading ... model-00005-of-00008.safetensors ... Read timed out.`
+    - `Trying to resume download...`
+    - timeout exit: `exit_code: 124`
 - Stage-2 (runtime before patch):
-  - `TypeError: 'function' object is not subscriptable`
-  - crash path in `vllm_ascend/worker/block_table.py` at `_compute_slot_mapping_kernel[(...)](...)`
+    - `TypeError: 'function' object is not subscriptable`
+    - crash path in `vllm_ascend/worker/block_table.py` at `_compute_slot_mapping_kernel[(...)](...)`
 - Stage-3 (after fallback patch):
-  - first rerun failed with prompt length guard:
-    - `ValueError: The decoder prompt (length 4416) is longer than the maximum model length of 4096.`
-  - after adjusting quick config `max_model_len` to `8192`, run passed and produced metric:
-    - `mmmu_val | acc,none: ground_truth=0.53 | measured=0.5267 | success=✅`
+    - first rerun failed with prompt length guard:
+        - `ValueError: The decoder prompt (length 4416) is longer than the maximum model length of 4096.`
+    - after adjusting quick config `max_model_len` to `8192`, run passed and produced metric:
+        - `mmmu_val | acc,none: ground_truth=0.53 | measured=0.5267 | success=✅`
 - Stage-4 (official config after adaptation):
-  - full config (`tests/e2e/models/configs/Molmo2-8B.yaml`) passed:
-    - `mmmu_val | acc,none: ground_truth=0.53 | measured=0.5344 | success=✅`
+    - full config (`tests/e2e/models/configs/Molmo2-8B.yaml`) passed:
+        - `mmmu_val | acc,none: ground_truth=0.53 | measured=0.5344 | success=✅`
 
 ### Root Cause Analysis
 
