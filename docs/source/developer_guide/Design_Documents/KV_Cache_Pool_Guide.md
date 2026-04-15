@@ -26,7 +26,7 @@ The KV Cache Pool integrates multiple memory tiers (HBM, DRAM, SSD, etc.) throug
 
 Each connector implements a unified interface for storing, retrieving, and transferring KV blocks between tiers, depending on access frequency and hardware bandwidth.
 
-When combined with vLLM’s Prefix Caching mechanism, the pool enables efficient caching both locally (in HBM) and globally (via Mooncake), ensuring that frequently used prefixes remain hot while less frequently accessed KV data can spill over to lower-cost memory.
+When combined with vLLM's Prefix Caching mechanism, the pool enables efficient caching both locally (in HBM) and globally (via Mooncake), ensuring that frequently used prefixes remain hot while less frequently accessed KV data can spill over to lower-cost memory.
 
 ### 1. Combining KV Cache Pool with HBM Prefix Caching
 
