@@ -1109,14 +1109,14 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
-            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
-                return self._forward_c8_decode(query, attn_metadata, output, layer)
-            elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+            if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
                 return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
+            elif _EXTRA_CTX.capturing:
+                attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
+                output[:num_tokens] = attn_output[:num_tokens]
+                return output
+            elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                return self._forward_c8_decode(query, attn_metadata, output, layer)
             else:
                 return self._forward_c8_fused_infer_attention(
                     query,
@@ -1127,21 +1127,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     layer,
                 )
         else:
-            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and not self.is_kv_producer:
-                if key is not None and value is not None:
-                    key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
-                    query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
-                # pooling model branch
-                if attn_metadata.model_runner_type == "pooling":
-                    attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
-                if _EXTRA_CTX.capturing:
-                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
-                return self._forward_c8_decode(query, attn_metadata, output, layer)
-            elif attn_metadata.attn_state != AscendAttentionState.DecodeOnly and self.is_kv_producer:
+            if attn_metadata.attn_state != AscendAttentionState.DecodeOnly and self.is_kv_producer:
                 output_padded = None
                 if key is not None and value is not None:
                     output_padded = output
@@ -1159,6 +1145,21 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
+            elif not self.is_kv_producer:
+                if key is not None and value is not None:
+                    key, value = self._quantize_kv_to_int8(key, value, layer, attn_metadata.num_actual_tokens)
+                    query, key, value, _ = self.reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
+                # pooling model branch
+                if attn_metadata.model_runner_type == "pooling":
+                    attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
+                    output[:num_tokens] = attn_output[:num_tokens]
+                    return output
+                if _EXTRA_CTX.capturing:
+                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
+                    output[:num_tokens] = attn_output[:num_tokens]
+                    return output
+                elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                    return self._forward_c8_decode(query, attn_metadata, output, layer)
 
     def _prepare_c8_scales(self, layer: AttentionLayer, device: torch.device) -> None:
         """Shard per-channel C8 scales/offsets to this TP rank and pre-compute
