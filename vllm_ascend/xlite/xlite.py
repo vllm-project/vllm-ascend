@@ -24,7 +24,7 @@ from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size,
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from xlite._C import (  # type: ignore[attr-defined]
+from xlite._C import (
     AttnMeta,
     AttnMHA,
     Model,
@@ -40,12 +40,12 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetad
 
 
 class XliteModel:
-    def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, int, int, torch.dtype]:
+    def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, torch.Tensor, int, torch.dtype]:
         raise NotImplementedError("Xlite Model initialize function not implemented.")
 
 
 class LlamaXliteModel(XliteModel):
-    def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, int, int, torch.dtype]:
+    def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, torch.Tensor, int, torch.dtype]:
         dtype = vllm_config.model_config.dtype
         config = self._build_model_config(vllm_config)
         xlite_model = self._build_model(runnable, vllm_config, config)
@@ -159,10 +159,10 @@ class LlamaXliteModel(XliteModel):
 
         return xlite_model
 
-    def _precompute_freqs_cis(self, dim: int, end: int, dtype: torch.dtype, theta: float = 10000.0):
+    def _precompute_freqs_cis(self, dim: int, end: int, dtype: torch.dtype, theta: float = 10000.0) -> torch.Tensor:
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu")[: (dim // 2)] / dim))
-        t = torch.arange(end, device=freqs.device)  # type: ignore
-        freqs = torch.outer(t, freqs).float()  # type: ignore
+        t = torch.arange(end, device=freqs.device)
+        freqs = torch.outer(t, freqs).float()
         cos_cache = freqs.cos().to(dtype)
         sin_cache = freqs.sin().to(dtype)
         freq_cis = torch.cat((cos_cache, sin_cache), dim=-1)
@@ -183,10 +183,10 @@ class QwenMoeXliteModel(LlamaXliteModel):
         config.def_dp_size = vllm_config.parallel_config.data_parallel_size
         config.moe_ep_size = ep_group.world_size if vllm_config.parallel_config.enable_expert_parallel else 1
         config.moe_tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else ep_group.world_size
-        config.experts_weight_transpose = True  # type: ignore
+        config.experts_weight_transpose = True
         config.moe_intermediate_size = hf_config.moe_intermediate_size
-        config.norm_topk_prob = hf_config.norm_topk_prob  # type: ignore
-        config.scoring_func = ScoringFuncSoftmax  # type: ignore
+        config.norm_topk_prob = hf_config.norm_topk_prob
+        config.scoring_func = ScoringFuncSoftmax
         return config
 
     def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig, config: ModelConfig) -> Model:
@@ -219,10 +219,10 @@ class Glm4MoeXliteModel(LlamaXliteModel):
         config.def_dp_size = vllm_config.parallel_config.data_parallel_size
         config.moe_ep_size = ep_group.world_size if vllm_config.parallel_config.enable_expert_parallel else 1
         config.moe_tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else ep_group.world_size
-        config.experts_weight_transpose = True  # type: ignore
+        config.experts_weight_transpose = True
         config.moe_intermediate_size = hf_config.moe_intermediate_size
-        config.norm_topk_prob = hf_config.norm_topk_prob  # type: ignore
-        config.scoring_func = ScoringFuncSigmoid  # type: ignore
+        config.norm_topk_prob = hf_config.norm_topk_prob
+        config.scoring_func = ScoringFuncSigmoid
         config.route_scale = hf_config.routed_scaling_factor
         return config
 
