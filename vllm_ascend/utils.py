@@ -1252,11 +1252,10 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    # because the broadcast in layer sharding needs to be overlapped with a heavy compute stream to be
-    # effectively hidden, it is enabled only during the prefill stage.
-    is_prefill_instance = (
-        vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.kv_role == "kv_producer"
-    )
+    kv_transfer_config = vllm_config.kv_transfer_config
+    # Layer sharding broadcast only pays off when it can be hidden by the
+    # heavier prefill-stage compute, so enable it only on the P-side instance.
+    is_prefill_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_producer"
     return is_prefill_instance
 
 
@@ -1267,9 +1266,12 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    # if is PD mix stage, using original TP o_proj weight, and also need to
-    # full gather for o_proj weight for prefill stage.
-    return vllm_config.kv_transfer_config is None
+    kv_transfer_config = vllm_config.kv_transfer_config
+    # In a normal non-PD deployment, or on the PD mixed-role instance, keep the
+    # original TP o_proj weight and full-gather it for the prefill stage.
+    is_non_pd_instance = kv_transfer_config is None
+    is_pd_mixed_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_both"
+    return is_non_pd_instance or is_pd_mixed_instance
 
 
 def check_gdn_layer(vllm_config) -> bool:
