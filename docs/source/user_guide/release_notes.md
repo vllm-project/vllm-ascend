@@ -683,11 +683,7 @@ v0.11.0 will be the next official release version of vLLM Ascend. We'll release 
 - For long sequence input case, there is no response sometimes and the kv cache usage is become higher. This is a bug for scheduler. We are working on it.
 - Qwen2-audio doesn't work by default, we're fixing it. Temporary solution is to set `--gpu-memory-utilization` to a suitable value, such as 0.8.
 - When running Qwen3-Next with expert parallel enabled, please set `HCCL_BUFFSIZE` environment variable to a suitable value, such as 1024.
-<<<<<<< HEAD
 - The accuracy of DeepSeek3.2 with aclgraph is not correct. Temporary solution is to set `agraph_capture_sizes` to a suitable value depending on the batch size for the input.
-=======
-- The accuracy of DeepSeek3.2 with aclgraph is not correct. Temporary solution is to set `cudagraph_capture_sizes` to a suitable value depending on the batch size for the input.
->>>>>>> e831aed5... Sensitive word modification
 
 ## v0.11.0rc0 - 2025.09.30
 
