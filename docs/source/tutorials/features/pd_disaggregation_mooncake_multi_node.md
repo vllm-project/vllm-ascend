@@ -742,7 +742,7 @@ python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-s
 # on 192.0.0.3
 python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
 # on 192.0.0.4
-python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.0.0.4 --dp-rpc-port 12321 --vllm-start-port 7100
+python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
 ```
 
 ## Example Proxy for Deployment

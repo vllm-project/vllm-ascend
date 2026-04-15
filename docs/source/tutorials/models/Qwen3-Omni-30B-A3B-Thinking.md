@@ -78,6 +78,12 @@ apt-get update && apt-get install ffmpeg -y
 ffmpeg -version
 ```
 
+Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stream and shape limitations.
+
+```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
+```
+
 ## Deployment
 
 ### Single-node Deployment

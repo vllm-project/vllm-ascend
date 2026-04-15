@@ -30,7 +30,7 @@ It is recommended to download the model weights to the shared directory of multi
 
 Run docker container:
 
-```bash
+```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
