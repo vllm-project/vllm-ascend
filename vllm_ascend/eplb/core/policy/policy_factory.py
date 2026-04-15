@@ -1,5 +1,6 @@
 # Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this factory.
+
 from .policy_abstract import DynamicConfig, EplbPolicy
 from .policy_default_eplb import DefaultEplb
 from .policy_flashlb import FlashLB, warm_up
@@ -10,7 +11,7 @@ from .policy_swift_balancer import SwiftBalanceEplb
 class PolicyFactory:
     @staticmethod
     def generate_policy(policy_type: int, config: DynamicConfig) -> EplbPolicy:
-        policy = {
+        policy: dict[int, type[EplbPolicy]] = {
             # Constraint applying Dynamic EPLB policy V2:
             # If there exists redundant expert:
             # only one redundant expert can be placed in one NPU and its physical expert index must be 0

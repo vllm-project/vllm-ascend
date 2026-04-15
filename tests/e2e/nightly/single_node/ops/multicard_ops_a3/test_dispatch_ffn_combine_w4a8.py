@@ -14,47 +14,47 @@ DEVICE_OFFSET = 0
 
 def int32_to_8x_int4_float(tensor_int32):
     """
-    将 int32 tensor 的每一位拆解为 8 个有符号 int4，并转换为 float32。
+    Unpack each int32 value in the tensor into 8 signed int4 values and convert them to float32.
     
-    逻辑：
-    1. 取低4位 -> 第0个 int4
-    2. 右移4位，取低4位 -> 第1个 int4
+    Logic:
+    1. Extract the lower 4 bits -> 0th int4
+    2. Shift right by 4 bits, extract the lower 4 bits -> 1st int4
     ...
-    3. 右移28位，取低4位 -> 第7个 int4
+    3. Shift right by 28 bits, extract the lower 4 bits -> 7th int4
     
-    对于有符号 int4 (Two's complement):
-    二进制 0000 ~ 0111 (0~7)  -> 浮点 0.0 ~ 7.0
-    二进制 1000 ~ 1111 (8~15) -> 浮点 -8.0 ~ -1.0
+    For signed int4 (Two's complement):
+    Binary 0000 ~ 0111 (0~7)  -> float 0.0 ~ 7.0
+    Binary 1000 ~ 1111 (8~15) -> float -8.0 ~ -1.0
     """
     
-    # 确保数据类型是 int32 (虽然输入已经是，但为了健壮性)
+    # Ensure the dtype is int32 (for robustness, even if the input is already int32)
     if tensor_int32.dtype != torch.int32:
         tensor_int32 = tensor_int32.to(torch.int32)
     
     original_shape = tensor_int32.shape
     
-    # 1. 构造移位量 [0, 4, 8, 12, 16, 20, 24, 28]
-    # 形状调整为 (1, 1, ..., 8) 以便广播
+    # 1. Create shift amounts [0, 4, 8, 12, 16, 20, 24, 28]
+    # Reshape to (1, 1, ..., 8) for broadcasting
     shifts = torch.arange(0, 32, 4, device=tensor_int32.device).view(*([1]*len(original_shape)), -1)
     
-    # 2. 扩展维度并右移
-    # unsqueeze(-1) 增加一个维度变成 [..., 1]
-    # 右移后变成 [..., 8]
+    # 2. Expand dimension and shift right
+    # unsqueeze(-1) adds a dimension -> [..., 1]
+    # After shifting -> [..., 8]
     shifted = tensor_int32.unsqueeze(-1) >> shifts
     
-    # 3. 掩码操作，只保留低4位 (0xF = 1111 binary)
-    # 此时得到的值范围是 0 ~ 15 (无符号视角)
+    # 3. Apply mask to keep only the lower 4 bits (0xF = 1111 binary)
+    # The value range here is 0 ~ 15 (unsigned view)
     unpacked_unsigned = shifted & 0xF
     
-    # 4. 转换为有符号 int4 (-8 ~ 7)
-    # 如果值 >= 8，说明最高位是1，代表负数。
-    # 在补码表示中，4位的 8~15 对应 -8~-1。
-    # 算法：val = val - 16 (当 val >= 8)
-    unpacked_signed = unpacked_unsigned.to(torch.int32) # 确保计算精度
+    # 4. Convert to signed int4 (-8 ~ 7)
+    # If value >= 8, the highest bit is 1, representing a negative number.
+    # In two's complement, 4-bit values 8~15 correspond to -8~-1.
+    # Algorithm: val = val - 16 (if val >= 8)
+    unpacked_signed = unpacked_unsigned.to(torch.int32)  # Ensure calculation precision
     mask = unpacked_signed >= 8
     unpacked_signed[mask] -= 16
     
-    # 5. 转换为 float32
+    # 5. Convert to float32
     result_float = unpacked_signed.to(torch.float32)
     result_flat = result_float.flatten(start_dim=-2)
     return result_flat
