@@ -165,5 +165,5 @@ def compute_topk_logprobs(
         logprob_token_ids=logprob_token_ids,
         logprobs=logprobs,
         selected_token_ranks=token_ranks,
-        cu_num_generated_token=cu_num_logits,
+        cu_num_generated_tokens=cu_num_logits,
     )
