@@ -71,7 +71,6 @@ def _min_p_kernel(
 
 
 def apply_min_p(logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, min_p: torch.Tensor) -> None:
-
     num_tokens, vocab_size = logits.shape
 
     vec_core = get_vectorcore_num()
