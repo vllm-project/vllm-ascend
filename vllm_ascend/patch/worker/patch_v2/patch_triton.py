@@ -1,5 +1,5 @@
 from vllm.v1.worker.gpu import input_batch, model_runner
-from vllm.v1.worker.gpu.sample import bad_words, penalties, prompt_logprob, sampler, state
+from vllm.v1.worker.gpu.sample import bad_words, penalties, prompt_logprob, sampler, states
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 
@@ -17,7 +17,7 @@ input_batch.post_update = post_update
 prompt_logprob.compute_topk_logprobs = compute_topk_logprobs
 sampler.compute_topk_logprobs = compute_topk_logprobs
 rejection_sampler.compute_topk_logprobs = compute_topk_logprobs
-state.apply_min_p = apply_min_p
+states.apply_min_p = apply_min_p
 penalties.bincount = bincount
 speculator.gumbel_sample = gumbel_sample
 model_runner.post_update = post_update
