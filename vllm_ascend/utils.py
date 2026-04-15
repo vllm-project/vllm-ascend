@@ -25,7 +25,7 @@ import os
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import regex as re
 import torch
@@ -631,8 +631,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     try:
         from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     except ImportError:
-        # GatedDeltaNetAttention is not available in this vLLM version
-        AscendGatedDeltaNetAttention = None
+        AscendGatedDeltaNetAttention = cast(type[AscendGatedDeltaNetAttention], None)
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
         AscendMergedColumnParallelLinear,
