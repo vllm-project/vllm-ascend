@@ -17,10 +17,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from multiprocessing import Manager
+
 import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -41,6 +44,11 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -61,11 +69,11 @@ class NPUModelRunner(GPUModelRunner):
         # - Context parallelism (prefill or decode)
         # - Dynamic EPLB
         parallel_config = vllm_config.parallel_config
+        eplb_config = self.ascend_config.eplb_config
+        self.dynamic_eplb = eplb_config.dynamic_eplb
+        self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None)
         if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
             raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
-
-        if self.ascend_config.eplb_config.dynamic_eplb:
-            raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -92,6 +100,12 @@ class NPUModelRunner(GPUModelRunner):
         self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
+
+        self.decode_token_per_req = 1
+        if self.speculative_config:
+            spec_token_num = self.speculative_config.num_speculative_tokens
+            assert spec_token_num > 0
+            self.decode_token_per_req = 1 + spec_token_num
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -144,6 +158,47 @@ class NPUModelRunner(GPUModelRunner):
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
 
+        if self.dynamic_eplb:
+            self.is_eplb_warmuped = False
+            self.policy_type = eplb_config.eplb_policy_type
+            self.eplb_loader = D2DExpertWeightLoader()
+            self.manager = Manager()
+            self.shared_dict = self.manager.dict({"expert_map": None, "moe_load": None, "expert_maps": None})
+            self.eplb_process = EplbProcess(shared_dict=self.shared_dict, policy_type=self.policy_type, enable_d2d=True)
+            self.process = self.eplb_process._launch_process()
+            self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
+
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        # Ascend config owns EPLB enablement for model runner v2, but the
+        # upstream GPUModelRunner reads only parallel_config.enable_eplb.
+        if self.eplb_enable:
+            self.parallel_config.enable_eplb = True
+            self.vllm_config.parallel_config.enable_eplb = True
+
+        eplb_methods = None
+        if self.dynamic_eplb and self.eplb is not None:
+            eplb_methods = (
+                self.eplb.maybe_register_model,
+                self.eplb.maybe_register_speculator,
+                self.eplb.maybe_start_async_loop,
+            )
+            self.eplb.maybe_register_model = lambda *args, **kwargs: False
+            self.eplb.maybe_register_speculator = lambda *args, **kwargs: False
+            self.eplb.maybe_start_async_loop = lambda *args, **kwargs: None
+
+        super().load_model(load_dummy_weights, *args, **kwargs)
+        if eplb_methods is not None:
+            (
+                self.eplb.maybe_register_model,
+                self.eplb.maybe_register_speculator,
+                self.eplb.maybe_start_async_loop,
+            ) = eplb_methods
+
+        if self.dynamic_eplb:
+            self.parallel_config.enable_eplb = False
+            self.vllm_config.parallel_config.enable_eplb = False
+            model_register(self.model)
+
     @torch.inference_mode()
     def profile_run(self) -> None:
         """Override GPUModelRunner.profile_run for Ascend NPUs.
@@ -151,6 +206,7 @@ class NPUModelRunner(GPUModelRunner):
         necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
         override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
         """
+        self.eplb_warmup()
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         with override_mrv2_in_profile_run(True):
             if (
@@ -382,10 +438,54 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
             self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
 
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: IntermediateTensors | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        is_profile: bool = False,
+    ):
+        if self.dynamic_eplb and not dummy_run and scheduler_output.total_num_scheduled_tokens > 0:
+            self.eplb_updator.forward_before()
+        return super().execute_model(
+            scheduler_output,
+            intermediate_tensors,
+            dummy_run,
+            skip_attn_for_dummy_run,
+            is_profile,
+        )
+
+    @torch.inference_mode()
+    def sample_tokens(self, grammar_output):
+        should_finalize_eplb = self.dynamic_eplb and self.execute_model_state is not None
+        output = super().sample_tokens(grammar_output)
+        if should_finalize_eplb:
+            self.eplb_updator.forward_end()
+        return output
+
+    @torch.inference_mode()
+    def _dummy_run(self, num_tokens: int, *args, is_profile: bool = False, **kwargs):
+        if self.dynamic_eplb:
+            self.eplb_warmup()
+            if not is_profile:
+                self.eplb_updator.forward_before()
+        output = super()._dummy_run(num_tokens, *args, is_profile=is_profile, **kwargs)
+        if self.dynamic_eplb:
+            if is_profile:
+                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
+                target.clear_all_moe_loads()
+            self.eplb_updator.forward_end()
+        return output
+
     def eplb_warmup(self):
-        # TODO(Ronald1995): just define the method in case calling error in
-        # worker, implement it in the future.
-        pass
+        if self.dynamic_eplb and not self.is_eplb_warmuped:
+            self.is_eplb_warmuped = True
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_loader.set_adator(self.eplb_adaptor)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.warm_up_eplb()
 
     def _pad_query_start_loc_for_fia(
         self,
