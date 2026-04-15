@@ -241,6 +241,9 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
+    # Record layer names in capture order to ensure correct replay order
+    # for hybrid models with mixed full/swa attention types
+    attn_layer_names: dict[int, list[str]]
 
 
 _graph_params: GraphParams | None = None
@@ -255,6 +258,7 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -262,6 +266,12 @@ def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
     global _graph_params
     if _graph_params is not None:
         _graph_params.workspaces[num_tokens] = workspace
+
+
+def update_graph_params_layer_name(num_tokens: int, layer_name: str):
+    global _graph_params
+    if _graph_params is not None:
+        _graph_params.attn_layer_names[num_tokens].append(layer_name)
 
 
 def get_graph_params():
@@ -280,6 +290,7 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
         {size: None for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -287,6 +298,12 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
     global _draft_graph_params
     if _draft_graph_params is not None:
         _draft_graph_params.workspaces[num_tokens] = workspace
+
+
+def update_draft_graph_params_layer_name(num_tokens: int, layer_name: str):
+    global _draft_graph_params
+    if _draft_graph_params is not None:
+        _draft_graph_params.attn_layer_names[num_tokens].append(layer_name)
 
 
 def get_draft_graph_params():

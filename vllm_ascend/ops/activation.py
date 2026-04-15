@@ -16,7 +16,12 @@
 #
 
 import torch
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SwigluOAIAndMul
+from vllm.model_executor.layers.activation import (
+    QuickGELU,
+    SiluAndMul,
+    SwigluOAIAndMul,
+    SwigluStepAndMul,
+)
 
 from vllm_ascend.utils import get_weight_prefetch_method
 
@@ -49,3 +54,9 @@ class AscendSwigluOAIAndMul:
 
         layer = MinimalSwigluOAIAndMul()
         return SwigluOAIAndMul.forward_native(layer, x)
+
+
+class AscendSwigluStepAndMul:
+    def swiglu_step_forward(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
+        layer = SwigluStepAndMul(limit=limit)
+        return SwigluStepAndMul.forward_native(layer, x)

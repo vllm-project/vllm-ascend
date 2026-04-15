@@ -39,7 +39,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     _update_out_and_lse,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params,
+    get_graph_params,
+    update_graph_params_layer_name,
+    update_graph_params_workspaces,
+)
 from vllm_ascend.utils import weak_ref_tensors
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
@@ -301,11 +306,19 @@ class AscendMlaCPImpl(AscendMLAImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        # Use capture order layer names for correct replay ordering
+        # For hybrid models, attn_metadata.keys() order differs from capture order
+        captured_layer_names = graph_params.attn_layer_names.get(num_tokens, [])
+        if captured_layer_names:
+            attn_keys = captured_layer_names
+        else:
+            # Fallback to metadata keys if no captured names (backward compatibility)
+            attn_keys = list(forward_context.attn_metadata.keys())
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
-                forward_context.attn_metadata,
+                attn_keys,
                 graph_params.attn_params[num_tokens],
                 graph_params.handles[num_tokens],
                 graph_params.events[num_tokens],
@@ -619,6 +632,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         block_size: int,
         attn_metadata: AscendMLAMetadata,
         dequant_scale_q_nope=None,
+        layer_name: str | None = None,
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
@@ -721,6 +735,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     weak_ref_tensors(softmax_lse),
                 )
             )
+            # Record layer name in capture order for correct replay ordering
+            if layer_name is not None:
+                if _EXTRA_CTX.is_draft_model:
+                    update_graph_params_layer_name(num_tokens, layer_name)
+                else:
+                    update_graph_params_layer_name(num_tokens, layer_name)
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(
                 q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]

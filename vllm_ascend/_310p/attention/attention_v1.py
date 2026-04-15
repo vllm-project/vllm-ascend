@@ -100,6 +100,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         query: Any,
         attn_metadata: AscendMetadata,
         output: Any | None = None,
+        layer_name: str | None = None,
     ) -> Any:
         """
         Executes Paged Attention (typically for the decode phase).
@@ -221,7 +222,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
 
         return output
 
-    def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
+    def forward_impl(self, query, key, value, kv_cache, attn_metadata, output, layer_name=None):
         """
         Main dispatch method for attention operations.
 

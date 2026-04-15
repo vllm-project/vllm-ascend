@@ -37,7 +37,9 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_graph_params,
+    update_draft_graph_params_layer_name,
     update_draft_graph_params_workspaces,
+    update_graph_params_layer_name,
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
@@ -774,11 +776,25 @@ class AscendMLAImpl(MLAAttentionImpl):
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
             attn_metadata = draft_attn_metadatas
-            attn_keys = list(attn_metadata[0].keys())
+            # Use capture order layer names for correct replay ordering
+            # For hybrid models, attn_metadata.keys() order differs from capture order
+            captured_layer_names = graph_params.attn_layer_names.get(num_tokens, [])
+            if captured_layer_names:
+                attn_keys = captured_layer_names
+            else:
+                # Fallback to metadata keys if no captured names (backward compatibility)
+                attn_keys = list(attn_metadata[0].keys())
         else:
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata
-            attn_keys = list(attn_metadata.keys())
+            # Use capture order layer names for correct replay ordering
+            # For hybrid models, attn_metadata.keys() order differs from capture order
+            captured_layer_names = graph_params.attn_layer_names.get(num_tokens, [])
+            if captured_layer_names:
+                attn_keys = captured_layer_names
+            else:
+                # Fallback to metadata keys if no captured names (backward compatibility)
+                attn_keys = list(attn_metadata.keys())
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         num_layers = len(attn_keys)
@@ -1312,6 +1328,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         block_size: int,
         attn_metadata: AscendMLAMetadata,
         dequant_scale_q_nope=None,
+        layer_name: str | None = None,
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
@@ -1467,6 +1484,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                     update_graph_params_workspaces(num_tokens, workspace)
 
             graph_params.attn_params[num_tokens].append(attn_params)
+
+            # Record layer name in capture order for correct replay ordering
+            if layer_name is not None:
+                if _EXTRA_CTX.is_draft_model:
+                    update_draft_graph_params_layer_name(num_tokens, layer_name)
+                else:
+                    update_graph_params_layer_name(num_tokens, layer_name)
 
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score_v2.out(
@@ -1732,6 +1756,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 kv_cache[0].shape[1],
                 attn_metadata,
                 decode_preprocess_res.dequant_scale_q_nope,
+                layer_name,
             )
 
             o_proj_input[:num_decode_tokens] = output_decode
