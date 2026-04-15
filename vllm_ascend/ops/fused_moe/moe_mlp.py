@@ -26,7 +26,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
-from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, swiglustep_and_mul
+from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.utils import (
     dispose_tensor,
@@ -361,7 +361,7 @@ def apply_moe_activation(
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     elif activation == MoEActivation.SWIGLUSTEP:
-        gate_up_out = swiglustep_and_mul(gate_up_out, limit=7.0)
+        gate_up_out = AscendSwigluStepAndMul.swiglu_step_forward(gate_up_out)
 
     else:
         raise ValueError(f"Unsupported FusedMoE activation: {activation}")
