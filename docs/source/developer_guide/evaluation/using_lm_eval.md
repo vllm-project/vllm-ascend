@@ -43,7 +43,7 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### 2. Run GSM8K using lm-eval for accuracy testing
+### 2. Run GSM8K using the vLLM server (curl) and then run lm-eval for accuracy testing
 
 You can query the result with input prompts:
 
