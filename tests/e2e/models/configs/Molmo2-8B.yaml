@@ -13,3 +13,15 @@ dtype: "bfloat16"
 trust_remote_code: True
 gpu_memory_utilization: 0.75
 enforce_eager: True
+# Doc sync only (check_docs_yaml_sync + docs/source/tutorials/models/Molmo2-8B.md). Ignored by lm-eval.
+# Split across model_name + doc_serve_options so the hook matches the standard `cmd` multi-target pattern.
+doc_serve_options:
+  - --trust-remote-code
+  - --dtype
+  - bfloat16
+  - --max-num-batched-tokens
+  - "36864"
+  - --limit-mm-per-prompt.image
+  - "1"
+  - --limit-mm-per-prompt.video
+  - "1"
