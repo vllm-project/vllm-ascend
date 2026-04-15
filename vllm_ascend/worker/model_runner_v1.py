@@ -113,6 +113,7 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
+from vllm_ascend.spec_decode.dflash_proposer import AscendDFlashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
@@ -456,6 +457,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDraftModelProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
+            | AscendDFlashProposer
             | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
@@ -469,9 +471,31 @@ class NPUModelRunner(GPUModelRunner):
                 if self.speculative_config.method == "eagle3":
                     assert isinstance(self.drafter, AscendEagleProposer)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
+                if self.speculative_config.method == "dflash":
+                    self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = RejectionSampler(self.sampler)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
+
+    def _get_eagle3_aux_layers_from_config(self) -> list[int] | None:
+        if self.speculative_config is None:
+            return None
+        draft_model_config = getattr(self.speculative_config, "draft_model_config", None)
+        if draft_model_config is None:
+            return None
+        hf_config = getattr(draft_model_config, "hf_config", None)
+        if hf_config is None:
+            return None
+
+        layer_ids = getattr(hf_config, "eagle_aux_hidden_state_layer_ids", None)
+        if not layer_ids:
+            dflash_config = getattr(hf_config, "dflash_config", None)
+            if dflash_config and isinstance(dflash_config, dict):
+                layer_ids = dflash_config.get("target_layer_ids")
+
+        if layer_ids and isinstance(layer_ids, (list, tuple)):
+            return list(layer_ids)
+        return None
 
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
@@ -1102,7 +1126,11 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
             )
-        elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
+        elif (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_draft_model()
+            or self.speculative_config.use_dflash()
+        ):
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
 
@@ -1691,7 +1719,11 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config:
                 use_padded_batch = (
                     self.speculative_config
-                    and (self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model())
+                    and (
+                        self.speculative_config.use_eagle()
+                        or self.speculative_config.uses_draft_model()
+                        or self.speculative_config.use_dflash()
+                    )
                     and not self.speculative_config.disable_padded_drafter_batch
                 )
                 if use_padded_batch:
@@ -2355,7 +2387,7 @@ class NPUModelRunner(GPUModelRunner):
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(kv_cache_gid)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer):
+                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDFlashProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -2736,7 +2768,14 @@ class NPUModelRunner(GPUModelRunner):
                             "Model does not support EAGLE3 interface but "
                             "aux_hidden_state_outputs was requested"
                         )
-                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                    aux_layers = self._get_eagle3_aux_layers_from_config()
+                    if aux_layers:
+                        logger.info(
+                            "Using auxiliary layers from speculative config: %s",
+                            aux_layers,
+                        )
+                    else:
+                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
                     self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
@@ -2774,9 +2813,11 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: refactor the logic of attention
         # Initialize drafter attention group initialization
         if self.speculative_config and (
-            self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_draft_model()
+            or self.speculative_config.use_dflash()
         ):
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
+            assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDFlashProposer)
             block_size = (self.kernel_block_sizes[0] if isinstance(
             self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)

@@ -62,6 +62,31 @@ from vllm_ascend.utils import weak_ref_tensors
 SWA_INT_MAX = 2147483647
 
 
+def _get_sparse_mode(
+    attn_mask: torch.Tensor | None,
+    causal: bool = True,
+    has_sinks: bool = False,
+    has_sliding_window: bool = False,
+) -> int:
+    """Determine sparse_mode for NPU attention operators.
+
+    When the backend supports non-causal attention and the caller explicitly
+    requests it (causal=False), sparse_mode is forced to 0 so that no causal
+    mask is applied.  Otherwise the original rules apply:
+      - sinks + sliding_window -> 4
+      - sinks without sliding_window -> 3
+      - attn_mask is None -> 0
+      - attn_mask is not None -> 3
+    """
+    if not causal:
+        return 0
+    if has_sinks:
+        return 4 if has_sliding_window else 3
+    if attn_mask is None:
+        return 0
+    return 3
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -477,6 +502,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+
+            if _EXTRA_CTX.is_draft_model:
+                _batch_causal = attn_metadata[0][attn_keys[0]].causal
+            else:
+                _batch_causal = attn_metadata[attn_keys[0]].causal
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
@@ -513,6 +543,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_tables = attn_metadata[key].block_tables
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
+                    sparse_mode = _get_sparse_mode(attn_mask, causal=_batch_causal)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
@@ -526,7 +557,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_key_value_heads=num_kv_heads,
                         num_heads=num_heads,
                         scale=scale,
-                        sparse_mode=3,
+                        sparse_mode=sparse_mode,
                         workspace=graph_params.workspaces.get(num_tokens),
                         out=[attn_output, softmax_lse],
                     )
@@ -561,6 +592,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Get workspace from cache or calculate it if not present.
         workspace = graph_params.workspaces.get(num_tokens)
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
+        sparse_mode = _get_sparse_mode(attn_metadata.attn_mask, causal=attn_metadata.causal)
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
@@ -574,7 +606,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
-                sparse_mode=3,
+                sparse_mode=sparse_mode,
                 scale=self.scale,
             )
             if _EXTRA_CTX.is_draft_model:
@@ -589,13 +621,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event.wait(stream)
         event.reset(stream)
         graph_params.events[num_tokens].append(event)
+        if attn_metadata.attn_mask is None:
+            mask = None
+        else:
+            mask = weak_ref_tensors(attn_metadata.attn_mask)
         graph_params.attn_params[num_tokens].append(
             (
                 weak_ref_tensors(query),
                 weak_ref_tensors(key),
                 weak_ref_tensors(value),
                 weak_ref_tensors(block_table),
-                weak_ref_tensors(attn_metadata.attn_mask),
+                mask,
                 block_size,
                 actual_seq_lengths_kv,
                 actual_seq_lengths_q,
@@ -621,7 +657,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=3,
+            sparse_mode=sparse_mode,
             workspace=workspace,
             out=[output, softmax_lse],
         )
@@ -826,10 +862,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
             if self.sliding_window is not None:
                 atten_mask = attn_metadata.swa_mask
-                sparse_mode = 4
             else:
                 atten_mask = attn_metadata.attn_mask
-                sparse_mode = 3
+            sparse_mode = _get_sparse_mode(
+                atten_mask,
+                causal=attn_metadata.causal,
+                has_sinks=True,
+                has_sliding_window=self.sliding_window is not None,
+            )
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
                 key,
@@ -849,6 +889,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
+            sparse_mode = _get_sparse_mode(attn_metadata.attn_mask, causal=attn_metadata.causal)
             attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                 query=query,
                 key=key,
@@ -862,7 +903,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,
-                sparse_mode=3,
+                sparse_mode=sparse_mode,
             )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
@@ -938,6 +979,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
         return query, key, value, output
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
+        DeviceOperator.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping.to(torch.int32),
+        )
 
     def forward_impl(
         self,
@@ -1312,7 +1370,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,
-                sparse_mode=3,
+                sparse_mode=_get_sparse_mode(attn_metadata.attn_mask, causal=attn_metadata.causal),
             )
             n_prefill = num_tokens - num_decode_tokens
             attn_out = attn_out.view(n_prefill, self.num_heads, self.head_size)
@@ -1379,7 +1437,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale=self.scale,
-            sparse_mode=3,
+            sparse_mode=_get_sparse_mode(attn_metadata.attn_mask, causal=attn_metadata.causal),
         )
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output
