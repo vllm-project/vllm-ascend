@@ -1,5 +1,5 @@
 from vllm.v1.worker.gpu import input_batch, model_runner
-from vllm.v1.worker.gpu.sample import bad_words, penalties, prompt_logprob, sampler
+from vllm.v1.worker.gpu.sample import bad_words, penalties, prompt_logprob, sampler, state
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 
