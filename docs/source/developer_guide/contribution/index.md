@@ -36,8 +36,8 @@ bash format.sh
 
 After completing "Run lint" setup, you can run CI (Continuous integration) locally:
 
-```bash
-
+```{code-block} bash
+   :substitutions:
 cd ~/vllm-project/
 
 # Run CI needs vLLM installed
