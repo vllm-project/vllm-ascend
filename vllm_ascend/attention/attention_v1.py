@@ -507,7 +507,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 _batch_causal = attn_metadata[0][attn_keys[0]].causal
             else:
                 _batch_causal = attn_metadata[attn_keys[0]].causal
-                
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
