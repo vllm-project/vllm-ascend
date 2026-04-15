@@ -505,7 +505,6 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
     def _make_method(self, is_kv_producer=False):
         from vllm_ascend.quantization.methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
-        # 构造模拟的 vllm_config
         mock_config = MagicMock(spec=VllmConfig)
         if is_kv_producer:
             kv_config = MagicMock(spec=KVTransferConfig)
