@@ -93,6 +93,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.utils import get_c_env
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -437,6 +438,9 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+        env_enpu_enable = get_c_env("ENPU_ENABLE")
+        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
+        self.enable_enpu = env_enpu_enable is not None and env_enpu_enable.lower() == "true"
 
     @property
     def use_cp(self) -> bool:
@@ -1942,25 +1946,12 @@ class NPUModelRunner(GPUModelRunner):
             )
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
 
-    def _model_forward(
+    def _update_full_graph_params_if_needed(
         self,
+        forward_context,
         num_tokens_padded: int,
-        input_ids: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **model_kwargs: dict[str, Any],
-    ):
-        assert self.model is not None
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            **model_kwargs,
-        )
-        forward_context = get_forward_context()
-        assert forward_context is not None
+        positions: torch.Tensor | None,
+    ) -> None:
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
             assert positions is not None
             update_full_graph_params(
@@ -1972,6 +1963,43 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
                 positions.shape[0],
             )
+
+    def _model_forward(
+        self,
+        num_tokens_padded: int,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs: dict[str, Any],
+    ):
+        assert self.model is not None
+        forward_context = get_forward_context()
+        assert forward_context is not None
+
+        if self.enable_enpu:
+            self._update_full_graph_params_if_needed(
+                forward_context, num_tokens_padded, positions
+            )
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **model_kwargs,
+            )
+        else:
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **model_kwargs,
+            )
+            self._update_full_graph_params_if_needed(
+                forward_context, num_tokens_padded, positions
+            )
+
         if get_forward_context().flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
