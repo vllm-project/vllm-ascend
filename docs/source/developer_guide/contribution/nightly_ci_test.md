@@ -49,7 +49,7 @@ matching the filter will be dispatched, which saves hardware resources.
 ## Differences Between PR and Scheduled Runs
 
 | | Scheduled / Manual Dispatch | PR-triggered |
-|-|----------------------------|-|
+|---|----------------------------|---|
 | Trigger | Cron (daily) or `workflow_dispatch` | Label `nightly-test` + `/nightly` comment |
 | Code tested | Pre-built nightly image | Your PR's HEAD commit (source installed fresh) |
 | Test scope | All tests | Configurable via `/nightly <names>` |
