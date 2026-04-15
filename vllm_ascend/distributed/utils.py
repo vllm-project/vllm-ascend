@@ -1,5 +1,7 @@
 import torch
 import torch.distributed as dist
+from torch._C._distributed_c10d import Work
+from torch.distributed import P2POp
 from vllm.distributed.parallel_state import GroupCoordinator, get_dp_group
 from vllm.forward_context import get_forward_context
 
@@ -46,3 +48,18 @@ def all_gather_async(
         output_size = (input_size[0] * group.world_size,) + input_size[1:]
         output = torch.empty(output_size, dtype=input.dtype, device=input.device)
     return output, dist.all_gather_into_tensor(output, input, group=group.device_group, async_op=async_op)
+
+
+def stateless_batch_isend_irecv(p2p_op_list: list[P2POp]) -> list[Work]:
+    reqs = []
+    for p2p_op in p2p_op_list:
+        assert p2p_op.op in [p2p_op.group.send, p2p_op.group.recv]
+        work = p2p_op.op(
+            [p2p_op.tensor],
+            p2p_op.group_peer,
+            tag=p2p_op.tag if hasattr(p2p_op, "tag") else 0,
+        )
+        if work:
+            reqs.append(work)
+
+    return reqs

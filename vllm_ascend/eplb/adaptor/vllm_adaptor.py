@@ -19,6 +19,8 @@ import json
 from typing import Any
 
 import torch
+import torch.distributed as dist
+from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
@@ -35,8 +37,13 @@ class VllmEplbAdaptor:
         else:
             self.model = model
             self.config = model.config
-        self.rank_id = get_dynamic_eplb_group().rank_in_group
-        self.world_size = get_dynamic_eplb_group().world_size
+        is_stateless = isinstance(get_dynamic_eplb_group(), StatelessGroupCoordinator)
+        if is_stateless:
+            self.rank_id = get_dynamic_eplb_group().rank_in_group
+            self.world_size = get_dynamic_eplb_group().world_size
+        else:
+            self.rank_id = dist.get_rank()
+            self.world_size = dist.get_world_size()
         self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
         self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
 
@@ -48,8 +55,11 @@ class VllmEplbAdaptor:
 
         num_buffer_tensor = self.num_local_experts
         self.buffer_tensor_list: list[list[Any]] = [[] for _ in range(num_buffer_tensor)]
+        # Send buffer for non-quantized fused MC2 sends. The communication library
+        # requires that the memory offset of the sent tensor be zero. This buffer stores
+        # temporary copies of weights with non-zero offsets to meet this requirement.
         if self.model.quant_config is None and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-            self.temp_tensor_list: list[list[Any]] = [[] for _ in range(num_buffer_tensor)]
+            self.send_buffer_tensor_list: list[list[Any]] = [[] for _ in range(num_buffer_tensor)]
         self.init_buffer_tensor(num_buffer_tensor)
 
         self.log2phy_map_per_layer = dict()
@@ -67,7 +77,7 @@ class VllmEplbAdaptor:
                 self.buffer_tensor_list[buffer_id].append(buffer_tensor)
                 if self.model.quant_config is None and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                     temp_tensor = torch.empty_like(expert_tensor)
-                    self.temp_tensor_list[buffer_id].append(temp_tensor)
+                    self.send_buffer_tensor_list[buffer_id].append(temp_tensor)
 
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
@@ -131,10 +141,7 @@ class VllmEplbAdaptor:
                 json.dump(record, f, indent=4)
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
-        if layer_id in self.expert_map_per_layer_cpu:
-            self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
-        else:
-            self.expert_map_per_layer_cpu[layer_id] = updated_expert_map.cpu()
+        self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         for expert_tensor, buffer_tensor in zip(
