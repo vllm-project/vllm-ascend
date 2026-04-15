@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-15 09:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -32,7 +32,7 @@ msgid "Name"
 msgstr "姓名"
 
 #: ../../source/community/contributors.md
-msgid "Github ID"
+msgid "GitHub ID"
 msgstr "GitHub ID"
 
 #: ../../source/community/contributors.md
@@ -916,6 +916,14 @@ msgstr "306"
 #: ../../source/community/contributors.md
 msgid "[@mengchengTang](https://github.com/mengchengTang)"
 msgstr "[@mengchengTang](https://github.com/mengchengTang)"
+
+#: ../../source/community/contributors.md
+msgid ""
+"[41eb71d](https://github.com/vllm-project/vllm-"
+"ascend/commit/41eb71d665ab9f0b72b6d3bc15d41dee7fcc0f5f)"
+msgstr ""
+"[41eb71d](https://github.com/vllm-project/vllm-"
+"ascend/commit/41eb71d665ab9f0b72b6d3bc15d41dee7fcc0f5f)"
 
 #: ../../source/community/contributors.md
 msgid "305"
@@ -2611,7 +2619,7 @@ msgstr "[@wangxiaochao6](https://github.com/wangxiaochao6)"
 
 #: ../../source/community/contributors.md
 msgid "2025/11/18"
-msgstr "2025/11/18"
+msgstr "2025年11月18日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -2631,7 +2639,7 @@ msgstr "[@845473182](https://github.com/845473182)"
 
 #: ../../source/community/contributors.md
 msgid "2025/11/14"
-msgstr "2025/11/14"
+msgstr "2025年11月14日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -2651,7 +2659,7 @@ msgstr "[@thonean](https://github.com/thonean)"
 
 #: ../../source/community/contributors.md
 msgid "2025/11/12"
-msgstr "2025/11/12"
+msgstr "2025年11月12日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -2671,7 +2679,7 @@ msgstr "[@zhaomingyu13](https://github.com/zhaomingyu13)"
 
 #: ../../source/community/contributors.md
 msgid "2025/11/11"
-msgstr "2025/11/11"
+msgstr "2025年11月11日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3043,7 +3051,7 @@ msgstr "[@yzy1996](https://github.com/yzy1996)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/23"
-msgstr "2025/10/23"
+msgstr "2025年10月23日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3111,7 +3119,7 @@ msgstr "[@KyrieDrewWang](https://github.com/KyrieDrewWang)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/22"
-msgstr "2025/10/22"
+msgstr "2025年10月22日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3147,7 +3155,7 @@ msgstr "[@drslark](https://github.com/drslark)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/21"
-msgstr "2025/10/21"
+msgstr "2025年10月21日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3183,7 +3191,7 @@ msgstr "[@leijie-ww](https://github.com/leijie-ww)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/20"
-msgstr "2025/10/20"
+msgstr "2025年10月20日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3203,7 +3211,7 @@ msgstr "[@ZYang6263](https://github.com/ZYang6263)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/19"
-msgstr "2025/10/19"
+msgstr "2025年10月19日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3223,7 +3231,7 @@ msgstr "[@yechao237](https://github.com/yechao237)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/18"
-msgstr "2025/10/18"
+msgstr "2025年10月18日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3259,7 +3267,7 @@ msgstr "[@DreamerLeader](https://github.com/DreamerLeader)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/15"
-msgstr "2025/10/15"
+msgstr "2025年10月15日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3279,7 +3287,7 @@ msgstr "[@yuzhup](https://github.com/yuzhup)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/14"
-msgstr "2025/10/14"
+msgstr "2025年10月14日"
 
 #: ../../source/community/contributors.md
 msgid ""
@@ -3331,7 +3339,7 @@ msgstr "[@dsxsteven](https://github.com/dsxsteven)"
 
 #: ../../source/community/contributors.md
 msgid "2025/10/13"
-msgstr "2025/10/13"
+msgstr "2025年10月13日"
 
 #: ../../source/community/contributors.md
 msgid ""

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-15 09:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -42,7 +42,9 @@ msgid ""
 "including supported features, feature configuration, environment "
 "preparation, single-NPU and multi-NPU deployment, accuracy and "
 "performance evaluation."
-msgstr "`Qwen2.5-Omni` 模型自 `vllm-ascend:v0.11.0rc0` 版本起获得支持。本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单NPU和多NPU部署、精度和性能评估。"
+msgstr ""
+"`Qwen2.5-Omni` 模型自 `vllm-ascend:v0.11.0rc0` "
+"版本起获得支持。本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单NPU和多NPU部署、精度和性能评估。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:9
 msgid "Supported Features"
@@ -73,13 +75,17 @@ msgstr "模型权重"
 msgid ""
 "`Qwen2.5-Omni-3B`(BF16): [Download model "
 "weight](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-3B)"
-msgstr "`Qwen2.5-Omni-3B`(BF16): [下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-3B)"
+msgstr ""
+"`Qwen2.5-Omni-3B`(BF16): "
+"[下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-3B)"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:20
 msgid ""
 "`Qwen2.5-Omni-7B`(BF16): [Download model "
 "weight](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B)"
-msgstr "`Qwen2.5-Omni-7B`(BF16): [下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B)"
+msgstr ""
+"`Qwen2.5-Omni-7B`(BF16): "
+"[下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B)"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:22
 msgid "Following examples use the 7B version by default."
@@ -98,7 +104,9 @@ msgid ""
 "Select an image based on your machine type and start the docker image on "
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
-msgstr "根据您的机器类型选择镜像并在节点上启动 docker 镜像，请参考[使用 docker](../../installation.md#set-up-using-docker)。"
+msgstr ""
+"根据您的机器类型选择镜像并在节点上启动 docker 镜像，请参考[使用 docker](../../installation.md#set-"
+"up-using-docker)。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:65
 msgid "Deployment"
@@ -114,18 +122,22 @@ msgstr "单 NPU (Qwen2.5-Omni-7B)"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:72
 msgid ""
-"The **environment variable** `LOCAL_MEDIA_PATH` which **allows** API "
-"requests to read local images or videos from directories specified by the"
-" server file system. Please note this is a security risk. Should only be "
-"enabled in trusted environments."
-msgstr "**环境变量** `LOCAL_MEDIA_PATH` **允许** API 请求从服务器文件系统指定的目录读取本地图像或视频。请注意，这存在安全风险。应仅在受信任的环境中启用。"
+"The environment variable `LOCAL_MEDIA_PATH` which allows API requests to "
+"read local images or videos from directories specified by the server file"
+" system. Please note this is a security risk. Should only be enabled in "
+"trusted environments."
+msgstr ""
+"环境变量 `LOCAL_MEDIA_PATH` 允许 API "
+"请求从服务器文件系统指定的目录读取本地图像或视频。请注意，这存在安全风险。应仅在受信任的环境中启用。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:92
 msgid ""
 "Now vllm-ascend docker image should contain vllm[audio] build part, if "
 "you encounter *audio not supported issue* by any chance, please re-build "
 "vllm with [audio] flag."
-msgstr "当前 vllm-ascend docker 镜像应包含 vllm[audio] 构建部分，如果您遇到*音频不支持的问题*，请使用 [audio] 标志重新构建 vllm。"
+msgstr ""
+"当前 vllm-ascend docker 镜像应包含 vllm[audio] 构建部分，如果您遇到*音频不支持的问题*，请使用 [audio] "
+"标志重新构建 vllm。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:100
 msgid ""
@@ -162,8 +174,8 @@ msgid "Functional Verification"
 msgstr "功能验证"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:131
-msgid "If your service **starts** successfully, you can see the info shown below:"
-msgstr "如果您的服务**启动**成功，您可以看到如下所示的信息："
+msgid "If your service starts successfully, you can see the info shown below:"
+msgstr "如果您的服务启动成功，您可以看到如下所示的信息："
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:139
 msgid "Once your server is started, you can query the model with input prompts:"
@@ -258,7 +270,10 @@ msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
-msgstr "详情请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+msgstr ""
+"详情请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:194
 msgid "Using vLLM Benchmark"
