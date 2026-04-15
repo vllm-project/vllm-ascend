@@ -132,7 +132,7 @@ model_name = "Qwen/Qwen3-VL-Reranker-8B"
 # that has been converted into a sequence classification model?
 # Qwen3-Reranker is a language model that doing reranker by using the
 # logits of "no" and "yes" tokens.
-# It needs to computing 151669 tokens logits, making this method extremely
+# It needs to compute 151669 tokens logits, making this method extremely
 # inefficient, not to mention incompatible with the vllm score API.
 # A method for converting the original model into a sequence classification
 # model was proposed. See: https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
@@ -165,7 +165,7 @@ model = LLM(
 # Why do we need hf_overrides for the official original version:
 # vllm converts it to Qwen3VLForSequenceClassification when loaded for
 # better performance.
-# - Firstly, we need using `"architectures": ["Qwen3VLForSequenceClassification"],`
+# - Firstly, we need to use `"architectures": ["Qwen3VLForSequenceClassification"],`
 # to manually route to Qwen3VLForSequenceClassification.
 # - Then, we will extract the vector corresponding to classifier_from_token
 # from lm_head using `"classifier_from_token": ["no", "yes"]`.

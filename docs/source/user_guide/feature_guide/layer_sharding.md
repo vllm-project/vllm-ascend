@@ -23,7 +23,7 @@ This approach **preserves exact computational semantics** while **significantly 
 
 ![layer shard](./images/layer_sharding.png)
 
-> **Figure.** Layer Shard Linear workflow: weights are sharded by layer across devices (top), and during forward execution (bottom), asynchronous broadcast **pre-fetches** the next layer's weight while the current layer computes—enabling **zero-overhead** weight loading.
+> **Figure.** Layer Shard Linear workflow: weights are sharded by layer across devices (top), and during forward execution (bottom), asynchronous broadcast **pre-fetches** the next layer's weight while the current layer computes-enabling **zero-overhead** weight loading.
 
 ---
 
@@ -37,14 +37,11 @@ To enable **Layer Shard Linear**, specify the target linear layers using the `--
 }'
 ```
 
-> **Restriction**
-> Layer Sharding can only be enabled in PD-disaggregated's **P node**.
-
 ---
 
 ## Supported Scenarios
 
-This feature delivers the greatest benefit in the following cases:
+This feature can be enabled in any scenario, but delivers the greatest benefit in the following cases:
 
 ### FlashComm2-enabled
 
@@ -64,8 +61,6 @@ vllm serve \
 ### DSA-CP-enabled
 
 With [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702), both `q_b_proj` and `o_proj` layers require large weight matrices to be stored per layer. Sharding these layers across NPUs helps fit extremely deep models (e.g., 61-layer architectures) into limited device memory.
-
-Layer Sharding can only be enabled in PD-disaggregated's **P node**.
 
 **Example configuration:**
 
