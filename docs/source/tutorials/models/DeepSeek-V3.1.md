@@ -257,7 +257,7 @@ Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes)
 
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64G × 16).
 
-To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_dp_program.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
+To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
 1. `launch_online_dp.py` to launch external dp vllm servers.
 [launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)

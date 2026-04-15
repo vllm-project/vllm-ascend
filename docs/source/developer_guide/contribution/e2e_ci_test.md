@@ -95,7 +95,7 @@ tests/e2e/
 
 ## Comparison with Full E2E Suite
 
-| | Full E2E suite | Per-test comment trigger |
+| Aspect | Full E2E suite | Per-test comment trigger |
 |---|---|---|
 | Trigger | `ready` + `ready-for-test` labels | `/e2e` comment + `ready` label |
 | Scope | All E2E tests | Only specified test paths |

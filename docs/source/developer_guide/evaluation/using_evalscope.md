@@ -65,7 +65,7 @@ pip install gradio plotly evalscope
 
 ## 3. Run GSM8K using EvalScope for accuracy testing
 
-You can use `evalscope eval` to run GSM8K for accuracy testing:
+You can use `evalscope eval` to run GSM8K (a grade-school math benchmark dataset) for accuracy testing:
 
 ```shell
 evalscope eval \
