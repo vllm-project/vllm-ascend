@@ -1,3 +1,6 @@
+model_name: "nv-community/Minitron-8B-Base"
+hardware: "Atlas A2 Series"
+trust_remote_code: true
 test_cases:
   - model: "nv-community/Minitron-8B-Base"
     server_cmd:
@@ -12,10 +15,6 @@ test_cases:
       - --enforce-eager
       - --port
       - "8000"
-
-model_name: "nv-community/Minitron-8B-Base"
-hardware: "Atlas A2 Series"
-trust_remote_code: true
 tasks:
   - name: "gsm8k"
     metrics:
