@@ -62,5 +62,4 @@ def prepare_inputs_padded_kernel(
 
         index_to_sample = q_last_tok_idx - num_rejected
         tl.store(token_indices_to_sample_ptr + offsets, index_to_sample, mask=mask)
-
         tl.store(num_rejected_tokens_gpu_ptr + offsets, num_rejected, mask=mask)

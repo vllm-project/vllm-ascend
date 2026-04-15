@@ -86,6 +86,7 @@ def _get_sparse_mode(
         return 0
     return 3
 
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -501,12 +502,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return
             if _EXTRA_CTX.is_draft_model:
                 attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
-            
+
             if _EXTRA_CTX.is_draft_model:
                 _batch_causal = attn_metadata[0][attn_keys[0]].causal
             else:
                 _batch_causal = attn_metadata[attn_keys[0]].causal
-            
+                
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(

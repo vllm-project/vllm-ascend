@@ -69,7 +69,7 @@ def _set_missing(namespace, op_name: str, full_name: str) -> None:
 torch.ops._C.rms_norm = _NpuRmsNormOp()
 torch.ops._C.rotary_embedding = _NpuRotaryEmbeddingOp()
 
-# --- The rest keep the _MissingOp placeholder ---
+
 _set_missing(torch.ops._C, "fused_add_rms_norm", "torch.ops._C.fused_add_rms_norm")
 _set_missing(torch.ops._C, "static_scaled_fp8_quant", "torch.ops._C.static_scaled_fp8_quant")
 _set_missing(torch.ops._C, "dynamic_scaled_fp8_quant", "torch.ops._C.dynamic_scaled_fp8_quant")

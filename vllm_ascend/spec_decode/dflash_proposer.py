@@ -137,7 +137,7 @@ class AscendDFlashProposer(SpecDecodeBaseProposer):
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
 
         cad.query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
-        cad.query_start_loc_cpu = (torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * num_query_per_req)
+        cad.query_start_loc_cpu = torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * num_query_per_req
         cad.seq_lens = effective_seq_lens + num_query_per_req
         cad.seq_lens_cpu = cad.seq_lens.cpu()
         cad.num_actual_tokens = num_query_total
