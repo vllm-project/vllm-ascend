@@ -1109,14 +1109,14 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
-            if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
-                return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
-            elif _EXTRA_CTX.capturing:
-                attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
-                output[:num_tokens] = attn_output[:num_tokens]
-                return output
-            elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                if _EXTRA_CTX.capturing:
+                    attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
+                    output[:num_tokens] = attn_output[:num_tokens]
+                    return output
                 return self._forward_c8_decode(query, attn_metadata, output, layer)
+            elif attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+                return self._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
             else:
                 return self._forward_c8_fused_infer_attention(
                     query,
