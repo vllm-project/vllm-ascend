@@ -46,7 +46,7 @@ jobs:
           pip install uv
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
@@ -59,7 +59,7 @@ jobs:
           uv pip uninstall triton
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install vllm-project/vllm-ascend
         run: |

@@ -50,7 +50,7 @@ jobs:
       image: quay.io/ascend-ci/vllm-ascend:lint
     steps:
     - name: Checkout vllm-project/vllm-ascend repo
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     # With problem matchers in a container, the output of $GITHUB_WORKSPACE and ${{ github.workspace }} are different.
     # So we will just copy it into a temp path. see https://github.com/actions/runner/issues/2058
@@ -65,7 +65,7 @@ jobs:
     - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
 
     - name: Checkout vllm-project/vllm repo
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: vllm-project/vllm
         path: ./vllm-empty
