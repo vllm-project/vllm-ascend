@@ -37,7 +37,6 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-from vllm_ascend.attention import op_constraint
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -141,6 +140,36 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
+        self.backend_extra_input_constructor = None
+
+    def prepare_backend_extra_input(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        query_start_loc_np: np.ndarray,
+    ) -> tuple[int, np.ndarray | None]:
+        """Apply FULL-graph padding requirements from attention backends (e.g. FIA TND)."""
+        if self.backend_extra_input_constructor is None:
+            self.backend_extra_input_constructor = set()
+            for backend in self._attn_backends:
+                if hasattr(backend, "get_extra_input_constructor"):
+                    self.backend_extra_input_constructor.add(backend.get_extra_input_constructor())
+        
+        max_num_reqs_padded = 0
+        max_query_start_loc_np = None
+        for constructor in self.backend_extra_input_constructor:
+            extra_input = constructor.prepare_extra_input(
+                num_reqs,
+                query_start_loc_np,
+                self.decode_query_len,
+                batch_desc,
+            )
+            if extra_input.num_reqs_padded > max_num_reqs_padded:
+                max_num_reqs_padded = extra_input.num_reqs_padded
+                assert extra_input.query_start_loc_np is not None
+                max_query_start_loc_np = extra_input.query_start_loc_np
+
+        return max_num_reqs_padded, max_query_start_loc_np
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
@@ -248,34 +277,19 @@ class NPUModelRunner(GPUModelRunner):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
-        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
-        # Backend-specific padding (e.g. FIA TND): needs the full (max_num_reqs+2) CPU buffer;
+        # Backend-specific padding (e.g. FIA TND): needs the full CPU buffer before slicing;
         # `FiaOpConstrait.padding` returns None in FULL graph mode (no extra_kw entries then).
-        extra_kwargs: dict[str, Any] = {}
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            for op_prefix in self.op_prefix:
-                constraint_cls = getattr(op_constraint, f"{op_prefix}OpConstrait", None)
-                if constraint_cls is None:
-                    continue
-                nreq_pad, qsl_np = constraint_cls.padding(
-                    num_reqs,
-                    query_start_loc_np.copy(),
-                    self.decode_query_len,
-                    batch_desc,
-                )
-                qsl_key, qsl_np_key, nreq_pad_key = op_constraint.op_constraint_extra_kw_keys(op_prefix)
-                async_copy_to_gpu(qsl_np, out=self.input_buffers.extra_kwargs[qsl_key])
-                qsl_np = qsl_np[: nreq_pad + 1]
-                extra_kwargs[qsl_key] = self.input_buffers.extra_kwargs[qsl_key]
-                extra_kwargs[qsl_np_key] = qsl_np
-                extra_kwargs[nreq_pad_key] = nreq_pad
-
-                if nreq_pad > num_reqs_padded:
-                    num_reqs_padded = nreq_pad
-                    query_start_loc = self.input_buffers.extra_kwargs[qsl_key][: nreq_pad + 1]
-                    query_start_loc_np = qsl_np
+            max_num_reqs_padded, max_query_start_loc_np = self.prepare_backend_extra_input(
+                batch_desc, num_reqs, query_start_loc_np
+            )
+            if max_num_reqs_padded > num_reqs_padded:
+                num_reqs_padded = max_num_reqs_padded
+                query_start_loc_np = max_query_start_loc_np
+                
+        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
 
         # Get prefill tokens if any.
         if self.req_states.any_prefills(idx_mapping_np):
@@ -355,7 +369,6 @@ class NPUModelRunner(GPUModelRunner):
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
-            extra_kwargs=extra_kwargs,
         )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.

@@ -38,7 +38,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.op_constraint import op_constraint_extra_kw_keys
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendPrefillContextParallelMetadata
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor
@@ -114,13 +113,12 @@ def build_attn_metadata(
         )
 
         for attn_group in attn_groups[i]:
-            impl_cls = attn_group.backend.get_impl_cls()
-            if not extra_kwargs and hasattr(impl_cls, "get_op_prefix"):
-                prefix = impl_cls.get_op_prefix()
-                k_qsl, k_qsl_np, _ = op_constraint_extra_kw_keys(prefix)
-                if k_qsl in extra_kwargs and k_qsl_np in extra_kwargs:
-                    common_attn_metadata.query_start_loc = extra_kwargs[k_qsl]
-                    common_attn_metadata.query_start_loc_cpu = torch.from_numpy(extra_kwargs[k_qsl_np])
+            if hasattr(attn_group.backend, "get_extra_input_Preparer"):
+                preparer = attn_group.backend.get_extra_input_Preparer()
+                num_reqs_padded = preparer.extra_input.num_reqs_padded
+                common_attn_metadata.query_start_loc = preparer.extra_input.query_start_loc[:num_reqs_padded + 1]
+                common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+                    extra_kwargs[preparer.extra_input.query_start_loc_np[:num_reqs_padded + 1]])
 
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             metadata = attn_metadata_builder.build(
