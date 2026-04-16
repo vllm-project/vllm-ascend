@@ -31,5 +31,5 @@ class AscendNgramProposerNPU(NgramProposerGPU):
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
         valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ):
         pass
