@@ -56,6 +56,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
+from vllm_ascend.quantization.utils import enable_c8_quant
 from vllm_ascend.utils import weak_ref_tensors
 
 # default max value of sliding window size
@@ -391,9 +392,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
-        self.enable_c8_quant = (
-            self.vllm_config.quant_config.enable_c8_quant if self.vllm_config.quant_config is not None else False
-        )
         self.sinks = sinks
 
     @staticmethod
@@ -580,7 +578,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         workspace = graph_params.workspaces.get(num_tokens)
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         extra_args = {}
-        if self.enable_c8_quant:
+        if enable_c8_quant:
             extra_args = {
                 "key_antiquant_scale": layer._c8_k_aq_scale,
                 "key_antiquant_offset": layer._c8_k_aq_offset,
@@ -636,7 +634,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             weak_ref_tensors(output),
             weak_ref_tensors(softmax_lse),
         )
-        if self.enable_c8_quant:
+        if enable_c8_quant:
             attn_params = attn_params + (
                 weak_ref_tensors(layer._c8_k_aq_scale),
                 weak_ref_tensors(layer._c8_k_aq_offset),
