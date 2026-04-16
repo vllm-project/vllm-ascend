@@ -100,7 +100,7 @@ vllm serve Qwen/Qwen3.5-4B \
 --max-num-seqs 256 \
 --gpu-memory-utilization 0.85 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
@@ -125,7 +125,7 @@ vllm serve Qwen/Qwen3.5-4B \
 --max-num-seqs 256 \
 --gpu-memory-utilization 0.5 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
@@ -150,14 +150,14 @@ vllm serve Qwen/Qwen3.5-4B \
 --max-num-seqs 256 \
 --gpu-memory-utilization 0.85 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
 **Notice:**
 
 - `--additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'` is the **most critical optimization** for Qwen3.5-4B, providing approximately **+900%** throughput improvement over the raw baseline.
-- `--compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}'` enables AclGraph for the decode phase, providing an additional ~+50-93% on top of additional-config.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables AclGraph for the decode phase, providing an additional ~+50-93% on top of additional-config.
 - For TP2 AclGraph, `--gpu-memory-utilization 0.5` is recommended as graph capture consumes additional memory.
 - `--default-chat-template-kwargs '{"enable_thinking":false}'` can be added to disable the thinking mode for faster non-reasoning tasks.
 - `HCCL_OP_EXPANSION_MODE=AIV` is recommended for TP > 1.
@@ -226,7 +226,7 @@ Standard benchmark parameters: `--dataset-name random --random-input-len 512 --r
 |--------|-------------|-------|----------------|----------------|-------------|
 | TP1 | 3,331 | 26.02 | 451 | 15.6 | +871% |
 | TP2 | 4,162 | 32.52 | 439 | 11.8 | +1,146% |
-| **TP4** | **4,977** | **38.89** | **399** | **9.6** | **+1,188%** |
+| **TP4** | **4,977** | **38.89** | **399** | **9.6** | **+1,088%** |
 
 ### Optimization Stage Breakdown (TP1)
 
