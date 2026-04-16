@@ -115,3 +115,4 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_kv_connector_lifecycle.py
     estimated_time: 20
+    
