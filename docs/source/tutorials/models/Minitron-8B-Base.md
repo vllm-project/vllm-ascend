@@ -116,8 +116,8 @@ The current evaluation results are:
 | Category | Dataset | Metric | Result |
 |----------|---------|--------|--------|
 | Accuracy | gsm8k / test | Total Samples | 1000 |
-| Accuracy | gsm8k / test | exact_match,strict-match | 0.149 |
-| Accuracy | gsm8k / test | exact_match,flexible-extract | 0.29 |
+| Accuracy | gsm8k / test | exact_match,strict-match | 0.5436 |
+| Accuracy | gsm8k / test | exact_match,flexible-extract | 0.5451 |
 
 ### Remarks on Metrics
 
