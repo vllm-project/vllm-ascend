@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Qwen3-Omni is the natively end-to-end multilingual omni-modal foundation models. It processes text, images, audio, and video, and delivers real-time streaming responses in both text and natural speech. We introduce several architectural upgrades to improve performance and efficiency. The Thinking model of Qwen3-Omni-30B-A3B, containing the thinker component, equipped with chain-of-thought reasoning, supporting audio, video, and text input, with text output.
+Qwen3-Omni is a native end-to-end multilingual omni-modal foundation model. It processes text, images, audio, and video, and delivers real-time streaming responses in both text and natural speech. We introduce several architectural upgrades to improve performance and efficiency. The Thinking model of Qwen3-Omni-30B-A3B, which contains the thinker component, is equipped with chain-of-thought reasoning and supports audio, video, and text input, with text output.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 

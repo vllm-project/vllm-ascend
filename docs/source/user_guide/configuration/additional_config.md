@@ -30,7 +30,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `weight_prefetch_config`            | dict | `{}`    | Configuration options for weight prefetch                                                                 |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
-| `eplb_config`                       | dict | `{}`    | Configuration options for ascend compilation |
+| `eplb_config`                       | dict | `{}`    | Configuration options for eplb |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump(eager mode).                                                     |
 | `enable_async_exponential`          | bool | `False` | Whether to enable asynchronous exponential overlap. To enable asynchronous exponential, set this config to True.        |

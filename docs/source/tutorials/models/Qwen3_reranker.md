@@ -95,14 +95,14 @@ model_name = "Qwen/Qwen3-Reranker-8B"
 
 # What is the difference between the official original version and one
 # that has been converted into a sequence classification model?
-# Qwen3-Reranker is a language model that doing reranker by using the
+# Qwen3-Reranker is a language model that does reranker by using the
 # logits of "no" and "yes" tokens.
-# It needs to computing 151669 tokens logits, making this method extremely
-# inefficient, not to mention incompatible with the vllm score API.
+# It needs to compute 151669 tokens logits, making this method extremely
+# inefficient, not to mention incompatible with the vLLM score API.
 # A method for converting the original model into a sequence classification
 # model was proposed. See: https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
 # Models converted offline using this method can not only be more efficient
-# and support the vllm score API, but also make the init parameters more
+# and support the vLLM score API, but also make the init parameters more
 # concise, for example.
 # model = LLM(model="Qwen/Qwen3-Reranker-8B", task="score")
 
@@ -120,7 +120,7 @@ model = LLM(
 )
 
 # Why do we need hf_overrides for the official original version:
-# vllm converts it to Qwen3ForSequenceClassification when loaded for
+# vLLM converts it to Qwen3ForSequenceClassification when loaded for
 # better performance.
 # - Firstly, we need using `"architectures": ["Qwen3ForSequenceClassification"],`
 # to manually route to Qwen3ForSequenceClassification.

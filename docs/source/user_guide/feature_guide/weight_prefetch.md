@@ -6,7 +6,7 @@ Since we use vector computations to hide the weight prefetching pipeline, this h
 
 ## Quick Start
 
-With `--additional-config '{"weight_prefetch_config": {"enabled": true}}'` to open weight prefetch.
+Use `--additional-config '{"weight_prefetch_config": {"enabled": true}}'` to enable weight prefetch.
 
 ## Fine-tune Prefetch Ratio
 
