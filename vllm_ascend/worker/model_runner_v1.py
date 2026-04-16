@@ -91,6 +91,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 
@@ -118,12 +119,12 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend import envs
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
-    get_c_env,
     global_stream,
     lmhead_tp_enable,
     set_weight_prefetch_method,
@@ -424,9 +425,13 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
-        env_enpu_enable = get_c_env("ENPU_ENABLE")
+        self.use_eagle = (
+            vllm_config.speculative_config.method in ("eagle", "eagle3")
+            if vllm_config.speculative_config
+            else False
+        )
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
-        self.enable_enpu = env_enpu_enable is not None and env_enpu_enable.lower() == "true"
+        self.enable_enpu = envs.VLLM_ASCEND_ENABLE_ENPU
 
     @property
     def use_cp(self) -> bool:
@@ -1783,6 +1788,11 @@ class NPUModelRunner(GPUModelRunner):
             and not forward_context.capturing
             and not self.use_sparse
         ):
+            if self.enable_enpu and not (
+                _EXTRA_CTX.is_draft_model and self.use_eagle
+            ):
+                torch.npu.current_stream().synchronize()
+
             assert positions is not None
             update_full_graph_params(
                 self.attn_backend,
@@ -2580,7 +2590,12 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+            self.model = ACLGraphWrapper(
+                self.model,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+            )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """

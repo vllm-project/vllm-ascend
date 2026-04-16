@@ -19,9 +19,9 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
-from ..utils import weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
 
 
 @dataclasses.dataclass
@@ -66,6 +66,8 @@ class ACLGraphWrapper:
         vllm_config: VllmConfig,
         runtime_mode: CUDAGraphMode,
         cudagraph_options: CUDAGraphOptions | None = None,
+        *,
+        use_eagle: bool | None = None,
     ):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -87,6 +89,12 @@ class ACLGraphWrapper:
         # the entries for different batch descriptors that we need to capture
         # aclgraphs for.
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
+        self.enable_enpu = ascend_envs.VLLM_ASCEND_ENABLE_ENPU
+        # Align with NPUModelRunner.use_eagle when provided; else derive (e.g. unit tests).
+        if use_eagle is None:
+            speculative = vllm_config.speculative_config
+            use_eagle = speculative.method in ("eagle", "eagle3") if speculative else False
+        self.use_eagle = use_eagle
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -197,12 +205,13 @@ class ACLGraphWrapper:
         # so that update_attn_params only executes after the previous graph replay has fully completed.
         # If we do not in main model and in full-graph mode when using merge-eagle-graph,
         # we do not need to synchronize.
-        use_eagle = (
-            self.vllm_config.speculative_config.method in ("eagle", "eagle3")
-            if self.vllm_config.speculative_config
-            else False
-        )
-        if self.runtime_mode != CUDAGraphMode.FULL or not _EXTRA_CTX.is_draft_model or not use_eagle:
+        # When enable_enpu is on, model_runner orders update vs replay; skip here.
+        # When FULL + EAGLE draft (merge path), replay does not need this barrier.
+        if not self.enable_enpu and not (
+            self.runtime_mode == CUDAGraphMode.FULL
+            and _EXTRA_CTX.is_draft_model
+            and self.use_eagle
+        ):
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
