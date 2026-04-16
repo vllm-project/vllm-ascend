@@ -2449,7 +2449,6 @@ class NPUModelRunner(GPUModelRunner):
         if create_mixed_batch:
             raise NotImplementedError("create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it")
         elif uniform_decode:
-            assert not create_mixed_batch
             num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
@@ -3472,6 +3471,16 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
+
+        # NOTE: super() may rewrite compilation_config.cudagraph_capture_sizes
+        # (e.g. adjust_cudagraph_sizes_for_spec_decode rounds sizes up to a
+        # multiple of `uniform_decode_query_len`). Refresh our cached copy so
+        # graph_params' event dict keys match what the dispatcher will actually
+        # capture with.
+        if self.compilation_config.cudagraph_capture_sizes:
+            self.cudagraph_batch_sizes = sorted(
+                self.compilation_config.cudagraph_capture_sizes
+            )
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
