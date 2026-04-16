@@ -143,6 +143,7 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
+        self.backend_extra_input_preparer = None
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -161,6 +162,35 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
             super().profile_run()
+
+    def prepare_backend_extra_input(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        query_start_loc_np: np.ndarray,
+    ) -> tuple[int, np.ndarray | None]:
+        """Apply FULL-graph padding requirements from attention backends (e.g. FIA TND)."""
+        if self.backend_extra_input_preparer is None:
+            self.backend_extra_input_preparer = set()
+            for backend in self._attn_backends:
+                if hasattr(backend, "get_extra_input_preparer"):
+                    self.backend_extra_input_preparer.add(backend.get_extra_input_preparer())
+        
+        max_num_reqs_padded = 0
+        max_query_start_loc_np = None
+        for preparer in self.backend_extra_input_preparer:
+            extra_input = preparer.prepare(
+                num_reqs,
+                query_start_loc_np,
+                self.decode_query_len,
+                batch_desc,
+            )
+            if extra_input.num_reqs_padded > max_num_reqs_padded:
+                max_num_reqs_padded = extra_input.num_reqs_padded
+                assert extra_input.query_start_loc_np is not None
+                max_query_start_loc_np = extra_input.query_start_loc_np
+
+        return max_num_reqs_padded, max_query_start_loc_np
 
     def prepare_inputs(
         self,
@@ -239,28 +269,26 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         num_reqs_padded = batch_desc.num_reqs or num_reqs
-        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
-
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # This is only required for vllm-ascend.
-            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_after_padding,
-                num_reqs_padded,
-                num_reqs,
-                query_start_loc_np,
-                batch_desc.cg_mode,
-                batch_desc.num_reqs,
-            )
-
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
-
-        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+
+        # Backend-specific padding (e.g. FIA TND): needs the full CPU buffer before slicing;
+        # `FiaOpConstrait.padding` returns None in FULL graph mode (no extra_kw entries then).
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            max_num_reqs_padded, max_query_start_loc_np = self.prepare_backend_extra_input(
+                batch_desc, num_reqs, query_start_loc_np
+            )
+            if max_num_reqs_padded > num_reqs_padded:
+                num_reqs_padded = max_num_reqs_padded
+                query_start_loc_np = max_query_start_loc_np
+                
+        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
 
         # Get prefill tokens if any.
         if self.req_states.any_prefills(idx_mapping_np):
