@@ -219,6 +219,7 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
             return random_sample(probs, generators), logits_to_return
 
+
 def _apply_top_k_top_p_pytorch(
     logits: torch.Tensor,  # [B, V_local]
     k: torch.Tensor = None,  # [B] or None
@@ -304,9 +305,9 @@ def _apply_top_k_top_p_ascendc(
         tp_group = get_tp_group()
         B, V_local = logits.shape
         rank = tp_group.rank_in_group
-        
+
         local_vals, local_idx = torch.topk(logits, k=top_k, dim=-1)  # [B, top_k], [B, top_k]
-        
+
         local_global_idx = local_idx + rank * V_local  # [B, top_k]
 
         gathered_vals = tp_group.all_gather(local_vals, dim=-1)  # [B, top_k*tp]
