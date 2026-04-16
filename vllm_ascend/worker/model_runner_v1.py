@@ -90,6 +90,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -119,7 +120,6 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend import envs
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
@@ -431,7 +431,7 @@ class NPUModelRunner(GPUModelRunner):
             else False
         )
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
-        self.enable_enpu = envs.VLLM_ASCEND_ENABLE_ENPU
+        self.enable_enpu = ascend_envs.VLLM_ASCEND_ENABLE_ENPU
 
     @property
     def use_cp(self) -> bool:
