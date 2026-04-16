@@ -39,6 +39,7 @@ import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
+
     if not vllm_version_is("0.19.0"):
         import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
