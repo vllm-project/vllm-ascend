@@ -1,0 +1,294 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:1
+msgid "CPU Binding"
+msgstr "CPU 绑定"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:5
+msgid ""
+"CPU Binding is a performance optimization feature for vLLM, specifically "
+"designed for servers equipped with **ARM architecture and Ascend NPUs**. "
+"It pins vLLM processes and threads to specific CPU cores to reduce "
+"CPU–NPU cross‑NUMA communication overhead and stabilize inference "
+"latency. This feature only adjusts host-side CPU affinity policies and "
+"**does not alter model execution logic or impact inference results**."
+msgstr ""
+"CPU 绑定是 vLLM 的一项性能优化特性，专为配备 **ARM 架构和 Ascend NPU** 的服务器设计。"
+"它将 vLLM 进程和线程固定到特定的 CPU 核心，以减少 CPU-NPU 跨 NUMA 通信开销并稳定推理延迟。"
+"该特性仅调整主机侧的 CPU 亲和性策略，**不会改变模型执行逻辑或影响推理结果**。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:7
+msgid "Usage"
+msgstr "使用方法"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:9
+msgid "Online serving example with CPU binding enabled (by default)"
+msgstr "启用 CPU 绑定的在线服务示例（默认启用）"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:16
+msgid "Online serving example with CPU binding disabled"
+msgstr "禁用 CPU 绑定的在线服务示例"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:23
+msgid "Offline inference example with CPU binding enabled"
+msgstr "启用 CPU 绑定的离线推理示例"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:34
+msgid "Offline inference example with CPU binding disabled"
+msgstr "禁用 CPU 绑定的离线推理示例"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:45
+msgid "Dependencies"
+msgstr "依赖"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:47
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:49
+msgid "Ubuntu/Debian"
+msgstr "Ubuntu/Debian"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:56
+msgid "RHEL/CentOS/Alma/Rocky"
+msgstr "RHEL/CentOS/Alma/Rocky"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:62
+msgid "openEuler"
+msgstr "openEuler"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:68
+msgid "IRQ binding's additional considerations"
+msgstr "中断绑定的额外注意事项"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:70
+msgid ""
+"For best results, if you run inside a docker container, which `systemctl`"
+" is likely unavailable, stop `irqbalance` service on the host manually "
+"before starting vLLM. Also make sure the container has the necessary "
+"permissions to write to `/proc/irq/*/smp_affinity` for IRQ binding:"
+msgstr ""
+"为获得最佳效果，如果您在 Docker 容器中运行（可能无法使用 `systemctl`），请在启动 vLLM 之前手动停止主机上的 `irqbalance` 服务。"
+"同时确保容器具有写入 `/proc/irq/*/smp_affinity` 进行中断绑定所需的权限："
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:72
+msgid "**Stop `irqbalance` service**:"
+msgstr "**停止 `irqbalance` 服务**："
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:74
+msgid ""
+"For example, on Ubuntu system, you can run the following command to stop "
+"irqbalance:"
+msgstr "例如，在 Ubuntu 系统上，可以运行以下命令停止 irqbalance："
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:79
+msgid "After you finish the vLLM process, you can restore irqbalance on the host:"
+msgstr "完成 vLLM 进程后，可以在主机上恢复 irqbalance："
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:85
+msgid "**Permissions**:"
+msgstr "**权限**："
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:86
+msgid "Read access to `/proc/self/status` and `/proc/interrupts`"
+msgstr "对 `/proc/self/status` 和 `/proc/interrupts` 的读权限"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:87
+msgid "Write access to `/proc/irq/*/smp_affinity` for IRQ binding"
+msgstr "对 `/proc/irq/*/smp_affinity` 的写权限（用于中断绑定）"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:89
+msgid "Common Issues & Troubleshooting"
+msgstr "常见问题与故障排查"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Error/Warning Message"
+msgstr "错误/警告消息"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Core Cause"
+msgstr "根本原因"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Solution"
+msgstr "解决方案"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Can not get running npu info."
+msgstr "无法获取运行中的 NPU 信息。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid ""
+"The npu-smi process table is empty, or the `ASCEND_RT_VISIBLE_DEVICES` "
+"environment variable filters out all NPUs."
+msgstr "npu-smi 进程表为空，或者 `ASCEND_RT_VISIBLE_DEVICES` 环境变量过滤掉了所有 NPU。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid ""
+"1. Ensure the process is running on visible NPUs; 2. Verify that the "
+"`ASCEND_RT_VISIBLE_DEVICES` value matches the actual logical NPU IDs."
+msgstr ""
+"1. 确保进程在可见的 NPU 上运行；2. 验证 `ASCEND_RT_VISIBLE_DEVICES` 的值与实际逻辑 NPU ID 匹配。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Insufficient CPUs for binding..."
+msgstr "用于绑定的 CPU 不足..."
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid ""
+"The number of CPU cores allocated to each NPU is less than the minimum "
+"requirement of 5."
+msgstr "分配给每个 NPU 的 CPU 核心数少于最低要求的 5 个。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "1. Expand the allowed CPU list; 2. Reduce the number of visible NPUs."
+msgstr "1. 扩大允许的 CPU 列表；2. 减少可见的 NPU 数量。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "NPU topo affinity not found..."
+msgstr "未找到 NPU 拓扑亲和性..."
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "npu-smi is unable to retrieve NPU topology affinity information."
+msgstr "npu-smi 无法获取 NPU 拓扑亲和性信息。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid ""
+"Verify the integrity of the npu-smi installation and ensure the user has "
+"sufficient execution permissions."
+msgstr "验证 npu-smi 安装的完整性，并确保用户具有足够的执行权限。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid "Bind cpus failed in rankX..."
+msgstr "在 rankX 中绑定 CPU 失败..."
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid ""
+"The CPU binding process failed (e.g., taskset is unavailable, or the user"
+" lacks write permissions for /proc/irq)."
+msgstr "CPU 绑定过程失败（例如，taskset 不可用，或用户缺少对 /proc/irq 的写权限）。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md
+msgid ""
+"1. Confirm that required tools (taskset, lscpu, npu-smi) are installed "
+"and available; 2. Verify the Cpus_allowed_list in `/proc/self/status` is "
+"valid."
+msgstr ""
+"1. 确认所需工具（taskset、lscpu、npu-smi）已安装并可用；2. 验证 `/proc/self/status` 中的 Cpus_allowed_list 有效。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:98
+msgid "Key Limitations"
+msgstr "主要限制"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:100
+msgid "ARM architecture only: Binding is automatically skipped on x86_64 systems."
+msgstr "仅限 ARM 架构：在 x86_64 系统上自动跳过绑定。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:102
+msgid ""
+"Symmetric NUMA layout required for optimal performance: CPU numbering "
+"should be aligned with NUMA nodes. Non-symmetric layouts may result in "
+"cross-NUMA CPU pools, reducing locality."
+msgstr ""
+"需要对称 NUMA 布局以获得最佳性能：CPU 编号应与 NUMA 节点对齐。非对称布局可能导致跨 NUMA CPU 池，降低局部性。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:104
+msgid ""
+"IRQ binding requires write permissions for /proc/irq. Memory binding "
+"depends on the `migratepages` tool; if unavailable, memory migration is "
+"skipped."
+msgstr ""
+"中断绑定需要对 /proc/irq 的写权限。内存绑定依赖于 `migratepages` 工具；如果不可用，则跳过内存迁移。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:106
+msgid "FAQ"
+msgstr "常见问题"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:108
+msgid "**Q1: Does CPU binding work on x86_64?**"
+msgstr "**问1：CPU 绑定在 x86_64 上有效吗？**"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:110
+msgid "No. The binding is skipped on non‑ARM CPUs."
+msgstr "不，在非 ARM CPU 上会跳过绑定。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:112
+msgid "**Q2: Why are only the current rank’s IRQs bound?**"
+msgstr "**问2：为什么只绑定当前 rank 的中断？**"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:114
+msgid ""
+"To avoid multiple processes overwriting IRQ affinity settings for the "
+"same device."
+msgstr "避免多个进程覆盖同一设备的中断亲和性设置。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:116
+msgid "**Q3: What if my cpuset already limits CPUs?**"
+msgstr "**问3：如果我的 cpuset 已经限制了 CPU，该怎么办？**"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:118
+msgid ""
+"The binder uses Cpus_allowed_list from /proc/self/status as the only "
+"eligible CPU set. Ensure this list is large enough."
+msgstr "绑定器使用 `/proc/self/status` 中的 Cpus_allowed_list 作为唯一合格的 CPU 集合。请确保该列表足够大。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:120
+msgid "**Q4: Does CPU binding change model outputs?**"
+msgstr "**问4：CPU 绑定会改变模型输出吗？**"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:122
+msgid ""
+"No. It only affects host‑side affinity and should not change numerical "
+"results."
+msgstr "不会。它只影响主机侧亲和性，不应改变数值结果。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:126
+msgid "Summary"
+msgstr "总结"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:128
+msgid ""
+"**Core Objective**: Reduce cross‑NUMA communication by pinning vLLM "
+"processes and threads to specific CPU cores, thereby stabilizing "
+"inference latency in Ascend NPU deployments (only applicable to ARM "
+"architectures)."
+msgstr ""
+"**核心目标**：通过将 vLLM 进程和线程固定到特定 CPU 核心来减少跨 NUMA 通信，从而稳定 Ascend NPU 部署中的推理延迟（仅适用于 ARM 架构）。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:130
+msgid ""
+"**Usage**: Enable or disable with `enable_cpu_binding` via "
+"`additional_config` in both online and offline workflows."
+msgstr ""
+"**使用方法**：在在线和离线工作流中，通过 `additional_config` 使用 `enable_cpu_binding` 启用或禁用。"
+
+#: ../../source/user_guide/feature_guide/cpu_binding.md:132
+msgid ""
+"**Key Limitations**: ARM‑only; relies on symmetric NUMA layouts; binding "
+"fails if the CPU pool has fewer than 5 cores; binding errors trigger a "
+"warning log but do not terminate the process."
+msgstr ""
+"**主要限制**：仅限 ARM 架构；依赖对称 NUMA 布局；如果 CPU 池少于 5 个核心，绑定失败；绑定错误会触发警告日志，但不会终止进程。"

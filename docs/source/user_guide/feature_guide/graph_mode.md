@@ -1,48 +1,99 @@
 # Graph Mode Guide
 
-```{note}
-This feature is currently experimental. In future versions, there may be behavioral changes around configuration, coverage, performance improvement.
-```
+## Overview
 
-```{note}
-In context parallel scenario (i.e. prefill_context_parallel_size * decode_context_parallel_size > 1), "cudagraph_mode" is not sufficiently supported to be set to "FULL" yet.
-```
+This guide explains how graph mode is used in vLLM Ascend.
 
-This guide provides instructions for using Ascend Graph Mode with vLLM Ascend. Please note that graph mode is only available on V1 Engine. And only Qwen, DeepSeek series models are well tested from 0.9.0rc1. We will make it stable and generalized in the next release.
+vLLM already provides the generic graph-mode architecture, mode definitions, and compile integration. For those upstream concepts, see:
 
-## Getting Started
+- [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/)
+- [torch.compile](https://docs.vllm.ai/en/latest/design/torch_compile/)
 
-From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode by default to keep the same behavior with vLLM. If you hit any issues, please feel free to open an issue on GitHub and fall back to the eager mode temporarily by setting `enforce_eager=True` when initializing the model.
+This document focuses on the Ascend-specific view: which graph backends are available, how to enable them, and what constraints users should keep in mind on Ascend.
 
-There are two kinds of graph mode supported by vLLM Ascend:
+## Current Status on Ascend
 
-- **ACLGraph**: This is the default graph mode supported by vLLM Ascend. In v0.9.1rc1, Qwen and DeepSeek series models are well tested.
-- **XliteGraph**: This is the OpenEuler Xlite graph mode. In v0.11.0, only Llama, Qwen dense series models, Qwen MoE series models, and Qwen3-VL are supported.
+- Graph mode is currently available only on the **V1 Engine**.
+- **ACLGraph** is the default graph path in vLLM Ascend.
+- **XliteGraph** is an optional graph path for selected model families and environments.
+- In context parallel scenarios, `cudagraph_mode="FULL"` is not sufficiently supported yet.
+
+## Graph Backends on Ascend
+
+vLLM Ascend currently exposes two graph backends:
+
+| Backend | Default | Typical usage | Notes | Since |
+|---|---|---|---|---|
+| ACL Graph | Yes | General graph mode on Ascend | Default path in vLLM Ascend | v0.9.0rc1 |
+| XliteGraph | No | Selected models with Xlite installed | Requires additional installation and config | v0.11.0 |
 
 ## Using ACLGraph
 
-ACLGraph is enabled by default. Take Qwen series models as an example, just set to use V1 Engine.
+ACLGraph is enabled by default when the model runs on the V1 Engine and graph mode is available.
+
+### Basic usage
 
 Offline example:
 
 ```python
-import os
-
 from vllm import LLM
 
-model = LLM(model="path/to/Qwen2-7B-Instruct")
-outputs = model.generate("Hello, how are you?")
+llm = LLM(model="path/to/Qwen3-0.6B")
+outputs = llm.generate("Hello, how are you?")
 ```
 
 Online example:
 
-```shell
-vllm serve Qwen/Qwen2-7B-Instruct
+```bash
+vllm serve Qwen/Qwen3-0.6B
 ```
+
+### Explicit `cudagraph_mode` configuration
+
+The generic `cudagraph_mode` options come from upstream vLLM. On Ascend, the final effective mode may still be adjusted according to platform and backend support, so the official vLLM CUDA Graphs document remains the canonical reference for mode semantics.
+
+CLI example:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
+```
+
+Python example:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="Qwen/Qwen3-0.6B",
+    compilation_config={"cudagraph_mode": "PIECEWISE"},
+)
+```
+
+For the detailed meaning of `NONE`, `PIECEWISE`, `FULL`, `FULL_DECODE_ONLY`, and `FULL_AND_PIECEWISE`, as well as the generic fallback policy, see the upstream [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/) design doc.
+
+### Attention backend compatibility
+
+Not all attention backends support all graph modes. vLLM checks attention backend compatibility during compatibility checks and, when possible, automatically adjusts `cudagraph_mode` to a more compatible mode instead of failing immediately. In practice, this means a requested full-graph mode may be narrowed to a mixed or piecewise mode, and if the backend cannot support graph execution at all, graph mode may be disabled.
+
+On Ascend, the current attention backend support levels are:
+
+| Attention backend | Declared support | Practical meaning |
+|---|---|---|
+| `attention_v1` | `ALWAYS` | Supports graph execution for mixed prefill/decode batches |
+| `context_parallel/attention_cp` | `ALWAYS` | Supports graph execution for mixed prefill/decode batches |
+| `mla_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
+| `context_parallel/mla_cp` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
+| `sfa_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
+| `context_parallel/sfa_cp` | `UNIFORM_BATCH` | Graph execution is limited to uniform batches; full graph is more restricted |
+
+This is why the effective graph mode on Ascend may differ from the mode requested in configuration.
 
 ## Using XliteGraph
 
-If you want to run Llama, Qwen dense series models, Qwen MoE series models, or Qwen3-VL with Xlite graph mode, please install xlite, and set xlite_graph_config.
+XliteGraph is an optional path for Llama, Qwen dense series models, Qwen MoE series models, and Qwen3-VL. It requires Xlite to be installed and configured through `xlite_graph_config`.
+
+Install Xlite first:
 
 ```bash
 pip install xlite
@@ -51,38 +102,60 @@ pip install xlite
 Offline example:
 
 ```python
-import os
 from vllm import LLM
 
-# xlite supports the decode-only mode by default, and the full mode can be enabled by setting: "full_mode": True
-model = LLM(model="path/to/Qwen3-32B", tensor_parallel_size=8, additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}})
-outputs = model.generate("Hello, how are you?")
+# Xlite supports decode-only mode by default.
+# Full mode can be enabled with "full_mode": True.
+llm = LLM(
+    model="path/to/Qwen3-32B",
+    tensor_parallel_size=8,
+    additional_config={
+        "xlite_graph_config": {
+            "enabled": True,
+            "full_mode": True,
+        }
+    },
+)
+outputs = llm.generate("Hello, how are you?")
 ```
 
 Online example:
 
-```shell
-vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
+```bash
+vllm serve path/to/Qwen3-32B \
+  --tensor-parallel-size 8 \
+  --additional-config '{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
 ```
 
-You can find more details about [Xlite](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)
+For more details about Xlite, see the [Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md).
 
-## Fallback to the Eager Mode
+## Common Limitations and Caveats
 
-If `ACLGraph` and `XliteGraph` all fail to run, you should fall back to the eager mode.
+- ACLGraph and XliteGraph have different support coverage. XliteGraph should be treated as an alternative backend, not as a drop-in replacement for all ACLGraph scenarios.
+- Model and backend coverage is still evolving, so a configuration that works for one model family may not yet be recommended for another.
 
-Offline example:
+## Fallback to Eager Mode
+
+If you encounter issues with graph mode, you can temporarily fall back to eager mode by setting `enforce_eager=True`.
+
+**Offline example:**
 
 ```python
-import os
 from vllm import LLM
 
-model = LLM(model="someother_model_weight", enforce_eager=True)
-outputs = model.generate("Hello, how are you?")
+llm = LLM(model="path/to/your/model", enforce_eager=True)
+outputs = llm.generate("Hello, how are you?")
 ```
 
-Online example:
+**Online example:**
 
-```shell
-vllm serve someother_model_weight --enforce-eager
+```bash
+vllm serve path/to/your/model --enforce-eager
 ```
+
+## References
+
+- [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/)
+- [torch.compile](https://docs.vllm.ai/en/latest/design/torch_compile/)
+- [Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)
+- [ACL Graph Developer Guide](../../developer_guide/Design_Documents/ACL_Graph.md)

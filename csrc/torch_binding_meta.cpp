@@ -51,14 +51,24 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     return {masked_input, mask};
 }
 
+void device_print_meta(c10::string_view msg)
+{
+    (void)msg;
+}
+
+void device_print_tensor_meta(const at::Tensor& tensor)
+{
+    (void)tensor;
+}
+
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
-                       int64_t slice_offset, int64_t slice_size) {
+                        int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
     return y_out;
 }
 
 at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
-                       at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
+                        at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
     return y_out;
 }
@@ -183,6 +193,8 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& expert_idx,
     const at::TensorList& scale1,
     const at::TensorList& scale2,
+    const at::TensorList& bias1,
+    const at::TensorList& bias2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
@@ -628,6 +640,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // Masked input and mask meta implementation
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
+    // Launch host print from device
+    ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
+    // launch host print from device for tensors
+    ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand

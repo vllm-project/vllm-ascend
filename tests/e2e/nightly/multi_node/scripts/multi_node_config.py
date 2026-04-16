@@ -182,15 +182,13 @@ class MultiNodeConfig:
         npu_per_node: int,
         envs: dict,
         disaggregated_prefill: dict | None,
-        perf_cmd: dict[str, Any] | None,
-        acc_cmd: dict[str, Any] | None,
+        benchmark_cases: list[dict],
     ):
         self.model = model
         self.test_name = test_name
         self.nodes = nodes
         self.npu_per_node = npu_per_node
-        self.perf_cmd = perf_cmd
-        self.acc_cmd = acc_cmd
+        self.benchmark_cases = benchmark_cases
 
         self.cur_index = self._resolve_cur_index()
         self.cur_node = self.nodes[self.cur_index]
@@ -281,8 +279,7 @@ class MultiNodeConfigLoader:
             npu_per_node=config.get("npu_per_node", 16),
             envs=config.get("env_common", {}),
             disaggregated_prefill=config.get("disaggregated_prefill"),
-            perf_cmd=benchmarks.get("perf"),
-            acc_cmd=benchmarks.get("acc"),
+            benchmark_cases=list(benchmarks.values()),
         )
 
     @classmethod
@@ -335,6 +332,8 @@ class MultiNodeConfigLoader:
     @staticmethod
     def _parse_benchmarks(cfg: dict) -> dict:
         benchmarks = cfg.get("benchmarks") or {}
+        for name, case in benchmarks.items():
+            case["case_name"] = name
         return benchmarks
 
     @staticmethod
