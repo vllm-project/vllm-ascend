@@ -34,11 +34,10 @@ bash format.sh
 
 #### Run CI locally
 
-After completing "Run lint" setup, you can run CI locally:
+After completing "Run lint" setup, you can run CI (Continuous integration) locally:
 
 ```{code-block} bash
    :substitutions:
-
 cd ~/vllm-project/
 
 # Run CI needs vLLM installed
@@ -75,7 +74,7 @@ You can refer to [Testing](./testing.md)  to set up a testing environment and ru
 
 ## DCO and Signed-off-by
 
-When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO.
+When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).
 
 Using `-s` with `git commit` will automatically add this header.
 
@@ -110,4 +109,7 @@ If you encounter any problems while contributing, feel free to submit a PR to im
 :maxdepth: 1
 testing
 multi_node_test
+nightly_ci_test
+e2e_ci_test
+doc_writing
 :::

@@ -2,9 +2,9 @@
 
 ## Overview
 
-**Layer Shard Linear** is a memory-optimization feature designed for large language model (LLM) inference. It addresses the high memory pressure caused by **repeated linear operators across many layers** that share identical structure but have distinct weights.
+**Layer Sharding Linear** is a memory-optimization feature designed for large language model (LLM) inference. It addresses the high memory pressure caused by **repeated linear operators across many layers** that share identical structure but have distinct weights.
 
-Instead of replicating all weights on every device, **Layer Shard Linear shards the weights of a "series" of such operators across the NPU devices in a communication group**:
+Instead of replicating all weights on every device, **Layer Sharding Linear shards the weights of a "series" of such operators across the NPU devices in a communication group**:
 
 - The **i-th layer's linear weight** is stored **only on device `i % K`**, where `K` is the number of devices in the group.
 - Other devices hold a lightweight **shared dummy tensor** during initialization and fetch the real weight **on-demand** via asynchronous broadcast during the forward pass.
@@ -23,13 +23,13 @@ This approach **preserves exact computational semantics** while **significantly 
 
 ![layer shard](./images/layer_sharding.png)
 
-> **Figure.** Layer Shard Linear workflow: weights are sharded by layer across devices (top), and during forward execution (bottom), asynchronous broadcast **pre-fetches** the next layer's weight while the current layer computes—enabling **zero-overhead** weight loading.
+> **Figure.** Layer Sharding Linear workflow: weights are sharded by layer across devices (top), and during forward execution (bottom), asynchronous broadcast **pre-fetches** the next layer's weight while the current layer computes-enabling **zero-overhead** weight loading.
 
 ---
 
 ## Getting Started
 
-To enable **Layer Shard Linear**, specify the target linear layers using the `--additional-config` argument when launching your inference job. For example, to shard the `o_proj` and `q_b_proj` layers, use:
+To enable **Layer Sharding Linear**, specify the target linear layers using the `--additional-config` argument when launching your inference job. For example, to shard the `o_proj` and `q_b_proj` layers, use:
 
 ```bash
 --additional-config '{
@@ -38,8 +38,7 @@ To enable **Layer Shard Linear**, specify the target linear layers using the `--
 ```
 
 > **Restriction**
-> In PD-disaggregated deployments, Layer Sharding can only be enabled on the **P node** with `kv_role="kv_producer"`.
-> `kv_role="kv_consumer"` and `kv_role="kv_both"` are not supported.
+> Layer Sharding can only be enabled in PD-disaggregated's **P node**.
 
 ---
 
@@ -66,7 +65,7 @@ vllm serve \
 
 With [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702), both `q_b_proj` and `o_proj` layers require large weight matrices to be stored per layer. Sharding these layers across NPUs helps fit extremely deep models (e.g., 61-layer architectures) into limited device memory.
 
-In PD-disaggregated deployments, this mode is supported only on the **P node** with `kv_role="kv_producer"`.
+Layer Sharding can only be enabled in PD-disaggregated's **P node**.
 
 **Example configuration:**
 

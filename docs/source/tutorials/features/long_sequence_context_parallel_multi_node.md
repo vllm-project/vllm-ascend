@@ -302,7 +302,7 @@ bash proxy.sh
 The parameters are explained as follows:
 
 - `--tensor-parallel-size` 16 are common settings for tensor parallelism (TP) sizes.
-- `--prefill-context-parallel-size` 2 are common settings for prefill context parallelism (PCP) sizes.
+- `--prefill-context-parallel-size` 2 is common setting for prefill context parallelism (PCP) sizes.
 - `--decode-context-parallel-size` 8 are common settings for decode context parallelism (DCP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
@@ -326,6 +326,8 @@ The parameters are explained as follows:
 - decode-context-parallel-size must be less than or equal to tensor-parallel-size.
 
 ## Accuracy Evaluation
+
+Here are two accuracy evaluation methods.
 
 ### Using AISBench
 

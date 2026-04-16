@@ -2,7 +2,7 @@
 
 ## Introduction
 
-[GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targeting at complex systems engineering and long-horizon agentic tasks.
+[GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
 The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`. In `vllm-ascend:v0.17.0rc1` and `vllm-ascend:v0.18.0rc1` , the version of transformers need to be upgraded to 5.2.0.
 
@@ -743,7 +743,6 @@ Before you start, please
 2. prepare the script `run_dp_template.sh` on each node.
 
     To support a 200k context window on the stage of prefill, the parameter `"layer_sharding": ["q_b_proj"]` needs to be added to `--additional_config` on each prefill node.
-    In PD-disaggregated deployment, `layer_sharding` is supported only on prefill/P nodes with `kv_role="kv_producer"`; do not enable it on decode/D nodes or `kv_role="kv_both"` nodes.
     1. Prefill node 0
 
         ```shell
