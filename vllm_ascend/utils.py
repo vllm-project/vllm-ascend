@@ -1267,7 +1267,7 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
 
     vllm_config = get_current_vllm_config()
     kv_transfer_config = vllm_config.kv_transfer_config
-    
+
     # In PD-mixed mode, keep the original TP o_proj weight when:
     # 1) KV pooling is disabled, or
     # 2) KV pooling is enabled with kv_role == "kv_both".
