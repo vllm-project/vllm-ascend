@@ -3472,22 +3472,20 @@ class NPUModelRunner(GPUModelRunner):
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
-        # NOTE: super() may rewrite compilation_config.cudagraph_capture_sizes
-        # (e.g. adjust_cudagraph_sizes_for_spec_decode rounds sizes up to a
-        # multiple of `uniform_decode_query_len`). Refresh our cached copy so
-        # graph_params' event dict keys match what the dispatcher will actually
-        # capture with.
-        if self.compilation_config.cudagraph_capture_sizes:
-            self.cudagraph_batch_sizes = sorted(
-                self.compilation_config.cudagraph_capture_sizes
-            )
+
+        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+        capture_sizes = sorted({
+            desc.num_tokens
+            for _, descs in capture_descs
+            for desc in descs
+        })
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
         if self.use_aclgraph:
-            set_graph_params(self.cudagraph_batch_sizes)
+            set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(self.cudagraph_batch_sizes)
+                set_draft_graph_params(capture_sizes)
 
     def capture_model(self) -> None:
         gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)
