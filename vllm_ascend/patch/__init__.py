@@ -687,3 +687,13 @@
 #       when using mrope.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
+# ** 29. File: worker/patch_qwen3_dflash.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
+#    Why:
+#       The function directly calls the ops.rms_norm and ops.rotary_imbedding operators,
+#       but NPU does not have a corresponding implementation.
+#    How：
+#       Replace ops.* with the internal implementation of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm-ascend supports pattern matching for ops.*.
