@@ -48,7 +48,7 @@ docker run --rm \
 ```
 
 :::{note}
-The Atlas 300 inference products device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
+The Atlas 300 inference products are supported from version 0.15.0rc1. You need to select the corresponding image for installation.
 :::
 
 ## Deployment
