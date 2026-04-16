@@ -3166,8 +3166,7 @@ class NPUModelRunner(GPUModelRunner):
                     # the min of all `num_blocks`. Verify it here.
 
                     state_tensors = []
-                    target_idx = 0
-                    start_idx = 0
+                    storage_offset_bytes = 0
                     # NOTE(zxr): in order to keep all tensor contiguous, we align ssm and kv block
                     # with same page size, so have to add extra padding block for kv, the overall
                     # layout of hybrid kv_cache on Ascend is:
@@ -3179,10 +3178,19 @@ class NPUModelRunner(GPUModelRunner):
                         # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
 
-                        target_idx += math.prod(target_shape) * get_dtype_size(dtype)
-                        tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
-                        start_idx = target_idx
+                        num_element_per_page = (
+                            current_kv_cache_spec.page_size_bytes // get_dtype_size(dtype)
+                        )
+                        stride = torch.empty(target_shape).stride()
+                        target_stride = (num_element_per_page, *stride[1:])
+                        tensor = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=target_shape,
+                            stride=target_stride,
+                            storage_offset=storage_offset_bytes // get_dtype_size(dtype),
+                        )
                         state_tensors.append(tensor)
+                        storage_offset_bytes += stride[0] * get_dtype_size(dtype)
                     kv_caches[layer_name] = state_tensors
                 else:
                     raise ValueError("Unknown KV cache spec type.")
