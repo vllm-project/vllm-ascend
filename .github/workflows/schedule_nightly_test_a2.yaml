@@ -177,6 +177,9 @@ jobs:
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
   multi-node-tests:
     name: multi-node
@@ -218,6 +221,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
@@ -324,8 +329,8 @@ jobs:
     runs-on: linux-aarch64-a2b3-0
     steps:
       - name: Merge all benchmark result artifacts
-        uses: actions/upload-artifact/merge@v4
         continue-on-error: true
+        uses: actions/upload-artifact/merge@v4
         with:
           name: nightly-a2
           pattern: nightly-test-benchmark-results-*
