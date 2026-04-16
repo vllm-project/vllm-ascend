@@ -378,6 +378,7 @@ jobs:
       - name: Upload Ascend logs
         if: always()
         uses: actions/upload-artifact@v7
+        continue-on-error: true      
         with:
           name: ${{ steps.vars.outputs.artifact_name }}
           path: /tmp/ascend-logs.tar.gz
@@ -391,9 +392,24 @@ jobs:
       - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: nightly-test-benchmark-results-${{ steps.vars.outputs.benchmark_job_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
           if-no-files-found: warn
           retention-days: 90
           compression-level: 0
+
+      - name: Save logs to share-volume
+        if: always()
+        continue-on-error: true
+        run: |
+          SHARED_LOG_DIR="/root/.cache/vllm-ascend/shared/logs/${GITHUB_RUN_ID}/${GITHUB_JOB}"
+          BENCHMARK_NAME="nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}"
+          
+          mkdir -p "$SHARED_LOG_DIR"
+          cp /tmp/ascend-logs.tar.gz "$SHARED_LOG_DIR/${{ inputs.config_file_path }}-ascend-logs.tar.gz" 2>/dev/null || true
+          echo "ascend-logs.tar.gz backup directory: $SHARED_LOG_DIR/${{ inputs.config_file_path }}-ascend-logs.tar.gz"
+          mkdir -p "$SHARED_LOG_DIR/$BENCHMARK_NAME"
+          cp -a /tmp/benchmark_results/. "$SHARED_LOG_DIR/$BENCHMARK_NAME/" 2>/dev/null || true
+          echo "benchmark_results backup directory: $SHARED_LOG_DIR/$BENCHMARK_NAME/"

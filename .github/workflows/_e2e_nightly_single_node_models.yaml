@@ -238,9 +238,19 @@ jobs:
       - name: Upload Report
         if: ${{ inputs.upload == true }}
         uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
           path: /vllm-workspace/vllm-ascend/benchmarks/accuracy/
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
+
+      - name: Backup Report to Shared Volume
+        if: ${{ inputs.upload == true }}
+        continue-on-error: true
+        run: |
+          SHARED_DIR="/root/.cache/vllm-ascend/shared/logs/${GITHUB_RUN_ID}/${GITHUB_JOB}/report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}"
+          mkdir -p "$SHARED_DIR"
+          cp -a ./benchmarks/accuracy/. "$SHARED_DIR/" 2>/dev/null || true
+          echo "Shared backup directory: $SHARED_DIR"
