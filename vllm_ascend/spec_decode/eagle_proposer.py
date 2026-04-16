@@ -476,9 +476,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         multi_steps_attn_metadata: list[dict[str, Any]],
     ) -> None:
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            if self.enable_enpu and not (
-                _EXTRA_CTX.is_draft_model and self.use_eagle
-            ):
+            is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+            if self.enable_enpu and not is_draft_eagle:
                 torch.npu.current_stream().synchronize()
 
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
