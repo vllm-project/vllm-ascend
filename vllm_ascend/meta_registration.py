@@ -1,3 +1,5 @@
+from contextlib import suppress
+
 import torch
 from torch.library import Library
 
@@ -51,11 +53,9 @@ def register_meta_if_necessary(ns: str, op_name: str, fn, overload: str = ""):
     meta_impl_list = torch._C._dispatch_get_registrations_for_dispatch_key("Meta")
     if schema_to_find in meta_impl_list:
         return
-    # 检查操作符是否存在，不存在则跳过注册
-    try:
+    # Some operators may be unavailable in certain builds.
+    with suppress(RuntimeError):
         lib.impl(op_name, fn, "Meta")
-    except RuntimeError:
-        pass
 
 
 def get_masked_input_and_mask_meta(
