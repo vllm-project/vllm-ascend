@@ -1,4 +1,4 @@
-# Fine-Grained Tensor Parallelism (Finegrained TP)
+# Fine-Grained Tensor Parallelism (Fine-grained TP)
 
 ## Overview
 
@@ -8,12 +8,12 @@ This capability supports heterogeneous parallelism strategies within a single mo
 
 ---
 
-## Benefits of Finegrained TP
+## Benefits of Fine-grained TP
 
 Fine-Grained Tensor Parallelism delivers two primary performance advantages through targeted weight sharding:
 
 - **Reduced Per-Device Memory Footprint**:  
-  Fine-grained TP shards large weight matrices(e.g., LM Head, o_proj)across devices, lowering peak memory usage and enabling larger batches or deployment on memory-limited hardware—without quantization.
+  Fine-grained TP shards large weight matrices (e.g., LM Head, o_proj) across devices, lowering peak memory usage and enabling larger batches or deployment on memory-limited hardware—without quantization.
   
 - **Faster Memory Access in GEMMs**:  
   In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency—especially for latency-sensitive layers like LM Head and o_proj.
@@ -53,7 +53,7 @@ The Fine-Grained TP size for any component must:
 
 ---
 
-## How to Use Finegrained TP
+## How to Use Fine-grained TP
 
 ### Configuration Format
 
