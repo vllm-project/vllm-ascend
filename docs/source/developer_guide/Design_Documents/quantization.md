@@ -54,7 +54,7 @@ Based on the above content, we present a brief description of the adaptation pro
 - **Step 2: Registration**. Use the `@register_scheme` decorator in `vllm_ascend/quantization/methods/registry.py` to register your quantization scheme class.
 
 ```python
-from vllm_ascend.quantization.methods import register_scheme, AscendLinearScheme
+from vllm_ascend.quantization.methods import register_scheme, AscendLinearScheme, AscendMoEScheme
 
 @register_scheme("W4A8_DYNAMIC", "linear")
 class AscendW4A8DynamicLinearMethod(AscendLinearScheme):

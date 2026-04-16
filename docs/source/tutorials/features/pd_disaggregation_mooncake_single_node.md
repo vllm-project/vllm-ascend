@@ -1,6 +1,6 @@
 # Prefill-Decode Disaggregation (Qwen2.5-VL)
 
-## Getting Start
+## Getting Started
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide provides step-by-step instructions to verify this features in resource-constrained environments.
 
