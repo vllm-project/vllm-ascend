@@ -2586,7 +2586,8 @@ class NPUModelRunner(GPUModelRunner):
             elif self.uses_xdrope_dim > 0:
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
-                positions = self.positions[:num_tokens_padded]
+                # 修复CpuGpuBuffer对象不可下标访问的问题
+                positions = self.positions.gpu[:num_tokens_padded]
 
             # update global cos, sin
             update_cos_sin(positions)

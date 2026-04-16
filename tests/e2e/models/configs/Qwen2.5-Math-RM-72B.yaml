@@ -1,0 +1,12 @@
+skip: true
+model_name: Qwen/Qwen2.5-Math-RM-72B
+hardware: ascend
+tensor_parallel_size: 4
+
+tasks:
+  - name: math_reward_scoring
+    metrics:
+      - name: accuracy
+        value: 0.85
+    num_fewshot: 0
+    trust_remote_code: true
