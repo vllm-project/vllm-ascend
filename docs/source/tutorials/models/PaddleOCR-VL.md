@@ -48,7 +48,7 @@ docker run --rm \
 ```
 
 :::{note}
-The Atlas 300 inference products device is supported from version 0.15.0rc1. You need to select the corresponding image for installation.
+The Atlas 300 inference products are supported from version 0.15.0rc1. You need to select the corresponding image for installation.
 :::
 
 ## Deployment
@@ -112,7 +112,7 @@ vllm serve ${MODEL_PATH} \
 ```
 
 :::{note}
-The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the Atlas 300 inference products device.
+The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the Atlas 300 inference products.
 :::
 
 ::::
@@ -260,7 +260,7 @@ The 910B4 device supports inference using the PaddlePaddle framework.
 ::::{tab-item} OM inference
 :sync: om
 
-The Atlas 300 inference products device supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
+The Atlas 300 inference products support only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
 
 ::::
 :::::
