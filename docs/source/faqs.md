@@ -147,7 +147,7 @@ In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capa
 
 ### 13. Failed to enable NPU graph mode when running DeepSeek
 
-Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
+Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, `num_heads`/`num_kv_heads` is {32, 64, 128}.
 
