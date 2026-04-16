@@ -209,6 +209,6 @@ def enable_fa_quant(vllm_config, layer_name=None) -> bool:
 
 
 def enable_c8_quant(vllm_config, layer_name=None) -> bool:
-    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
+    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_c8_quant", False):
         return True
     return False
