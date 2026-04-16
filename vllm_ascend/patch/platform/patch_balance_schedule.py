@@ -275,15 +275,7 @@ class BalanceScheduler(Scheduler):
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                    is_ready = self._update_waiting_for_remote_kv(request)
-                    if is_ready:
-                        if request.num_preemptions:
-                            # We must be loading for a resumed preemption
-                            # rather than a new request.
-                            request.status = RequestStatus.PREEMPTED
-                        else:
-                            request.status = RequestStatus.WAITING
-                    else:
+                    if request.request_id not in self.finished_recving_kv_req_ids:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request_id,
@@ -291,6 +283,13 @@ class BalanceScheduler(Scheduler):
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
+                    self._update_waiting_for_remote_kv(request)
+                    if request.num_preemptions:
+                        # We must be loading for a resumed preemption
+                        # rather than a new request.
+                        request.status = RequestStatus.PREEMPTED
+                    else:
+                        request.status = RequestStatus.WAITING
 
                 # Skip request if the structured output request is still waiting
                 # for FSM compilation.
