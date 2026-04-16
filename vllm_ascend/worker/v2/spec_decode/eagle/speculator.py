@@ -27,7 +27,6 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, gumbel_sample, update_eagle_inputs
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 
@@ -78,43 +77,24 @@ class AscendEagleSpeculator(EagleSpeculator):
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with build_attn_metadata_wrapper(), torch_gather_wrapper():
-            if vllm_version_is("0.19.0"):
-                return super().propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings,
-                    last_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    last_sampled,
-                    next_prefill_tokens,
-                    temperature,
-                    seeds,
-                    num_tokens_across_dp,
-                    dummy_run,
-                    skip_attn_for_dummy_run,
-                    mm_inputs,
-                )
-            else:
-                return super().propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings,
-                    last_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    last_sampled,
-                    next_prefill_tokens,
-                    temperature,
-                    seeds,
-                    num_tokens_across_dp,
-                    dummy_run,
-                    skip_attn_for_dummy_run,
-                    mm_inputs,
-                    is_profile=is_profile,
-                )
+            return super().propose(
+                input_batch,
+                attn_metadata,
+                slot_mappings,
+                last_hidden_states,
+                aux_hidden_states,
+                num_sampled,
+                num_rejected,
+                last_sampled,
+                next_prefill_tokens,
+                temperature,
+                seeds,
+                num_tokens_across_dp,
+                dummy_run,
+                skip_attn_for_dummy_run,
+                mm_inputs,
+                is_profile=is_profile,
+            )
 
     def generate_draft(
         self,
