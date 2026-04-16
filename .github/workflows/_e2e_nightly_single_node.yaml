@@ -100,7 +100,7 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           path: ./temp-vllm-ascend
           fetch-depth: 1

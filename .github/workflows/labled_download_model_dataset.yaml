@@ -38,7 +38,7 @@ jobs:
           df -h /root/.cache | grep -v Filesystem | \
           awk '{print "Mount point: "$6, "Total: "$2, "Used: "$3, "Available: "$4, "Usage: "$5}'
       - name: Checkout PR branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 

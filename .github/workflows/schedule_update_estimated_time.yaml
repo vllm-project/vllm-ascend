@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           repository: ${{ env.FORK_OWNER }}/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}

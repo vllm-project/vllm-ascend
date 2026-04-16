@@ -80,21 +80,21 @@ jobs:
           exit 1
         fi
 
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v4
       if: ${{ github.event_name != 'workflow_dispatch' }}
       with:
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
 
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v4
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
       with:
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.workflow_dispatch_tag }}
 
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v4
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }}
       with:
         fetch-depth: 0
@@ -179,13 +179,13 @@ jobs:
     if: ${{ inputs.should_push }}
     steps:
       - name: Checkout branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '') }}
         with:
           ref: ${{ inputs.branch_ref }}
 
       - name: Checkout tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
         with:
           ref: ${{ inputs.workflow_dispatch_tag }}
