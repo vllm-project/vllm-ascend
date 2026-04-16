@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-16 02:08+0000\n"
 "PO-Revision-Date: 2026-01-22 16:55+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -167,9 +167,9 @@ msgid ""
 "binaries>.   First, we need to obtain the Mooncake project. Refer to the "
 "following command:"
 msgstr ""
-"Mooncake 是 Moonshot AI 提供的领先 LLM 服务 Kimi 的推理平台。  安装与编译指南："
-"<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>。  "
-"首先，我们需要获取 Mooncake 项目。参考以下命令："
+"Mooncake 是 Moonshot AI 提供的领先 LLM 服务 Kimi 的推理平台。  "
+"安装与编译指南：<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-"
+"and-use-binaries>。  首先，我们需要获取 Mooncake 项目。参考以下命令："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:54
 msgid "(Optional) Replace go install url if the network is poor"
@@ -266,7 +266,7 @@ msgid "`export HCCL_INTRA_ROCE_ENABLE=1`"
 msgstr "`export HCCL_INTRA_ROCE_ENABLE=1`"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
-msgid "Required by direct transmission cheme on 800 I/T A2 series"
+msgid "Required by direct transmission scheme on 800 I/T A2 series"
 msgstr "800 I/T A2 系列直接传输方案所需"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:102
@@ -274,13 +274,14 @@ msgid "FAQ for HIXL (ascend_direct) backend"
 msgstr "HIXL (ascend_direct) 后端常见问题解答"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:104
+#, python-format
 msgid ""
 "For common troubleshooting and issue localization guidance for HIXL "
 "(ascend_direct), see: "
 "<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>"
 msgstr ""
-"关于 HIXL (ascend_direct) 的常见故障排除和问题定位指南，请参阅："
-"<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>"
+"关于 HIXL (ascend_direct) "
+"的常见故障排除和问题定位指南，请参阅：<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:107
 msgid "Run Mooncake Master"
@@ -326,8 +327,9 @@ msgid ""
 " and `ASCEND_TRANSFER_TIMEOUT`."
 msgstr ""
 "`eviction_high_watermark_ratio` 决定了 Mooncake Store 执行驱逐（eviction）的水位线，而 "
-"`eviction_ratio` 决定了将被驱逐的已存储对象的比例。`default_kv_lease_ttl` 控制 KV 对象的默认租约 TTL（毫秒）；通过 "
-"`--default_kv_lease_ttl` 配置它，并使其大于 `ASCEND_CONNECT_TIMEOUT` 和 `ASCEND_TRANSFER_TIMEOUT`。"
+"`eviction_ratio` 决定了将被驱逐的已存储对象的比例。`default_kv_lease_ttl` 控制 KV 对象的默认租约 "
+"TTL（毫秒）；通过 `--default_kv_lease_ttl` 配置它，并使其大于 `ASCEND_CONNECT_TIMEOUT` 和 "
+"`ASCEND_TRANSFER_TIMEOUT`。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:140
 #: ../../source/user_guide/feature_guide/kv_pool.md:603
@@ -424,7 +426,7 @@ msgstr "1. 运行混部脚本"
 #: ../../source/user_guide/feature_guide/kv_pool.md:345
 #: ../../source/user_guide/feature_guide/kv_pool.md:1056
 msgid "Content of pd_mix.sh:"
-msgstr "mixed_department.sh 的内容："
+msgstr "pd_mix.sh 的内容："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:384
 msgid "2.Run Inference"
@@ -453,7 +455,10 @@ msgid ""
 "required. Establishing these connections introduces a one-time time "
 "overhead and persistent device memory consumption (4 MB of device memory "
 "per connection)."
-msgstr "这是因为当涉及设备到设备通信时，HCCL 单边通信连接是在实例启动后延迟创建的。目前，需要在所有设备之间建立全连接。建立这些连接会引入一次性时间开销和持续的设备内存消耗（每个连接消耗 4 MB 设备内存）。"
+msgstr ""
+"这是因为当涉及设备到设备通信时，HCCL "
+"单边通信连接是在实例启动后延迟创建的。目前，需要在所有设备之间建立全连接。建立这些连接会引入一次性时间开销和持续的设备内存消耗（每个连接消耗 4 "
+"MB 设备内存）。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:404
 msgid ""
@@ -474,19 +479,25 @@ msgstr "安装 Memcache"
 msgid ""
 "**MemCache depends on MemFabric. Therefore, MemFabric must be "
 "installed.Installing the memcache after the memfabric is installed.**"
-msgstr "**MemCache 依赖于 MemFabric。因此，必须先安装 MemFabric。在 MemFabric 安装完成后，再安装 Memcache。**"
+msgstr ""
+"**MemCache 依赖于 MemFabric。因此，必须先安装 MemFabric。在 MemFabric 安装完成后，再安装 "
+"Memcache。**"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:412
 msgid ""
 "**memfabric_hybrid**: "
 "<https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
-msgstr "**memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
+msgstr ""
+"**memfabric_hybrid**: "
+"<https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:414
 msgid ""
 "**memcache**: "
 "<https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
-msgstr "**memcache**: <https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
+msgstr ""
+"**memcache**: "
+"<https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:416
 msgid "Configuring the memcache Config File"
@@ -510,7 +521,9 @@ msgid ""
 "You are advised to copy mmc-local.conf and mmc-meta.conf to your own path"
 " and modify them, and set the MMC_META_CONFIG_PATH environment variable "
 "to the path of your own mmc-meta.conf file."
-msgstr "建议将 mmc-local.conf 和 mmc-meta.conf 复制到您自己的路径并进行修改，并将 MMC_META_CONFIG_PATH 环境变量设置为您自己的 mmc-meta.conf 文件的路径。"
+msgstr ""
+"建议将 mmc-local.conf 和 mmc-meta.conf 复制到您自己的路径并进行修改，并将 MMC_META_CONFIG_PATH"
+" 环境变量设置为您自己的 mmc-meta.conf 文件的路径。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:436
 msgid "**mmc-meta.conf：**"
@@ -575,7 +588,9 @@ msgid ""
 " ROCE available, recommended for A2), `device_sdma` (supported for A3 "
 "when HCCS available, recommended for A3). Currently does not support "
 "heterogeneous protocol setting."
-msgstr "`host_rdma`（默认），`device_rdma`（当设备 ROCE 可用时，A2 和 A3 支持，推荐用于 A2），`device_sdma`（当 HCCS 可用时，A3 支持，推荐用于 A3）。目前不支持异构协议设置。"
+msgstr ""
+"`host_rdma`（默认），`device_rdma`（当设备 ROCE 可用时，A2 和 A3 支持，推荐用于 "
+"A2），`device_sdma`（当 HCCS 可用时，A3 支持，推荐用于 A3）。目前不支持异构协议设置。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`ock.mmc.local_service.dram.size`"
@@ -608,7 +623,10 @@ msgid ""
 "Using `MultiConnector` to simultaneously utilize both "
 "`MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` "
 "performs kv_transfer, while `AscendStoreConnector` enables KV Cache Pool"
-msgstr "使用 `MultiConnector` 同时利用 `MooncakeConnectorV1` 和 `AscendStoreConnector`。`MooncakeConnectorV1` 负责 kv_transfer（KV 传输），而 `AscendStoreConnector` 启用 KV 缓存池。"
+msgstr ""
+"使用 `MultiConnector` 同时利用 `MooncakeConnectorV1` 和 "
+"`AscendStoreConnector`。`MooncakeConnectorV1` 负责 kv_transfer（KV 传输），而 "
+"`AscendStoreConnector` 启用 KV 缓存池。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:609
 #: ../../source/user_guide/feature_guide/kv_pool.md:918
@@ -698,7 +716,9 @@ msgid ""
 "For more parameters, refer to the `dscli` usage documentation on the "
 "Yuanrong Datasystem official site: <https://atomgit.com/openeuler"
 "/yuanrong-datasystem>"
-msgstr "有关更多参数，请参考元戎数据系统官方网站上的 `dscli` 使用文档：<https://atomgit.com/openeuler/yuanrong-datasystem>"
+msgstr ""
+"有关更多参数，请参考元戎数据系统官方网站上的 `dscli` 使用文档：<https://atomgit.com/openeuler"
+"/yuanrong-datasystem>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:1170
 msgid "To stop the worker:"
@@ -758,7 +778,9 @@ msgstr "否"
 msgid ""
 "Passed to Yuanrong `HeteroClient.enable_exclusive_connection`. Use `1` to"
 " enable the exclusive connection mode when required by your deployment."
-msgstr "传递给元戎 `HeteroClient.enable_exclusive_connection`。当您的部署需要时，使用 `1` 来启用独占连接模式。"
+msgstr ""
+"传递给元戎 `HeteroClient.enable_exclusive_connection`。当您的部署需要时，使用 `1` "
+"来启用独占连接模式。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`DS_ENABLE_REMOTE_H2D`"
@@ -795,7 +817,9 @@ msgid ""
 "longer than 255 characters or containing unsupported characters are "
 "rewritten, so do not rely on the raw key string when debugging backend "
 "storage."
-msgstr "元戎后端在调用数据系统之前会对 KV 键进行规范化处理。长度超过 255 个字符或包含不支持字符的键会被重写，因此在调试后端存储时，请勿依赖原始的键字符串。"
+msgstr ""
+"元戎后端在调用数据系统之前会对 KV 键进行规范化处理。长度超过 255 "
+"个字符或包含不支持字符的键会被重写，因此在调试后端存储时，请勿依赖原始的键字符串。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:1229
 msgid ""
@@ -822,9 +846,9 @@ msgstr "元戎不需要额外的缓冲区预注册步骤。该后端在构建 bl
 #~ "with the default being mooncake."
 #~ msgstr ""
 #~ "**kv_connector_extra_config**: KV 池的其他可配置参数。  "
-#~ "**lookup_rpc_port**: 池化调度进程与工作进程之间 RPC"
-#~ " 通信的端口：每个实例都需要唯一的端口配置。  **load_async**: 是否启用异步加载。默认值为"
-#~ " false。  **backend**: 设置 KV 池的存储后端，默认值为 "
+#~ "**lookup_rpc_port**: 池化调度进程与工作进程之间 RPC "
+#~ "通信的端口：每个实例都需要唯一的端口配置。  **load_async**: 是否启用异步加载。默认值为 "
+#~ "false。  **backend**: 设置 KV 池的存储后端，默认值为 "
 #~ "mooncake。"
 
 #~ msgid "Colocation Scenario"
