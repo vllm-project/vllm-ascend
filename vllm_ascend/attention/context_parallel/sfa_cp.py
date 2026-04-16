@@ -464,4 +464,90 @@ class AscendSFACPImpl(AscendSFAImpl):
             q=torch.index_select(prefill_q, 0, q_head_idx),
             key=prefill_key,
             weights=torch.index_select(prefill_weights, 0, q_head_idx),
-            actual_seq_lengths_query=sfa_cp_metadata.
+            actual_seq_lengths_query=sfa_cp_metadata.prefill_q_cum_seqlens // 2,
+            actual_seq_lengths_key=q_head_actual_seq_lengths_key,
+            block_table=prefill_block_table,
+        )
+
+        # q tail compute
+        q_tail_actual_seq_lengths_key = sfa_cp_metadata.tail_attn_nomask_seqlens[num_decodes:]
+        q_tail_topk_indices = self._execute_indexer_select(
+            q=torch.index_select(prefill_q, 0, q_tail_idx),
+            key=prefill_key,
+            weights=torch.index_select(prefill_weights, 0, q_tail_idx),
+            actual_seq_lengths_query=sfa_cp_metadata.prefill_q_cum_seqlens // 2,
+            actual_seq_lengths_key=q_tail_actual_seq_lengths_key,
+            block_table=prefill_block_table,
+        )
+
+        q_full_idx = sfa_cp_metadata.q_full_idx
+        topk_indices = torch.index_select(torch.cat([q_head_topk_indices, q_tail_topk_indices], dim=0), 0, q_full_idx)
+        if decode_topk_indices is not None:
+            topk_indices = torch.cat([decode_topk_indices, topk_indices], dim=0)
+        return topk_indices
+
+    def _execute_indexer_select(self, q, key, weights, actual_seq_lengths_query, actual_seq_lengths_key, block_table):
+        if self.use_torch_npu_lightning_indexer:
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
+                query=q,
+                key=key,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        else:
+            topk_indices = torch.ops._C_ascend.npu_lightning_indexer(
+                query=q,
+                key=key,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
+        return topk_indices
+
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+    ):
+        if self.pcp_size == 1:
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
+        kv_c, k_pe = kv_no_split.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())  # type: ignore[misc]
+        assert len(kv_cache) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
+        assert attn_metadata.sfa_cp_metadata is not None
+        kv_c_normed = kv_c_normed.view([kv_c_normed.shape[0], self.num_kv_heads, -1])
+        k_pe = k_pe.unsqueeze(1)
+        k_pe = self.rope_single(k_pe, cos, sin)
+        kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
+        kv_c_k_pe = get_pcp_group().all_gather(kv_c_k_pe, 0)
+        kv_c_k_pe = torch.index_select(kv_c_k_pe, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
+        kv_c_normed, k_pe = kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        slot_mapping = attn_metadata.slot_mapping
+        torch_npu._npu_reshape_and_cache(
+            key=kv_c_normed, value=k_pe, key_cache=kv_cache[0], value_cache=kv_cache[1], slot_indices=slot_mapping
+        )
+        return None, None
+
+    def _get_full_kv(self, k, attn_metadata: M):
+        if self.pcp_size == 1 or self.enable_mlapo:
+            return k
+        else:
+            assert attn_metadata.sfa_cp_metadata is not None
+            k = get_pcp_group().all_gather(k.contiguous(), 0)
+            k = torch.index_select(k, 0, attn_metadata.sfa_cp_metadata.pcp_allgather_restore_idx)
+            return k
