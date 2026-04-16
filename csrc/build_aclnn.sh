@@ -5,10 +5,8 @@ SOC_VERSION=$2
 
 if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     # ASCEND310P series
-    # currently, no custom aclnn ops for ASCEND310 series
-    # CUSTOM_OPS=""
-    # SOC_ARG="ascend310p"
-    exit 0
+    CUSTOM_OPS="causal_conv1d_v310;recurrent_gated_delta_rule_v310"
+    SOC_ARG="ascend310p"
 elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     # ASCEND910B (A2) series
     # dependency: catlass
@@ -39,12 +37,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
             exit 1
         fi
     fi
-    # dependency: cann-toolkit file moe_distribute_base.h
-    HCCL_STRUCT_FILE_PATH=$(find -L "${ASCEND_TOOLKIT_HOME}" -name "moe_distribute_base.h" 2>/dev/null | head -n1)
-    if [ -z "$HCCL_STRUCT_FILE_PATH" ]; then
-        echo "cannot find moe_distribute_base.h file in CANN env"
-        exit 1
-    fi
     # for dispatch_gmm_combine_decode
     yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
 
@@ -53,6 +45,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "lightning_indexer_vllm"
         "sparse_flash_attention"
         "dispatch_ffn_combine"
+        "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
         "dispatch_gmm_combine_decode"
         "moe_combine_normal"

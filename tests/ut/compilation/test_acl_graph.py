@@ -803,6 +803,7 @@ class TestPCPDCPGraphParams(TestBase):
                                      slot_mapping,
                                      query_start_loc,
                                      seq_lens,
+                                     seq_lens,
                                      block_tables,
                                      4,
                                      4,
