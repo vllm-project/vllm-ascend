@@ -349,6 +349,7 @@ class NPUModelRunner(GPUModelRunner):
             num_sampled,
             num_rejected,
         )
+
         # npu attention backend still need to use seq_lens_cpu,
         # we need to copy num_computed_tokens back to cpu.
         default_stream = torch.cuda.current_stream()
