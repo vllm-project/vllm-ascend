@@ -102,7 +102,7 @@ class AscendMLABackend(AttentionBackend):
         return AscendMLAImpl
     
     @staticmethod
-    def get_extra_input_Preparer() -> FiaExtraInputPreparer:
+    def get_extra_input_preparer() -> FiaExtraInputPreparer:
         raise FiaExtraInputPreparer()
 
     @staticmethod
