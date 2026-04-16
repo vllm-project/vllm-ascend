@@ -80,6 +80,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -122,6 +123,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
             layer_name=f"{prefix}.attn",
+            skip_topk=skip_topk,
         )
 
         original_process_weights = self.mla_attn.process_weights_after_loading
