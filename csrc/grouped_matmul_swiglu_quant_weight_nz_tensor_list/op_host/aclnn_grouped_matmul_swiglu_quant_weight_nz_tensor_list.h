@@ -27,6 +27,7 @@ extern "C" {
  * @param [in] xScale:
  * Represents per Token quantization parameters. The data type supports FLOAT32, and the data format supports ND.
  * @param [in] groupList: Required parameter, representing the index situation on the input and output grouping axes. The data type supports INT64.
+ * @param [in] swigluLimit: Required parameter.
  * @param [out] quantOutput: Represents out in the formula. The data type supports INT8, and the data format supports ND.
  * @param [out] quantScaleOutput: Represents outQuantScale in the formula. The data type supports Float32.
  * @param [out] workspaceSize: Returns the workspace size that users need to apply for on the npu device side.
@@ -35,7 +36,7 @@ extern "C" {
  */
 __attribute__((visibility("default"))) aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(
     const aclTensor *x, const aclTensorList *weight, const aclTensor *bias, const aclTensor *offset,
-    const aclTensorList *weightScale, const aclTensor *xScale, const aclTensor *groupList,  
+    const aclTensorList *weightScale, const aclTensor *xScale, const aclTensor *groupList, float swigluLimit,
     aclTensor *output, aclTensor *outputScale, aclTensor *outputOffset, uint64_t *workspaceSize, aclOpExecutor **executor);
 
 /**

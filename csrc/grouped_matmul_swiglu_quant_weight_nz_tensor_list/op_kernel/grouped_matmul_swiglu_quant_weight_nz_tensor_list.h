@@ -437,6 +437,16 @@ __aicore__ inline void GMMSwigluCompute<mmType, sync, CHANNELDTYPE>::Swiglu(uint
     LocalTensor<float> workspaceLocal= reduceWorkspace.Get<float>();
     LocalTensor<float> src0Local = _inMMLocal[loopIdx * gmmSwiglu->tokenLen + gmmSwiglu->tokenLen / 2];
     LocalTensor<float> src1Local = _inMMLocal[loopIdx * gmmSwiglu->tokenLen];
+    if(gmmSwiglu->swigluLimit>1e-8f){
+        Mins(src0Local, src0Local, gmmSwiglu->swigluLimit, gmmSwiglu->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+        Maxs(src0Local, src0Local, (-1.0f * gmmSwiglu->swigluLimit), gmmSwiglu->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+
+        Mins(src1Local, src1Local, gmmSwiglu->swigluLimit, gmmSwiglu->tokenLen / 2);
+        PipeBarrier<PIPE_V>();
+    }
+
     SwiGLU<float, false>(workspaceLocal, src0Local, src1Local, beta, gmmSwiglu->tokenLen / 2);
     PipeBarrier<PIPE_ALL>();
     DataCopyParams repeatParams{1, static_cast<uint16_t>((gmmSwiglu->tokenLen / 2) / 8), 0, 0};

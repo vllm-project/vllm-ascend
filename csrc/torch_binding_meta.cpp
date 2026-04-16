@@ -122,7 +122,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     const at::Tensor & x_scale,
     const at::Tensor & group_list,
     const c10::optional<at::Tensor> & bias,
-    const c10::optional<at::Tensor> & offset)
+    const c10::optional<at::Tensor> & offset,
+        double swiglu_limit)
 {
     auto x_size = x.sizes();
     int n = weight[0].sizes()[1];

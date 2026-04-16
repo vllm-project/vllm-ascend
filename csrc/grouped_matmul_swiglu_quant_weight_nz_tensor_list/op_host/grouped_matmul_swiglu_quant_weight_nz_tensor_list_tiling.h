@@ -35,6 +35,7 @@ BEGIN_TILING_DATA_DEF(GMMSwiglu)
   TILING_DATA_FIELD_DEF(uint32_t, maxProcessRowNum);
   TILING_DATA_FIELD_DEF(uint32_t, groupListLen);
   TILING_DATA_FIELD_DEF(uint32_t, tokenLen);
+  TILING_DATA_FIELD_DEF(float, swigluLimit);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(GMMSwigluOp, GMMSwiglu)
 
