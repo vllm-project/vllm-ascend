@@ -927,8 +927,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
-        logits, draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
-        if lmhead_tp_enable() and num_indices < logits.shape[0]:
+        if get_ascend_config().enable_reduce_sample:
+            draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+        else:
+            logits = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+        if lmhead_tp_enable() and num_indices < logits.shape[0] and not get_ascend_config().enable_reduce_sample:
             logits = logits[:num_indices]
             token_indices_to_sample = token_indices_to_sample[:num_indices]
 
@@ -1061,9 +1064,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            logits, draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+            if get_ascend_config().enable_reduce_sample:
+                draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+            else:
+                logits = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
 
-            if lmhead_tp_enable() and num_indices < logits.shape[0]:
+            if lmhead_tp_enable() and num_indices < logits.shape[0] and not get_ascend_config().enable_reduce_sample:
                 logits = logits[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
 

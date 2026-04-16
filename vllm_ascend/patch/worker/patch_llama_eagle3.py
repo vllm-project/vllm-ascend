@@ -19,7 +19,7 @@ def compute_logits(
         logits = logits.contiguous()
         next_token = greedy_sample(logits)
         bias = torch.index_select(self.draft_id_to_target_id, dim=0, index=next_token.view(-1)).view(next_token.shape)
-        return None, next_token + bias
+        return next_token + bias
     else:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
@@ -39,7 +39,7 @@ def compute_logits(
             float("-inf"),
         )
         logits_new[:, targets] = logits
-        return logits_new, None
+        return logits_new
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
