@@ -2138,11 +2138,11 @@ class NPUModelRunner(GPUModelRunner):
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
                 # Only expand block_table for decode requests when using CP.
                 # For prefill-only requests, num_decode_reqs = 0, no expansion needed.
-                if self.use_cp and self.pcp_manager.num_decode_reqs > 0:
-                    maybe_num_reqs_padded = num_reqs_padded * self.decode_token_per_req
-                else:
-                    maybe_num_reqs_padded = num_reqs_padded
-                blk_table_tensor = blk_table.get_device_tensor()[:maybe_num_reqs_padded]
+                # if self.use_cp and self.pcp_manager.num_decode_reqs > 0:
+                #     maybe_num_reqs_padded = num_reqs_padded * self.decode_token_per_req
+                # else:
+                #     maybe_num_reqs_padded = num_reqs_padded
+                blk_table_tensor = blk_table.get_device_tensor()[:num_reqs_padded]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
