@@ -240,12 +240,12 @@ If you occasionally see `zmq.error.ZMQError: Address already in use` during star
 ### launch_online_dp.py
 
 Use `launch_online_dp.py` to launch external dp vllm servers.
-[launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+[launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
 ### run_dp_template.sh
 
 Modify `run_dp_template.sh` on each node.
-[run\_dp\_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
+[run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
 #### Layerwise
 
@@ -881,7 +881,7 @@ You can get the proxy program in the repository's examples, [load\_balance\_prox
 We recommend use aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark) Execute the following commands to install aisbench
 
 ```shell
-git clone https://github.com/AISBench/benchmark.git
+git clone https://gitee.com/aisbench/benchmark.git
 cd benchmark/
 pip3 install -e ./
 ```

@@ -2,7 +2,6 @@
 
 ## Version Specific FAQs
 
-- [[v0.18.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7633)
 - [[v0.17.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/7173)
 - [[v0.13.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/6583)
 
@@ -105,7 +104,7 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 7. How vllm-ascend work with vLLM?
 
-`vllm-ascend` is a hardware plugin for vLLM. Stable releases usually align with the same vLLM version, while RC releases may use the corresponding vLLM final release version. For example, `vllm-ascend` `v0.18.0rc1` matches vLLM `v0.18.0`. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
+`vllm-ascend` is a hardware plugin for vLLM. The version of `vllm-ascend` is the same as the version of `vllm`. For example, if you use `vllm` 0.9.1, you should use vllm-ascend 0.9.1 as well. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
 
 ### 8. Does vllm-ascend support Prefill Disaggregation feature?
 
@@ -260,7 +259,7 @@ The performance of `torch_npu.npu_fused_infer_attention_score` in small batch sc
 
 ```bash
 bash tools/install_flash_infer_attention_score_ops_a2.sh
-## change to run the following instruction if you're using A3 machine
+# change to run the following instruction if you're using A3 machine
 # bash tools/install_flash_infer_attention_score_ops_a3.sh
 ```
 
@@ -287,7 +286,18 @@ export SOC_VERSION="ascend310p1"
 export SOC_VERSION="<value starting with ascend950>"
 ```
 
-### 23. Why TPOT increases drastically as concurrency grows?
+### 23. Compilation error occasionally encounters with triton-ascend
+
+As shown in [#7782](https://github.com/vllm-project/vllm-ascend/issues/7782), triton-ascend occasionally encounters compilation errors, which is a known issue in triton-ascend 3.2.0. To avoid this issue, please use the official docker images or install the specific triton-ascend version as following:
+
+```bash
+PYTHON_TAG=$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')") && \
+ARCH=$(python3 -c "import platform; machine = platform.machine().lower(); arch_map = {'x86_64': 'x86_64', 'amd64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}; print(arch_map.get(machine, machine))") && \
+TRITON_ASCEND_WHEEL="triton_ascend-3.2.0.dev20260322-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl" && \
+python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${TRITON_ASCEND_WHEEL}"
+```
+
+### 24. Why TPOT increases drastically as concurrency grows?
 
 When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
 Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:

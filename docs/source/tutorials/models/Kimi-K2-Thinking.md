@@ -112,27 +112,18 @@ Run the following script to start the vLLM server on Multi-NPU:
 
 For an Atlas 800 A3 (64G*16) node, tensor-parallel-size should be at least 16.
 
-```{test} bash
-:sync-yaml: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
-:sync-target: test_cases[0].envs
-:sync-class: env
-
+```bash
+#!/bin/bash
+export VLLM_USE_MODELSCOPE=True
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export OMP_PROC_BIND=false
 export HCCL_OP_EXPANSION_MODE=AIV
-export SERVER_PORT=DEFAULT_PORT  # Replace DEFAULT_PORT with the actual port.
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-```
-
-```{test} bash
-:sync-yaml: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
-:sync-target: test_cases[0].model test_cases[0].server_cmd
-:sync-class: cmd
 
 vllm serve "moonshotai/Kimi-K2-Thinking" \
   --tensor-parallel-size 16 \
-  --port $SERVER_PORT \
+  --port 8000 \
   --max-model-len 8192 \
   --max-num-batched-tokens 8192 \
   --max-num-seqs 12 \
