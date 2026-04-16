@@ -1353,3 +1353,21 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+@lru_cache(maxsize=1)
+def _libc_getenv():
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    libc.getenv.argtypes = [ctypes.c_char_p]
+    libc.getenv.restype = ctypes.c_char_p
+    return libc.getenv
+
+
+def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
+    """Read env via C getenv; returns None if unset."""
+    raw = _libc_getenv()(name.encode(encoding))
+    if raw is None:
+        return None
+    return raw.decode(encoding)
