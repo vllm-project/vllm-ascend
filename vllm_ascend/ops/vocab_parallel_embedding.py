@@ -40,6 +40,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
 from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
 
+
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
     """
     Register VocabParallelEmbedding as a custom op for Ascend.

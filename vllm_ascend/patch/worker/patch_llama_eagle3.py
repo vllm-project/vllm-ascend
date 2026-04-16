@@ -44,7 +44,6 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
     B, V_local = logits.shape
     rank = tp_group.rank_in_group
-    world_size = tp_group.world_size
 
     local_max_logits, local_max_indices = logits.max(dim=-1)
 

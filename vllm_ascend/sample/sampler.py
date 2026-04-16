@@ -1,12 +1,10 @@
 import torch
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
-
-from vllm.distributed.parallel_state import get_tp_group
-from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties
@@ -15,6 +13,7 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_s
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
 _SAMPLING_EPS = 1e-5
+
 
 def random_sample(
     probs: torch.Tensor,
@@ -73,10 +72,10 @@ class AscendSampler(Sampler):
 
     def set_q_event(self, q, event):
         self.topk_topp_sampler.set_q_event(q, event)
-        
+
     def prepare_sampling(self, top_k):
         self.topk_topp_sampler.prepare_sampling(top_k)
-    
+
     def do_async_exponential(self, b_s, head_dim, generators):
         # Calculating exponential randoms in a different stream
         # and overlapping with model executing.
@@ -91,12 +90,12 @@ class AscendSampler(Sampler):
                     q[i].exponential_(generator=generator)
             self.async_exponential_event.record()
         self.set_q_event(q, self.async_exponential_event)
-    
+
     def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        logprobs_mode_override = None,
+        logprobs_mode_override=None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sample logits based on sampling metadata.
 
@@ -125,9 +124,7 @@ class AscendSampler(Sampler):
         assert sampling_metadata.temperature is not None
 
         # Apply temperature.
-        logits = self.apply_temperature(
-            logits, sampling_metadata.temperature, sampling_metadata.all_random
-        )
+        logits = self.apply_temperature(logits, sampling_metadata.temperature, sampling_metadata.all_random)
 
         # Apply logits processors that only apply to random sampling
         # (argmax invariant)
@@ -152,7 +149,7 @@ class AscendSampler(Sampler):
             out=greedy_sampled,  # Reuse tensor
         )
         return sampled, processed_logprobs
-    
+
     @staticmethod
     def greedy_sample_v2(logits: torch.Tensor) -> torch.Tensor:
         tp_group = get_tp_group()
@@ -163,13 +160,11 @@ class AscendSampler(Sampler):
         local_global_idx = local_max_indices + rank * V_local  # [B]
         # [B, world_size]
         gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
-        gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1) # [B, world_size]
+        gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
         global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
-        target_argmax = gathered_global_idx.gather(
-            dim=-1,
-            index=global_max_rank.unsqueeze(-1)
-        ).squeeze(-1)  # [B]
+        target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
         return target_argmax
+
 
 class AscendTopKTopPSampler(TopKTopPSampler):
     def __init__(self, **kwargs):
@@ -188,14 +183,14 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             self.top_k = top_k
         else:
             self.top_k = None
-        
+
     def forward_native(self, logits, generators, k, p):
         """Override pytorch native implementation to torch_npu"""
         # when batch_invariant mode is enabled, we should use vllm's implementation.
         # or it will make batch_invariant mode not working.
         if envs.VLLM_BATCH_INVARIANT:
             return super().forward_native(logits, generators, k, p)
-        
+
         if get_ascend_config().enable_reduce_sample:
             cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
             logits_to_return = None
@@ -204,8 +199,8 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             elif self.logprobs_mode == "processed_logprobs":
                 logits_to_return = cand_logits.log_softmax(dim=-1, dtype=torch.float32)
 
-            probs = torch.softmax(cand_logits, dim=-1) 
-            pos = random_sample(probs, generators) # [B] 
+            probs = torch.softmax(cand_logits, dim=-1)
+            pos = random_sample(probs, generators)  # [B]
 
             next_token = cand_idx.gather(dim=1, index=pos.unsqueeze(1)).squeeze(1)  # [B]
             return next_token, logits_to_return
@@ -225,10 +220,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             return random_sample(probs, generators), logits_to_return
 
 def _apply_top_k_top_p_pytorch(
-    logits: torch.Tensor,          # [B, V_local]
-    k: torch.Tensor = None,        # [B] or None
-    p: torch.Tensor = None,        # [B] or None
-    top_k = None,
+    logits: torch.Tensor,  # [B, V_local]
+    k: torch.Tensor = None,  # [B] or None
+    p: torch.Tensor = None,  # [B] or None
+    top_k=None,
 ) -> torch.Tensor:
     if get_ascend_config().enable_reduce_sample:
         tp_group = get_tp_group()
@@ -240,8 +235,8 @@ def _apply_top_k_top_p_pytorch(
         local_vals, local_idx = torch.topk(logits, k=top_k, dim=-1)  # [B, top_k], [B, top_k]
         local_global_idx = local_idx + rank * V_local  # [B, top_k]
 
-        gathered_vals = tp_group.all_gather(local_vals, dim=-1)         # [B, top_k*tp]
-        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)    # [B, top_k*tp]
+        gathered_vals = tp_group.all_gather(local_vals, dim=-1)  # [B, top_k*tp]
+        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)  # [B, top_k*tp]
 
         full_logits = logits.new_full((B, V_global), -float("inf"))
         full_logits.scatter_(dim=-1, index=gathered_idx, src=gathered_vals)
@@ -252,7 +247,7 @@ def _apply_top_k_top_p_pytorch(
         probs_sort, _ = probs.sort(dim=-1, descending=False)
         if k is not None:
             kk = k.to(torch.long).clamp(min=1, max=V_global)
-            top_k_count = (probs_sort.size(1) - kk).unsqueeze(1)    # [B,1]
+            top_k_count = (probs_sort.size(1) - kk).unsqueeze(1)  # [B,1]
             top_k_cutoff = probs_sort.gather(-1, top_k_count)
             no_top_k_mask = (kk == V_global).unsqueeze(1)
             top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
@@ -298,11 +293,12 @@ def _apply_top_k_top_p_pytorch(
 
         return logits
 
+
 def _apply_top_k_top_p_ascendc(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
-    top_k = None,
+    top_k=None,
 ) -> torch.Tensor:
     if get_ascend_config().enable_reduce_sample:
         tp_group = get_tp_group()
@@ -312,10 +308,10 @@ def _apply_top_k_top_p_ascendc(
         local_vals, local_idx = torch.topk(logits, k=top_k, dim=-1)  # [B, top_k], [B, top_k]
         
         local_global_idx = local_idx + rank * V_local  # [B, top_k]
-        
-        gathered_vals = tp_group.all_gather(local_vals, dim=-1)         # [B, top_k*tp]
-        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)    # [B, top_k*tp]
-        
+
+        gathered_vals = tp_group.all_gather(local_vals, dim=-1)  # [B, top_k*tp]
+        gathered_idx = tp_group.all_gather(local_global_idx, dim=-1)  # [B, top_k*tp]
+
         if p is None and k is None:
             return logits
         gathered_vals = torch.ops._C_ascend.npu_apply_top_k_top_p(gathered_vals, k=k, p=p)
@@ -325,8 +321,9 @@ def _apply_top_k_top_p_ascendc(
             return logits
         return torch.ops._C_ascend.npu_apply_top_k_top_p(logits, k=k, p=p)
 
-apply_top_k_top_p = ( 
-    _apply_top_k_top_p_ascendc 
-    if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3] 
+
+apply_top_k_top_p = (
+    _apply_top_k_top_p_ascendc
+    if get_ascend_device_type() in [AscendDeviceType.A2, AscendDeviceType.A3]
     else _apply_top_k_top_p_pytorch
 )

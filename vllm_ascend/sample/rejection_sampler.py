@@ -29,6 +29,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
 
+
 class AscendRejectionSampler(RejectionSampler):
     """Ascend-optimized rejection sampler for speculative decoding.
 
@@ -186,7 +187,6 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
     B, V_local = logits.shape
     rank = tp_group.rank_in_group
-    world_size = tp_group.world_size
 
     local_max_logits, local_max_indices = logits.max(dim=-1)
 
@@ -1221,7 +1221,8 @@ def rejection_random_sample_block_verify_pytorch(
     bonus_mask = bonus_mask & bonus_pos_match
     bonus_values_expanded = bonus_token_ids.view(-1, 1).expand(-1, max_spec_len + 1)
     output_token_ids[:] = torch.where(bonus_mask, bonus_values_expanded, output_token_ids)
-    
+
+
 def sample_recovered_tokens_blockwise_pytorch(
     output_token_ids,  # [num_tokens]
     cu_num_draft_tokens,  # [batch_size]
@@ -1269,7 +1270,7 @@ def sample_recovered_tokens_blockwise_pytorch(
         # and target_indices maps compressed positions to global vocab indices.
         # We need to search for draft_token_id in the compressed candidates.
         draft_expanded = draft_token_ids[:, None]  # [num_tokens, 1]
-        is_in_candidates = (target_indices == draft_expanded)  # [num_tokens, compressed_vocab_size]
+        is_in_candidates = target_indices == draft_expanded  # [num_tokens, compressed_vocab_size]
         target_token_scalar_probs = torch.where(
             is_in_candidates,
             target_probs,
@@ -1313,9 +1314,7 @@ def sample_recovered_tokens_blockwise_pytorch(
             draft_probs_flat = draft_probs.flatten()
             valid_mask = flat_indices < draft_probs.shape[1]
             flat_draft_probs_at_indices = torch.where(
-                valid_mask,
-                draft_probs_flat[flat_token_offsets + flat_indices],
-                torch.tensor(0.0, device=device)
+                valid_mask, draft_probs_flat[flat_token_offsets + flat_indices], torch.tensor(0.0, device=device)
             )
             draft_probs_at_indices = flat_draft_probs_at_indices.view(num_tokens, -1)
 
