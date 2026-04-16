@@ -1,4 +1,4 @@
-from vllm.v1.worker.gpu.sample import logprob, penalties, sampler, states, gumbel
+from vllm.v1.worker.gpu.sample import gumbel, logprob, penalties, sampler, states
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 

@@ -51,7 +51,7 @@ def _topk_log_softmax_kernel(
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
         logits = logits.to(tl.float32)
         e = tl.exp(logits - max_val)
-        se += tl.sum(e)                                                                                                                                         
+        se += tl.sum(e)
     lse = tl.log(se)
 
     k_offset = tl.arange(0, PADDED_TOPK)
@@ -76,7 +76,7 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         token_ids,
         num_logprobs,
         vocab_size,
-        BLOCK_SIZE= 12944,
+        BLOCK_SIZE=12944,
         PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
         multibuffer=False,
     )
