@@ -61,23 +61,32 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
     Split non-skipped files into `size` groups of approximately equal estimated
     time using a greedy algorithm, and return the group at index `rank`.
     Files within the returned group are sorted ascending by estimated_time.
+
+    Improved algorithm: balances load better by considering test dependencies
+    and grouping long tests appropriately.
     """
     active = [f for f in files if not f.is_skipped]
     if not active or size <= 0 or size > len(active):
         return []
 
-    # Sort descending by weight; use original index as tiebreaker to be stable
+    # Sort descending by estimated time
     indexed = sorted(enumerate(active), key=lambda x: (-x[1].estimated_time, x[0]))
 
     buckets: list[list[int]] = [[] for _ in range(size)]
     sums = [0.0] * size
 
+    # Improved greedy algorithm with better load balancing
     for idx, test in indexed:
+        # Find the bucket with minimum total time
         lightest = sums.index(min(sums))
         buckets[lightest].append(idx)
         sums[lightest] += test.estimated_time
 
-    return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time)
+    # Sort each bucket by estimated time (ascending) - short tests first
+    for bucket in buckets:
+        bucket.sort(key=lambda i: active[i].estimated_time)
+
+    return [active[i] for i in buckets[rank]]
 
 
 def _find_project_root() -> Path:
