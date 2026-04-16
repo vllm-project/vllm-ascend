@@ -1008,40 +1008,54 @@ class NPUModelRunner(GPUModelRunner):
         elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
             draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
         elif isinstance(self.drafter, AscendNgramProposerNPU):
-            (
-                next_token_ids,
-                valid_sampled_tokens_count,
-                valid_sampled_token_ids_gpu,
-            ) = self.drafter.update_token_ids_ngram(
-                valid_sampled_token_ids,
-                self.input_batch,
-                self.token_ids_gpu_tensor,
-                self.num_tokens_no_spec_gpu,
-                self.discard_request_mask.gpu,
-            )
-            self._copy_valid_sampled_token_count(
-                next_token_ids, valid_sampled_tokens_count
+            logger.info_once("$NPU@")
+            batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
+
+            # 准备 sampled_token_ids tensor（list → padded tensor）
+            sampled_token_ids = valid_sampled_token_ids
+            if isinstance(sampled_token_ids, list):
+                max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
+                max_len = max(max_len, 1)
+                padded_list = [
+                    sublist + [-1] * (max_len - len(sublist))
+                    for sublist in sampled_token_ids
+                ]
+                sampled_token_ids_tensor = torch.tensor(
+                    padded_list, dtype=torch.int32, device=self.device
+                )
+            else:
+                sampled_token_ids_tensor = sampled_token_ids
+
+            # 调用 vllm-ascend 内置 ngram_spec_decode 算子
+            k = self.drafter.k
+            (_token_ids, next_token_ids, draft_token_ids,
+             num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
+                self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
+                self.num_tokens_no_spec_gpu[:batch_size],      # [B]
+                sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
+                self.discard_request_mask.gpu[:batch_size],    # [B]
+                vocab_size=self.drafter.vocab_size,
+                min_n=self.drafter.min_n,
+                max_n=self.drafter.max_n,
+                k=k,
             )
 
-            batch_size = next_token_ids.shape[0]
+            # 只有 async scheduling 模式才设置 prev_sampled_token_ids，
+            # 否则下一步 _prepare_input_ids 会误入 async 代码路径导致
+            # prev_req_id_to_index is None 断言失败。
+            if self.use_async_scheduling:
+                self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
-            draft_token_ids, num_valid_draft_tokens = self.drafter.propose(
-                self.num_tokens_no_spec_gpu[:batch_size],
-                self.token_ids_gpu_tensor[:batch_size],
-                valid_sampled_token_ids_gpu,
-                valid_sampled_tokens_count,
-            )
-
-            # Cache valid draft counts for scheduler-side trimming.
+            # 保存 num_valid_draft_tokens 供 scheduler trim 使用
             self._num_valid_draft_tokens = num_valid_draft_tokens
 
-            # Async D2H copy on a dedicated stream.
+            # 异步 D2H 拷贝 num_valid_draft_tokens（逻辑不变，stream/event 复用原有）
             copy_num_valid_draft_tokens(
                 self._num_valid_draft_tokens_cpu,
                 self._num_valid_draft_tokens_copy_stream,
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens,
-                self.input_batch.num_reqs,
+                batch_size,
             )
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
@@ -1172,6 +1186,36 @@ class NPUModelRunner(GPUModelRunner):
 
         return draft_token_ids
 
+    def _copy_draft_token_ids_to_cpu(
+        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
+    ) -> None:
+        if not self.num_spec_tokens:
+            return
+        if self.use_async_scheduling and not (
+            scheduler_output.has_structured_output_requests
+            or self.input_batch.sampling_metadata.output_token_ids
+        ):
+            return
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
+        draft_token_ids: torch.Tensor = self._draft_token_ids  # type: ignore[has-type]
+        if not torch.is_tensor(draft_token_ids):
+            return
+        assert self.draft_token_ids_event is not None
+        assert self.draft_token_ids_copy_stream is not None
+        assert self.draft_token_ids_cpu is not None
+        default_stream = torch.npu.current_stream()
+        num_reqs = draft_token_ids.shape[0]
+        with torch.npu.stream(self.draft_token_ids_copy_stream):
+            if not zeros_only:
+                self.draft_token_ids_copy_stream.wait_stream(default_stream)
+                self.draft_token_ids_cpu[:num_reqs].copy_(
+                    draft_token_ids, non_blocking=True
+                )
+            else:
+                self.draft_token_ids_cpu[:num_reqs] = 0
+            self.draft_token_ids_event.record()
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1218,6 +1262,25 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                # Fix up prev_req_id_to_index for requests that were discarded
+                # in the previous sample_tokens step. If a request has
+                # prev_num_draft_len > 0 but is missing from
+                # prev_req_id_to_index, the parent _update_states would
+                # hit a KeyError. Reset prev_num_draft_len to 0 for such
+                # requests so they fall through safely.
+                if (
+                    self.use_async_scheduling
+                    and self.num_spec_tokens
+                    and self.input_batch.prev_req_id_to_index is not None
+                ):
+                    for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                        if (
+                            req_id not in self.input_batch.prev_req_id_to_index
+                            and (req_state := self.requests.get(req_id)) is not None
+                            and req_state.prev_num_draft_len
+                        ):
+                            req_state.prev_num_draft_len = 0
+
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
@@ -1766,16 +1829,17 @@ class NPUModelRunner(GPUModelRunner):
                     discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
                 )
+
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
             invalid_req_indices_set = set(invalid_req_indices)
 
-            if self.num_spec_tokens <= 0:
-                assert sampled_token_ids.shape[-1] == 1
-                # Cache the sampled tokens on the NPU and avoid CPU sync.
-                # These will be copied into input_ids in the next step
-                # when preparing inputs.
+            # Cache the sampled tokens on the NPU and avoid CPU sync.
+            # These will be copied into input_ids in the next step
+            # when preparing inputs.
+            # With spec decoding, this is done in propose_draft_token_ids().
+            if self.input_batch.prev_sampled_token_ids is None:
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
 
             self.input_batch.prev_req_id_to_index = {

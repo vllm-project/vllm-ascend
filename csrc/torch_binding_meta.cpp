@@ -569,6 +569,24 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+// N-gram 投机解码 meta
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_ngram_spec_decode_meta(
+    at::Tensor &token_ids,
+    const at::Tensor &num_tokens_no_spec,
+    const at::Tensor &sampled_token_ids,
+    const at::Tensor &discard_request_mask,
+    int64_t vocab_size,
+    int64_t min_n,
+    int64_t max_n,
+    int64_t k)
+{
+    int64_t batch_size = token_ids.size(0);
+    at::Tensor next_token_ids = at::empty({batch_size}, token_ids.options());
+    at::Tensor draft_token_ids = at::empty({batch_size, k}, token_ids.options());
+    at::Tensor num_valid_draft_tokens = at::empty({batch_size}, token_ids.options());
+    return std::make_tuple(token_ids, next_token_ids, draft_token_ids, num_valid_draft_tokens);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -618,5 +636,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // N-gram 投机解码
+    ops.impl("npu_ngram_spec_decode", &vllm_ascend::meta::npu_ngram_spec_decode_meta);
 }
 }

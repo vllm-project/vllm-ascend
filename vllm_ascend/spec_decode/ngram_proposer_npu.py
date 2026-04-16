@@ -6,6 +6,7 @@ class AscendNgramProposerNPU(NgramProposerGPU):
     def __init__(self, vllm_config, device: torch.device, runner):
         self.runner = runner
         super().__init__(vllm_config, device=device)
+        self.vocab_size = vllm_config.model_config.get_vocab_size()
 
     def load_model(self, *args, **kwargs):
         # No model to load.
