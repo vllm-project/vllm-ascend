@@ -190,7 +190,7 @@ def rejection_random_sample_kernel(
                             if not found:
                                 vocab_offsets = v_offset + tl.arange(0, VOCAB_BLOCK_SIZE)
                                 vocab_mask = vocab_offsets < vocab_size
-                                
+
                                 candidate_indices = tl.load(
                                     target_indices_ptr + token_idx * vocab_size + vocab_offsets,
                                     mask=vocab_mask,
