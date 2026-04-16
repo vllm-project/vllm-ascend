@@ -100,7 +100,7 @@ vllm serve Qwen/Qwen3.5-9B \
 --max-num-seqs 256 \
 --gpu-memory-utilization 0.85 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
@@ -125,7 +125,7 @@ vllm serve Qwen/Qwen3.5-9B \
 --max-num-seqs 256 \
 --gpu-memory-utilization 0.85 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
@@ -150,7 +150,7 @@ vllm serve Qwen/Qwen3.5-9B \
 --max-num-seqs 256 \
 --gpu-memory-utilization 0.5 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
