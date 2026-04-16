@@ -58,5 +58,16 @@ class AscendSwigluOAIAndMul:
 
 class AscendSwigluStepAndMul:
     def swiglu_step_forward(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
-        layer = SwigluStepAndMul(limit=limit)
-        return SwigluStepAndMul.forward_native(layer, x)
+        """Out-variant of swiglustep activation.
+
+        Writes into `out`:
+        silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+        """
+        import torch.nn.functional as F
+
+        gate, up = x.chunk(2, dim=-1)
+        gate = F.silu(gate)
+        gate = gate.clamp(max=limit)
+        up = up.clamp(min=-limit, max=limit)
+        out = gate * up
+        return out
