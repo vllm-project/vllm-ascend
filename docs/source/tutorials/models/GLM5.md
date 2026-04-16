@@ -2,7 +2,7 @@
 
 ## Introduction
 
-[GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targeting at complex systems engineering and long-horizon agentic tasks.
+[GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
 The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`. In `vllm-ascend:v0.17.0rc1` and `vllm-ascend:v0.18.0rc1` , the version of transformers need to be upgraded to 5.2.0.
 
@@ -1351,7 +1351,7 @@ Here are two accuracy evaluation methods.
 
 ### Using Language Model Evaluation Harness
 
-Not test yet.
+Not tested yet.
 
 ## Performance
 

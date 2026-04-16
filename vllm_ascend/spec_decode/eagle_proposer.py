@@ -46,7 +46,12 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
+
+if not vllm_version_is("0.19.0"):
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+else:
+    DFlashQwen3ForCausalLM = None
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -243,8 +248,11 @@ class SpecDecodeBaseProposer(EagleProposer):
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_lm_head(model)
 
-        if self.parallel_drafting and self.pass_hidden_states_to_model:
-            assert self.parallel_drafting_hidden_state_tensor is not None
+        if (
+            self.parallel_drafting
+            and self.pass_hidden_states_to_model
+            and self.parallel_drafting_hidden_state_tensor is not None
+        ):
             self.parallel_drafting_hidden_state_tensor.copy_(
                 self.model.combine_hidden_states(self.model.mask_hidden.view(3 * self.hidden_size))
                 if self.eagle3_use_aux_hidden_state
@@ -317,8 +325,8 @@ class SpecDecodeBaseProposer(EagleProposer):
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.method == "eagle" and hasattr(model, "lm_head"):
-            logger.info("Loading EAGLE LM head weights from the target model.")
+        if self.method in ("eagle", "dflash") and hasattr(model, "lm_head"):
+            logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
             if supports_multimodal(model):
                 self.model.lm_head = model.get_language_model().lm_head
             else:
@@ -493,8 +501,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
-        if self.method == "eagle3":
-            assert isinstance(self.get_model(), Eagle3LlamaForCausalLM)
+        if self.method in ("eagle3", "dflash"):
+            assert isinstance(self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM))
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
@@ -561,11 +569,14 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, num_reqs_padded
             )
-            common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
-            common_attn_metadata.seq_lens_cpu = self._adjust_tensor(common_attn_metadata.seq_lens_cpu, num_reqs_padded)
-            common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
-                common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
+            common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+            common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
+                self.runner.optimistic_seq_lens_cpu, num_reqs_padded
             )
+            if common_attn_metadata.num_computed_tokens_cpu is not None:
+                common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
+                    common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
+                )
         else:
             num_reqs_padded = common_attn_metadata.num_reqs
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
@@ -766,13 +777,16 @@ class SpecDecodeBaseProposer(EagleProposer):
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
 
-        model_kwargs = {
-            "input_ids": model_input_ids,
-            "positions": model_positions,
-            "inputs_embeds": inputs_embeds,
-        }
+        if self.method == "dflash":
+            model_kwargs = self.build_model_inputs_first_pass(num_input_tokens)
+        else:
+            model_kwargs = {
+                "input_ids": model_input_ids,
+                "positions": model_positions,
+                "inputs_embeds": inputs_embeds,
+            }
 
-        if self.pass_hidden_states_to_model:
+        if self.pass_hidden_states_to_model and self.method != "dflash":
             model_hidden_states = self.hidden_states[:num_input_tokens]
             model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
             model_kwargs["hidden_states"] = model_hidden_states
@@ -786,9 +800,10 @@ class SpecDecodeBaseProposer(EagleProposer):
         else:
             last_hidden_states, hidden_states = ret_hidden_states
 
-        last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-            last_hidden_states, model_positions, hidden_states
-        )
+        if self.method != "dflash":
+            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
+                last_hidden_states, model_positions, hidden_states
+            )
 
         num_indices = token_indices_to_sample.shape[0]
         if self.pcp_size > 1:
@@ -1139,7 +1154,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             return total_num_output_tokens, token_indices_to_sample, new_cad, None
 
     def model_returns_tuple(self) -> bool:
-        return self.method not in ("mtp", "draft_model")
+        return self.method not in ("mtp", "draft_model", "dflash")
 
     def attn_update_stack_num_spec_norm(
         self,
@@ -1170,9 +1185,14 @@ class SpecDecodeBaseProposer(EagleProposer):
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     common_attn_metadata.seq_lens_cpu, input_batch_size
                 )
-                common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
-                    common_attn_metadata.num_computed_tokens_cpu, input_batch_size
-                )
+                if common_attn_metadata._seq_lens_cpu is not None:
+                    common_attn_metadata._seq_lens_cpu = self._adjust_tensor(
+                        common_attn_metadata._seq_lens_cpu, input_batch_size
+                    )
+                if common_attn_metadata.num_computed_tokens_cpu is not None:
+                    common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
+                        common_attn_metadata.num_computed_tokens_cpu, input_batch_size
+                    )
                 common_attn_metadata.query_start_loc = self.arange[: input_batch_size + 1]
                 common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
                     self.token_arange_np[: input_batch_size + 1]
@@ -1199,8 +1219,12 @@ class SpecDecodeBaseProposer(EagleProposer):
         # in the merged graph, it does not affect position 1
         # FIXME(lilinsiman)
         common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
-        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
-        common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
+        if common_attn_metadata.seq_lens_cpu is not None:
+            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
+        if common_attn_metadata._seq_lens_cpu is not None:
+            common_attn_metadata._seq_lens_cpu = common_attn_metadata._seq_lens_cpu.clone()
+        if common_attn_metadata.num_computed_tokens_cpu is not None:
+            common_attn_metadata.num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu.clone()
         common_attn_metadata.positions = common_attn_metadata.positions.clone()
 
         # NOTE(woosuk): We should handle the case where the draft model
@@ -1228,11 +1252,16 @@ class SpecDecodeBaseProposer(EagleProposer):
         # For the requests that exceed the max model length, we set the
         # sequence length to 1 to minimize their overheads in attention.
         common_attn_metadata.seq_lens[:batch_size].masked_fill_(exceeds_max_model_len, 1)
-
-        common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
-        exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
-        common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
-        common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
+        if common_attn_metadata.seq_lens_cpu is not None:
+            common_attn_metadata.seq_lens_cpu[:batch_size] = common_attn_metadata.seq_lens_cpu[:batch_size] + 1
+            exceeds_mask = common_attn_metadata.seq_lens_cpu[:batch_size] >= self.max_model_len
+            common_attn_metadata.seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask, 1)
+        if common_attn_metadata._seq_lens_cpu is not None:
+            common_attn_metadata._seq_lens_cpu[:batch_size] = common_attn_metadata._seq_lens_cpu[:batch_size] + 1
+            exceeds_mask_internal = common_attn_metadata._seq_lens_cpu[:batch_size] >= self.max_model_len
+            common_attn_metadata._seq_lens_cpu[:batch_size].masked_fill_(exceeds_mask_internal, 1)
+        if common_attn_metadata.num_computed_tokens_cpu is not None:
+            common_attn_metadata.num_computed_tokens_cpu[:batch_size] += 1
         if self.uses_mrope:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions[0])
         else:
@@ -1310,7 +1339,7 @@ class SpecDecodeBaseProposer(EagleProposer):
 
     def prepare_next_token_ids_padded(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
+        seq_lens_cpu: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -1330,11 +1359,9 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
+        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(common_attn_metadata.seq_lens_cpu[i].item())
-                for i in range(num_reqs)
-            ]
+            [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
@@ -1647,10 +1674,8 @@ class SpecDecodeBaseProposer(EagleProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.is_multimodal_model and _EXTRA_CTX.flash_comm_v1_enabled:
-            return hidden_states, positions
         if self.method == "mtp":
-            if _EXTRA_CTX.flash_comm_v1_enabled:
+            if _EXTRA_CTX.flash_comm_v1_enabled and not self.is_multimodal_model:
                 hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
                 positions = positions.unsqueeze(-1)
                 positions = torch.ops.vllm.maybe_pad_and_reduce(positions)

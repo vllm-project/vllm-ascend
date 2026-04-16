@@ -164,7 +164,7 @@ class NPUInputBatch(InputBatch):
 
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
-            (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
@@ -182,6 +182,10 @@ class NPUInputBatch(InputBatch):
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
+
+        # req_id -> list of specific token IDs to compute logprobs for
+        # More efficient than num_logprobs=-1 when only a few tokens are needed
+        self.logprob_token_ids: dict[str, list[int]] = {}
 
         # Internal representation of per-step batch state changes, used for
         # reordering persistent batch and generating logitsprocs batch state

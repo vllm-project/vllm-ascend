@@ -323,7 +323,7 @@ vllm serve Eco-Tech/Kimi-K2.5-W4A8 \
 
 We recommend using Mooncake for deployment: [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md).
 
-Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
+Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory to serve high concurrency in 1P1D case.
 
 - `Kimi-K2.5-w4a8 2P1D` require 4 Atlas 800 A3 (64G × 16).
 
@@ -809,7 +809,7 @@ In this chapter, we recommend best practices for three scenarios:
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
-  A: Clean up old processes and restart: `pkill -f VLLM*`.
+  A: Clean up old processes and restart: `pkill -f vLLM*`.
 
 - **Q: How to handle OOM or unstable startup?**
 

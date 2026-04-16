@@ -3,6 +3,7 @@ import logging
 import os
 import shlex
 from typing import Any
+import vllm
 
 import pytest
 
@@ -228,8 +229,7 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     runner = os.environ.get("VLLM_CI_RUNNER", "")
 
     # Filter out None benchmark cases; results align with the non-None ones in order
-    benchmark_items = [("acc", config.acc_cmd), ("perf", config.perf_cmd)]
-    valid_items = [(k, v) for k, v in benchmark_items if v is not None]
+    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
 
     tasks = [
         _build_task_entry(key, case_cfg, result)
@@ -241,8 +241,8 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
         "feature": _extract_features(config.nodes[0].server_cmd, config.envs),
-        "vllm_version": os.environ.get("VLLM_VERSION", ""),
-        "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
+        "vllm_version": vllm.__version__,
+        "vllm_ascend_version": os.environ.get("VLLM_ASCEND_REF", ""),
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config),
         "environment": _filter_environment(config.envs),
@@ -286,11 +286,10 @@ async def test_multi_node() -> None:
             host, port = config.benchmark_endpoint
 
             if config.is_master:
-                aisbench_cases = [c for c in [config.acc_cmd, config.perf_cmd] if c is not None]
                 results = run_aisbench_cases(
                     model=config.model,
                     port=port,
-                    aisbench_cases=aisbench_cases,
+                    aisbench_cases=config.benchmark_cases,
                     host_ip=host,
                 )
                 _save_benchmark_results_json(config, results)

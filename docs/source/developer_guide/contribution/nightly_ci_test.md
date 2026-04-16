@@ -49,7 +49,7 @@ matching the filter will be dispatched, which saves hardware resources.
 ## Differences Between PR and Scheduled Runs
 
 | | Scheduled / Manual Dispatch | PR-triggered |
-|-|----------------------------|-|
+|---|----------------------------|---|
 | Trigger | Cron (daily) or `workflow_dispatch` | Label `nightly-test` + `/nightly` comment |
 | Code tested | Pre-built nightly image | Your PR's HEAD commit (source installed fresh) |
 | Test scope | All tests | Configurable via `/nightly <names>` |
@@ -138,7 +138,6 @@ events — it will **not** run on PR-triggered runs even with `/nightly all`.
 | `qwen2-5-vl-7b` | Qwen2.5-VL-7B-Instruct |
 | `qwen2-5-vl-7b-epd` | Qwen2.5-VL-7B-Instruct EPD |
 | `qwen2-5-vl-32b` | Qwen2.5-VL-32B-Instruct |
-| `qwen3-32b-int8-a3-feature-stack3` | Qwen3-32B-Int8 feature stack3 |
 | `qwen3-32b-int8-prefix-cache` | Qwen3-32B-Int8 prefix cache |
 | `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
 | `custom-multi-ops` | Custom multi-card operator tests |
@@ -201,7 +200,8 @@ need to post a new comment.
 **How to obtain more detailed logs to pinpoint problems for multi-node tests**
 
 - For most issues, the stdout pop-up logs from GitHub actions are sufficient (this log always represents the logs from the first node).
-- If the logs from a first node are no longer sufficient to provide effective logging information, see the summary of you jobs to download log archive for the corresponding test, which includes the framework-side logs and plog information for each node, structured as follows:
+- If the logs from a first node are no longer sufficient to provide effective logging information, see the summary of your jobs to download log archive for the corresponding test, which includes the framework-side logs and plog information for each node, structured as follows:
+
   ```shell
   .
   ├── node0
