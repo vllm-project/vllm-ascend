@@ -158,7 +158,7 @@ def rejection_random_sample_kernel(
     NO_DRAFT_PROBS: tl.constexpr,
     COMPRESSED_MODE: tl.constexpr,  # Whether using compressed logits
     BLOCK_SIZE: tl.constexpr,
-    VOCAB_BLOCK_SIZE: tl.constexpr = 512, 
+    VOCAB_BLOCK_SIZE: tl.constexpr = 512,
 ):
     block_idx = tl.program_id(0)
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -185,7 +185,7 @@ def rejection_random_sample_kernel(
                     if COMPRESSED_MODE:
                         target_prob = 0.0
                         found = False
-                        
+
                         for v_offset in range(0, vocab_size, VOCAB_BLOCK_SIZE):
                             if not found:
                                 vocab_offsets = v_offset + tl.arange(0, VOCAB_BLOCK_SIZE)
@@ -194,21 +194,21 @@ def rejection_random_sample_kernel(
                                 candidate_indices = tl.load(
                                     target_indices_ptr + token_idx * vocab_size + vocab_offsets,
                                     mask=vocab_mask,
-                                    other=-1  
+                                    other=-1,
                                 )
-                                
+
                                 match_mask = candidate_indices == draft_token_id
-                                
+
                                 candidate_probs = tl.load(
                                     target_probs_ptr + token_idx * vocab_size + vocab_offsets,
                                     mask=vocab_mask,
-                                    other=0.0
+                                    other=0.0,
                                 )
-                                
+
                                 current_match_prob = tl.sum(candidate_probs * match_mask, axis=0)
                                 if current_match_prob > 0.0:
                                     target_prob = current_match_prob
-                                    found = True 
+                                    found = True
                     else:
                         target_prob = tl.load(target_probs_ptr + token_idx * vocab_size + draft_token_id)
 
@@ -268,6 +268,7 @@ def expand_kernel(
         src_val1 = get_element(src_val, (i,))
         offset1 = tl.arange(0, MAX_NUM_TOKENS)
         tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1)
+
 
 @triton.jit
 def sample_recovered_tokens_kernel(
@@ -355,15 +356,15 @@ def sample_recovered_tokens_kernel(
             for prev_pos in range(pos):
                 prev_token_idx = start_idx + prev_pos
                 prev_draft_token_id = tl.load(draft_token_ids_ptr + prev_token_idx).to(tl.int64)
-                prev_target_prob = tl.load(
-                    target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id
-                ).to(tl.float32)
+                prev_target_prob = tl.load(target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id).to(
+                    tl.float32
+                )
                 if NO_DRAFT_PROBS:
                     prev_draft_prob = 1.0
                 else:
-                    prev_draft_prob = tl.load(
-                        draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id
-                    ).to(tl.float32)
+                    prev_draft_prob = tl.load(draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id).to(
+                        tl.float32
+                    )
                 ratio = tl.where(prev_draft_prob > 0, prev_target_prob / prev_draft_prob, 0.0)
                 prefix_prob = prefix_prob * tl.minimum(ratio, 1.0)
 
@@ -404,6 +405,7 @@ def sample_recovered_tokens_kernel(
             global_recovered_id = tl.where(better, block_best_global_id.to(tl.int64), global_recovered_id)
 
         tl.store(output_token_ids_ptr + token_idx, global_recovered_id)
+
 
 def rejection_greedy_sample_with_triton(
     output_token_ids,
@@ -457,6 +459,7 @@ def expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replac
         BLOCK_SIZE=block_size,
     )
 
+
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_block_verify_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
@@ -504,28 +507,24 @@ def rejection_random_sample_block_verify_kernel(
                 if COMPRESSED_MODE:
                     target_prob = 0.0
                     found = False
-                    
+
                     for v_offset in range(0, vocab_size, VOCAB_BLOCK_SIZE):
                         if not found:
                             vocab_offsets = v_offset + tl.arange(0, VOCAB_BLOCK_SIZE)
                             vocab_mask = vocab_offsets < vocab_size
-                            
+
                             candidate_indices = tl.load(
-                                target_indices_ptr + token_idx * vocab_size + vocab_offsets,
-                                mask=vocab_mask,
-                                other=-1
+                                target_indices_ptr + token_idx * vocab_size + vocab_offsets, mask=vocab_mask, other=-1
                             )
-                            
+
                             match_mask = candidate_indices == draft_token_id
-                            
+
                             candidate_probs = tl.load(
-                                target_probs_ptr + token_idx * vocab_size + vocab_offsets,
-                                mask=vocab_mask,
-                                other=0.0
+                                target_probs_ptr + token_idx * vocab_size + vocab_offsets, mask=vocab_mask, other=0.0
                             )
-                            
+
                             current_match_prob = tl.sum(candidate_probs * match_mask, axis=0)
-                            
+
                             if current_match_prob > 0.0:
                                 target_prob = current_match_prob
                                 found = True
