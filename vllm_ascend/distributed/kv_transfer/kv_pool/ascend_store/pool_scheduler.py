@@ -214,8 +214,6 @@ class KVPoolScheduler:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 # resumed request
                 new_block_ids = cached_reqs.new_block_ids[i]
-                # if not new_block_ids:
-                #     continue
                 if req_id in self._preempted_req_ids:
                     if not new_block_ids:
                         continue
@@ -268,10 +266,6 @@ class KVPoolScheduler:
                         raise ValueError(
                             f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached"
                         )
-                    # num_computed_token = cached_reqs.num_computed_tokens[i]
-                    # if num_computed_token >= len(request.prompt_token_ids):
-                    #     continue
-                    # request_tracker.update(new_block_ids)
                     if new_block_ids:
                         request_tracker.update(new_block_ids)
 
