@@ -23,6 +23,7 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
+from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -1977,16 +1978,17 @@ class NPUModelRunner(GPUModelRunner):
         forward_context = get_forward_context()
         assert forward_context is not None
 
-        def run_model():
-            return self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
+        model_inputs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "intermediate_tensors": intermediate_tensors,
+            "inputs_embeds": inputs_embeds,
+            **model_kwargs,
+        }
+        run_model = partial(self.model, **model_inputs)
 
         if self.enable_enpu:
+            # The soft segmentation scenario requires event.record first, then event.wait
             self._update_full_graph_params_if_needed(
                 forward_context, num_tokens_padded, positions
             )
