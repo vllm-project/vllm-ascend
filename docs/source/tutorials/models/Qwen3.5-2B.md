@@ -100,7 +100,7 @@ vllm serve Qwen/Qwen3.5-2B \
 --max-num-seqs 512 \
 --gpu-memory-utilization 0.85 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
@@ -125,7 +125,7 @@ vllm serve Qwen/Qwen3.5-2B \
 --max-num-seqs 256 \
 --gpu-memory-utilization 0.85 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
@@ -150,13 +150,13 @@ vllm serve Qwen/Qwen3.5-2B \
 --max-num-seqs 256 \
 --gpu-memory-utilization 0.85 \
 --trust-remote-code \
---compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 --additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'
 ```
 
 **Notice:**
 
-- `--compilation-config '{"mode":"none","cudagraph_mode":"FULL_DECODE_ONLY"}'` enables AclGraph for the decode phase, which is the primary performance optimization.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables AclGraph for the decode phase, which is the primary performance optimization.
 - `--additional-config '{"enable_async_exponential":true,"enable_cpu_binding":true}'` enables async exponential scheduling and CPU core binding, which provides significant throughput improvement.
 - `--default-chat-template-kwargs '{"enable_thinking":false}'` can be added to disable the thinking mode for faster non-reasoning tasks.
 - `HCCL_OP_EXPANSION_MODE=AIV` is recommended for TP > 1 to improve communication efficiency.
