@@ -222,9 +222,9 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
 def _apply_top_k_top_p_pytorch(
     logits: torch.Tensor,  # [B, V_local]
-    k: torch.Tensor = None,  # [B] or None
-    p: torch.Tensor = None,  # [B] or None
-    top_k=None,
+    k: torch.Tensor,  # [B] or None
+    p: torch.Tensor,  # [B] or None
+    top_k: int | None = None,
 ) -> torch.Tensor:
     if get_ascend_config().enable_reduce_sample:
         tp_group = get_tp_group()
@@ -299,7 +299,7 @@ def _apply_top_k_top_p_ascendc(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
-    top_k=None,
+    top_k: int | None = None,
 ) -> torch.Tensor:
     if get_ascend_config().enable_reduce_sample:
         tp_group = get_tp_group()
