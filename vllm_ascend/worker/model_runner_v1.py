@@ -1778,7 +1778,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_padded: int,
         positions: torch.Tensor | None,
     ) -> None:
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing and not self.use_sparse:
             assert positions is not None
             update_full_graph_params(
                 self.attn_backend,
