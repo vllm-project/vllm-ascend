@@ -1267,11 +1267,11 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
 
     vllm_config = get_current_vllm_config()
     kv_transfer_config = vllm_config.kv_transfer_config
-    # In a normal non-PD deployment, or on the PD mixed-role instance, keep the
-    # original TP o_proj weight and full-gather it for the prefill stage.
-    is_non_pd_instance = kv_transfer_config is None
-    is_pd_mixed_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_both"
-    return is_non_pd_instance or is_pd_mixed_instance
+    
+    # In PD-mixed mode, keep the original TP o_proj weight when:
+    # 1) KV pooling is disabled, or
+    # 2) KV pooling is enabled with kv_role == "kv_both".
+    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
 
 
 def check_gdn_layer(vllm_config) -> bool:
