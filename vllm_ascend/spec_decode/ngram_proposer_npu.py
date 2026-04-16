@@ -4,9 +4,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU
 
 class AscendNgramProposerNPU(NgramProposerGPU):
     def __init__(self, vllm_config, device: torch.device, runner):
-        self.runner = runner
         super().__init__(vllm_config, device=device)
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
 
     def load_model(self, *args, **kwargs):
         # No model to load.
@@ -34,6 +32,4 @@ class AscendNgramProposerNPU(NgramProposerGPU):
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
         valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return super().propose(
-            num_tokens_no_spec, token_ids_gpu, valid_sampled_token_ids_gpu, valid_sampled_tokens_count
-        )
+        pass

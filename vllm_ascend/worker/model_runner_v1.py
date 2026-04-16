@@ -1130,7 +1130,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_tokens_no_spec_gpu[:batch_size],      # [B]
                 sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
                 self.discard_request_mask.gpu[:batch_size],    # [B]
-                vocab_size=self.drafter.vocab_size,
+                vocab_size=self.model_config.get_vocab_size(),
                 min_n=self.drafter.min_n,
                 max_n=self.drafter.max_n,
                 k=k,
