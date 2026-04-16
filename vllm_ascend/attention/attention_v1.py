@@ -391,8 +391,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
-        self.enable_c8_quant = (
-            self.vllm_config.quant_config is not None and getattr(self.vllm_config.quant_config, "enable_c8_quant", False)
+        self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
+            self.vllm_config.quant_config, "enable_c8_quant", False
         )
         self.sinks = sinks
 
