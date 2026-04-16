@@ -18,7 +18,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen3-VL-235B-A22B-Instruct`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node，2 Atlas 800 A2（64G * 8）nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/)
+- `Qwen3-VL-235B-A22B-Instruct`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node，2 Atlas 800 A2（64G × 8）nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -140,7 +140,7 @@ Node1
 export VLLM_USE_MODELSCOPE=true
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-# this obtained through ifconfig
+# this is obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
 local_ip="xxxx"
@@ -258,7 +258,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3-VL-235B-A22B-Instruct` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 

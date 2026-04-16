@@ -58,6 +58,8 @@ def clear_all_moe_loads(self):
 
 
 def model_register(model):
+    if hasattr(model, "language_model"):
+        model = model.language_model
     model.get_expert_map = types.MethodType(get_expert_map, model)
     model.get_log2phy_map = types.MethodType(get_log2phy_map, model)
     model.get_all_moe_loads = types.MethodType(get_all_moe_loads, model)

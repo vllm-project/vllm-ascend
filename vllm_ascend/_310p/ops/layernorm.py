@@ -1,5 +1,6 @@
 import torch
 import torch_npu
+from vllm.model_executor.layers.layernorm import RMSNormGated
 
 from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
 
@@ -37,3 +38,14 @@ class AscendGemmaRMSNorm310(AscendGemmaRMSNorm):
 
         x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight, self.variance_epsilon)
         return x
+
+
+class AscendRMSNormGated310(RMSNormGated):
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        z: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # 310P should not depend on the Triton-gated layernorm path.
+        # Reuse the upstream native implementation directly.
+        return super().forward_native(x, z)

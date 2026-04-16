@@ -43,7 +43,13 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         super().__init__(*args, **kwargs)
 
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int):
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ):
         """
         Determines the shape of the Key-Value (KV) cache tensor.
 

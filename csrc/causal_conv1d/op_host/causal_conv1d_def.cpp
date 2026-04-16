@@ -42,19 +42,28 @@ public:
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("queryStartLoc")
-            .ParamType(REQUIRED)
-            .DataTypeList({ge::DT_INT32})
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
+            .ValueDepend(OPTIONAL)
             .AutoContiguous();
         this->Input("cacheIndices")
-            .ParamType(REQUIRED)
-            .DataTypeList({ge::DT_INT32})
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
+            .ValueDepend(OPTIONAL)
             .AutoContiguous();
-        this->Input("hasInitialState")
-            .ParamType(REQUIRED)
-            .DataTypeList({ge::DT_BOOL})
+        this->Input("initialStateMode")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT64})
             .FormatList({ge::FORMAT_ND})
+            .ValueDepend(OPTIONAL)
+            .AutoContiguous();
+        this->Input("numAcceptedTokens")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT64})
+            .FormatList({ge::FORMAT_ND})
+            .ValueDepend(OPTIONAL)
             .AutoContiguous();
 
         this->Output("y")
@@ -65,6 +74,7 @@ public:
 
         this->Attr("activationMode").AttrType(OPTIONAL).Int(0);
         this->Attr("padSlotId").AttrType(OPTIONAL).Int(-1);
+        this->Attr("runMode").AttrType(OPTIONAL).Int(0);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

@@ -264,6 +264,7 @@ def test_deepseek3_2_w8a8_pruning_mtp_tp2_ep():
         additional_config={"layer_sharding": ["q_b_proj", "o_proj"]},
         reasoning_parser="deepseek_v3",
         tokenizer_mode="deepseek_v32",
+        gpu_memory_utilization=0.8,
     ) as vllm_model:
         vllm_model.generate_greedy(short_example_prompts, max_tokens)
         vllm_model.generate_greedy(long_example_prompts, max_tokens)
@@ -292,6 +293,7 @@ def test_deepseek3_2_w8a8c8_pruning_mtp_tp2_ep():
         additional_config={"layer_sharding": ["q_b_proj", "o_proj"], "enable_sparse_c8": True},
         reasoning_parser="deepseek_v3",
         tokenizer_mode="deepseek_v32",
+        gpu_memory_utilization=0.8,
     ) as vllm_model:
         vllm_model.generate_greedy(short_example_prompts, max_tokens)
         vllm_model.generate_greedy(long_example_prompts, max_tokens)

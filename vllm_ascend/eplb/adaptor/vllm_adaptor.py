@@ -30,11 +30,16 @@ from vllm_ascend.quantization.methods.base import QuantType
 class VllmEplbAdaptor:
     def __init__(self, model, **args):
         super().__init__(**args)
-        self.model = model
+        if hasattr(model, "language_model"):
+            self.model = model.language_model
+            self.config = model.config.text_config
+        else:
+            self.model = model
+            self.config = model.config
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
-        self.num_dense_layers = getattr(self.model.config, "first_k_dense_replace", 0)
-        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
+        self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
+        self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
 
@@ -80,7 +85,7 @@ class VllmEplbAdaptor:
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
-        for layer_idx in range(self.num_dense_layers, self.model.config.num_hidden_layers):
+        for layer_idx in range(self.num_dense_layers, self.config.num_hidden_layers):
             self.expert_param_per_layer[layer_idx] = list()
             moe_layer = getattr(self.model.model.layers[layer_idx], self.moe_attr_name)
             for name in self.expert_weight_names:

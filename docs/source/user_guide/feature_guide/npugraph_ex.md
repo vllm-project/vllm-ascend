@@ -4,7 +4,7 @@
 
 As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/4715), this is a simple ACLGraph graph mode acceleration solution based on Fx graphs.
 
-## Using npugraph_ex
+## Using Npugraph_ex
 
 Npugraph_ex will be enabled by default in the future, Take Qwen series models as an example to show how to configure it.
 
@@ -32,4 +32,4 @@ vllm serve Qwen/Qwen2-7B-Instruct
 --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":false}}'
 ```
 
-You can find more details about npugraph_ex [here](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)
+You can find more details about [npugraph_ex](https://www.hiascend.com/document/detail/zh/Pytorch/730/modthirdparty/torchairuseguide/torchair_00021.html)
