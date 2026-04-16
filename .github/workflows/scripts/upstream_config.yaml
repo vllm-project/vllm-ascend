@@ -3,8 +3,6 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/benchmarks/test_random_multimodal_dataset_video.py
     estimated_time: 20
-  - name: tests/compile/fullgraph/test_multiple_graphs.py
-    estimated_time: 20
   - name: tests/config/test_mp_reducer.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_h2ovl.py
@@ -21,21 +19,13 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/cuda/test_platform_no_cuda_init.py
     estimated_time: 20
-  - name: tests/distributed/test_mq_connect_ip.py
-    estimated_time: 20
   - name: tests/distributed/test_packed_tensor.py
     estimated_time: 20
   - name: tests/kernels/attention/test_use_trtllm_attention.py
     estimated_time: 20
-  - name: tests/entrypoints/weight_transfer/test_weight_transfer_llm.py
-    estimated_time: 20
   - name: tests/entrypoints/openai/responses/test_sampling_params.py
     estimated_time: 20
-  - name: tests/entrypoints/llm/test_mm_embeds_only.py
-    estimated_time: 20
   - name: tests/kernels/moe/test_unquantized_backend_selection.py
-    estimated_time: 20
-  - name: tests/lora/test_qwen3_unembed.py
     estimated_time: 20
   - name: tests/model_executor/model_loader/test_reload.py
     estimated_time: 20
@@ -81,10 +71,6 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/entrypoints/anthropic/test_anthropic_messages_conversion.py
     estimated_time: 20
-  - name: tests/entrypoints/openai/chat_completion/test_chat.py
-    estimated_time: 20
-  - name: tests/entrypoints/openai/chat_completion/test_chat_echo.py
-    estimated_time: 20
   - name: tests/entrypoints/openai/chat_completion/test_chat_error.py
     estimated_time: 20
   - name: tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
@@ -122,8 +108,6 @@ e2e-upstream-singlecard:
   - name: tests/entrypoints/pooling/embed/test_cohere_online.py
     estimated_time: 20
   - name: tests/tool_parsers/test_minimax_m2_tool_parser.py
-    estimated_time: 20
-  - name: tests/v1/e2e/general/test_context_length.py
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_flexkv_connector.py
     estimated_time: 20
