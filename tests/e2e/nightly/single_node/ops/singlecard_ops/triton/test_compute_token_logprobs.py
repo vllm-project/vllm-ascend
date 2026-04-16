@@ -1,8 +1,7 @@
 import random
 import torch
 import pytest
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs
 
 def torch_compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
