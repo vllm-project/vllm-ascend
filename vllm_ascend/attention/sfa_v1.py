@@ -1111,6 +1111,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 num_input_tokens=num_input_tokens,
             )
             k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            wait_for_kv_layer_from_connector(layer_name)
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
