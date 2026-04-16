@@ -360,10 +360,6 @@ class NPUWorker(WorkerBase):
             # on exit, but we override it below with this pre-graph value.
             profile_torch_peak = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
 
-            # Placeholder for step 3 (profile_npugraph_memory).
-            # Will be replaced with self.model_runner.profile_npugraph_memory().
-            npugraph_memory_estimate = 0
-
         # Override torch_peak_increase with the pre-graph-capture value to
         # avoid double-counting graph pool memory as activation memory.
         profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
@@ -374,13 +370,6 @@ class NPUWorker(WorkerBase):
         # Save per-category memory for use in compile_or_warm_up_model() (step 5).
         self.peak_activation_memory = profile_result.torch_peak_increase
         self.non_torch_memory = profile_result.non_torch_increase
-        self.npugraph_memory_estimate = npugraph_memory_estimate
-
-        # Only pre-deduct graph memory when the env var is explicitly enabled.
-        # Default is off; will align with vLLM upstream default (True) in a future version.
-        npugraph_memory_estimate_applied = (
-            npugraph_memory_estimate if envs_ascend.VLLM_ASCEND_MEMORY_PROFILER_ESTIMATE_NPUGRAPHS else 0
-        )
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
@@ -392,26 +381,11 @@ class NPUWorker(WorkerBase):
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container."
         )
-        self.available_kv_cache_memory_bytes = (
-            self.requested_memory - profile_result.non_kv_cache_memory - npugraph_memory_estimate_applied
-        )
-        unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
-        logger.info(
-            "Initial free memory: %s GiB; Requested memory: %f (util), %s GiB",
-            format_gib(self.init_snapshot.free_memory),
-            self.cache_config.gpu_memory_utilization,
-            format_gib(self.requested_memory),
-        )
-        logger.info(
-            "Free memory after profiling: %s GiB (total), %s GiB (within requested)",
-            format_gib(free_gpu_memory),
-            format_gib(free_gpu_memory - unrequested_memory),
-        )
+        self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %s GiB",
-            format_gib(self.available_kv_cache_memory_bytes),
-            scope="local",
+            "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
 
         return int(self.available_kv_cache_memory_bytes)
@@ -523,20 +497,7 @@ class NPUWorker(WorkerBase):
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()
 
-        # Block 1: Compare actual vs estimated NPU graph memory.
-        # Only printed when step 3 (profile_npugraph_memory) is implemented and
-        # produced a non-zero estimate.
-        if hasattr(self, "npugraph_memory_estimate") and self.npugraph_memory_estimate > 0:
-            diff = abs(npugraph_memory_bytes - self.npugraph_memory_estimate)
-            logger.info(
-                "NPU graph pool memory: %s GiB (actual), %s GiB (estimated), difference: %s GiB (%.1f%%).",
-                format_gib(npugraph_memory_bytes),
-                format_gib(self.npugraph_memory_estimate),
-                format_gib(diff),
-                100 * diff / max(npugraph_memory_bytes, 1),
-            )
-
-        # Block 2: Suggest an optimal --kv-cache-memory value for future runs.
+        # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
         # pre-specified) so that peak_activation_memory etc. are available.
         # non_kv_memory already includes NPU graph memory, so the suggestion
