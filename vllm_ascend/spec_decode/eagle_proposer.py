@@ -41,6 +41,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -48,7 +49,6 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 from vllm_ascend.ascend_config import get_ascend_config
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -891,7 +891,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             last_hidden_states, hidden_states = ret_hidden_states
 
-        if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
                 last_hidden_states, model_positions, hidden_states
             )
@@ -1065,7 +1064,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
             if get_ascend_config().enable_reduce_sample:
-                draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+                draft_token_ids = self.model.compute_logits(
+                    sample_hidden_states, get_ascend_config().enable_reduce_sample
+                )
             else:
                 logits = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
 

@@ -21,8 +21,8 @@
 # Reference: https://github.com/vllm-project/vllm-ascend/pull/6979
 
 import torch
-from vllm.triton_utils import tl, triton
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
@@ -81,11 +81,7 @@ def token_bin_counts_and_mask_kernel(
 
     local_token = token - vocab_start_idx
 
-    token_in_range = (
-        pos_mask
-        & (token >= vocab_start_idx)
-        & (local_token < vocab_size)
-    )
+    token_in_range = pos_mask & (token >= vocab_start_idx) & (local_token < vocab_size)
 
     count_ptr = batch_counts_start + local_token * counts_vocab_stride
     tl.atomic_add(count_ptr, 1, mask=token_in_range)
