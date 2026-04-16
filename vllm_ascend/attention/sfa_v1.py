@@ -24,7 +24,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.backend import AscendAttentionBackend, FiaExtraInputPreparer
+from vllm_ascend.attention.backend import BaseAscendAttentionBackend, FiaExtraInputPreparer
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 
-class AscendSFABackend(AttentionBackend):
+class AscendSFABackend(BaseAscendAttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod

@@ -41,7 +41,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.backend import AscendAttentionBackend, FiaExtraInputPreparer
+from vllm_ascend.attention.backend import BaseAscendAttentionBackend, FiaExtraInputPreparer
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -64,7 +64,7 @@ SWA_INT_MAX = 2147483647
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
-class AscendAttentionBackend(AscendAttentionBackend):
+class AscendAttentionBackend(BaseAscendAttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
