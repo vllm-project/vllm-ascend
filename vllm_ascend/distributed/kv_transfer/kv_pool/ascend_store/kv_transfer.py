@@ -126,6 +126,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         kv_role: str,
         ready_event: threading.Event,
         enable_kv_event: bool = False,
+        worker: Any = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -134,6 +135,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.kv_role = kv_role
         self.stored_requests = defaultdict[str, int](int)
         self.enable_kv_event = enable_kv_event
+        self.worker = worker
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -150,6 +152,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
 
     def _handle_request(self, req_meta: ReqMeta):
+        if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
+            try:
+                self.worker._store_kv_tp_mismatch(req_meta)
+            finally:
+                self.request_queue.task_done()
+            return
         token_len = req_meta.token_len_chunk
         block_ids = req_meta.block_ids
         req_id = req_meta.req_id
@@ -255,10 +263,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
+        worker: Any = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
         )
+        self.worker = worker
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
@@ -268,18 +278,24 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             // self.block_size
             * self.block_size
         )
-        addr_list = []
-        size_list = []
-        key_list = []
-        for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes, mask_num):
-            addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
-            key_list.append(key.to_string())
-            addr_list.append(addr)
-            size_list.append(size)
-        key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-        addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-        size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-        self.m_store.get(key_list_c, addr_list_c, size_list_c)
+
+        if self.worker is not None and self.worker.tp_mismatch:
+            self.worker._load_kv_tp_mismatch(
+                req_meta.block_hashes, req_meta.block_ids, token_len, mask_num
+            )
+        else:
+            addr_list = []
+            size_list = []
+            key_list = []
+            for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes, mask_num):
+                addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+            key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
+            addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
+            size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
+            self.m_store.get(key_list_c, addr_list_c, size_list_c)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
 
