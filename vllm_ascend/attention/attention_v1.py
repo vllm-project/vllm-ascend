@@ -50,6 +50,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
+    get_draft_graph_prefill_params,
     get_graph_params,
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
@@ -406,7 +407,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
-                graph_params = get_draft_graph_params()
+                if _EXTRA_CTX.is_draft_model_prefill:
+                    graph_params = get_draft_graph_prefill_params()
+                else:
+                    graph_params = get_draft_graph_params()
             else:
                 graph_params = get_graph_params()
             with torch.npu.stream(update_stream):
@@ -458,7 +462,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             # FIA update logic
             if _EXTRA_CTX.is_draft_model:
-                graph_params = get_draft_graph_params()
+                if _EXTRA_CTX.is_draft_model_prefill:
+                    graph_params = get_draft_graph_prefill_params()
+                else:
+                    graph_params = get_draft_graph_params()
                 attn_metadata = draft_attn_metadatas
                 attn_keys = list(attn_metadata[0].keys())
             else:
@@ -554,7 +561,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
+            if _EXTRA_CTX.is_draft_model_prefill:
+                graph_params = get_draft_graph_prefill_params()
+            else:
+                graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
