@@ -366,9 +366,9 @@
 #
 # ** 12. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `torchair.core._concrete_graph.ValuePack`,
-#      `torchair.npu_fx_compiler._unpack_meta`,
-#      `torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu`
+#   1. `npugraph_ex.core._concrete_graph.ValuePack`,
+#      `npugraph_ex.npu_fx_compiler._unpack_meta`,
+#      `npugraph_ex.npu_fx_compiler._NpuGraphConverter._unpack_npu`
 #    Why:
 #       In the Triton scenario, npugraph_ex backend needs to process the value pack of the input parameters.
 #    How：
