@@ -40,7 +40,7 @@ It is recommended to place the model weight in a shared cache directory, such as
 You can use the official docker image for deployment:
 
 ```bash
-export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
   --name vllm-ascend \
   --shm-size=1g \
