@@ -160,10 +160,7 @@ class PyHcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
-        if src == self.rank:
-            buffer = buffer_type(tensor.data_ptr())
-        else:
-            buffer = buffer_type(tensor.data_ptr())
+        buffer = buffer_type(tensor.data_ptr())
         self.hccl.hcclBroadcast(
             buffer,
             tensor.numel(),

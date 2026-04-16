@@ -215,46 +215,46 @@ The 910B4 device supports inference using the PaddlePaddle framework.
 
 1. Pull the PaddlePaddle-compatible CANN image
 
-```bash
-docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
-```
+    ```bash
+    docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
+    ```
 
-Start the container using the following command:
+    Start the container using the following command:
 
-```bash
-docker run -it --name paddle-npu-dev -v $(pwd):/work \
-    --privileged --network=host --shm-size=128G -w=/work \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -e ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
-    ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
-```
+    ```bash
+    docker run -it --name paddle-npu-dev -v $(pwd):/work \
+        --privileged --network=host --shm-size=128G -w=/work \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -e ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
+        ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
+    ```
 
 2. Install [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
 
-```bash
-python -m pip install paddlepaddle==3.2.0
-wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-pip  install  paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-python -m pip install -U "paddleocr[doc-parser]"
-pip install safetensors
-```
+    ```bash
+    python -m pip install paddlepaddle==3.2.0
+    wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+    pip  install  paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+    python -m pip install -U "paddleocr[doc-parser]"
+    pip install safetensors
+    ```
 
-:::{note}
-The OpenCV component may be missing:
+    :::{note}
+    The OpenCV component may be missing:
 
-```bash
-apt-get update
-apt-get install -y libgl1 libglib2.0-0
-```
+    ```bash
+    apt-get update
+    apt-get install -y libgl1 libglib2.0-0
+    ```
 
-CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
+    CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
 
-```bash
-python -m pip install numpy==1.26.4
-python -m pip install opencv-python==3.4.18.65
-```
+    ```bash
+    python -m pip install numpy==1.26.4
+    python -m pip install opencv-python==3.4.18.65
+    ```
 
 ::::
 ::::{tab-item} OM inference

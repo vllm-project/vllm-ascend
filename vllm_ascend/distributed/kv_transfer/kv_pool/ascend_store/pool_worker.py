@@ -20,7 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
-    LasyerMultiBlockReqMeta,
+    LayerMultiBlockReqMeta,
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -403,7 +403,7 @@ class KVPoolWorker:
                     if not is_finish:
                         logger.info("Layerwise get failed")
                 self.get_event.clear()
-                req_meta = LasyerMultiBlockReqMeta(
+                req_meta = LayerMultiBlockReqMeta(
                     request.req_id, keys_multi_chunk, starts, ends, request.block_ids, layer_id
                 )
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr, call-arg]
@@ -459,7 +459,7 @@ class KVPoolWorker:
         if keys:
             keys = [list(row) for row in zip(*keys)]  # [layer_num,block_num]
             for layer_id, keys_multi_chunk in enumerate(keys):
-                req_meta = LasyerMultiBlockReqMeta(
+                req_meta = LayerMultiBlockReqMeta(
                     request.req_id,
                     keys_multi_chunk,
                     starts,
@@ -606,8 +606,9 @@ class KVPoolWorker:
                     )
                     multi_tp_keys.append(new_str)
 
+            pp_base_keys = multi_tp_keys.copy()
             for i in range(1, self.pp_size):
-                for item in keys:
+                for item in pp_base_keys:
                     new_str = item.replace(  # type: ignore[attr-defined]
                         "@pp_rank:0", f"@pp_rank:{i}", 1
                     )

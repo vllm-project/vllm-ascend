@@ -101,7 +101,7 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
     ):
         if use_mxfp_quant:
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         if dynamic_scale is None:
             return torch_npu.npu_dynamic_quant(hidden_states)
@@ -118,9 +118,11 @@ class BaseDeviceAdaptor:
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
+        act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
     ):
         if use_mxfp_quant:
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         return torch_npu.npu_grouped_matmul_swiglu_quant(
             x=x,
@@ -143,7 +145,7 @@ class BaseDeviceAdaptor:
         use_mxfp_quant: bool = False,
     ) -> dict:
         if use_mxfp_quant:
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         return {
             "output_dtype": input_dtype if input_dtype in [torch.bfloat16, torch.float16] else torch.bfloat16,
@@ -170,7 +172,7 @@ class BaseDeviceAdaptor:
         fallback_output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         if use_mxfp_quant:
-            raise RuntimeError("MXFP8 MoE quantization is only supported on Ascend A5.")
+            raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
         if fallback_output_dtype is None:
             fallback_output_dtype = weight_scale[0].dtype if isinstance(weight_scale, list) else weight_scale.dtype
@@ -241,7 +243,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if scale is None or scale.ndim != 2:
             return scale
         if scale.shape[-1] % 2 != 0:
-            raise ValueError(f"Invalid MXFP8 scale shape: {tuple(scale.shape)}")
+            raise ValueError(f"Invalid MXFP scale shape: {tuple(scale.shape)}")
         return scale.reshape(scale.shape[0], scale.shape[1] // 2, 2)
 
     @staticmethod
@@ -307,6 +309,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         x_scale: torch.Tensor,
         bias=None,
         use_mxfp_quant: bool = False,
+        act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
+        weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
     ):
         if not use_mxfp_quant:
             return BaseDeviceAdaptor.npu_grouped_matmul_swiglu_quant(
@@ -328,7 +332,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             dequant_mode=2,
             quant_mode=2,
             dequant_dtype=torch.float32,
-            quant_dtype=torch.float8_e4m3fn,
+            quant_dtype=act_quant_type,
+            x_dtype=act_quant_type,
+            weight_dtype=weight_quant_type,
             weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
             x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
         )
