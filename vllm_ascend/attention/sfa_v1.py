@@ -35,6 +35,7 @@ from vllm_ascend.attention.utils import (
     transdata,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.attention.backend import AscendAttentionBackend, FiaExtraInputPreparer
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.layer_shard_linear import (
@@ -65,7 +66,7 @@ if TYPE_CHECKING:
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 
-class AscendSFABackend(AttentionBackend):
+class AscendSFABackend(AscendAttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -100,6 +101,10 @@ class AscendSFABackend(AttentionBackend):
 
             return AscendSFACPImpl
         return AscendSFAImpl
+    
+    @staticmethod
+    def get_extra_input_Preparer() -> FiaExtraInputPreparer:
+        raise FiaExtraInputPreparer()
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:

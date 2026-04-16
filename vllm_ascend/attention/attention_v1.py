@@ -53,6 +53,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     using_paged_attention,
 )
+from vllm_ascend.attention.backend import AscendAttentionBackend, FiaExtraInputPreparer
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -70,7 +71,7 @@ SWA_INT_MAX = 2147483647
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
-class AscendAttentionBackend(AttentionBackend):
+class AscendAttentionBackend(AscendAttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -95,6 +96,10 @@ class AscendAttentionBackend(AttentionBackend):
 
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
+    
+    @staticmethod
+    def get_extra_input_Preparer() -> FiaExtraInputPreparer:
+        raise FiaExtraInputPreparer()
 
     @staticmethod
     def get_kv_cache_shape(
@@ -354,7 +359,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         return attn_metadata
 
 
-class AscendAttentionBackendImpl(AttentionImpl):
+class AscendAttentionBackendImpl(AttentionImpl, ):
     def __init__(
         self,
         num_heads: int,
