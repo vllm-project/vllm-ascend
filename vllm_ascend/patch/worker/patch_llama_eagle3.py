@@ -1,7 +1,7 @@
-import numpy as np
 import torch
-from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+
 
 def compute_logits(
     self,
@@ -12,8 +12,7 @@ def compute_logits(
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             assert logits.shape[1] == self.config.vocab_size, (
-                "Expected logits to have shape "
-                f"(*, {self.config.vocab_size}), but got {logits.shape}"
+                f"Expected logits to have shape (*, {self.config.vocab_size}), but got {logits.shape}"
             )
             return logits
         logits = logits.contiguous()
@@ -24,8 +23,7 @@ def compute_logits(
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             assert logits.shape[1] == self.config.vocab_size, (
-                "Expected logits to have shape "
-                f"(*, {self.config.vocab_size}), but got {logits.shape}"
+                f"Expected logits to have shape (*, {self.config.vocab_size}), but got {logits.shape}"
             )
             return logits
 
@@ -41,6 +39,7 @@ def compute_logits(
         logits_new[:, targets] = logits
         return logits_new
 
+
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
     B, V_local = logits.shape
@@ -53,12 +52,10 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
 
     # [B, world_size]
     gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
-    gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1) # [B, world_size]
+    gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
     global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
-    target_argmax = gathered_global_idx.gather(
-        dim=-1,
-        index=global_max_rank.unsqueeze(-1)
-    ).squeeze(-1) # [B]
+    target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
     return target_argmax
+
 
 Eagle3LlamaForCausalLM.compute_logits = compute_logits
