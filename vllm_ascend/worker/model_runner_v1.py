@@ -3181,8 +3181,21 @@ class NPUModelRunner(GPUModelRunner):
 
                         target_idx += math.prod(target_shape) * get_dtype_size(dtype)
                         tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
+                        
+                        num_element_per_page = (
+                            current_kv_cache_spec.page_size_bytes // get_dtype_size(dtype)
+                        )
+                        stride = torch.empty(target_shape).stride()
+                        target_stride = (num_element_per_page, *stride[1:])
+                        tensor = torch.as_strided(
+                            tensor.view(dtype),
+                            size=target_shape,
+                            stride=target_stride,
+                            storage_offset=storage_offset_bytes // get_dtype_size(dtype),
+                        )
                         start_idx = target_idx
                         state_tensors.append(tensor)
+                        storage_offset_bytes += stride[0] *  get_dtype_size(dtype),
                     kv_caches[layer_name] = state_tensors
                 else:
                     raise ValueError("Unknown KV cache spec type.")
