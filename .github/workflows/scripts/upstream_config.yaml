@@ -73,8 +73,6 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/entrypoints/openai/chat_completion/test_chat_error.py
     estimated_time: 20
-  - name: tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
-    estimated_time: 20
   - name: tests/entrypoints/openai/chat_completion/test_serving_chat_stream_harmony.py
     estimated_time: 20
   - name: tests/test_zen_cpu_platform_detection.py
@@ -86,8 +84,6 @@ e2e-upstream-singlecard:
   - name: tests/models/multimodal/processing/test_deepseek_ocr.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_audio_in_video.py
-    estimated_time: 20
-  - name: tests/models/multimodal/pooling/test_colpali.py
     estimated_time: 20
   - name: tests/models/language/pooling_mteb_test/test_ernie.py
     estimated_time: 20
@@ -115,4 +111,4 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_kv_connector_lifecycle.py
     estimated_time: 20
-    
+
