@@ -56,3 +56,4 @@ import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_c8  # noqa
 import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
