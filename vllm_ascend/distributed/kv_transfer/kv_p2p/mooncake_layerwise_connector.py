@@ -23,6 +23,7 @@ import torch
 import torch_npu
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -1163,26 +1164,56 @@ class MooncakeLayerwiseConnectorWorker:
                     use_kv_buffer = True
                     kv_buffer = kv_cache_tuple
             single_layer_meta = LayerMetadata([], [], [], [])
-            for single_kv_cache in kv_cache_tuple:
+            if envs.VLLM_USE_V2_MODEL_RUNNER:
+                (k_cache, v_cache) = kv_cache_tuple[0]
                 block_start_rank = 1
                 num_blocks = self.kv_cache_config.num_blocks
-                tensor_num_blocks = single_kv_cache.shape[0]
+                tensor_num_blocks = k_cache.shape[0]
                 assert tensor_num_blocks % num_blocks == 0, (
                     "The external block size must be an integer multiple of the kernel block size."
                 )
                 block_size_scale = tensor_num_blocks // num_blocks
-                block_shape = single_kv_cache.shape[block_start_rank:]
+                block_shape = k_cache.shape[block_start_rank:]
+                
                 single_layer_meta.tensor_group_idx.append(layer_kv_group_id)
-                single_layer_meta.kv_caches_base_addr.append(single_kv_cache.data_ptr())
-                single_layer_meta.block_len.append(single_kv_cache.element_size() * math.prod(block_shape))
+                single_layer_meta.kv_caches_base_addr.append(k_cache.data_ptr())
+                single_layer_meta.block_len.append(k_cache.element_size() * math.prod(block_shape))
                 single_layer_meta.block_size_scale.append(block_size_scale)
+
+                single_layer_meta.tensor_group_idx.append(layer_kv_group_id)
+                single_layer_meta.kv_caches_base_addr.append(v_cache.data_ptr())
+                single_layer_meta.block_len.append(v_cache.element_size() * math.prod(block_shape))
+                single_layer_meta.block_size_scale.append(block_size_scale)
+
                 self.kernel_block_size_scale[layer2group_ids[layer_name]] = block_size_scale
-                if single_kv_cache.data_ptr() not in ptrs and not self.use_attn_mamba_hybrid:
-                    ptrs.append(single_kv_cache.data_ptr())
+                if k_cache.data_ptr() not in ptrs and not self.use_attn_mamba_hybrid:
+                    ptrs.append(k_cache.data_ptr())
                     lengths.append(
-                        num_blocks * single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
+                        2 * num_blocks * k_cache.element_size() * math.prod(block_shape) * block_size_scale
                     )
                 logger.info(f"layer: {layer_name}, num_blocks: {num_blocks}, block_shape: {block_shape}")
+            else:
+                for single_kv_cache in kv_cache_tuple:
+                    block_start_rank = 1
+                    num_blocks = self.kv_cache_config.num_blocks
+                    tensor_num_blocks = single_kv_cache.shape[0]
+                    assert tensor_num_blocks % num_blocks == 0, (
+                        "The external block size must be an integer multiple of the kernel block size."
+                    )
+                    block_size_scale = tensor_num_blocks // num_blocks
+                    block_shape = single_kv_cache.shape[block_start_rank:]
+                    single_layer_meta.tensor_group_idx.append(layer_kv_group_id)
+                    single_layer_meta.kv_caches_base_addr.append(single_kv_cache.data_ptr())
+                    single_layer_meta.block_len.append(single_kv_cache.element_size() * math.prod(block_shape))
+                    single_layer_meta.block_size_scale.append(block_size_scale)
+                    self.kernel_block_size_scale[layer2group_ids[layer_name]] = block_size_scale
+                    if single_kv_cache.data_ptr() not in ptrs and not self.use_attn_mamba_hybrid:
+                        ptrs.append(single_kv_cache.data_ptr())
+                        lengths.append(
+                            num_blocks * single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
+                        )
+                    logger.info(f"layer: {layer_name}, num_blocks: {num_blocks}, block_shape: {block_shape}")
+
             self.layer_metadata[layer_name] = single_layer_meta
 
         if self.use_attn_mamba_hybrid:
