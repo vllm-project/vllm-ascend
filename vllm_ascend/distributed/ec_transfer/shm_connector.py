@@ -80,7 +80,7 @@ class SHMConnector(ECConnectorBase):
 
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is not None:
-            self._storage_path = transfer_config.get_from_extra_config("shared_storage_path", "/tmp") 
+            self._storage_path = transfer_config.get_from_extra_config("shared_storage_path", "/tmp")
             logger.debug(transfer_config)
             logger.debug("Shared storage path is %s", self._storage_path)
         else:
@@ -124,7 +124,7 @@ class SHMConnector(ECConnectorBase):
 
         if not rpc.api._is_current_rpc_agent_set():
             logger.info(
-                 f"Init RPC: {self.rpc_name} (Global Rank {self.rpc_rank}) Target Master: {self.ec_ip}:{master_port}"
+                f"Init RPC: {self.rpc_name} (Global Rank {self.rpc_rank}) Target Master: {self.ec_ip}:{master_port}"
             )
             options = NPUTensorPipeRpcBackendOptions(init_method=f"tcp://{self.ec_ip}:{master_port}", rpc_timeout=30.0)
             rpc.init_rpc(
@@ -388,5 +388,4 @@ class SHMConnector(ECConnectorBase):
             for request_id in finished_req_ids:
                 gc.collect()
                 torch.cuda.empty_cache()
-
         return None, None
