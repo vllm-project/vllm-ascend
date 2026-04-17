@@ -2,7 +2,7 @@
 
 ## Committers
 
-| Name | Github ID | Date |
+| Name | GitHub ID | Date |
 |:-----------:|:-----:|:-----:|
 | Xiyuan Wang | [@wangxiyuan](https://github.com/wangxiyuan) | 2025/01 |
 | Yikun Jiang| [@Yikun](https://github.com/Yikun) | 2025/02 |

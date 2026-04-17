@@ -30,11 +30,6 @@ on:
         default: "2"
         type: string
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
-      vllm_version:
-        required: false
-        default: "v0.18.0"
-        type: string
-        description: vllm version to use
       vllm_ascend_remote_url:
         required: false
         default: https://github.com/vllm-project/vllm-ascend.git
@@ -58,9 +53,18 @@ on:
         type: string
         default: ''
         description: job name used as benchmark artifact identifier, defaults to config_file_path stem
+      vllm_ascend_branch:
+        required: false
+        type: string
+        default: ''
+        description: branch name used as prefix in artifact names to distinguish dual-branch test runs
     secrets:
       KUBECONFIG_B64:
         required: true
+      OBS_ACCESS_KEY:
+        required: false
+      OBS_SECRET_KEY:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -105,20 +109,40 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set job variables
+        id: vars
         run: |
           # Derive a unique, valid k8s resource name from config_file_path.
           # Append 6-char random suffix to avoid conflicts; total length capped at 63 chars.
 
           config_file="${{ inputs.config_file_path }}"
-          lws_suffix=$(echo "$config_file" | sed 's/\.yaml$//' | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
+          config_stem="${config_file%.yaml}"
+          lws_suffix=$(echo "$config_stem" | tr '[:upper:]' '[:lower:]' | tr '._' '-' | cut -c1-43)
           rand_suffix=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-6)
           LWS_NAME="vllm-${lws_suffix}-${rand_suffix}"
+
+          branch="${{ inputs.vllm_ascend_branch }}"
+          if [ -n "$branch" ]; then
+            ARTIFACT_NAME="${branch}-${config_stem}-ascend-logs"
+          else
+            ARTIFACT_NAME="${config_stem}-ascend-logs"
+          fi
+
+          job_name="${{ inputs.name }}"
+          if [ -z "$job_name" ]; then
+            job_name="$config_stem"
+          fi
+          BENCHMARK_JOB_NAME="${branch}-${job_name}"
 
           {
             echo "LWS_NAME=${LWS_NAME}"
             echo "LEADER_POD=${LWS_NAME}-0"
             echo "LOG_PREFIX=${{ inputs.ascend_log_prefix }}/${LWS_NAME}"
           } >> $GITHUB_ENV
+
+          {
+            echo "artifact_name=${ARTIFACT_NAME}"
+            echo "benchmark_job_name=${BENCHMARK_JOB_NAME}"
+          } >> $GITHUB_OUTPUT
 
       - name: Prepare scripts
         run: |
@@ -164,7 +188,6 @@ jobs:
           config_file_path="${{ inputs.config_file_path }}"
           fail_tag="FAIL_TAG_${{ inputs.config_file_path }}"
           is_pr_test="${{ github.event_name == 'pull_request' }}"
-          vllm_version="${{ inputs.vllm_version }}"
           vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
           vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
           runner="${{ inputs.soc_version }}"
@@ -178,10 +201,7 @@ jobs:
             pvc_name=vllm-project-hk001
           fi
 
-          benchmark_job_name="${{ inputs.name }}"
-          if [ -z "$benchmark_job_name" ]; then
-            benchmark_job_name="${config_file_path%.yaml}"
-          fi
+          benchmark_job_name="${{ steps.vars.outputs.benchmark_job_name }}"
 
           jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
             -D lws_name="$LWS_NAME" \
@@ -193,7 +213,6 @@ jobs:
             -D npu_per_node="$npu_per_node" \
             -D fail_tag="$fail_tag" \
             -D is_pr_test="$is_pr_test" \
-            -D vllm_version="$vllm_version" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
             -D pvc_name="$pvc_name" \
@@ -287,9 +306,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/benchmark_results
-          echo "Fetching benchmark results from PVC at /root/.cache/benchmark_results/${{ inputs.name }}..."
+          echo "Fetching benchmark results from PVC at /root/.cache/benchmark_results/${{ steps.vars.outputs.benchmark_job_name }}..."
           # Copy from PVC mounted directory (persists after pod termination)
-          SRC="/root/.cache/benchmark_results/${{ inputs.name }}"
+          SRC="/root/.cache/benchmark_results/${{ steps.vars.outputs.benchmark_job_name }}"
           if [ -d "$SRC" ] && [ "$(ls -A "$SRC" 2>/dev/null)" ]; then
             cp -r "$SRC"/. /tmp/benchmark_results/
             echo "Benchmark results fetched successfully from PVC:"
@@ -362,9 +381,21 @@ jobs:
 
       - name: Upload Ascend logs
         if: always()
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY }}
+          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          name: ${{ inputs.config_file_path }}-ascend-logs
+          path: /tmp/ascend-logs.tar.gz
+          retention-days: 7
+
+      - name: Upload Ascend logs (GitHub Artifacts)
+        if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.config_file_path }}-ascend-logs
+          name: ${{ steps.vars.outputs.artifact_name }}
           path: /tmp/ascend-logs.tar.gz
           retention-days: 7
 
@@ -375,9 +406,22 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY }}
+          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /tmp/benchmark_results/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload benchmark results (GitHub Artifacts)
+        if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-test-benchmark-results-${{ inputs.name || inputs.config_file_path }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          name: nightly-test-benchmark-results-${{ steps.vars.outputs.benchmark_job_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
           if-no-files-found: warn
           retention-days: 90

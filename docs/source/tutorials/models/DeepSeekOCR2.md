@@ -112,7 +112,7 @@ Single-node deployment is recommended.
 
 ### Prefill-Decode Disaggregation
 
-We don't neel to Prefill-Decode disaggregation
+We don't need to Prefill-Decode disaggregation
 
 ## Functional Verification
 
@@ -154,7 +154,7 @@ Here are two accuracy evaluation methods.
 
 ### Using Language Model Evaluation Harness
 
-Not test yet.
+Not tested yet.
 
 ## Performance
 
