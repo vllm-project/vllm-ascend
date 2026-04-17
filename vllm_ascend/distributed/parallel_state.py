@@ -126,7 +126,6 @@ def init_ascend_model_parallel(
             parallel_config.data_parallel_master_ip,
             backend,
             coord_store=coord_store,
-            use_device_communicator=False,
         )
     else:
         _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
@@ -140,7 +139,6 @@ def init_ascend_model_parallel(
                 parallel_config.data_parallel_master_ip,
                 backend,
                 coord_store=coord_store,
-                use_device_communicator=False,
             )
         else:
             _DYNAMIC_EPLB = init_model_parallel_group(
@@ -156,7 +154,6 @@ def init_ascend_model_parallel(
                 parallel_config.data_parallel_master_ip,
                 backend,
                 coord_store=coord_store,
-                use_device_communicator=False,
             )
         else:
             _FC3_QUANT_X = init_model_parallel_group(

@@ -25,7 +25,6 @@ from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
-from vllm_ascend.distributed.utils import stateless_batch_isend_irecv
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -142,11 +141,8 @@ class EplbUpdator:
         self.update_iteration()
 
     def compute_and_set_moe_load(self):
-        self.world_size = self.comm_group.world_size
-        local_load = self.adaptor.get_rank_expert_workload().cpu()
-        gather_buffer = [torch.empty_like(local_load) for _ in range(self.world_size)]
-        self.comm_group.cpu_group.allgather(gather_buffer, local_load).wait()
-        moe_load = torch.stack(gather_buffer).permute(1, 0, 2)
+        local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
+        moe_load = self.comm_group.all_gather(local_load, dim=1).cpu()
 
         if self.multi_stage:
             moe_load = moe_load.permute(2, 0, 1, 3)
@@ -170,48 +166,17 @@ class EplbUpdator:
 
         comm_op_list = []
 
-        if self.is_stateless:
-            tag = 0
-            tag_dict = dict()
-            for src_rank in range(self.world_size):
-                for dst_rank in range(self.world_size):
-                    if src_rank != dst_rank:
-                        tag_dict[(src_rank, dst_rank)] = tag
-                        tag += 1
-
         for dst_rank in range(self.world_size):
             if dst_rank == self.rank_id:
                 continue
-            if self.is_stateless:
-                op = object.__new__(dist.P2POp)
-                op.group = self.comm_group.device_group
-                op.op = op.group.send
-                op.tensor = src_tensor
-                op.group_peer = dst_rank
-                op.tag = tag_dict[(self.rank_id, dst_rank)]
-                comm_op_list.append(op)
-            else:
-                comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group))
+            comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank, group=self.comm_group.device_group))
 
         for src_rank in range(self.world_size):
             if src_rank == self.rank_id:
                 continue
-            if self.is_stateless:
-                op = object.__new__(dist.P2POp)
-                op.group = self.comm_group.device_group
-                op.op = op.group.recv
-                op.tensor = src_tensor
-                op.group_peer = src_rank
-                op.tag = tag_dict[(src_rank, self.rank_id)]
-                comm_op_list.append(op)
-            else:
-                comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank, group=self.comm_group.device_group))
+            comm_op_list.append(dist.P2POp(dist.irecv, src_tensor, src_rank, group=self.comm_group.device_group))
         if comm_op_list:
-            if self.is_stateless:
-                comm_op_list = sorted(comm_op_list, key=lambda op: op.tag)
-                reqs = stateless_batch_isend_irecv(comm_op_list)
-            else:
-                reqs = dist.batch_isend_irecv(comm_op_list)
+            reqs = dist.batch_isend_irecv(comm_op_list)
 
         for req in reqs:
             req.wait()

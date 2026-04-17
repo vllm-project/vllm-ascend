@@ -56,7 +56,6 @@ def create_ascend_standby_groups(
         master_ip,
         backend,
         coord_store=coord_store,
-        use_device_communicator=False,
     )
 
     if get_ascend_config().eplb_config.dynamic_eplb:
@@ -66,7 +65,6 @@ def create_ascend_standby_groups(
             master_ip,
             backend,
             coord_store=coord_store,
-            use_device_communicator=False,
         )
 
     if get_ascend_config().multistream_overlap_gate:
@@ -76,7 +74,6 @@ def create_ascend_standby_groups(
             master_ip,
             backend,
             coord_store=coord_store,
-            use_device_communicator=False,
         )
 
 
