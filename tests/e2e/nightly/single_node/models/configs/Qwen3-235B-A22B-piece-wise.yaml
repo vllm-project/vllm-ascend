@@ -1,0 +1,77 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+test_cases:
+  - name: "Qwen3-235B-A22B-piece-wise"
+    model: "Qwen/Qwen3-235B-A22B/Qwen3-235B-A22B"
+    envs: &envs
+      VLLM_USE_V1: "1"
+      TASK_QUEUE_ENABLE: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      SERVER_PORT: "DEFAULT_PORT"
+      VLLM_RPC_TIMEOUT: "300"
+      VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+    server_cmd: &server_cmd
+      - "--data-parallel-size"
+      - "8"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-model-len"
+      - "23552"
+      - "--max-num-seqs"
+      - "1024"
+      - "--additional-config"
+      - '{"enable_shared_expert_dp":false, "ascend_scheduler_config":{"enabled":false,"enable_chunked_prefill":true}}'
+      - "--compilation_config"
+      - '{"cudagraph_capture_sizes":[4,8,12,16,32,64,128]}'
+      - "--gpu-memory-utilization"
+      - "0.9"
+    benchmarks: &benchmarks
+      acc:
+        case_type: accuracy
+        dataset_path_local: vllm-ascend/math
+        request_conf: vllm_api_general_chat
+        dataset_conf: math/math500_gen_0_shot_cot_chat_prompt
+        max_out_len: 20480
+        batch_size: 128
+        temperature: "0"
+        num_prompts: 32
+        top_k: "-1"
+        top_p: 1
+        logprobs: 1
+        seed: 1234
+        baseline: 95
+        threshold: 5
+      acc2:
+        case_type: accuracy
+        dataset_path: vllm-ascend/math
+        request_conf: vllm_api_general_chat
+        dataset_conf: math/math500_gen_0_shot_cot_chat_prompt
+        max_out_len: 20480
+        batch_size: 128
+        temperature: "0"
+        num_prompts: 32
+        top_k: "-1"
+        top_p: 1
+        logprobs: 1
+        seed: 1234
+        baseline: 95
+        threshold: 5
+      acc3:
+        case_type: accuracy
+        dataset_path: vllm-ascend/math
+        request_conf: vllm_api_general_chat
+        dataset_conf: math/math500_gen_0_shot_cot_chat_prompt
+        max_out_len: 20480
+        batch_size: 128
+        temperature: "0"
+        num_prompts: 32
+        top_k: "-1"
+        top_p: 1
+        logprobs: 1
+        seed: 1234
+        baseline: 95
+        threshold: 5
