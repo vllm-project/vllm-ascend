@@ -10,8 +10,11 @@ import torch
 from numba import njit  # type: ignore
 from scipy import stats  # type: ignore
 from scipy.optimize import linear_sum_assignment  # type: ignore
+from vllm.logger import logger
 
-from .policy_abstract import DynamicConfig, EplbPolicy
+from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
+
+from .policy_abstract import EplbPolicy
 
 # Suppress numba log warnings
 numba_logger = logging.getLogger("numba")
@@ -501,44 +504,37 @@ class FlashTree:
         return final_deployment, deployed_replicas, final_par
 
 
+class FlashLBConfig:
+    layers_upper_bound: int = -1
+    z_score: float = stats.norm.ppf(0.75)
+    depth: int = 4
+    width: int = 8
+    sample_size: int = 64
+
+
 class FlashLB(EplbPolicy):
     """
     Flash Load Balancing (FlashLB) policy for expert deployment optimization
     Implements layered tree search with load balance score optimization
     """
 
-    def __init__(self, config: DynamicConfig):
+    def __init__(self):
         """
         Initialize FlashLB policy with dynamic configuration
 
         Args:
             config: Dynamic configuration object containing policy parameters
         """
-        super().__init__(config)
-        if config.ep_worldsize >= 32:
-            threshold_ratio = 0.9
-            threshold_value = 0.85
-        else:
-            threshold_ratio = 0.95
-            threshold_value = 0.9
+        self.update_threshold_ratio = 0.9
+        self.update_threshold_value = 0.85
+        self.true_update = False
 
-        # Max window size for expert hotness observation
-        self.max_observation_window = config.max_stage_window if hasattr(config, "max_stage_window") else 2000
-        # Threshold ratio for load balance update trigger
-        self.update_threshold_ratio = config.threshold_ratio if hasattr(config, "threshold_ratio") else threshold_ratio
-        # Threshold value for load balance update trigger
-        self.update_threshold_value = config.threshold_value if hasattr(config, "threshold_value") else threshold_value
-        # Upper bound of layers to update per iteration
-        self.update_layers_upper_bound = config.layers_upper_bound if hasattr(config, "layers_upper_bound") else -1
-        # Z-score for risk calculation (default: 75% confidence)
-        self.z_score = config.z_score if hasattr(config, "z_score") else stats.norm.ppf(0.75)
-        # Tree search depth for flash_tree algorithm
-        self.depth = config.depth if hasattr(config, "depth") else 4
-        # Tree search width for neighbor search
-        self.width = config.width if hasattr(config, "width") else 8
-        self.sample_size = (
-            config.sample_size if hasattr(config, "sample_size") else min(self.max_observation_window, 64)
-        )
+        config = FlashLBConfig()
+        self.update_layers_upper_bound = config.layers_upper_bound
+        self.z_score = config.z_score
+        self.depth = config.depth
+        self.width = config.width
+        self.sample_size = config.sample_size
 
         # Runtime state storage with type annotations
         self.average_to_peak_history: dict[int, float] = {}  # Layer-wise load balance history
@@ -864,12 +860,22 @@ class FlashLB(EplbPolicy):
             priority_idx: Indices of updated layers (sorted by improvement)
             new_deployment: Updated expert deployment matrix
         """
+        if not self.true_update:
+            try:
+                if get_dynamic_eplb_group().world_size < 32:
+                    self.update_threshold_ratio = 0.95
+                    self.update_threshold_value = 0.9
+                    self.true_update = True
+            except Exception:
+                logger.info("Dynamic eplb group is not initialized now")
         current_deployment = np.array(current_expert_table)
         expert_workload = np.array(expert_workload)
 
         # Add batch dimension if missing
         if expert_workload.ndim == 3:
             expert_workload = expert_workload[np.newaxis, ...]
+        self.max_observation_window = expert_workload.shape[0]
+        self.sample_size = min(self.max_observation_window, self.sample_size)
         num_layers = expert_workload.shape[1]
         num_expert = np.unique(current_deployment[0].reshape(-1)).shape[0]
         num_devices = current_deployment.shape[1]
@@ -1012,10 +1018,7 @@ def warm_up() -> None:
     Warm up FlashLB algorithm with dummy data
     Pre-compiles numba functions and initializes state
     """
-    exam_config = DynamicConfig()
-    exam_config.ep_worldsize = 32
-    exam_config.num_die_per_host = 16
-    algo = FlashLB(exam_config)
+    algo = FlashLB()
     # Generate dummy expert deployment tensor
     expert_tensor = generate_layered_experts(num_layers=58, layer_shape=(32, 9))
     # Run rebalance with dummy workload data
