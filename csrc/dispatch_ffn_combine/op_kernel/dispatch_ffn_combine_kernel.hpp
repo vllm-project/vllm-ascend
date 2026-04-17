@@ -836,17 +836,7 @@ private:
 
         uint32_t n2 = params.problemShape.k();
 
-        // typename BlockEpilogue2::Params epilogueParams{
-        //     static_cast<int32_t>(params.EP),
-        //     static_cast<int32_t>(params.expertPerRank),
-        //     static_cast<int32_t>(params.rank),
-        //     reinterpret_cast<__gm__ int32_t *>(shmem() + peermemInfo.offsetPeerTokenPerExpert),
-        //     params.layoutD2,
-        //     static_cast<int32_t>(n2),
-        //     static_cast<int32_t>(L1TileShape::N),
-        //     shmem,
-        //     static_cast<int32_t>(peermemInfo.offsetD)
-        // };
+
         typename BlockEpilogue2::Params epilogueParams{
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
@@ -894,24 +884,12 @@ private:
         }
 
         blockEpilogue1.Finalize();
-
-
-        //CombineSetFlag();
-
-        //CombineV2(params, blockEpilogue2);
         BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
         CombineV1(params, blockEpilogue2);
         AscendC::SyncAll<true>();
         #ifndef __CROSSRANKSYNCANDALLGATHERV1__
         ResetTokenPerExpert(params.EP * AlignUp(params.EP * params.expertPerRank, 128));
         #endif
-        //shmem.CrossRankSync();
-
-        // MoeTokenUnpermuteTilingData tilingData;
-        // MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum);
-        // KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
-        // kernelMoeTokenUnpermuteOp.Init(shmem() + peermemInfo.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
-        // kernelMoeTokenUnpermuteOp.Process();
 
         shmem.InitStatusTargetSum();
         if (get_subblockid() == 0) {
