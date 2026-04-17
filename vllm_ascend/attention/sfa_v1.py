@@ -418,7 +418,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.tp_rank = get_tp_group().rank_in_group
         self.q_b_proj = kwargs["q_b_proj"]
         self.skip_topk = kwargs.get("skip_topk", False)
-        self.use_index_cache = self.skip_topk
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
 
         ascend_config = get_ascend_config()
@@ -1260,7 +1259,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         topk_num_tokens = num_input_tokens or hidden_states.shape[0]
         if self.skip_topk:
             topk_indices = self._get_indexcache_topk_indices(topk_num_tokens)
-            logger.info("--- skip topk_indices --- ")
         else:
             topk_indices = self.indexer_select_post_process(
                 x=hidden_states,
