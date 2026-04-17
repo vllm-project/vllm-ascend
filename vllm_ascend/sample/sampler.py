@@ -91,7 +91,6 @@ class AscendSampler(Sampler):
             self.async_exponential_event.record()
         self.set_q_event(q, self.async_exponential_event)
 
-
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
         if get_ascend_config().enable_reduce_sample:
