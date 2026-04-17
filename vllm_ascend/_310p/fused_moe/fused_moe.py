@@ -172,7 +172,6 @@ class AscendFusedMoE310(FusedMoE):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
         self.quant_type = self.get_quant_type()
-
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
 
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
@@ -185,6 +184,7 @@ class AscendFusedMoE310(FusedMoE):
             kwargs.pop("gate", None),
             kwargs.pop("shared_experts", None),
             self.quant_method,
+            self.reduce_results if hasattr(self, "reduce_results") else True,
             self.vllm_config.parallel_config.enable_dbo,
         )
 
@@ -272,7 +272,7 @@ class AscendFusedMoE310(FusedMoE):
 
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
-            reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
+            reduce_results=self.reduce_results if hasattr(self, "reduce_results") else True,
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
 

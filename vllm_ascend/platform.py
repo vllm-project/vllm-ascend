@@ -658,6 +658,7 @@ class NPUPlatform(Platform):
         cudagraph_runtime_mode=None,
         batch_descriptor=None,
         ubatch_slices=None,
+        **kwargs,
     ) -> dict[str, Any]:
         """set additional forward context for ascend npus.
 
