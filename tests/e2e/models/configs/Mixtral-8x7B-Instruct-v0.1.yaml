@@ -1,0 +1,27 @@
+model_name: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+hardware: "Atlas A2 Series"
+
+# ===== 评测任务 =====
+tasks:
+  - name: "ceval-valid"
+    metrics:
+      - name: "acc,none"
+        value: 0.52
+
+# ===== few-shot =====
+num_fewshot: 5
+
+# ===== 推理参数 =====
+max_model_len: 4096
+trust_remote_code: True
+dtype: "float16"
+
+# ===== chat 行为 =====
+apply_chat_template: False
+fewshot_as_multiturn: False
+
+# ===== Ascend / vLLM 关键参数 =====
+tensor_parallel_size: 4
+enforce_eager: True
+block_size: 128
+gpu_memory_utilization: 0.7

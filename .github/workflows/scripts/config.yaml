@@ -166,5 +166,3 @@ e2e-multicard-4-cards:
   estimated_time: 1391
 - name: tests/e2e/multicard/4-cards/test_pipeline_parallel.py
   estimated_time: 679
-- name: tests/e2e/multicard/4-cards/test_profiling_chunk_performance.py
-  estimated_time: 1300
