@@ -7,7 +7,6 @@ from vllm.forward_context import ForwardContext
 from vllm.model_executor.layers.mla import MLAModules
 
 from tests.ut.base import TestBase
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
 
 
@@ -74,7 +73,6 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.mock_mla_modules.kv_a_layernorm = MagicMock()
         self.mock_mla_modules.kv_b_proj = MagicMock()
         self.mock_mla_modules.o_proj = MagicMock()
-        self.mock_mla_modules.topk_indices_buffer = torch.empty(8, 4, dtype=torch.int32)
 
         self.mock_cache_config = MagicMock(spec=CacheConfig)
         self.mock_quant_config = MagicMock()
@@ -90,7 +88,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_cls:
+        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
             mock_tp_size.return_value = 2
             mock_ascend_config.return_value.enable_shared_expert_dp = True
             mock_vllm_config = MagicMock(spec=VllmConfig)
@@ -112,15 +110,11 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 cache_config=self.mock_cache_config,
                 quant_config=self.mock_quant_config,
                 prefix=self.prefix,
-                skip_topk=True,
             )
 
             self.assertEqual(attn.tp_size, 2)
             self.assertTrue(attn.enable_shared_expert_dp)
             self.assertIsNotNone(attn.mla_attn)
-            kwargs = mock_mla_cls.call_args.kwargs
-            self.assertTrue(kwargs["skip_topk"])
-            self.assertIs(kwargs["topk_indices_buffer"], self.mock_mla_modules.topk_indices_buffer)
 
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
@@ -173,42 +167,3 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         output = attn.forward(positions, hidden_states)
 
         self.assertEqual(output.shape, (3, self.hidden_size))
-
-
-class TestAscendSFAImplIndexCache(TestBase):
-
-    def test_get_indexcache_topk_indices(self):
-        impl = object.__new__(AscendSFAImpl)
-        impl.topk_indices_buffer = torch.arange(24, dtype=torch.int32).view(6, 4)
-
-        topk_indices = impl._get_indexcache_topk_indices(3)
-
-        self.assertEqual(topk_indices.shape, (3, 1, 4))
-        self.assertTrue(torch.equal(topk_indices.squeeze(1), impl.topk_indices_buffer[:3]))
-
-    def test_get_indexcache_topk_indices_requires_buffer(self):
-        impl = object.__new__(AscendSFAImpl)
-        impl.topk_indices_buffer = None
-
-        with self.assertRaisesRegex(RuntimeError, "topk_indices_buffer"):
-            impl._get_indexcache_topk_indices(3)
-
-    def test_update_indexcache_topk_indices(self):
-        impl = object.__new__(AscendSFAImpl)
-        impl.topk_indices_buffer = torch.full((6, 4), -1, dtype=torch.int32)
-        topk_indices = torch.arange(12, dtype=torch.int32).view(3, 4)
-
-        impl._update_indexcache_topk_indices(topk_indices)
-
-        self.assertTrue(torch.equal(impl.topk_indices_buffer[:3], topk_indices))
-        self.assertTrue(torch.equal(impl.topk_indices_buffer[3:], torch.full((3, 4), -1, dtype=torch.int32)))
-
-    def test_update_indexcache_topk_indices_from_npu_shape(self):
-        impl = object.__new__(AscendSFAImpl)
-        impl.topk_indices_buffer = torch.full((6, 4), -1, dtype=torch.int32)
-        topk_indices = torch.arange(12, dtype=torch.int32).view(3, 1, 4)
-
-        impl._update_indexcache_topk_indices(topk_indices)
-
-        self.assertTrue(torch.equal(impl.topk_indices_buffer[:3], topk_indices.squeeze(1)))
-        self.assertTrue(torch.equal(impl.topk_indices_buffer[3:], torch.full((3, 4), -1, dtype=torch.int32)))
