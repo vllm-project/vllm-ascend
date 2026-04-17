@@ -404,7 +404,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         return cls(config)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> str | None:
+    def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config: Any = None) -> str | None:
         if hf_quant_cfg is not None:
             quant_method = hf_quant_cfg.get("quant_method", None)
             if not quant_method and torch.npu.is_available():
