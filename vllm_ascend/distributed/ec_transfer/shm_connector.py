@@ -21,13 +21,12 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
 )
 from vllm.distributed.parallel_state import get_world_group
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
 
-logger = init_logger(__name__)
 
 _LOCAL_CONNECTOR: Optional["SHMConnector"] = None
 
@@ -81,9 +80,7 @@ class SHMConnector(ECConnectorBase):
 
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is not None:
-            self._storage_path = transfer_config.get_from_extra_config(
-                "shared_storage_path", "/tmp"
-            )
+            self._storage_path = transfer_config.get_from_extra_config("shared_storage_path", "/tmp") 
             logger.debug(transfer_config)
             logger.debug("Shared storage path is %s", self._storage_path)
         else:
@@ -121,33 +118,27 @@ class SHMConnector(ECConnectorBase):
         if transfer_config.ec_role == "ec_producer":
             self.rpc_rank = engine_id * producer_single_size + vllm_local_rank
         else:
-            self.rpc_rank = (
-                producer_size + engine_id * consumer_single_size + vllm_local_rank
-            )
+            self.rpc_rank = producer_size + engine_id * consumer_single_size + vllm_local_rank
         self.rpc_name = f"worker_{self.rpc_rank}"
         master_port = str(self.listen_ports[0])
 
         if not rpc.api._is_current_rpc_agent_set():
-            logger.info(f"Init RPC: {self.rpc_name} (Global Rank {self.rpc_rank}) "
-                        f"Target Master: {self.ec_ip}:{master_port}")
-            options = NPUTensorPipeRpcBackendOptions(
-                init_method=f"tcp://{self.ec_ip}:{master_port}",
-                rpc_timeout=30.0
+            logger.info(
+                 f"Init RPC: {self.rpc_name} (Global Rank {self.rpc_rank}) Target Master: {self.ec_ip}:{master_port}"
             )
+            options = NPUTensorPipeRpcBackendOptions(init_method=f"tcp://{self.ec_ip}:{master_port}", rpc_timeout=30.0)
             rpc.init_rpc(
                 self.rpc_name,
                 backend=rpc.backend_registry.BackendType.NPU_TENSORPIPE,
                 rank=self.rpc_rank,
                 world_size=self.rpc_world_size,
-                rpc_backend_options=options
+                rpc_backend_options=options,
             )
 
         if transfer_config.ec_role == "ec_producer":
             self.send_queue: queue.Queue[tuple[str, torch.Tensor]] = queue.Queue()
             self._stop_event = threading.Event()
-            self.consumer_names = [
-                f"worker_{i}" for i in range(producer_size, self.rpc_world_size)
-            ]
+            self.consumer_names = [f"worker_{i}" for i in range(producer_size, self.rpc_world_size)]
             self.thread_executor = ThreadPoolExecutor(max_workers=self.max_workers)
             self.thread_executor.submit(self.producer_run)
 
@@ -161,9 +152,7 @@ class SHMConnector(ECConnectorBase):
                 try:
                     item = self.send_queue.get(timeout=1.0)
                     if item is None:
-                        logger.info(
-                            "Producer thread received sentinel value, exiting..."
-                        )
+                        logger.info("Producer thread received sentinel value, exiting...")
                         self.send_queue.task_done()
                         break
                     feat_key, tensor = item
@@ -381,9 +370,7 @@ class SHMConnector(ECConnectorBase):
             os.makedirs(foldername, exist_ok=True)
         return foldername
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[set[str] | None, set[str] | None]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
@@ -401,4 +388,5 @@ class SHMConnector(ECConnectorBase):
             for request_id in finished_req_ids:
                 gc.collect()
                 torch.cuda.empty_cache()
+
         return None, None
