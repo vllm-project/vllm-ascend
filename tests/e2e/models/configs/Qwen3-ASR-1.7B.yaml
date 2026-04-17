@@ -1,6 +1,6 @@
 model_name: "Qwen/Qwen3-ASR-1.7B"
 model_type: "vllm-asr"
-hardware: "Atlas A3 Series"
+hardware: "Atlas A2 Series"
 
 serve:
   tensor_parallel_size: 1

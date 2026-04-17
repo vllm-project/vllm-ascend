@@ -217,6 +217,8 @@ jobs:
             model_type=$(python3 -c "import yaml,sys; c=yaml.safe_load(open('${config_path}')); print(c.get('model_type','vllm'))" 2>/dev/null || echo "vllm")
             if [[ "$model_type" == "vllm-asr" ]]; then
               test_script="./tests/e2e/models/test_asr_eval_correctness.py"
+            elif [[ "$model_type" == "vllm-rm" ]]; then
+              test_script="./tests/e2e/models/test_rm_eval_correctness.py"
             else
               test_script="./tests/e2e/models/test_lm_eval_correctness.py"
             fi

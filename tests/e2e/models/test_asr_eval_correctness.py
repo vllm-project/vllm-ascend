@@ -1,23 +1,20 @@
 import io
 import os
+import string
 from dataclasses import dataclass
 
-import string
-
-import jiwer
+import jiwer  # type: ignore[import-untyped]
 import numpy as np
 import pytest
-import scipy.io.wavfile as wav_io
-import soundfile as sf
+import scipy.io.wavfile as wav_io  # type: ignore[import-untyped]
+import soundfile as sf  # type: ignore[import-untyped]
 import yaml
 from datasets import Audio
-from modelscope.msdatasets import MsDataset
-import huggingface_hub.constants as hf_constants
-import datasets.config as ds_config
 from jinja2 import Environment, FileSystemLoader
+from modelscope.msdatasets import MsDataset  # type: ignore[import-untyped]
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from vllm.utils.network_utils import get_open_port
 
 # Allow up to 10% relative deviation from the declared ground-truth WER.
 # ASR results have higher variance than classification tasks, so we use a
@@ -165,6 +162,7 @@ def generate_asr_report(
         rows=report_data["rows"],
         parallel_mode=parallel_mode,
         execution_model=execution_model,
+        show_command=False,
     )
 
     report_path = os.path.join(report_dir, f"{os.path.basename(eval_config['model_name'])}.md")
@@ -218,21 +216,11 @@ def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
 
             split_expr = f"{split}[:{limit}]" if limit is not None else split
             print(f"\nLoading dataset via modelscope: {dataset_name} / {dataset_config_name} ({split_expr})")
-            # MsDataset accesses ModelScope (not HuggingFace), but datasets/huggingface_hub
-            # cache HF_HUB_OFFLINE at import time and block all HTTP. Patch temporarily.
-            _orig_hf_offline = hf_constants.HF_HUB_OFFLINE
-            _orig_ds_offline = ds_config.HF_DATASETS_OFFLINE
-            hf_constants.HF_HUB_OFFLINE = False
-            ds_config.HF_DATASETS_OFFLINE = False
-            try:
-                ds = MsDataset.load(
-                    dataset_name,
-                    subset_name=dataset_config_name,
-                    split=split_expr,
-                )
-            finally:
-                hf_constants.HF_HUB_OFFLINE = _orig_hf_offline
-                ds_config.HF_DATASETS_OFFLINE = _orig_ds_offline
+            ds = MsDataset.load(
+                dataset_name,
+                subset_name=dataset_config_name,
+                split=split_expr,
+            )
             if limit is not None:
                 ds = ds.select(range(min(limit, len(ds))))
 
@@ -287,10 +275,7 @@ def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
                 success = success and task_success
 
                 status = "✅" if task_success else "❌"
-                print(
-                    f"{task_name} | wer: ground_truth={ground_truth} | "
-                    f"measured={measured_wer} | {status}"
-                )
+                print(f"{task_name} | wer: ground_truth={ground_truth} | measured={measured_wer} | {status}")
 
                 report_data["rows"].append(
                     {
