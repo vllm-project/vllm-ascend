@@ -4,9 +4,9 @@
 
 Prefix caching is an important feature in LLM inference that can reduce prefill computation time drastically.
 
-However, the performance gain from prefix caching is highly dependent on the cache hit rate, while the cache hit rate can be limited if one only uses HBM for KV cache storage.
+However, the performance gain from prefix caching is highly dependent on the cache hit rate, while the cache hit rate can be limited if one only uses on-chip memory for KV cache storage.
 
-Hence, KV Cache Pool is proposed to utilize various types of storage including HBM, DRAM, and SSD, making a pool for KV Cache storage while making the prefix of requests visible across all nodes, increasing the cache hit rate for all requests.
+Hence, KV Cache Pool is proposed to utilize various types of storage including on-chip memory, DRAM, and SSD, making a pool for KV Cache storage while making the prefix of requests visible across all nodes, increasing the cache hit rate for all requests.
 
 vLLM Ascend currently supports [MooncakeStore](https://github.com/kvcache-ai/Mooncake), one of the most recognized KV Cache storage engines.
 
@@ -22,26 +22,26 @@ For step-by-step deployment and configuration, please refer to the [KV Pool User
 
 ## How it works?
 
-The KV Cache Pool integrates multiple memory tiers (HBM, DRAM, SSD, etc.) through a connector-based architecture.
+The KV Cache Pool integrates multiple memory tiers (on-chip memory, DRAM, SSD, etc.) through a connector-based architecture.
 
 Each connector implements a unified interface for storing, retrieving, and transferring KV blocks between tiers, depending on access frequency and hardware bandwidth.
 
-When combined with vLLM's Prefix Caching mechanism, the pool enables efficient caching both locally (in HBM) and globally (via Mooncake), ensuring that frequently used prefixes remain hot while less frequently accessed KV data can spill over to lower-cost memory.
+When combined with vLLM's Prefix Caching mechanism, the pool enables efficient caching both locally (in on-chip memory) and globally (via Mooncake), ensuring that frequently used prefixes remain hot while less frequently accessed KV data can spill over to lower-cost memory.
 
-### 1. Combining KV Cache Pool with HBM Prefix Caching
+### 1. Combining KV Cache Pool with on-chip memory Prefix Caching
 
-Prefix Caching with HBM is already supported by the vLLM V1 Engine.
-By introducing KV Connector V1, users can seamlessly combine HBM-based Prefix Caching with Mooncake-backed KV Pool.
+Prefix Caching with on-chip memory is already supported by the vLLM V1 Engine.
+By introducing KV Connector V1, users can seamlessly combine on-chip memory-based Prefix Caching with Mooncake-backed KV Pool.
 
  The user can enable both features simply by enabling Prefix Caching, which is enabled by default in vLLM V1 unless the `--no_enable_prefix_caching` flag is set, and setting up the KV Connector for KV Pool (e.g., the MooncakeStoreConnector).
 
 **Workflow**:
 
-1. The engine first checks for prefix hits in the HBM cache.
+1. The engine first checks for prefix hits in the on-chip memory cache.
 
-2. After getting the number of hit tokens on HBM, it queries the KV Pool via the connector. If there are additional hits in the KV Pool, we get the **additional blocks only** from the KV Pool, and get the rest of the blocks directly from HBM to minimize the data transfer latency.
+2. After getting the number of hit tokens on on-chip memory, it queries the KV Pool via the connector. If there are additional hits in the KV Pool, we get the **additional blocks only** from the KV Pool, and get the rest of the blocks directly from on-chip memory to minimize the data transfer latency.
 
-3. After the KV Caches in the KV Pool are loaded into HBM, the remaining process is the same as Prefix Caching in HBM.
+3. After the KV Caches in the KV Pool are loaded into on-chip memory, the remaining process is the same as Prefix Caching in on-chip memory.
 
 ### 2. Combining KV Cache Pool with Mooncake PD Disaggregation
 
@@ -49,7 +49,7 @@ When used together with Mooncake PD (Prefill-Decode) Disaggregation, the KV Cach
 
 Currently, we only perform put and get operations of KV Pool for **Prefill Nodes**, and Decode Nodes get their KV Cache from Mooncake P2P KV Connector, i.e., MooncakeConnector.
 
-The key benefit of doing this is that we can keep the gain in performance by computing less with Prefix Caching from HBM and KV Pool for Prefill Nodes, while not sacrificing the data transfer efficiency between Prefill and Decode nodes with P2P KV Connector that transfers KV Caches between NPU devices directly.
+The key benefit of doing this is that we can keep the gain in performance by computing less with Prefix Caching from on-chip memory and KV Pool for Prefill Nodes, while not sacrificing the data transfer efficiency between Prefill and Decode nodes with P2P KV Connector that transfers KV Caches between NPU devices directly.
 
 To enable this feature, we need to set up both Mooncake Connector and MooncakeStore Connector with a Multi Connector, which is a KV Connector class provided by vLLM that can call multiple KV Connectors in a specific order.
 
