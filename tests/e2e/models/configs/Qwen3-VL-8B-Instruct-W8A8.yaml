@@ -3,8 +3,11 @@ model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
 
 serve:
+  tensor_parallel_size: 1
+  dtype: auto
   max_model_len: 8192
   gpu_memory_utilization: 0.8
+  trust_remote_code: false
   quantization: ascend
 
 tasks:
@@ -13,4 +16,7 @@ tasks:
   - name: "acc,none"
     value: 0.52
 
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
 batch_size: 32

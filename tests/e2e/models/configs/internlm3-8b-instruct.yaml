@@ -3,9 +3,11 @@ model_type: "vllm"
 hardware: "Atlas A2 Series"
 
 serve:
-  max_model_len: 2048
-  trust_remote_code: true
+  tensor_parallel_size: 1
   dtype: "bfloat16"
+  max_model_len: 2048
+  gpu_memory_utilization: 0.8
+  trust_remote_code: true
 
 tasks:
 - name: "ceval-valid"
@@ -16,3 +18,4 @@ tasks:
 num_fewshot: 5
 apply_chat_template: false
 fewshot_as_multiturn: false
+batch_size: "auto"

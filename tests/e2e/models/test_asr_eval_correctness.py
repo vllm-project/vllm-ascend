@@ -1,48 +1,32 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ASR (Automatic Speech Recognition) accuracy evaluation using Open ASR Leaderboard datasets.
-
-Evaluates WER (Word Error Rate) on speech datasets (LibriSpeech, etc.) by:
-1. Starting vllm serve with the ASR model via RemoteOpenAIServer
-2. Transcribing audio samples via POST /v1/audio/transcriptions
-3. Normalising hypotheses and references with the Whisper EnglishTextNormalizer
-4. Computing WER with jiwer and comparing against ground-truth thresholds
-
-Runs with the same --config / --config-list-file CLI options as test_lm_eval_correctness.py.
-Only processes configs that have model_type: "vllm-asr"; other configs are skipped.
-
-Usage:
-    pytest tests/e2e/models/test_asr_eval.py \
-        --config=tests/e2e/models/configs/Qwen3-ASR-1.7B.yaml \
-        --tp-size=1 \
-        --report-dir=./benchmarks/accuracy
-
-Reference: https://github.com/huggingface/open_asr_leaderboard
-"""
-
 import io
 import os
 from dataclasses import dataclass
+
+import string
 
 import jiwer
 import numpy as np
 import pytest
 import scipy.io.wavfile as wav_io
+import soundfile as sf
 import yaml
-from datasets import load_dataset
+from datasets import Audio
+from modelscope.msdatasets import MsDataset
+import huggingface_hub.constants as hf_constants
+import datasets.config as ds_config
 from jinja2 import Environment, FileSystemLoader
-from whisper.normalizers import EnglishTextNormalizer
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from vllm.utils.network_utils import get_open_port
 
 # Allow up to 10% relative deviation from the declared ground-truth WER.
 # ASR results have higher variance than classification tasks, so we use a
 # more generous tolerance than the 5% used in test_lm_eval_correctness.py.
-RTOL = 0.10
+RTOL = 0.03
 
 TEST_DIR = os.path.dirname(__file__)
 
-_NORMALIZER = EnglishTextNormalizer()
+_PUNCT_TABLE = str.maketrans("", "", string.punctuation)
 
 
 @dataclass
@@ -68,10 +52,6 @@ def env_config() -> EnvConfig:
         torch_npu_version=os.getenv("TORCH_NPU_VERSION", "unknown"),
     )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def build_serve_args(eval_config: dict) -> list[str]:
     """Convert the serve: section of the YAML into a vllm serve CLI args list.
@@ -117,8 +97,11 @@ def audio_to_wav_bytes(audio_array: np.ndarray, sample_rate: int) -> bytes:
 
 
 def normalize_text(text: str) -> str:
-    """Apply Whisper's EnglishTextNormalizer (lowercase + strip punctuation)."""
-    return _NORMALIZER(text)
+    """Normalize text for WER calculation: lowercase, strip punctuation, collapse whitespace."""
+    text = text.lower()
+    text = text.translate(_PUNCT_TABLE)
+    text = " ".join(text.split())
+    return text
 
 
 def transcribe_batch(client, model_name: str, audio_items: list[dict], language: str) -> list[str]:
@@ -190,10 +173,6 @@ def generate_asr_report(
         f.write(report_content)
 
 
-# ---------------------------------------------------------------------------
-# Main test
-# ---------------------------------------------------------------------------
-
 def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
     """Parametrised ASR accuracy test driven by a YAML config file.
 
@@ -212,18 +191,11 @@ def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
     # Build serve args, letting --tp-size CLI flag override the YAML value.
     serve_args = build_serve_args(eval_config)
     if tp_size and tp_size != "1":
-        # Remove any tensor-parallel-size already in serve_args and use CLI value.
-        filtered = []
-        skip_next = False
-        for arg in serve_args:
-            if skip_next:
-                skip_next = False
-                continue
-            if arg == "--tensor-parallel-size":
-                skip_next = True
-                continue
-            filtered.append(arg)
-        serve_args = filtered + ["--tensor-parallel-size", str(tp_size)]
+        # Drop any --tensor-parallel-size already in serve_args, then append
+        # the CLI-supplied value so it takes precedence over the YAML setting.
+        it = iter(serve_args)
+        serve_args = [a for a in it if a != "--tensor-parallel-size" or not next(it, None)]
+        serve_args += ["--tensor-parallel-size", str(tp_size)]
 
     print(f"\nStarting vllm serve for {model_name}")
     print(f"  serve args: {serve_args}")
@@ -231,7 +203,9 @@ def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
 
-    with RemoteOpenAIServer(model_name, serve_args) as server:
+    server_port = get_open_port()
+    serve_args = serve_args + ["--port", str(server_port)]
+    with RemoteOpenAIServer(model_name, serve_args, server_port=server_port, auto_port=False) as server:
         client = server.get_client()
 
         for task in eval_config["tasks"]:
@@ -242,15 +216,30 @@ def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
             audio_col: str = task.get("audio_column", "audio")
             text_col: str = task.get("text_column", "text")
 
-            print(f"\nLoading dataset: {dataset_name} / {dataset_config_name} ({split})")
-            ds = load_dataset(
-                dataset_name,
-                dataset_config_name,
-                split=split,
-                trust_remote_code=False,
-            )
+            split_expr = f"{split}[:{limit}]" if limit is not None else split
+            print(f"\nLoading dataset via modelscope: {dataset_name} / {dataset_config_name} ({split_expr})")
+            # MsDataset accesses ModelScope (not HuggingFace), but datasets/huggingface_hub
+            # cache HF_HUB_OFFLINE at import time and block all HTTP. Patch temporarily.
+            _orig_hf_offline = hf_constants.HF_HUB_OFFLINE
+            _orig_ds_offline = ds_config.HF_DATASETS_OFFLINE
+            hf_constants.HF_HUB_OFFLINE = False
+            ds_config.HF_DATASETS_OFFLINE = False
+            try:
+                ds = MsDataset.load(
+                    dataset_name,
+                    subset_name=dataset_config_name,
+                    split=split_expr,
+                )
+            finally:
+                hf_constants.HF_HUB_OFFLINE = _orig_hf_offline
+                ds_config.HF_DATASETS_OFFLINE = _orig_ds_offline
             if limit is not None:
                 ds = ds.select(range(min(limit, len(ds))))
+
+            # Disable automatic audio decoding so we can use soundfile instead
+            # of torchcodec (which requires CUDA libs unavailable on Ascend NPU).
+            if hasattr(ds, "cast_column"):
+                ds = ds.cast_column(audio_col, Audio(decode=False))
 
             print(f"  {len(ds)} samples to evaluate")
 
@@ -260,13 +249,18 @@ def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
 
             for batch_start in range(0, len(ds), batch_size):
                 batch = ds.select(range(batch_start, min(batch_start + batch_size, len(ds))))
-                audio_items = [
-                    {
-                        "audio_array": sample[audio_col]["array"],
-                        "sample_rate": sample[audio_col]["sampling_rate"],
-                    }
-                    for sample in batch
-                ]
+                audio_items = []
+                for sample in batch:
+                    raw = sample[audio_col]
+                    if isinstance(raw, dict) and "bytes" in raw and raw["bytes"] is not None:
+                        audio_array, sample_rate = sf.read(io.BytesIO(raw["bytes"]))
+                    elif isinstance(raw, dict) and "path" in raw and raw["path"] is not None:
+                        audio_array, sample_rate = sf.read(raw["path"])
+                    else:
+                        # Already decoded (e.g. MsDataset with native decoding)
+                        audio_array = raw["array"]
+                        sample_rate = raw["sampling_rate"]
+                    audio_items.append({"audio_array": audio_array, "sample_rate": sample_rate})
                 references = [sample[text_col] for sample in batch]
 
                 hypotheses = transcribe_batch(client, model_name, audio_items, language)
@@ -287,7 +281,9 @@ def test_asr_eval_param(config_filename, tp_size, report_dir, env_config):
                 if metric["name"] != "wer":
                     continue
                 ground_truth = metric["value"]
-                task_success = bool(np.isclose(ground_truth, measured_wer, rtol=RTOL))
+                # Pass if measured WER is at or below the threshold (better is OK);
+                # allow up to RTOL relative degradation above the threshold.
+                task_success = measured_wer <= ground_truth * (1 + RTOL)
                 success = success and task_success
 
                 status = "✅" if task_success else "❌"

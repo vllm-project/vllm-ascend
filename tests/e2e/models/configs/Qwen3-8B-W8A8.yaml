@@ -20,3 +20,6 @@ tasks:
     value: 0.82
 
 num_fewshot: 5
+apply_chat_template: true
+fewshot_as_multiturn: true
+batch_size: "auto"

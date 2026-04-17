@@ -3,9 +3,11 @@ model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
 
 serve:
-  max_model_len: 128000
   tensor_parallel_size: 2
+  dtype: auto
+  max_model_len: 128000
   gpu_memory_utilization: 0.7
+  trust_remote_code: false
   enable_expert_parallel: true
 
 tasks:
@@ -13,3 +15,8 @@ tasks:
   metrics:
   - name: "acc,none"
     value: 0.58
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"

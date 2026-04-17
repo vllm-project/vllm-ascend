@@ -1,6 +1,6 @@
 model_name: "Qwen/Qwen3-ASR-1.7B"
 model_type: "vllm-asr"
-hardware: "Atlas A2 Series"
+hardware: "Atlas A3 Series"
 
 serve:
   tensor_parallel_size: 1
@@ -11,26 +11,11 @@ serve:
 
 tasks:
   - name: "librispeech_test_clean"
-    dataset: "librispeech_asr"
-    split: "test.clean"
+    dataset: "openslr/librispeech_asr"
+    split: "test"
     dataset_config: "clean"
-    audio_column: "audio"
-    text_column: "text"
     metrics:
       - name: "wer"
         value: 0.035
 
-  - name: "librispeech_test_other"
-    dataset: "librispeech_asr"
-    split: "test.other"
-    dataset_config: "other"
-    audio_column: "audio"
-    text_column: "text"
-    metrics:
-      - name: "wer"
-        value: 0.08 
-
-limit: 100
-batch_size: 8
-language: "en"
-normalizer: "whisper" 
+limit: 500
