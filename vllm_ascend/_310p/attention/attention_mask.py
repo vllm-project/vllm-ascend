@@ -38,6 +38,7 @@ class AttentionMaskBuilder310:
         self.causal_attn_mask_cache = None
         self.non_causal_attn_mask_cache = None
         self.device = device
+        self._swa_mask_cache: dict[tuple, torch.Tensor] = {}
 
     @staticmethod
     def gen_causal_additive_mask(max_seq_len: int, device: torch.device):
@@ -113,6 +114,16 @@ class AttentionMaskBuilder310:
                 return self._get_non_causal_mask(self.max_seqlen, model_config.dtype)
 
         return self._get_causal_mask(self.max_seqlen)
+
+    def get_swa_mask(self, dtype: torch.dtype, sliding_window: int) -> torch.Tensor:
+        cache_key = (dtype, sliding_window)
+        if cache_key in self._swa_mask_cache:
+            return self._swa_mask_cache[cache_key]
+        row = torch.arange(AttentionMaskBuilder310.max_seqlen, device=self.device).unsqueeze(1)
+        col = torch.arange(AttentionMaskBuilder310.max_seqlen, device=self.device).unsqueeze(0)
+        mask = ((col < row - sliding_window) | (col > row)).to(dtype)
+        self._swa_mask_cache[cache_key] = mask
+        return mask
 
     def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:
         """

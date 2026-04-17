@@ -40,6 +40,7 @@ class AttentionMaskBuilder:
         self.mla_mask = None
         self.chunked_prefill_attn_mask = None
         self.pcp_mla_mask = None
+        self._swa_mask_cache: dict[tuple, torch.Tensor] = {}
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
         if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
@@ -77,6 +78,17 @@ class AttentionMaskBuilder:
             return self.get_attn_mask(2048, torch.bool)
 
         return self.get_splitfuse_attn_mask()
+
+    def get_swa_mask(self, dtype: torch.dtype, sliding_window: int) -> torch.Tensor:
+        cache_key = (dtype, sliding_window)
+        if cache_key in self._swa_mask_cache:
+            return self._swa_mask_cache[cache_key]
+        max_seq_len = 2048
+        row = torch.arange(max_seq_len, device=self.device).unsqueeze(1)
+        col = torch.arange(max_seq_len, device=self.device).unsqueeze(0)
+        mask = ((col < row - sliding_window) | (col > row)).to(dtype)
+        self._swa_mask_cache[cache_key] = mask
+        return mask
 
     def get_final_mla_mask(self, model_config: ModelConfig):
         if get_pcp_group().world_size > 1:

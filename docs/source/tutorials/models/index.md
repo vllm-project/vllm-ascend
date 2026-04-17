@@ -39,4 +39,5 @@ gpt-oss-120b.md
 Mixtral-8x7B-Instruct-v0.1.md
 Qwen3-ASR-1.7B.md
 Qwen2.5-Math-RM-72B.md
+llama4_scout.md
 :::
