@@ -13,7 +13,6 @@ import torch
 import torch.distributed.rpc as rpc
 from torch.multiprocessing.reductions import reduce_tensor
 from torch_npu.distributed.rpc.options import NPUTensorPipeRpcBackendOptions
-
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
