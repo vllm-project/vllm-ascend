@@ -700,7 +700,7 @@ class NPUModelRunner(GPUModelRunner):
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
         # the InputBatch, we need to fill in the prompt embeds into the expected
         # spots in the GpuModelRunner's pre-allocated prompt_embeds tensor.
-        if self.input_batch.req_prompt_embeds and (self.is_multimodal_model or self.enable_prompt_embeds):
+        if self.input_batch.req_prompt_embeds and (self.supports_mm_inputs or self.enable_prompt_embeds):
             output_idx = 0
             for req_idx in range(num_reqs):
                 num_sched = num_scheduled_tokens[req_idx]
@@ -2422,6 +2422,12 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # When running in mm-encoder-only mode, the LM backbone is replaced
+        # with StageMissingLayer stubs. Skip the LM dummy run entirely.
+        mm_config = self.vllm_config.model_config.multimodal_config
+        if mm_config and mm_config.mm_encoder_only:
+            return torch.tensor([]), torch.tensor([])
+
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
         # If cudagraph_mode.decode_mode() == FULL and
@@ -2571,7 +2577,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            if self.is_multimodal_model and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
+            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
@@ -2668,6 +2674,11 @@ class NPUModelRunner(GPUModelRunner):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # MM Encoder only model does not need to run sampler.
+        mm_config = self.vllm_config.model_config.multimodal_config
+        if mm_config and mm_config.mm_encoder_only:
+            return torch.tensor([])
+
         output = None
 
         # For profile, have maximum num_reqs and that collectively have
