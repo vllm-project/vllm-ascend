@@ -238,6 +238,26 @@
 #       finish-backfill fix are present in the runtime vLLM version used by
 #       vllm-ascend.
 #
+# ** 11. File: platform/patch_tool_choice_none_content.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.engine.serving.OpenAIServing`
+#      `vllm.parser.abstract_parser.DelegatingParser`
+#    Why:
+#       Some reasoning parsers can consume the full model output and return
+#       `content=None`. On the release runtime, forced named tool choice still
+#       asserts that content is present before constructing a function call,
+#       which can surface as a server-side failure instead of an empty-argument
+#       tool call.
+#    How：
+#       Monkey-patch the forced-tool-choice parsing entry points to normalize
+#       `content=None` to `""` before delegating back to the original upstream
+#       implementations.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40148
+#    Future Plan:
+#       Remove this patch once the upstream forced-tool-choice fix is included
+#       in the runtime vLLM version used by vllm-ascend.
+#
 # * Worker Patch:
 # ===============
 #
