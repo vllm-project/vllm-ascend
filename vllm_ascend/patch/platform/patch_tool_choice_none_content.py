@@ -35,7 +35,10 @@ def _normalize_tool_choice_content(
         return content
 
     tool_choice = getattr(request, "tool_choice", None)
-    if isinstance(tool_choice, ToolChoiceFunction | ChatCompletionNamedToolChoiceParam):
+    if isinstance(
+        tool_choice,
+        (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+    ):
         return ""
     return content
 
