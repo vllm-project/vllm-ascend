@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import torch
 import torch.nn.functional as F
 
@@ -197,7 +199,11 @@ def chunk_gated_delta_rule_pytorch(
     Internal math follows Transformers torch_chunk_gated_delta_rule flow.
     """
     if head_first:
-        raise DeprecationWarning("head_first=True is not supported in 310P fallback.")
+        warnings.warn(
+            "head_first=True is not supported in 310P fallback.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     q, k, v, g, beta, input_was_tnd = _normalize_chunk_inputs(q, k, v, g, beta, cu_seqlens)
 
     if cu_seqlens is not None and q.shape[0] != 1:

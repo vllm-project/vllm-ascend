@@ -278,9 +278,10 @@ def chunk_gated_delta_rule(
     assert len(beta.shape) == 3, "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
 
     if head_first:
-        raise DeprecationWarning(
+        warnings.warn(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead.",
+            DeprecationWarning,
             stacklevel=2,
         )
         q, k, v, beta, g = map(lambda x: rearrange(x, "b h t ... -> b t h ..."), (q, k, v, beta, g))
