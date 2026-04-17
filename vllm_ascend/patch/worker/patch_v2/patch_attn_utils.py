@@ -1,6 +1,7 @@
-import vllm
+"""Legacy placeholder for removed v2 attention utils patch.
 
-from vllm_ascend.worker.v2.attn_utils import _allocate_kv_cache, _reshape_kv_cache
-
-vllm.v1.worker.gpu.attn_utils._allocate_kv_cache = _allocate_kv_cache
-vllm.v1.worker.gpu.attn_utils._reshape_kv_cache = _reshape_kv_cache
+The previous patch targeted private helpers that no longer exist in
+`vllm_ascend.worker.v2.attn_utils`. The patch is not imported by the active
+patch registry, so keeping this file as a no-op avoids stale mypy failures
+without changing runtime behavior.
+"""

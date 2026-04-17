@@ -142,5 +142,6 @@ exclude = [
     "docs/source/tutorials/models/Qwen3.5-397B-A17B.md",
     "docs/source/tutorials/models/Qwen3_embedding.md",
     "docs/source/tutorials/models/Qwen3_reranker.md",
+    "docs/source/tutorials/models/Mixtral-8x7B-Instruct-v0.1.md",
     "docs/source/tutorials/models/index.md",
 ]
