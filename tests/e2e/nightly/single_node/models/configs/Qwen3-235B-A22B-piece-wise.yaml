@@ -38,7 +38,6 @@ test_cases:
         max_out_len: 20480
         batch_size: 128
         temperature: "0"
-        num_prompts: 32
         top_k: "-1"
         top_p: 1
         logprobs: 1
@@ -53,7 +52,6 @@ test_cases:
         max_out_len: 20480
         batch_size: 128
         temperature: "0"
-        num_prompts: 32
         top_k: "-1"
         top_p: 1
         logprobs: 1
@@ -68,7 +66,6 @@ test_cases:
         max_out_len: 20480
         batch_size: 128
         temperature: "0"
-        num_prompts: 32
         top_k: "-1"
         top_p: 1
         logprobs: 1
