@@ -10,56 +10,67 @@ import torch_npu
 def create_test_attention_operator():
     """Create test tensors and call npu_fused_infer_attention_score"""
 
-    # Configuration similar to attention_cp.py
-    batch_size = 2
-    num_heads = 8
-    num_kv_heads = 2
+    # User specified configuration
+    # query: [4, 16, 128] -> [num_tokens, num_heads, head_size]
+    num_tokens = 4
+    num_heads = 16
     head_size = 128
-    num_tokens = 4  # number of query tokens
-    max_seq_len = 2048
-    block_size = 16
 
-    # Create query tensor: [num_tokens, num_heads, head_size] - layout TND
+    # k_nope: [268, 128, 128]
+    # value: [268, 128, 128] same as k_nope
+    num_kv_heads = 1
+
+    # block_table: [4, 128], block_table[:,0]=1, others=0
+    batch_size = 4
+    max_blocks_per_seq = 128
+
+    # actual_seq_lengths_kv: [3, 4, 4, 5]
+    # actual_seq_lengths: [1, 2, 3, 4]
+    actual_seq_lengths_kv = torch.tensor([3, 4, 4, 5], dtype=torch.int32, device='npu')
+    actual_seq_lengths_q = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device='npu')
+
+    # Create query tensor: [4, 16, 128] - layout TND
     query = torch.randn(num_tokens, num_heads, head_size, dtype=torch.float16, device='npu')
 
-    # Create key cache: [batch, block_num, block_size, num_kv_heads, head_size]
-    num_blocks = max_seq_len // block_size
-    key_cache = torch.randn(batch_size, num_blocks, block_size, num_kv_heads, head_size,
-                           dtype=torch.float16, device='npu')
-    value_cache = torch.randn(batch_size, num_blocks, block_size, num_kv_heads, head_size,
-                             dtype=torch.float16, device='npu')
+    # Create k_nope and value tensors: [268, 128, 128]
+    # Based on the shape, this appears to be [batch*seq_len, num_kv_heads, head_size]
+    # But num_kv_heads=1 so we need to interpret it differently
+    # The shape might be [batch, seq_len, num_kv_heads * head_size] = [4, 67, 128] roughly
+    # But user said [268, 128, 128], let's assume it's flat like [total_kv_tokens, head_dim]
+    # Actually, let's try: treat as [batch, seq_len, head_dim] = [4, 268, 128] then view
 
-    # View key and value to get k_nope and value tensors
-    # Shape: [batch, block_num * block_size, num_kv_heads * head_size]
-    k_nope = key_cache.view(key_cache.shape[0], key_cache.shape[1] * key_cache.shape[2], -1)
-    value = value_cache.view(value_cache.shape[0], value_cache.shape[1] * value_cache.shape[2], -1)
+    # For torch_npu.npu_fused_infer_attention_score:
+    # - query: [num_tokens, num_heads, head_size] = TND layout
+    # - k_nope: [batch, seq_len, num_kv_heads * head_size] or similar
+    # - value: same as k_nope
 
-    # Create block table: [batch, max_blocks_per_seq]
-    max_blocks_per_seq = 32
-    block_tables = torch.randint(0, num_blocks, (batch_size, max_blocks_per_seq), dtype=torch.int32, device='npu')
+    # Let's create based on user's shape interpretation
+    # Assuming k_nope/value are [batch, seq_len, num_kv_heads * head_size]
+    # But user gave [268, 128, 128] - let's try [batch, seq_len, head_dim] view
+    k_nope = torch.randn(268, 128, 128, dtype=torch.float16, device='npu')
+    value = torch.randn(268, 128, 128, dtype=torch.float16, device='npu')
 
-    # Actual sequence lengths for KV (how many tokens are computed)
-    actual_seq_lengths_kv = torch.tensor([100, 150], dtype=torch.int32, device='npu')
-
-    # Actual sequence lengths for Q
-    actual_seq_lengths_q = torch.tensor([num_tokens, num_tokens], dtype=torch.int32, device='npu')
+    # Create block table: [4, 128], block_table[:,0]=1, others=0
+    block_tables = torch.zeros((batch_size, max_blocks_per_seq), dtype=torch.int32, device='npu')
+    block_tables[:, 0] = 1  # First block is valid
 
     # Scale for attention
     scale = 1.0 / (head_size ** 0.5)
 
     # Common kwargs similar to _forward_decode_pcp_dcp
+    # sparse_mode not specified (will use default)
     common_kwargs = {
         "num_heads": num_heads,
         "num_key_value_heads": num_kv_heads,
         "input_layout": "TND",
-        "atten_mask": None,  # Could be a boolean mask if needed
+        "atten_mask": None,
         "scale": scale,
         "antiquant_mode": 0,
         "antiquant_scale": None,
-        "sparse_mode": 3,
+        # "sparse_mode": 3,  # Not specified by user
         "softmax_lse_flag": True,
         "block_table": block_tables,
-        "block_size": block_size,
+        "block_size": 16,  # Assuming block_size=16 based on typical config
         "actual_seq_lengths_kv": actual_seq_lengths_kv,
         "actual_seq_lengths": actual_seq_lengths_q,
     }
@@ -83,28 +94,24 @@ def test_with_workspace():
     Test with workspace - this is similar to the graph capturing path in attention_cp.py
     For graph capturing, we need to pre-allocate workspace and output buffers
     """
-    batch_size = 2
-    num_heads = 8
-    num_kv_heads = 2
-    head_size = 128
     num_tokens = 4
-    max_seq_len = 2048
-    block_size = 16
-    num_blocks = max_seq_len // block_size
+    num_heads = 16
+    head_size = 128
+    num_kv_heads = 1
+    batch_size = 4
+    max_blocks_per_seq = 128
 
     # Create tensors
     query = torch.randn(num_tokens, num_heads, head_size, dtype=torch.float16, device='npu')
-    key_cache = torch.randn(batch_size, num_blocks, block_size, num_kv_heads, head_size,
-                           dtype=torch.float16, device='npu')
-    value_cache = torch.randn(batch_size, num_blocks, block_size, num_kv_heads, head_size,
-                             dtype=torch.float16, device='npu')
+    k_nope = torch.randn(268, 128, 128, dtype=torch.float16, device='npu')
+    value = torch.randn(268, 128, 128, dtype=torch.float16, device='npu')
 
-    k_nope = key_cache.view(key_cache.shape[0], key_cache.shape[1] * key_cache.shape[2], -1)
-    value = value_cache.view(value_cache.shape[0], value_cache.shape[1] * value_cache.shape[2], -1)
+    # block_table: [4, 128], block_table[:,0]=1, others=0
+    block_tables = torch.zeros((batch_size, max_blocks_per_seq), dtype=torch.int32, device='npu')
+    block_tables[:, 0] = 1
 
-    block_tables = torch.randint(0, num_blocks, (batch_size, 32), dtype=torch.int32, device='npu')
-    actual_seq_lengths_kv = torch.tensor([100, 150], dtype=torch.int32, device='npu')
-    actual_seq_lengths_q = torch.tensor([num_tokens, num_tokens], dtype=torch.int32, device='npu')
+    actual_seq_lengths_kv = torch.tensor([3, 4, 4, 5], dtype=torch.int32, device='npu')
+    actual_seq_lengths_q = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device='npu')
     scale = 1.0 / (head_size ** 0.5)
 
     common_kwargs = {
@@ -115,10 +122,10 @@ def test_with_workspace():
         "scale": scale,
         "antiquant_mode": 0,
         "antiquant_scale": None,
-        "sparse_mode": 3,
+        # "sparse_mode": 3,
         "softmax_lse_flag": True,
         "block_table": block_tables,
-        "block_size": block_size,
+        "block_size": 16,
         "actual_seq_lengths_kv": actual_seq_lengths_kv,
         "actual_seq_lengths": actual_seq_lengths_q,
     }
