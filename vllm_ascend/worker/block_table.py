@@ -125,6 +125,26 @@ class BlockTable:
 
         self.block_table.np[[src, tgt]] = self.block_table.np[[tgt, src]]
 
+    def apply_permutation(self, permutation: list[int] | np.ndarray) -> bool:
+        """Reorder the active rows according to ``permutation``.
+
+        ``permutation[new_row] = old_row`` for the active prefix of length
+        ``len(permutation)``.
+        """
+        num_reqs = len(permutation)
+        if num_reqs <= 1:
+            return False
+
+        permutation_np = np.asarray(permutation, dtype=np.int32)
+        if np.array_equal(permutation_np, np.arange(num_reqs, dtype=np.int32)):
+            return False
+
+        self.num_blocks_per_row[:num_reqs] = self.num_blocks_per_row[
+            permutation_np
+        ].copy()
+        self.block_table.np[:num_reqs] = self.block_table.np[permutation_np].copy()
+        return True
+
     def compute_domain_slot_mapping(self, req_indices: np.ndarray, positions: np.ndarray, num_dycp_reqs: int = 0) -> None:
         # Split requests into dycp (dcp) and dp groups
         # req_indices < num_dycp_reqs: use dcp calculation
@@ -367,6 +387,12 @@ class MultiGroupBlockTable:
     def swap_row(self, src: int, tgt: int) -> None:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
+
+    def apply_permutation(self, permutation: list[int] | np.ndarray) -> bool:
+        modified = False
+        for block_table in self.block_tables:
+            modified = block_table.apply_permutation(permutation) or modified
+        return modified
 
     def compute_domain_slot_mapping(
         self, req_indices: np.ndarray, positions: np.ndarray, num_dycp_reqs: int = 0
