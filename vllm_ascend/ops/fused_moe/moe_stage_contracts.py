@@ -17,12 +17,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
 import torch
 
 from vllm_ascend.ops.fused_moe.moe_stage_params import MoEQuantParams, MoERoutingParams
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 TMoECombineMetadata = TypeVar("TMoECombineMetadata")
 
@@ -65,7 +68,7 @@ class MoEFusedExpertsInput:
     weights: MoEWeights
     routing: MoERoutingParams
     quant: MoEQuantParams
-    activation: str = "silu"
+    activation: MoEActivation | str | None = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
 
@@ -136,7 +139,7 @@ class MoEMlpComputeInput:
     weights: MoEWeights
     quant: MoEQuantParams
     fusion: bool
-    activation: str = "silu"
+    activation: MoEActivation | str | None = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
 

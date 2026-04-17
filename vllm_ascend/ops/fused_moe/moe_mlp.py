@@ -18,8 +18,8 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
-from vllm.triton_utils import HAS_TRITON
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
@@ -79,6 +79,14 @@ def _require_single_tensor_for_swiglu_quant(
             raise ValueError(f"{name} must be a tensor or a single-element list, but got {len(tensor_or_list)}.")
         return tensor_or_list[0]
     return tensor_or_list
+
+
+def _normalize_moe_activation(activation: MoEActivation | str | None) -> MoEActivation:
+    if activation is None:
+        return MoEActivation.SILU
+    if isinstance(activation, MoEActivation):
+        return activation
+    return MoEActivation.from_str(activation)
 
 
 def quant_apply_mlp(
@@ -328,11 +336,13 @@ def unquant_apply_mlp(
     group_list: torch.Tensor,
     w1_bias: torch.Tensor = None,
     w2_bias: torch.Tensor = None,
-    activation: str | None = None,
+    activation: MoEActivation | str | None = None,
     group_list_type: int = 1,
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
 ) -> torch.Tensor:
+    activation = _normalize_moe_activation(activation)
+
     if need_trans:
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
@@ -372,9 +382,7 @@ def unquant_apply_mlp(
             gate_up_out = torch.relu(gate_up_out)
             gate_up_out = torch.square(gate_up_out)
         else:
-            raise ValueError(
-                    f"Unsupported FusedMoE activation: {activation}"
-                )     
+            raise ValueError(f"Unsupported FusedMoE activation: {activation}")
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
