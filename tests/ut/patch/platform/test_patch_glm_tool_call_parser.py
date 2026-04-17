@@ -70,7 +70,11 @@ def test_create_remaining_args_delta_uses_fallback_metadata_for_args_only_delta(
     assert tc.function.arguments == ('{"files":[{"filepath":"HumanEval-X/README.md"}]}')
 
 
-def test_create_remaining_args_delta_prefers_current_metadata_over_fallback():
+def test_create_remaining_args_delta_uses_fallback_over_original_delta():
+    # _create_remaining_args_delta ignores original_delta metadata and uses
+    # the explicit fallback_* parameters instead.  The caller is responsible
+    # for passing non-None fallback values only for the first chunk of a
+    # tool call (when the header has not yet been streamed).
     original_delta = DeltaMessage(
         tool_calls=[
             DeltaToolCall(
@@ -95,9 +99,9 @@ def test_create_remaining_args_delta_prefers_current_metadata_over_fallback():
     )
 
     tc = result.tool_calls[0]
-    assert tc.id == "call_current"
+    assert tc.id == "call_fallback"
     assert tc.type == "function"
-    assert tc.function.name == "current_name"
+    assert tc.function.name == "fallback_name"
     assert tc.function.arguments == "]}"
 
 
