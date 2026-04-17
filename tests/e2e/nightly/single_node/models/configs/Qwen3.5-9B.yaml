@@ -1,0 +1,66 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3.5-9B-enable-prefix-cache"
+    model: "Qwen/Qwen3.5-9B"
+    envs:
+      TASK_QUEUE_ENABLE: "1"
+      OMP_PROC_BIND: "false"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PAGED_ATTENTION_MASK_LEN: "5500"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--port"
+      - "$SERVER_PORT"
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "1"
+      - "--max-model-len"
+      - "16000"
+      - "--max-num-batched-tokens"
+      - "32000"
+      - "--max-num-seqs"
+      - "20"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--skip-mm-profiling"
+      - "--trust-remote-code"
+      - "--async-scheduling"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm_processor_cache_type"
+      - "shm"
+      - "--enable-prefix-caching"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true, "enable_weight_nz_layout":true}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,8,10,12,14,16,18,20]}'
+      - "--default-chat-template-kwargs"
+      - '{"enable_thinking": false}'
+    benchmarks:
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        num_prompts: 32
+        max_out_len: 32768
+        batch_size: 32
+        baseline: 95
+        threshold: 5
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs400
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 80
+        max_out_len: 1500
+        batch_size: 20
+        request_rate: 0
+        baseline: 1
+        threshold: 0.97
