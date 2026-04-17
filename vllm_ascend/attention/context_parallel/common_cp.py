@@ -4,7 +4,6 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.distributed import get_dcp_group, get_decode_context_model_parallel_world_size, get_pcp_group, get_dycp_group
-from vllm.logger import logger
 
 
 @dataclass
@@ -121,7 +120,6 @@ def _process_attn_out_lse(attn_output: torch.Tensor, softmax_lse: torch.Tensor) 
 
 
 def _npu_update_dycp_attn(num_dycp_reqs, attn_output: torch.Tensor, softmax_lse: torch.Tensor) -> torch.Tensor:
-
     assert num_dycp_reqs > 0, "num_dycp_reqs should be greater than 0"
     dycp_group = get_dycp_group()
     softmax_lse = softmax_lse.to(torch.float32)[:num_dycp_reqs]

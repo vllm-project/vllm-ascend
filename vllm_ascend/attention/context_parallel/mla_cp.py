@@ -2,7 +2,6 @@ from typing import ClassVar, Optional, Tuple, TypeVar
 
 import numpy as np
 import torch
-from vllm.logger import logger
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -292,9 +291,6 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         # [bs, pcp_size, dcp_size]
         num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[: self.num_decodes_flatten]
 
-        # cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
-        # cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
-        # decode_metadata.cp_seq_len = cp_seq_len.tolist()
         cp_seq_len = get_dcp_local_seq_lens(decode_metadata.seq_lens,
                                             self.dycp_size,
                                             self.dycp_rank,
@@ -364,7 +360,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 self.prefill_dycp_rank = self.dycp_rank
             else:
                 self.prefill_dycp_size = 1
-                self.prefill_dycp_rank = 1
+                self.prefill_dycp_rank = 0
             self.common_pcp_size = self.dycp_size if self.prefill_dycp_size > 1 else self.pcp_size
             self.common_pcp_rank = self.dycp_rank if self.prefill_dycp_size > 1 else self.pcp_rank
         except AssertionError:
@@ -494,28 +490,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     workspace = graph_params.workspaces.get(graph_key)
                     break
 
-        if len(attn_params) == 0 or len(handles) == 0 or len(events) == 0:
-            logger.warning_once(
-                "AscendMlaCPImpl.update_graph_params found empty graph params for key %s "
-                "(num_tokens=%s, num_dycp_reqs=%s).",
-                graph_key,
-                num_tokens,
-                num_dycp_reqs,
-            )
-            return
-
         num_layers = len(forward_context.attn_metadata)
-        if len(attn_params) < num_layers or len(handles) < num_layers or len(events) < num_layers:
-            logger.warning_once(
-                "AscendMlaCPImpl.update_graph_params layer count mismatch (insufficient): "
-                "metadata=%s, params=%s, handles=%s, events=%s, key=%s.",
-                num_layers,
-                len(attn_params),
-                len(handles),
-                len(events),
-                graph_key,
-            )
-            return
 
         # If this key contains multiple capture rounds, pick the chunk that
         # matches current decode token shape first.
@@ -1454,7 +1429,7 @@ def generate_dp_chunked_metadata(
     query_lens = torch.tensor(attn_metadata.query_lens, dtype=torch.int32)
     device = chunked_metadata.cu_seq_lens.device
 
-    num_computed_tokens_cpu = attn_metadata.seq_lens - query_lens 
+    num_computed_tokens_cpu = attn_metadata.seq_lens - query_lens
     reqs_start = attn_metadata.num_decodes  # prefill_start
 
     context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
