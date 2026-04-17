@@ -602,4 +602,5 @@ After about several minutes, you can get the performance evaluation result.
 
 ## Qwen3.5-397B-A17B Known issues
 
-- Issue1: For single-node deployment scenario, when fused_mc2 is enabled, using multi-DP model deployment may cause garbled or empty outputs after the model triggers recomputation.When tuning performance by adjusting model parallelism, ensure that this fused operator is disabled when DP > 1. For PD deployment scenario，D nodes can avoid this problem by enabling the recompute scheduler.  
+- Issue1: For single-node deployment scenario, when fused_mc2 is enabled, using multi-DP model deployment may cause garbled or empty outputs after the model triggers recomputation.When tuning performance by adjusting model parallelism, ensure that this fused operator is disabled when DP > 1. For PD deployment scenario，D nodes can avoid this problem by enabling the recompute scheduler.
+  
