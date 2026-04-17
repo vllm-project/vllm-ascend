@@ -51,6 +51,17 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 # key: model_type
 # value: dict of fused module name -> list of original module names
 packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
+    "qwen3": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    },
     "qwen3_moe": {
         "qkv_proj": [
             "q_proj",
@@ -245,6 +256,82 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
     },
 }
 
+_QUAROT_LINEAR_QUANT_TYPE = "W4A4_QUAROT_DYNAMIC"
+_QUAROT_ATTN_QUANT_TYPE = "QUAROT_ATTENTION"
+_QUAROT_TARGET_PROJ_NAMES = (
+    "qkv_proj",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "gate_up_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+    "o_proj",
+    "out_proj",
+)
+_QUAROT_FFN_TARGET_PROJ_NAMES = (
+    "gate_up_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+_QUAROT_LEAN_H_ONLY_REQUIRED_CONTRACT = {
+    "export_rotation_tensors": False,
+    "h_mode": "deterministic_walsh",
+    "deterministic_h_profile": True,
+    "alpha_source": "rmsnorm",
+    "matrix_free_h_runtime": True,
+}
+_QUAROT_LEAN_H_ONLY_SUPPORTED_Q_MODES = {"randomized_hadamard", "identity"}
+_QUAROT_LEAN_H_ONLY_SUPPORTED_CONTRACT_VERSIONS = {"2.1.0"}
+_QUAROT_FFN_HADAMARD_LAYOUT = "pow2_last_dim"
+_QUAROT_ATTENTION_CONTRACT = "lean_h_only"
+
+
+def get_quarot_metadata(quant_description: dict[str, Any]) -> dict[str, Any]:
+    metadata = quant_description.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    quarot_meta = metadata.get("quarot")
+    if not isinstance(quarot_meta, dict):
+        return {}
+    return quarot_meta
+
+
+def get_quarot_kv_group_size(quant_description: dict[str, Any]) -> int | None:
+    kv_group_size = quant_description.get("kv_group_size")
+    if isinstance(kv_group_size, int) and kv_group_size > 0:
+        return kv_group_size
+
+    quarot_meta = get_quarot_metadata(quant_description)
+    kv_group_size = quarot_meta.get("kv_group_size")
+    if isinstance(kv_group_size, int) and kv_group_size > 0:
+        return kv_group_size
+
+    return None
+
+
+def is_lean_h_only_quarot_profile(quarot_meta: dict[str, Any]) -> bool:
+    if not isinstance(quarot_meta, dict):
+        return False
+    if quarot_meta.get("attention_contract") != _QUAROT_ATTENTION_CONTRACT:
+        return False
+    for key, expected in _QUAROT_LEAN_H_ONLY_REQUIRED_CONTRACT.items():
+        if quarot_meta.get(key) != expected:
+            return False
+    if quarot_meta.get("q_mode") not in _QUAROT_LEAN_H_ONLY_SUPPORTED_Q_MODES:
+        return False
+    contract_version = quarot_meta.get("contract_version")
+    if contract_version not in _QUAROT_LEAN_H_ONLY_SUPPORTED_CONTRACT_VERSIONS:
+        return False
+    if quarot_meta.get("allow_runtime_shift_permutation") not in (None, False):
+        return False
+    if quarot_meta.get("ffn_hadamard_layout", _QUAROT_FFN_HADAMARD_LAYOUT) != _QUAROT_FFN_HADAMARD_LAYOUT:
+        return False
+    runtime_h_partition = quarot_meta.get("runtime_h_partition")
+    return runtime_h_partition == "full"
+
 
 def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
     """Get packed modules mapping for a model type.
@@ -369,10 +456,12 @@ class AscendModelSlimConfig(QuantizationConfig):
     def __init__(self, quant_config: dict[str, Any] | None = None):
         super().__init__()
         self.quant_description = quant_config if quant_config is not None else {}
+        self._native_quarot_promoted = False
         self._apply_extra_quant_adaptations()
         self.model_type: str | None = None
         self.hf_to_vllm_mapper: WeightsMapper | None = None
         self._mapper_applied = False
+        self._promote_native_quarot_descriptor()
         self._add_kvcache_quant_metadata()
 
     def __repr__(self) -> str:
@@ -431,6 +520,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         if self.quant_description:
             self.quant_description = hf_to_vllm_mapper.apply_dict(self.quant_description)
+            self._promote_native_quarot_descriptor()
             self._add_kvcache_quant_metadata()
             logger.info("Applied hf_to_vllm_mapper to quant_description keys")
 
@@ -453,6 +543,203 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.model_type = model_type
         return prefix
 
+    def _promote_native_quarot_descriptor(self) -> None:
+        quarot_meta = get_quarot_metadata(self.quant_description)
+        if not quarot_meta:
+            self._native_quarot_promoted = False
+            return
+        if quarot_meta.get("attention_contract") is None:
+            quarot_meta["attention_contract"] = _QUAROT_ATTENTION_CONTRACT
+        quantize_attention = quarot_meta.get("quantize_attention", True) is not False
+        if "kv_group_size" not in self.quant_description:
+            kv_group_size = get_quarot_kv_group_size(self.quant_description)
+            if isinstance(kv_group_size, int) and kv_group_size > 0:
+                self.quant_description["kv_group_size"] = kv_group_size
+
+        target_proj_names = _QUAROT_TARGET_PROJ_NAMES if quantize_attention else _QUAROT_FFN_TARGET_PROJ_NAMES
+        changed = 0
+        for key, value in list(self.quant_description.items()):
+            if key.endswith(".weight") and value == "W4A4_DYNAMIC":
+                for proj in target_proj_names:
+                    if f".{proj}.weight" in key:
+                        self.quant_description[key] = _QUAROT_LINEAR_QUANT_TYPE
+                        layer_prefix = key[: -len(".weight")]
+                        self.quant_description[f"{layer_prefix}.quarot"] = True
+                        changed += 1
+                        break
+
+        if not quantize_attention:
+            self.quant_description.pop("fa_quant_type", None)
+        elif changed > 0 and self.quant_description.get("fa_quant_type") is None:
+            self.quant_description["fa_quant_type"] = _QUAROT_ATTN_QUANT_TYPE
+        self._native_quarot_promoted = changed > 0
+
+    def _ensure_quarot_shape_metadata_from_hf(self, hf_config: Any) -> None:
+        if not self._native_quarot_promoted:
+            return
+
+        hidden_dim = self.quant_description.get("hidden_dim")
+        num_heads = self.quant_description.get("num_heads")
+        head_dim = self.quant_description.get("head_dim")
+        if hidden_dim is None:
+            hidden_dim = getattr(hf_config, "hidden_size", None)
+            if isinstance(hidden_dim, int):
+                self.quant_description["hidden_dim"] = hidden_dim
+        if num_heads is None:
+            num_heads = getattr(hf_config, "num_attention_heads", None)
+            if isinstance(num_heads, int):
+                self.quant_description["num_heads"] = num_heads
+        if head_dim is None:
+            inferred_head_dim = getattr(hf_config, "head_dim", None)
+            if (
+                inferred_head_dim is None
+                and isinstance(hidden_dim, int)
+                and isinstance(num_heads, int)
+                and num_heads > 0
+            ):
+                inferred_head_dim = hidden_dim // num_heads
+            if isinstance(inferred_head_dim, int):
+                self.quant_description["head_dim"] = inferred_head_dim
+        if "rms_eps" not in self.quant_description:
+            rms_eps = getattr(hf_config, "rms_norm_eps", 1e-6)
+            self.quant_description["rms_eps"] = float(rms_eps)
+        if "rms_alpha" not in self.quant_description:
+            self.quant_description["rms_alpha"] = 1.0
+        if "kv_group_size" not in self.quant_description:
+            kv_group_size = get_quarot_kv_group_size(self.quant_description)
+            if isinstance(kv_group_size, int) and kv_group_size > 0:
+                self.quant_description["kv_group_size"] = kv_group_size
+            elif isinstance(self.quant_description.get("head_dim"), int) and self.quant_description["head_dim"] > 0:
+                self.quant_description["kv_group_size"] = self.quant_description["head_dim"]
+
+    def _get_quarot_shape_metadata(self) -> dict[str, int]:
+        hidden_dim = self.quant_description.get("hidden_dim")
+        num_heads = self.quant_description.get("num_heads")
+        head_dim = self.quant_description.get("head_dim")
+        rms_eps = self.quant_description.get("rms_eps", 1e-6)
+        rms_alpha = self.quant_description.get("rms_alpha", 1.0)
+        if hidden_dim is None or num_heads is None or head_dim is None:
+            raise ValueError(
+                "QuaRot enabled but missing one of top-level shape metadata keys: "
+                "hidden_dim, num_heads, head_dim."
+            )
+        if not isinstance(hidden_dim, int) or not isinstance(num_heads, int) or not isinstance(head_dim, int):
+            raise ValueError("QuaRot metadata hidden_dim/num_heads/head_dim must be integers.")
+        if not isinstance(rms_eps, (float, int)) or not isinstance(rms_alpha, (float, int)):
+            raise ValueError("QuaRot metadata rms_eps/rms_alpha must be numeric.")
+        if "kv_group_size" in self.quant_description:
+            kv_group_size = self.quant_description.get("kv_group_size")
+        else:
+            kv_group_size = head_dim
+        if not isinstance(kv_group_size, int) or kv_group_size <= 0:
+            raise ValueError("QuaRot metadata kv_group_size must be a positive integer.")
+        return {
+            "hidden_dim": hidden_dim,
+            "num_heads": num_heads,
+            "head_dim": head_dim,
+            "rms_eps": float(rms_eps),
+            "rms_alpha": float(rms_alpha),
+            "kv_group_size": kv_group_size,
+        }
+
+    def _get_quarot_contract_metadata(self) -> dict[str, Any]:
+        quarot_meta = get_quarot_metadata(self.quant_description)
+        attention_contract = quarot_meta.get("attention_contract")
+        if attention_contract != _QUAROT_ATTENTION_CONTRACT:
+            raise ValueError(
+                "QuaRot metadata must declare attention_contract='lean_h_only' "
+                f"(observed {attention_contract!r})."
+            )
+        return {
+            "contract_version": quarot_meta.get("contract_version"),
+            "attention_contract": attention_contract,
+            "export_rotation_tensors": quarot_meta.get("export_rotation_tensors"),
+            "h_mode": quarot_meta.get("h_mode"),
+            "deterministic_h_profile": quarot_meta.get("deterministic_h_profile"),
+            "alpha_source": quarot_meta.get("alpha_source"),
+            "q_mode": quarot_meta.get("q_mode"),
+            "matrix_free_h_runtime": quarot_meta.get("matrix_free_h_runtime"),
+            "runtime_h_partition": quarot_meta.get("runtime_h_partition"),
+            "allow_runtime_shift_permutation": quarot_meta.get("allow_runtime_shift_permutation"),
+            "fold_types": quarot_meta.get("fold_types"),
+            "ffn_hadamard_layout": quarot_meta.get("ffn_hadamard_layout", _QUAROT_FFN_HADAMARD_LAYOUT),
+            "quantize_attention": quarot_meta.get("quantize_attention", True),
+            "lean_h_only_profile": is_lean_h_only_quarot_profile(quarot_meta),
+        }
+
+    def _get_linear_quarot_enabled(self, prefix: str) -> bool:
+        direct_key = f"{prefix}.quarot"
+        if direct_key in self.quant_description:
+            return bool(self.quant_description[direct_key])
+        if self._is_quarot_float_qkv_layer(prefix):
+            return True
+
+        proj_name = prefix.split(".")[-1]
+        if proj_name in self.packed_modules_mapping:
+            shard_prefixes = [
+                prefix.replace(proj_name, shard_proj_name) for shard_proj_name in self.packed_modules_mapping[proj_name]
+            ]
+            shard_flags = [self.quant_description.get(f"{shard_prefix}.quarot") for shard_prefix in shard_prefixes]
+            explicit_flags = [bool(flag) for flag in shard_flags if flag is not None]
+            if explicit_flags and not all(flag == explicit_flags[0] for flag in explicit_flags):
+                raise ValueError(f"Inconsistent QuaRot flag across fused shards for {prefix}.")
+            if explicit_flags:
+                return explicit_flags[0]
+        return False
+
+    def _is_quarot_float_qkv_layer(self, prefix: str) -> bool:
+        if not self._native_quarot_promoted:
+            return False
+        if prefix.split(".")[-1] != "qkv_proj":
+            return False
+        quarot_meta = get_quarot_metadata(self.quant_description)
+        if quarot_meta.get("attention_contract") != _QUAROT_ATTENTION_CONTRACT:
+            return False
+        if quarot_meta.get("quantize_attention") is False:
+            return False
+        shard_names = self.packed_modules_mapping.get("qkv_proj", [])
+        if shard_names != ["q_proj", "k_proj", "v_proj"]:
+            return False
+        shard_prefixes = [prefix.replace("qkv_proj", shard_name) for shard_name in shard_names]
+        return all(self.quant_description.get(f"{shard_prefix}.weight") == "FLOAT" for shard_prefix in shard_prefixes)
+
+    def _get_attention_quarot_enabled(self, prefix: str) -> bool:
+        candidate_prefixes = [prefix]
+        if ".self_attn.attn" in prefix:
+            candidate_prefixes.append(prefix.replace(".self_attn.attn", ".self_attn"))
+
+        suffixes = (
+            "qkv_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "out_proj",
+        )
+        for candidate_prefix in candidate_prefixes:
+            direct_key = f"{candidate_prefix}.quarot"
+            if direct_key in self.quant_description:
+                return bool(self.quant_description[direct_key])
+
+            for suffix in suffixes:
+                if self.quant_description.get(f"{candidate_prefix}.{suffix}.quarot") is True:
+                    return True
+        return False
+
+    def _attach_quarot_config(self, layer: torch.nn.Module, prefix: str, layer_type: str) -> None:
+        if layer_type == "linear":
+            enabled = self._get_linear_quarot_enabled(prefix)
+        else:
+            enabled = self._get_attention_quarot_enabled(prefix)
+
+        if not enabled:
+            layer.quarot_config = {"enabled": False}
+            return
+
+        shape_meta = self._get_quarot_shape_metadata()
+        contract_meta = self._get_quarot_contract_metadata()
+        layer.quarot_config = {"enabled": True, **shape_meta, **contract_meta}
+
     def get_quant_method(self, layer: torch.nn.Module, prefix: str) -> Optional["QuantizeMethodBase"]:
         from .method_adapters import (
             AscendEmbeddingMethod,
@@ -463,6 +750,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_config.model_type
+        self._ensure_quarot_shape_metadata_from_hf(vllm_config.model_config.hf_config)
 
         if model_type in ["minimax", "minimax_m2"]:
             # Adapt to Minimax architecture: update layer names to MoE convention
@@ -479,22 +767,38 @@ class AscendModelSlimConfig(QuantizationConfig):
         if model_type in ["qwen3_vl"] and prefix == "lm_head":
             prefix = "language_model.lm_head"
 
-        if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping[model_type]
+        self.packed_modules_mapping = packed_modules_model_mapping.get(model_type, {})
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
+                if self._is_quarot_float_qkv_layer(prefix):
+                    from .methods import AscendW4A4QuaRotDynamicLinearMethod
+
+                    self._attach_quarot_config(layer, prefix, "linear")
+                    return AscendLinearMethod(AscendW4A4QuaRotDynamicLinearMethod(float_weight=True))
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
                 return AscendUnquantizedLinearMethod()
+            quant_type = get_quant_type_for_layer(
+                self.quant_description, prefix, "linear", self.packed_modules_mapping
+            )
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            if quant_type == _QUAROT_LINEAR_QUANT_TYPE:
+                self._attach_quarot_config(layer, prefix, "linear")
             return AscendLinearMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and (
-            self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)
+            self.quant_description.get("fa_quant_type") == _QUAROT_ATTN_QUANT_TYPE
+            or self.is_fa_quant_layer(prefix)
+            or self.is_indexer_quant_layer(prefix)
         ):
+            quant_type = get_quant_type_for_layer(
+                self.quant_description, prefix, "attention", self.packed_modules_mapping
+            )
             scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
+            if quant_type == _QUAROT_ATTN_QUANT_TYPE:
+                self._attach_quarot_config(layer, prefix, "attention")
             return AscendKVCacheMethod(scheme)
         elif isinstance(layer, AttentionLayerBase) and self.quant_description.get("kv_cache_type") == "C8":
             from .methods.kv_c8 import AscendC8KVCacheAttentionMethod
@@ -623,6 +927,9 @@ class AscendModelSlimConfig(QuantizationConfig):
             with open(config_path) as f:
                 self.quant_description = json.load(f)
             self._apply_extra_quant_adaptations()
+            self._promote_native_quarot_descriptor()
+            if hf_config is not None:
+                self._ensure_quarot_shape_metadata_from_hf(hf_config)
             self._add_kvcache_quant_metadata()
             return
 

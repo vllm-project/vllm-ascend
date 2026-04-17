@@ -37,6 +37,7 @@ from .kv_c8 import AscendFAQuantAttentionMethod
 
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
+from .w4a4_quarot_dynamic import AscendQuaRotAttentionMethod, AscendW4A4QuaRotDynamicLinearMethod
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
@@ -83,6 +84,8 @@ __all__ = [
     "AscendW4A16FusedMoEMethod",
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
+    "AscendW4A4QuaRotDynamicLinearMethod",
+    "AscendQuaRotAttentionMethod",
     "AscendFAQuantAttentionMethod",
     "AscendW4A4MXFP4DynamicLinearMethod",
     "AscendW4A4MXFP4DynamicFusedMoEMethod",
