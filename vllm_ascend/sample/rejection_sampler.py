@@ -720,6 +720,8 @@ def sample_recovered_tokens(
             q,
             vocab_size,
             IS_NGRAM=draft_probs is None,
+            target_indices=target_indices,
+            compressed_mode=compressed_mode,
         )
     else:
         sample_recovered_tokens_pytorch(

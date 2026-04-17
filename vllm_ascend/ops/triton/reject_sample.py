@@ -345,66 +345,56 @@ def sample_recovered_tokens_kernel(
         tl.store(output_token_ids_ptr + token_idx, global_recovered_id)
     else:
         vocab_size = global_vocab_size
-        n_loop = tl.cdiv(vocab_size, SUB_BLOCK)
-
-        global_max_p = tl.full((), -float("inf"), tl.float32)
-        global_recovered_id = tl.full((), -1, tl.int64)
-        draft_token_id = tl.load(draft_token_ids_ptr + token_idx).to(tl.int64)
-
+        loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+        global_recovered_id = -1
+        global_max_p = -1.0
         prefix_prob = 1.0
         if BLOCK_VERIFY:
             for prev_pos in range(pos):
                 prev_token_idx = start_idx + prev_pos
-                prev_draft_token_id = tl.load(draft_token_ids_ptr + prev_token_idx).to(tl.int64)
-                prev_target_prob = tl.load(target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id).to(
-                    tl.float32
-                )
+                prev_draft_token_id = tl.load(draft_token_ids_ptr + prev_token_idx)
+                prev_target_prob = tl.load(target_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
                 if NO_DRAFT_PROBS:
                     prev_draft_prob = 1.0
                 else:
-                    prev_draft_prob = tl.load(draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id).to(
-                        tl.float32
-                    )
-                ratio = tl.where(prev_draft_prob > 0, prev_target_prob / prev_draft_prob, 0.0)
-                prefix_prob = prefix_prob * tl.minimum(ratio, 1.0)
+                    prev_draft_prob = tl.load(draft_probs_ptr + prev_token_idx * vocab_size + prev_draft_token_id)
+                if prev_draft_prob > 0:
+                    prefix_prob = min(prefix_prob * prev_target_prob / prev_draft_prob, 1.0)
+                else:
+                    prefix_prob = 0.0
 
-        for vi in range(n_loop):
-            v_start = vi * SUB_BLOCK
-            offs = v_start + tl.arange(0, SUB_BLOCK)
-            mask = offs < vocab_size
-
-            gidx = offs  # Global indices are just offset here
-
-            tprob = tl.load(target_probs_ptr + token_idx * vocab_size + offs, mask=mask, other=0.0).to(tl.float32)
-
+        draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+        for loop_i in range(loop):
+            vocab_start = loop_i * SUB_BLOCK
+            vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+            target_prob = tl.load(
+                target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+                mask=vocab_offset < vocab_size,
+                other=0,
+            )
             if NO_DRAFT_PROBS:
-                is_draft = (gidx == draft_token_id) & mask
-                if BLOCK_VERIFY:
-                    prob = tl.where(is_draft, 0.0, prefix_prob * tprob)
-                else:
-                    prob = tl.where(is_draft, 0.0, tprob)
+                prob = prefix_prob * target_prob if BLOCK_VERIFY else target_prob
+                prob = tl.where(vocab_offset == draft_token_id, 0.0, prob)
             else:
-                dprob = tl.load(draft_probs_ptr + token_idx * vocab_size + gidx, mask=mask, other=0.0).to(tl.float32)
+                draft_prob = tl.load(
+                    draft_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+                    mask=vocab_offset < vocab_size,
+                    other=0,
+                )
                 if BLOCK_VERIFY:
-                    prob = tl.maximum(prefix_prob * tprob - dprob, 0.0)
+                    prob = tl.maximum(prefix_prob * target_prob - draft_prob, 0.0)
                 else:
-                    prob = tl.maximum(tprob - dprob, 0.0)
+                    prob = tl.maximum(target_prob - draft_prob, 0.0)
 
-            qv = tl.load(q_ptr + req_idx * vocab_size + offs, mask=mask, other=1.0).to(tl.float32)
+            q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf"))
+            new_p = prob / q
+            recovered_id = tl.argmax(new_p, axis=-1)
+            max_p = get_element(new_p, (recovered_id,))
+            if max_p > global_max_p:
+                global_max_p = max_p
+                global_recovered_id = vocab_start + recovered_id
 
-            bad_q = (qv <= 0) | tl.math.isinf(qv)
-            score = tl.where(bad_q, float("-inf"), prob / qv)
-            score = tl.where(mask, score, float("-inf"))
-
-            block_best_score = tl.max(score, axis=0)
-            block_best_idx = tl.argmax(score, axis=0).to(tl.int64)
-            block_best_global_id = v_start + block_best_idx
-
-            better = block_best_score > global_max_p
-            global_max_p = tl.where(better, block_best_score, global_max_p)
-            global_recovered_id = tl.where(better, block_best_global_id.to(tl.int64), global_recovered_id)
-
-        tl.store(output_token_ids_ptr + token_idx, global_recovered_id)
+        tl.store(output_token_ids_ptr + start_idx + pos, global_recovered_id)
 
 
 def rejection_greedy_sample_with_triton(
