@@ -445,7 +445,36 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is None or kv_role != "kv_consumer":
+                raise ValueError(
+                    "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) only supports PD-disaggregated "
+                    "decode nodes (D-side) with kv_role='kv_consumer'. It is not supported "
+                    "in PD-mixed mode (no kv_transfer_config / kv_role='kv_both') nor on "
+                    "prefill nodes (P-side) with kv_role='kv_producer'."
+                )
+
+        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is not None and kv_role != "kv_both":
+                raise ValueError(
+                    "VLLM_ASCEND_BALANCE_SCHEDULING (balance scheduling) only supports PD-mixed mode "
+                    "(kv_role='kv_both' or no kv_transfer_config), and is not supported in "
+                    "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
+                )
+
         if ascend_config.recompute_scheduler_enable:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is None or kv_role == "kv_both":
+                raise ValueError(
+                    "recompute_scheduler_enable can only be enabled in PD-disaggregated mode "
+                    "(kv_role='kv_producer' or 'kv_consumer'), and is not supported in PD-mixed mode."
+                )
+
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
