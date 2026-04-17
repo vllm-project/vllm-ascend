@@ -386,7 +386,9 @@ def sample_recovered_tokens_kernel(
                 else:
                     prob = tl.maximum(target_prob - draft_prob, 0.0)
 
-            q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf"))
+            q = tl.load(
+                q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
+            )
             new_p = prob / q
             recovered_id = tl.argmax(new_p, axis=-1)
             max_p = get_element(new_p, (recovered_id,))
