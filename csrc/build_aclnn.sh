@@ -5,7 +5,7 @@ SOC_VERSION=$2
 
 if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     # ASCEND310P series
-    CUSTOM_OPS="causal_conv1d_v310"
+    CUSTOM_OPS="causal_conv1d_v310;recurrent_gated_delta_rule_v310"
     SOC_ARG="ascend310p"
 elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     # ASCEND910B (A2) series
@@ -45,6 +45,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "lightning_indexer_vllm"
         "sparse_flash_attention"
         "dispatch_ffn_combine"
+        "dispatch_ffn_combine_w4_a8"
         "dispatch_ffn_combine_bf16"
         "dispatch_gmm_combine_decode"
         "moe_combine_normal"

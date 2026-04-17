@@ -51,14 +51,24 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     return {masked_input, mask};
 }
 
+void device_print_meta(c10::string_view msg)
+{
+    (void)msg;
+}
+
+void device_print_tensor_meta(const at::Tensor& tensor)
+{
+    (void)tensor;
+}
+
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
-                       int64_t slice_offset, int64_t slice_size) {
+                        int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
     return y_out;
 }
 
 at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
-                       at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
+                        at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
     return y_out;
 }
@@ -183,6 +193,8 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& expert_idx,
     const at::TensorList& scale1,
     const at::TensorList& scale2,
+    const at::TensorList& bias1,
+    const at::TensorList& bias2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
@@ -520,6 +532,24 @@ at::Tensor npu_causal_conv1d_310_meta(
     at::Tensor output = at::empty_symint(x.sym_sizes(), x.options());
     return output;
 }
+
+at::Tensor npu_recurrent_gated_delta_rule_310_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& beta,
+    at::Tensor& state,
+    const at::Tensor& actual_seq_lengths,
+    const at::Tensor& ssm_state_indices,
+    const c10::optional<at::Tensor>& g,
+    const c10::optional<at::Tensor>& gk,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    double scale_value)
+{
+
+    at::Tensor output = at::empty_symint(value.sym_sizes(), value.options());
+    return output;
+}
   
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
@@ -598,6 +628,8 @@ namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // causal_conv1d_310
     ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
+    // npu_recurrent_gated_delta_rule_310
+    ops.impl("npu_recurrent_gated_delta_rule_310", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_310_meta);
 }
 }
 #else
@@ -608,6 +640,10 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // Masked input and mask meta implementation
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
+    // Launch host print from device
+    ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
+    // launch host print from device for tensors
+    ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand

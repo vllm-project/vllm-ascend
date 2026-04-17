@@ -8,6 +8,7 @@ from vllm.platforms import PlatformEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -236,6 +237,56 @@ class TestNPUPlatform(TestBase):
         self.assertIsNone(self.platform.inference_mode())
         mock_inference_mode.assert_called_once()
 
+    def test_set_additional_forward_context_v2_includes_required_moe_fields(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        dummy_comm_method = object()
+
+        with (
+            patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
+            patch("vllm_ascend.platform.is_moe_model", return_value=True),
+            patch("vllm_ascend.platform.enable_sp", return_value=False),
+            patch("vllm_ascend.platform.flashcomm2_enable", return_value=False),
+            patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
+            patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
+            patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
+            patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=dummy_comm_method),
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=None,
+                num_tokens=5,
+            )
+
+        self.assertFalse(kwargs["in_profile_run"])
+        self.assertEqual(kwargs["padded_num_tokens"], 8)
+        self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
+
+    def test_set_additional_forward_context_reads_v2_profile_override(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+
+        with (
+            patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
+            patch("vllm_ascend.platform.is_moe_model", return_value=True),
+            patch("vllm_ascend.platform.enable_sp", return_value=False),
+            patch("vllm_ascend.platform.flashcomm2_enable", return_value=False),
+            patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=2),
+            patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
+            patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
+            patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=object()),
+            override_mrv2_in_profile_run(True),
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=None,
+                num_tokens=4,
+            )
+
+        self.assertTrue(kwargs["in_profile_run"])
+
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.update_aclgraph_sizes")
@@ -437,6 +488,36 @@ class TestNPUPlatform(TestBase):
         self.platform.update_block_size_for_backend(vllm_config)
 
         self.assertEqual(vllm_config.cache_config.block_size, 512)
+
+    def test_validate_layer_sharding_config_accepts_single_node(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
+        vllm_config.kv_transfer_config = None
+
+        self.platform._validate_layer_sharding_config(vllm_config)
+
+    def test_validate_layer_sharding_config_accepts_kv_producer(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=True, kv_role="kv_producer")
+
+        self.platform._validate_layer_sharding_config(vllm_config)
+
+    def test_validate_layer_sharding_config_rejects_non_kv_producer(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=False, kv_role="kv_consumer")
+
+        with pytest.raises(ValueError, match="layer_sharding can only be enabled in PD-disaggregated's P node"):
+            self.platform._validate_layer_sharding_config(vllm_config)
+
+    def test_validate_layer_sharding_config_rejects_kv_both(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
+        vllm_config.kv_transfer_config = MagicMock(is_kv_producer=True, kv_role="kv_both")
+
+        with pytest.raises(ValueError, match="layer_sharding can only be enabled in PD-disaggregated's P node"):
+            self.platform._validate_layer_sharding_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

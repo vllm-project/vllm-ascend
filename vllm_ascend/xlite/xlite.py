@@ -30,6 +30,7 @@ from xlite._C import (  # type: ignore[attr-defined]
     Model,
     ModelConfig,
     Runtime,
+    ScoringFuncSigmoid,
     ScoringFuncSoftmax,
 )
 
@@ -85,7 +86,11 @@ class LlamaXliteModel(XliteModel):
         scheduler_config = vllm_config.scheduler_config
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = vllm_config.model_config.max_model_len
-        config.max_m = scheduler_config.max_num_batched_tokens
+        config.max_m = (
+            scheduler_config.max_num_batched_tokens
+            if get_ascend_config().xlite_graph_config.full_mode
+            else scheduler_config.max_num_seqs
+        )
         config.max_batch_size = max_batch_size
         config.max_seq_len = max_seq_len
         config.block_size = vllm_config.cache_config.block_size
@@ -207,6 +212,85 @@ class QwenMoeXliteModel(LlamaXliteModel):
         return xlite_model
 
 
+class Glm4MoeXliteModel(LlamaXliteModel):
+    def initialize(self, runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, int, int, torch.dtype]:
+        dtype = vllm_config.model_config.dtype
+        config = self._build_model_config(vllm_config)
+        xlite_model = self._build_model(runnable, vllm_config, config)
+        rank = torch.distributed.get_rank()
+        xlite_model.init(config, rank)
+
+        freq_cis = super()._precompute_freqs_cis(config.rope_head_dim, config.max_seq_len, dtype, config.rope_theta)
+
+        return (xlite_model, freq_cis, config.hidden_size, dtype)
+
+    def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
+        config = super()._build_model_config(vllm_config)
+        hf_config = vllm_config.model_config.hf_text_config
+        ep_group = get_ep_group()
+        config.rope_head_dim = int(hf_config.head_dim * hf_config.partial_rotary_factor)
+        config.n_dense_layers = hf_config.first_k_dense_replace
+        config.n_routed_experts = hf_config.n_routed_experts
+        config.n_shared_experts = hf_config.n_shared_experts
+        config.n_act_experts = hf_config.num_experts_per_tok
+        config.def_dp_size = vllm_config.parallel_config.data_parallel_size
+        config.moe_ep_size = ep_group.world_size if vllm_config.parallel_config.enable_expert_parallel else 1
+        config.moe_tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else ep_group.world_size
+        config.experts_weight_transpose = True  # type: ignore
+        config.moe_intermediate_size = hf_config.moe_intermediate_size
+        config.norm_topk_prob = hf_config.norm_topk_prob  # type: ignore
+        config.scoring_func = ScoringFuncSigmoid  # type: ignore
+        config.route_scale = hf_config.routed_scaling_factor
+        return config
+
+    def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig, config: ModelConfig) -> Model:
+        xlite_model = super()._build_model(runnable, vllm_config, config)
+        layers = runnable.model.layers
+        xlite_model.gate = [
+            layer.mlp.gate.weight
+            for layer in layers
+            if hasattr(layer.mlp, "gate") and layer.mlp.gate.weight is not None
+        ]
+        xlite_model.gate_bias = [
+            layer.mlp.gate.e_score_correction_bias.to(torch.float32)
+            for layer in layers
+            if hasattr(layer.mlp, "gate")
+            and hasattr(layer.mlp.gate, "e_score_correction_bias")
+            and layer.mlp.gate.e_score_correction_bias is not None
+        ]
+        xlite_model.re_up_gate = [
+            layer.mlp.experts.w13_weight[i]
+            for layer in layers
+            if hasattr(layer.mlp, "experts")
+            and hasattr(layer.mlp.experts, "w13_weight")
+            and layer.mlp.experts.w13_weight is not None
+            for i in range(layer.mlp.experts.local_num_experts)
+        ]
+        xlite_model.re_down = [
+            layer.mlp.experts.w2_weight[i]
+            for layer in layers
+            if hasattr(layer.mlp, "experts")
+            and hasattr(layer.mlp.experts, "w2_weight")
+            and layer.mlp.experts.w2_weight is not None
+            for i in range(layer.mlp.experts.local_num_experts)
+        ]
+        xlite_model.se_up_gate = [
+            layer.mlp.shared_experts.gate_up_proj.weight
+            for layer in layers
+            if hasattr(layer.mlp, "shared_experts")
+            and hasattr(layer.mlp.shared_experts, "gate_up_proj")
+            and layer.mlp.shared_experts.gate_up_proj.weight is not None
+        ]
+        xlite_model.se_down = [
+            layer.mlp.shared_experts.down_proj.weight
+            for layer in layers
+            if hasattr(layer.mlp, "shared_experts")
+            and hasattr(layer.mlp.shared_experts, "down_proj")
+            and layer.mlp.shared_experts.down_proj.weight is not None
+        ]
+        return xlite_model
+
+
 def xlite_model_init(runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Model, int, int, torch.dtype]:
     strategy_map = {
         "LlamaForCausalLM": LlamaXliteModel,
@@ -214,6 +298,7 @@ def xlite_model_init(runnable: nn.Module, vllm_config: VllmConfig) -> tuple[Mode
         "Qwen3ForCausalLM": LlamaXliteModel,
         "Qwen3VLForConditionalGeneration": LlamaXliteModel,
         "Qwen3MoeForCausalLM": QwenMoeXliteModel,
+        "Glm4MoeForCausalLM": Glm4MoeXliteModel,
     }
 
     architecture = vllm_config.model_config.architectures[0]

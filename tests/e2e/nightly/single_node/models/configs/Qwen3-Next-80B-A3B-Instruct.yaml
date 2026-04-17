@@ -46,8 +46,8 @@ _benchmarks: &benchmarks
     max_out_len: 32768
     batch_size: 64
     top_k: 20
-    baseline: 96
-    threshold: 3
+    baseline: 100
+    threshold: 5
 
 # ==========================================
 # ACTUAL TEST CASES

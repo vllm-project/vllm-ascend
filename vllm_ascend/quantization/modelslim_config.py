@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 import regex as re
 import torch
+from transformers import PretrainedConfig
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -313,10 +314,14 @@ def get_quant_type_for_layer(
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
     # Attention
-    if layer_type == "attention" and "fa_quant_type" in quant_description:
-        return quant_description["fa_quant_type"]
-    if layer_type == "attention" and "indexer_quant_type" in quant_description:
-        return quant_description["indexer_quant_type"]
+    if layer_type == "attention":
+        layer_indexer_quant_type = quant_description.get(f"{prefix}.indexer.quant_type")
+        if layer_indexer_quant_type is not None:
+            return layer_indexer_quant_type
+        if "fa_quant_type" in quant_description:
+            return quant_description["fa_quant_type"]
+        if "indexer_quant_type" in quant_description:
+            return quant_description["indexer_quant_type"]
     # Linear / MoE
     return get_linear_quant_type(quant_description, prefix, packed_modules_mapping)
 
@@ -470,6 +475,10 @@ class AscendModelSlimConfig(QuantizationConfig):
                     parts = parts[: exp_idx + 1]
                     prefix = ".".join(parts)
 
+        # TODO: remove it when vllm fixes the WeightsMapper bug of qwen3-vl.
+        if model_type in ["qwen3_vl"] and prefix == "lm_head":
+            prefix = "language_model.lm_head"
+
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[model_type]
         prefix = self.quant_prefix_mapper(model_type, prefix)
@@ -542,13 +551,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return True
         return False
 
-    def is_indexer_quant_layer(self, prefix):
-        if self.enable_indexer_quant:
-            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
-            if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
-                return True
-        return False
-
     def enabling_fa_quant(self, vllm_config, layer_name) -> bool:
         is_decode_instance = (
             vllm_config.kv_transfer_config is not None
@@ -556,6 +558,13 @@ class AscendModelSlimConfig(QuantizationConfig):
             and not vllm_config.kv_transfer_config.is_kv_producer
         )
         return bool(is_decode_instance and self.is_fa_quant_layer(layer_name))
+
+    def is_indexer_quant_layer(self, prefix):
+        if self.enable_indexer_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.indexer_quant_layers:
+                return True
+        return False
 
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
@@ -575,7 +584,12 @@ class AscendModelSlimConfig(QuantizationConfig):
             kv_head_dim_list = [k_quant_head_dim, v_quant_head_dim]
         return calc_split_factor(kv_head_dim_list)
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None) -> None:
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ) -> None:
         """Load the ModelSlim quantization config from model directory.
 
         This method is called by vllm after get_quant_config() returns
@@ -591,6 +605,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         Args:
             model_name: Path to the model directory or HuggingFace /
                 ModelScope repo id.
+            hf_config: The Hugging Face config of the model
             revision: Optional revision (branch, tag, or commit hash) for
                 remote repos.
         """
