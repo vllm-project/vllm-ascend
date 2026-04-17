@@ -91,79 +91,24 @@ class AscendSampler(Sampler):
             self.async_exponential_event.record()
         self.set_q_event(q, self.async_exponential_event)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-        logprobs_mode_override=None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Sample logits based on sampling metadata.
-
-        The various logits processing functions called in this method
-        may update the logits tensor in-place.
-        """
-
-        logprobs_mode = logprobs_mode_override or self.logprobs_mode
-        assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
-        if sampling_metadata.all_random:
-            greedy_sampled = None
-        else:
-            if get_ascend_config().enable_reduce_sample:
-                greedy_sampled = self.greedy_sample_v2(logits)
-            else:
-                greedy_sampled = self.greedy_sample(logits)
-            if sampling_metadata.all_greedy:
-                processed_logprobs = None
-                if sampling_metadata.max_num_logprobs is not None:
-                    if logprobs_mode == "processed_logits":
-                        processed_logprobs = logits
-                    elif logprobs_mode == "processed_logprobs":
-                        processed_logprobs = self.compute_logprobs(logits)
-                return greedy_sampled, processed_logprobs
-
-        assert sampling_metadata.temperature is not None
-
-        # Apply temperature.
-        logits = self.apply_temperature(logits, sampling_metadata.temperature, sampling_metadata.all_random)
-
-        # Apply logits processors that only apply to random sampling
-        # (argmax invariant)
-        for processor in sampling_metadata.logitsprocs.argmax_invariant:
-            logits = processor.apply(logits)
-
-        # Apply top_k and/or top_p.
-        random_sampled, processed_logprobs = self.topk_topp_sampler(
-            logits,
-            sampling_metadata.generators,
-            sampling_metadata.top_k,
-            sampling_metadata.top_p,
-        )
-
-        if greedy_sampled is None:
-            return random_sampled, processed_logprobs
-
-        sampled = torch.where(
-            sampling_metadata.temperature < _SAMPLING_EPS,
-            greedy_sampled,
-            random_sampled,
-            out=greedy_sampled,  # Reuse tensor
-        )
-        return sampled, processed_logprobs
 
     @staticmethod
-    def greedy_sample_v2(logits: torch.Tensor) -> torch.Tensor:
-        tp_group = get_tp_group()
-        B, V_local = logits.shape
-        rank = tp_group.rank_in_group
+    def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
+        if get_ascend_config().enable_reduce_sample:
+            tp_group = get_tp_group()
+            B, V_local = logits.shape
+            rank = tp_group.rank_in_group
 
-        local_max_logits, local_max_indices = logits.max(dim=-1)
-        local_global_idx = local_max_indices + rank * V_local  # [B]
-        # [B, world_size]
-        gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
-        gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
-        global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
-        target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
-        return target_argmax
+            local_max_logits, local_max_indices = logits.max(dim=-1)
+            local_global_idx = local_max_indices + rank * V_local  # [B]
+            # [B, world_size]
+            gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
+            gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
+            global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
+            target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
+            return target_argmax
+        else:
+            return logits.argmax(dim=-1).view(-1)
 
 
 class AscendTopKTopPSampler(TopKTopPSampler):
