@@ -37,6 +37,8 @@ std::tuple<at::Tensor, at::Tensor> npu_scatter_pa_kv_cache_vllm(
 
     EXEC_NPU_CMD(aclnnScatterPaKvCacheVllm, key, key_cache, slot_mapping, value, value_cache,
         compress_lens, compress_seq_offsets, seq_lens, cache_mode_ptr, scatter_mode, strides, offsets);
+
+    return std::make_tuple(key_cache, value_cache);
 }
 
 }
