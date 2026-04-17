@@ -46,6 +46,7 @@ class AscendLinearMethod(LinearMethodBase):
 
     def __init__(self, scheme: AscendLinearScheme) -> None:
         self.quant_method = scheme
+        self._enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
 
     def create_weights(
         self,
@@ -145,7 +146,7 @@ class AscendLinearMethod(LinearMethodBase):
                     tp_rank = 0
                 else:
                     tp_rank = get_flashcomm2_otp_group().rank_in_group
-            elif layer.prefix.find("o_proj") != -1 and enable_dsa_cp_with_layer_shard():
+            elif layer.prefix.find("o_proj") != -1 and self._enable_dsa_cp_with_layer_shard:
                 tp_rank = 0
             else:
                 tp_rank = get_tensor_model_parallel_rank()
