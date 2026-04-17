@@ -466,6 +466,9 @@ class KVPoolScheduler:
         if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
         delay_free_blocks = len(block_ids) > 0
+        # TODO 删除是否是异步的？
+        res = self.store_scheduler.remove_batch(list(tracker.key_gva_mapping.keys()))
+        logger.info(f">>>>>>>>>>>>>>>>>>>> res {res} remove {len(list(tracker.key_gva_mapping.keys()))} keys of request {request.request_id}")
         if delay_free_blocks:
             logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
