@@ -620,8 +620,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         rms_alpha = self.quant_description.get("rms_alpha", 1.0)
         if hidden_dim is None or num_heads is None or head_dim is None:
             raise ValueError(
-                "QuaRot enabled but missing one of top-level shape metadata keys: "
-                "hidden_dim, num_heads, head_dim."
+                "QuaRot enabled but missing one of top-level shape metadata keys: hidden_dim, num_heads, head_dim."
             )
         if not isinstance(hidden_dim, int) or not isinstance(num_heads, int) or not isinstance(head_dim, int):
             raise ValueError("QuaRot metadata hidden_dim/num_heads/head_dim must be integers.")
@@ -647,8 +646,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         attention_contract = quarot_meta.get("attention_contract")
         if attention_contract != _QUAROT_ATTENTION_CONTRACT:
             raise ValueError(
-                "QuaRot metadata must declare attention_contract='lean_h_only' "
-                f"(observed {attention_contract!r})."
+                f"QuaRot metadata must declare attention_contract='lean_h_only' (observed {attention_contract!r})."
             )
         return {
             "contract_version": quarot_meta.get("contract_version"),
@@ -781,9 +779,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
                 return AscendUnquantizedLinearMethod()
-            quant_type = get_quant_type_for_layer(
-                self.quant_description, prefix, "linear", self.packed_modules_mapping
-            )
+            quant_type = get_quant_type_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
             if quant_type == _QUAROT_LINEAR_QUANT_TYPE:
                 self._attach_quarot_config(layer, prefix, "linear")

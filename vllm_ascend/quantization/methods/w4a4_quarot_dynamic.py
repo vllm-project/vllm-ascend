@@ -28,7 +28,7 @@ import torch
 import torch_npu
 from safetensors import safe_open
 from vllm.config import get_current_vllm_config
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.ops.fast_hadamard import (
     fast_hadamard_dynamic_quant_blockwise_last_dim,
@@ -99,7 +99,6 @@ _HADAMARD_BASE_12 = torch.tensor(
     ],
     dtype=torch.float32,
 )
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
