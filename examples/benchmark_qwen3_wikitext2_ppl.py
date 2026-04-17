@@ -37,7 +37,6 @@ from typing import Any
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-
 DEFAULT_FULL_MODEL = "/data/weights/qwen3-8B"
 DEFAULT_QUAROT_MODEL = "/data/weights/Qwen3-8B-QuaRot-W4A4-RTN"
 DEFAULT_DATASET = "/workspace/wikitext-2-raw/wiki.test.raw"
@@ -95,7 +94,10 @@ def parse_args() -> argparse.Namespace:
         "--gpu-memory-utilization",
         type=float,
         default=0.8,
-        help="gpu_memory_utilization passed to vLLM engine startup (default: 0.80 to leave prompt-logprob workspace headroom).",
+        help=(
+            "gpu_memory_utilization passed to vLLM engine startup "
+            "(default: 0.80 to leave prompt-logprob workspace headroom)."
+        ),
     )
     parser.add_argument(
         "--enforce-eager",
@@ -275,15 +277,9 @@ def print_summary(results: list[EvalResult], meta: dict[str, Any]) -> None:
     print()
     for r in results:
         print(f"[{r.name}] {r.model_path}")
-        print(
-            f"  ppl={r.perplexity:.6f}  scored_tokens={r.scored_tokens}  nll={r.neg_log_likelihood:.3f}"
-        )
-        print(
-            f"  load_s={r.model_load_sec:.3f}  eval_s={r.eval_sec:.3f}  tok_s={r.throughput_tok_s:.3f}"
-        )
-        print(
-            f"  latency_ms(avg/p50/p95)={r.latency_avg_ms:.3f}/{r.latency_p50_ms:.3f}/{r.latency_p95_ms:.3f}"
-        )
+        print(f"  ppl={r.perplexity:.6f}  scored_tokens={r.scored_tokens}  nll={r.neg_log_likelihood:.3f}")
+        print(f"  load_s={r.model_load_sec:.3f}  eval_s={r.eval_sec:.3f}  tok_s={r.throughput_tok_s:.3f}")
+        print(f"  latency_ms(avg/p50/p95)={r.latency_avg_ms:.3f}/{r.latency_p50_ms:.3f}/{r.latency_p95_ms:.3f}")
     if len(results) == 2:
         a, b = results
         print()

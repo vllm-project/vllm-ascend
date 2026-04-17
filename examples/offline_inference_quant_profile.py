@@ -58,11 +58,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         action="append",
         default=[],
-        help=(
-            "Model spec as name=path. "
-            "Can be provided multiple times. "
-            "Default: flatquant and quarot server paths."
-        ),
+        help=("Model spec as name=path. Can be provided multiple times. Default: flatquant and quarot server paths."),
     )
     parser.add_argument("--dtype", default="float16", help="Runtime compute dtype, e.g. float16 or bfloat16.")
     parser.add_argument("--max-model-len", type=int, default=64, help="Maximum model length.")
@@ -380,7 +376,9 @@ def summarize_kv_cache_usage(kv_caches: Any) -> dict[str, Any]:
 
     num_records = len(records)
     bytes_per_record = per_record_bytes[0] if per_record_bytes else 0
-    all_records_uniform = bool(per_record_bytes) and all(record_bytes == bytes_per_record for record_bytes in per_record_bytes)
+    all_records_uniform = bool(per_record_bytes) and all(
+        record_bytes == bytes_per_record for record_bytes in per_record_bytes
+    )
     token_capacity = 0
     block_size = 0
     num_blocks = 0
@@ -611,10 +609,7 @@ def print_report(results: dict[str, Any]) -> None:
         print(f"  ffn_total_us={ffn_total_us:.3f} (source={model['ffn_breakdown'].get('source', 'unknown')})")
         print("  ffn_components:")
         for component, detail in list(model["ffn_breakdown"]["components"].items())[:8]:
-            print(
-                f"    - {component}: {detail['total_time_us']:.3f} us "
-                f"({detail['ratio_pct_within_ffn']:.2f}% of ffn)"
-            )
+            print(f"    - {component}: {detail['total_time_us']:.3f} us ({detail['ratio_pct_within_ffn']:.2f}% of ffn)")
         print("  top_ops:")
         for row in model["top_ops"]:
             print(f"    - {row['op_type']}: {row['total_time_us']:.3f} us ({row['ratio_pct']:.2f}%)")

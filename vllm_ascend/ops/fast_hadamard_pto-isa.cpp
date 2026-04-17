@@ -18,8 +18,7 @@ constexpr unsigned X_PING = 0x00000;
 constexpr unsigned X_PONG = X_PING + X_BUFFER_BYTES + 0x100;
 constexpr unsigned EVEN_BASE = X_PONG + X_BUFFER_BYTES + 0x100;
 constexpr unsigned ODD_BASE = EVEN_BASE + UB_HALF_BYTES + 0x100;
-static_assert(ODD_BASE + UB_HALF_BYTES <= UB_USABLE_BYTES,
-              "Fast Hadamard UB layout exceeds usable UB.");
+static_assert(ODD_BASE + UB_HALF_BYTES <= UB_USABLE_BYTES, "Fast Hadamard UB layout exceeds usable UB.");
 
 #define FAST_HADAMARD_BATCHED_CASES(X) \
   X(64, 6)                             \
@@ -43,12 +42,9 @@ AICORE void runBatchedHadamardInPlace(unsigned x_base, uint32_t sample_count) {
   constexpr uint32_t kNHalf = kN >> 1;
   constexpr uint32_t kSamplesPerLoad = ELEMENTS_PER_TILE / kN;
 
-  using FullTile = Tile<TileType::Vec, InputT, kSamplesPerLoad, kN,
-                        BLayout::RowMajor, DYNAMIC, kN>;
-  using HalfTile = Tile<TileType::Vec, InputT, kSamplesPerLoad, kNHalf,
-                        BLayout::RowMajor, DYNAMIC, kNHalf>;
-  using RowHalfTile =
-      Tile<TileType::Vec, InputT, 1, kNHalf, BLayout::RowMajor, 1, kNHalf>;
+  using FullTile = Tile<TileType::Vec, InputT, kSamplesPerLoad, kN, BLayout::RowMajor, DYNAMIC, kN>;
+  using HalfTile = Tile<TileType::Vec, InputT, kSamplesPerLoad, kNHalf, BLayout::RowMajor, DYNAMIC, kNHalf>;
+  using RowHalfTile = Tile<TileType::Vec, InputT, 1, kNHalf, BLayout::RowMajor, 1, kNHalf>;
 
   FullTile xBulkTile(sample_count);
   HalfTile evenTile(sample_count);
@@ -86,13 +82,11 @@ AICORE void runBatchedHadamardInPlace(unsigned x_base, uint32_t sample_count) {
 }
 
 template <typename InputT>
-AICORE void issueTLoad(__gm__ InputT *x, const TileWork &tile, unsigned x_base,
-                       event_t ev) {
+AICORE void issueTLoad(__gm__ InputT* x, const TileWork& tile, unsigned x_base, event_t ev) {
   using ShapeDim5 = pto::Shape<1, 1, 1, 1, ELEMENTS_PER_TILE>;
   using StridDim5 = pto::Stride<1, 1, 1, 1, 1>;
   using InGlobal = pto::GlobalTensor<InputT, ShapeDim5, StridDim5>;
-  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE,
-                        BLayout::RowMajor, -1, -1>;
+  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
 
   FullTile xBulkTile(1, tile.elements);
   TASSIGN(xBulkTile, x_base);
@@ -105,9 +99,8 @@ AICORE void issueTLoad(__gm__ InputT *x, const TileWork &tile, unsigned x_base,
   set_flag(PIPE_MTE2, PIPE_V, ev);
 }
 
-AICORE bool nextTile(uint32_t &sample_done, uint32_t gm_offset_base,
-                     uint32_t samples_to_process, uint32_t samples_per_load,
-                     uint32_t n, TileWork &tile) {
+AICORE bool nextTile(uint32_t& sample_done, uint32_t gm_offset_base, uint32_t samples_to_process,
+                     uint32_t samples_per_load, uint32_t n, TileWork& tile) {
   if (sample_done >= samples_to_process) {
     return false;
   }
@@ -120,8 +113,7 @@ AICORE bool nextTile(uint32_t &sample_done, uint32_t gm_offset_base,
 }
 
 template <typename InputT>
-AICORE bool tryRunBatchedHadamard(unsigned x_base, uint32_t sample_count,
-                                  uint32_t n, uint32_t log2_n) {
+AICORE bool tryRunBatchedHadamard(unsigned x_base, uint32_t sample_count, uint32_t n, uint32_t log2_n) {
   switch (n) {
 #define FAST_HADAMARD_BATCHED_DISPATCH_CASE(N, LOG2)                    \
   case N:                                                               \
@@ -139,8 +131,7 @@ AICORE bool tryRunBatchedHadamard(unsigned x_base, uint32_t sample_count,
 }
 
 template <typename T>
-AICORE void runTFastHadamard(__gm__ T *x, uint32_t batch, uint32_t n,
-                             uint32_t log2_n) {
+AICORE void runTFastHadamard(__gm__ T* x, uint32_t batch, uint32_t n, uint32_t log2_n) {
 #if defined(__DAV_VEC__)
   set_mask_norm();
   set_vector_mask(-1, -1);
@@ -170,13 +161,10 @@ AICORE void runTFastHadamard(__gm__ T *x, uint32_t batch, uint32_t n,
   using StridDim5 = pto::Stride<1, 1, 1, 1, 1>;
   using GlobalData = pto::GlobalTensor<T, ShapeDim5, StridDim5>;
 
-  using FullTile =
-      Tile<TileType::Vec, T, 1, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
-  using HalfTile = Tile<TileType::Vec, T, 1, ELEMENTS_PER_TILE / 2,
-                        BLayout::RowMajor, -1, -1>;
+  using FullTile = Tile<TileType::Vec, T, 1, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
+  using HalfTile = Tile<TileType::Vec, T, 1, ELEMENTS_PER_TILE / 2, BLayout::RowMajor, -1, -1>;
 
-  const uint32_t samples_per_load =
-      (n < ELEMENTS_PER_TILE) ? ELEMENTS_PER_TILE / n : 1;
+  const uint32_t samples_per_load = (n < ELEMENTS_PER_TILE) ? ELEMENTS_PER_TILE / n : 1;
   const uint32_t n_half = n >> 1;
 
   set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
@@ -192,8 +180,7 @@ AICORE void runTFastHadamard(__gm__ T *x, uint32_t batch, uint32_t n,
   uint32_t sample_done = 0;
   TileWork current_tile;
   const uint32_t gm_offset_base = sample_offset * n;
-  if (!nextTile(sample_done, gm_offset_base, samples_to_process,
-                samples_per_load, n, current_tile)) {
+  if (!nextTile(sample_done, gm_offset_base, samples_to_process, samples_per_load, n, current_tile)) {
     return;
   }
 
@@ -207,9 +194,7 @@ AICORE void runTFastHadamard(__gm__ T *x, uint32_t batch, uint32_t n,
     wait_flag(PIPE_MTE2, PIPE_V, current_ev);
 
     TileWork next_tile;
-    const bool has_next =
-        nextTile(sample_done, gm_offset_base, samples_to_process,
-                 samples_per_load, n, next_tile);
+    const bool has_next = nextTile(sample_done, gm_offset_base, samples_to_process, samples_per_load, n, next_tile);
     if (has_next) {
       const event_t next_ev = ping ? (event_t)EVENT_ID1 : (event_t)EVENT_ID0;
       const unsigned next_x_base = ping ? X_PONG : X_PING;
@@ -222,8 +207,7 @@ AICORE void runTFastHadamard(__gm__ T *x, uint32_t batch, uint32_t n,
     GlobalData xGlobal(x + current_tile.gm_offset);
     TASSIGN(xGlobal, (x + current_tile.gm_offset));
 
-    if (!tryRunBatchedHadamard<T>(x_base, current_tile.sample_count, n,
-                                  log2_n)) {
+    if (!tryRunBatchedHadamard<T>(x_base, current_tile.sample_count, n, log2_n)) {
       for (uint32_t s = 0; s < current_tile.sample_count; ++s) {
         const unsigned row_base = x_base + s * n * sizeof(T);
 
@@ -275,13 +259,11 @@ AICORE void runTFastHadamard(__gm__ T *x, uint32_t batch, uint32_t n,
 
 }  // namespace
 
-__global__ AICORE void fast_hadamard_fp16(__gm__ void *x, uint32_t batch,
-                                          uint32_t n, uint32_t log2_n) {
-  runTFastHadamard<half>((__gm__ half *)x, batch, n, log2_n);
+__global__ AICORE void fast_hadamard_fp16(__gm__ void* x, uint32_t batch, uint32_t n, uint32_t log2_n) {
+  runTFastHadamard<half>((__gm__ half*)x, batch, n, log2_n);
 }
 
-extern "C" void call_kernel(uint32_t blockDim, void *stream, uint8_t *x,
-                            uint32_t batch, uint32_t n, uint32_t log2_n) {
+extern "C" void call_kernel(uint32_t blockDim, void* stream, uint8_t* x, uint32_t batch, uint32_t n, uint32_t log2_n) {
   blockDim = blockDim * 2;
   fast_hadamard_fp16<<<blockDim, nullptr, stream>>>(x, batch, n, log2_n);
 }

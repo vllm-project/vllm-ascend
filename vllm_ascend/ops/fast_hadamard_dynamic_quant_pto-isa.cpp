@@ -25,21 +25,15 @@ constexpr unsigned ODD_BASE = EVEN_BASE + UB_HALF_BYTES + 0x100;
 constexpr unsigned SCALE_BASE = ODD_BASE + UB_HALF_BYTES + 0x100;
 constexpr unsigned REDUCE_TMP_BASE = SCALE_BASE + MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(float) + 0x100;
 constexpr unsigned ROWMAX_BASE = REDUCE_TMP_BASE + X_BUFFER_BYTES + 0x100;
-constexpr unsigned ROWMIN_BASE =
-    ROWMAX_BASE + MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(half) + 0x100;
-static_assert(ODD_BASE + UB_HALF_BYTES <= UB_USABLE_BYTES,
-              "Fused Hadamard+quantize UB layout exceeds usable UB.");
-static_assert(SCALE_BASE +
-                  MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(float) <=
-              UB_USABLE_BYTES,
+constexpr unsigned ROWMIN_BASE = ROWMAX_BASE + MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(half) + 0x100;
+static_assert(ODD_BASE + UB_HALF_BYTES <= UB_USABLE_BYTES, "Fused Hadamard+quantize UB layout exceeds usable UB.");
+static_assert(SCALE_BASE + MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(float) <= UB_USABLE_BYTES,
               "Dynamic quant scale UB layout exceeds usable UB.");
 static_assert(REDUCE_TMP_BASE + X_BUFFER_BYTES <= UB_USABLE_BYTES,
               "Dynamic quant reduce-temp UB layout exceeds usable UB.");
-static_assert(ROWMAX_BASE + MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(half) <=
-                  UB_USABLE_BYTES,
+static_assert(ROWMAX_BASE + MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(half) <= UB_USABLE_BYTES,
               "Dynamic quant row-max UB layout exceeds usable UB.");
-static_assert(ROWMIN_BASE + MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(half) <=
-                  UB_USABLE_BYTES,
+static_assert(ROWMIN_BASE + MAX_DYNAMIC_SAMPLES_PER_LOAD * sizeof(half) <= UB_USABLE_BYTES,
               "Dynamic quant row-min UB layout exceeds usable UB.");
 
 #define FAST_HADAMARD_BATCHED_CASES(X) \
@@ -64,12 +58,9 @@ AICORE void runBatchedHadamardInPlace(unsigned x_base, uint32_t sample_count) {
   constexpr uint32_t kNHalf = kN >> 1;
   constexpr uint32_t kSamplesPerLoad = ELEMENTS_PER_TILE / kN;
 
-  using FullTile = Tile<TileType::Vec, InputT, kSamplesPerLoad, kN,
-                        BLayout::RowMajor, DYNAMIC, kN>;
-  using HalfTile = Tile<TileType::Vec, InputT, kSamplesPerLoad, kNHalf,
-                        BLayout::RowMajor, DYNAMIC, kNHalf>;
-  using RowHalfTile =
-      Tile<TileType::Vec, InputT, 1, kNHalf, BLayout::RowMajor, 1, kNHalf>;
+  using FullTile = Tile<TileType::Vec, InputT, kSamplesPerLoad, kN, BLayout::RowMajor, DYNAMIC, kN>;
+  using HalfTile = Tile<TileType::Vec, InputT, kSamplesPerLoad, kNHalf, BLayout::RowMajor, DYNAMIC, kNHalf>;
+  using RowHalfTile = Tile<TileType::Vec, InputT, 1, kNHalf, BLayout::RowMajor, 1, kNHalf>;
 
   FullTile xBulkTile(sample_count);
   HalfTile evenTile(sample_count);
@@ -107,13 +98,11 @@ AICORE void runBatchedHadamardInPlace(unsigned x_base, uint32_t sample_count) {
 }
 
 template <typename InputT>
-AICORE void issueTLoad(__gm__ InputT *x, const TileWork &tile, unsigned x_base,
-                       event_t ev) {
+AICORE void issueTLoad(__gm__ InputT* x, const TileWork& tile, unsigned x_base, event_t ev) {
   using InShapeDim5 = pto::Shape<1, 1, 1, 1, ELEMENTS_PER_TILE>;
   using StridDim5 = pto::Stride<1, 1, 1, 1, 1>;
   using InGlobal = pto::GlobalTensor<InputT, InShapeDim5, StridDim5>;
-  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE,
-                        BLayout::RowMajor, -1, -1>;
+  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
 
   FullTile xBulkTile(1, tile.elements);
   TASSIGN(xBulkTile, x_base);
@@ -126,9 +115,8 @@ AICORE void issueTLoad(__gm__ InputT *x, const TileWork &tile, unsigned x_base,
   set_flag(PIPE_MTE2, PIPE_V, ev);
 }
 
-AICORE bool nextTile(uint32_t &sample_done, uint32_t gm_offset_base,
-                     uint32_t samples_to_process, uint32_t samples_per_load,
-                     uint32_t n, TileWork &tile) {
+AICORE bool nextTile(uint32_t& sample_done, uint32_t gm_offset_base, uint32_t samples_to_process,
+                     uint32_t samples_per_load, uint32_t n, TileWork& tile) {
   if (sample_done >= samples_to_process) {
     return false;
   }
@@ -141,8 +129,7 @@ AICORE bool nextTile(uint32_t &sample_done, uint32_t gm_offset_base,
 }
 
 template <typename InputT>
-AICORE bool tryRunBatchedHadamard(unsigned x_base, uint32_t sample_count,
-                                  uint32_t n, uint32_t log2_n) {
+AICORE bool tryRunBatchedHadamard(unsigned x_base, uint32_t sample_count, uint32_t n, uint32_t log2_n) {
   switch (n) {
 #define FAST_HADAMARD_BATCHED_DISPATCH_CASE(N, LOG2)                    \
   case N:                                                               \
@@ -160,13 +147,10 @@ AICORE bool tryRunBatchedHadamard(unsigned x_base, uint32_t sample_count,
 }
 
 template <typename InputT>
-AICORE void runSingleHadamardRow(unsigned row_base, uint32_t n,
-                                 uint32_t log2_n) {
+AICORE void runSingleHadamardRow(unsigned row_base, uint32_t n, uint32_t log2_n) {
   const uint32_t n_half = n >> 1;
-  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE,
-                        BLayout::RowMajor, -1, -1>;
-  using HalfTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE / 2,
-                        BLayout::RowMajor, -1, -1>;
+  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
+  using HalfTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE / 2, BLayout::RowMajor, -1, -1>;
 
   FullTile xRowTile(1, n);
   HalfTile xFirstHalf(1, n_half);
@@ -193,46 +177,36 @@ AICORE void runSingleHadamardRow(unsigned row_base, uint32_t n,
 }
 
 template <typename InputT>
-AICORE void runRowBlockwiseHadamardInPlace(unsigned row_base, uint32_t full_n,
-                                           uint32_t hadamard_n,
+AICORE void runRowBlockwiseHadamardInPlace(unsigned row_base, uint32_t full_n, uint32_t hadamard_n,
                                            uint32_t log2_hadamard_n) {
-  if (full_n == hadamard_n &&
-      tryRunBatchedHadamard<InputT>(row_base, 1, full_n, log2_hadamard_n)) {
+  if (full_n == hadamard_n && tryRunBatchedHadamard<InputT>(row_base, 1, full_n, log2_hadamard_n)) {
     return;
   }
 
   const uint32_t num_blocks = full_n / hadamard_n;
   for (uint32_t block_idx = 0; block_idx < num_blocks; ++block_idx) {
-    const unsigned block_base =
-        row_base + block_idx * hadamard_n * sizeof(InputT);
-    if (!tryRunBatchedHadamard<InputT>(block_base, 1, hadamard_n,
-                                       log2_hadamard_n)) {
+    const unsigned block_base = row_base + block_idx * hadamard_n * sizeof(InputT);
+    if (!tryRunBatchedHadamard<InputT>(block_base, 1, hadamard_n, log2_hadamard_n)) {
       runSingleHadamardRow<InputT>(block_base, hadamard_n, log2_hadamard_n);
     }
   }
 }
 
 template <typename InputT>
-AICORE void runTileBlockwiseHadamardInPlace(unsigned tile_base,
-                                            uint32_t sample_count,
-                                            uint32_t full_n,
-                                            uint32_t hadamard_n,
-                                            uint32_t log2_hadamard_n) {
-  if (full_n == hadamard_n &&
-      tryRunBatchedHadamard<InputT>(tile_base, sample_count, full_n,
-                                    log2_hadamard_n)) {
+AICORE void runTileBlockwiseHadamardInPlace(unsigned tile_base, uint32_t sample_count, uint32_t full_n,
+                                            uint32_t hadamard_n, uint32_t log2_hadamard_n) {
+  if (full_n == hadamard_n && tryRunBatchedHadamard<InputT>(tile_base, sample_count, full_n, log2_hadamard_n)) {
     return;
   }
 
   for (uint32_t s = 0; s < sample_count; ++s) {
     const unsigned row_base = tile_base + s * full_n * sizeof(InputT);
-    runRowBlockwiseHadamardInPlace<InputT>(row_base, full_n, hadamard_n,
-                                           log2_hadamard_n);
+    runRowBlockwiseHadamardInPlace<InputT>(row_base, full_n, hadamard_n, log2_hadamard_n);
   }
 }
 
 template <typename TileDataS>
-AICORE float computeRowMaxAbsScalar(TileDataS &src, uint32_t n) {
+AICORE float computeRowMaxAbsScalar(TileDataS& src, uint32_t n) {
   float max_abs = 0.0f;
   for (uint32_t col = 0; col < n; ++col) {
     const float value = (float)src.GetValue(col);
@@ -245,19 +219,15 @@ AICORE float computeRowMaxAbsScalar(TileDataS &src, uint32_t n) {
 }
 
 template <typename TileDataS>
-AICORE float computeRowMaxAbs(TileDataS &src, uint32_t n) {
+AICORE float computeRowMaxAbs(TileDataS& src, uint32_t n) {
   return computeRowMaxAbsScalar<TileDataS>(src, n);
 }
 
 template <typename InputT, typename OutputT>
-AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
-                                  __gm__ InputT *group_scales,
-                                  __gm__ InputT *group_offsets,
-                                  uint32_t scale_group_stride,
-                                  uint32_t offset_group_stride, uint32_t batch,
-                                  uint32_t n, uint32_t log2_n,
-                                  uint32_t num_cores, uint32_t vid, float scale,
-                                  uint32_t group_size, float q_offset) {
+AICORE void runTFastHadamardQuant(__gm__ InputT* x, __gm__ OutputT* y, __gm__ InputT* group_scales,
+                                  __gm__ InputT* group_offsets, uint32_t scale_group_stride,
+                                  uint32_t offset_group_stride, uint32_t batch, uint32_t n, uint32_t log2_n,
+                                  uint32_t num_cores, uint32_t vid, float scale, uint32_t group_size, float q_offset) {
   set_mask_norm();
   set_vector_mask(-1, -1);
 
@@ -284,15 +254,11 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
   using StridDim5 = pto::Stride<1, 1, 1, 1, 1>;
   using OutGlobal = pto::GlobalTensor<OutputT, OutShapeDim5, StridDim5>;
 
-  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE,
-                        BLayout::RowMajor, -1, -1>;
-  using HalfTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE / 2,
-                        BLayout::RowMajor, -1, -1>;
-  using QuantTile = Tile<TileType::Vec, OutputT, 1, ELEMENTS_PER_TILE / 2,
-                         BLayout::RowMajor, -1, -1>;
+  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
+  using HalfTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE / 2, BLayout::RowMajor, -1, -1>;
+  using QuantTile = Tile<TileType::Vec, OutputT, 1, ELEMENTS_PER_TILE / 2, BLayout::RowMajor, -1, -1>;
 
-  const uint32_t samples_per_load =
-      (n < ELEMENTS_PER_TILE) ? (ELEMENTS_PER_TILE / n) : 1;
+  const uint32_t samples_per_load = (n < ELEMENTS_PER_TILE) ? (ELEMENTS_PER_TILE / n) : 1;
   const uint32_t n_half = n >> 1;
   const uint32_t packed_n = n >> 1;
 
@@ -309,8 +275,7 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
   uint32_t sample_done = 0;
   TileWork current_tile;
   const uint32_t gm_offset_base = sample_offset * n;
-  if (!nextTile(sample_done, gm_offset_base, samples_to_process,
-                samples_per_load, n, current_tile)) {
+  if (!nextTile(sample_done, gm_offset_base, samples_to_process, samples_per_load, n, current_tile)) {
     return;
   }
 
@@ -325,9 +290,7 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
     wait_flag(PIPE_MTE2, PIPE_V, current_ev);
 
     TileWork next_tile;
-    const bool has_next =
-        nextTile(sample_done, gm_offset_base, samples_to_process,
-                 samples_per_load, n, next_tile);
+    const bool has_next = nextTile(sample_done, gm_offset_base, samples_to_process, samples_per_load, n, next_tile);
     if (has_next) {
       const event_t next_ev = ping ? (event_t)EVENT_ID1 : (event_t)EVENT_ID0;
       const unsigned next_x_base = ping ? X_PONG : X_PING;
@@ -342,8 +305,7 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
     OutGlobal yGlobal(y + (current_tile.gm_offset >> 1));
     TASSIGN(yGlobal, (y + (current_tile.gm_offset >> 1)));
 
-    if (!tryRunBatchedHadamard<InputT>(current_x_base,
-                                       current_tile.sample_count, n, log2_n)) {
+    if (!tryRunBatchedHadamard<InputT>(current_x_base, current_tile.sample_count, n, log2_n)) {
       for (uint32_t s = 0; s < current_tile.sample_count; ++s) {
         const unsigned row_base = current_x_base + s * n * sizeof(InputT);
 
@@ -380,8 +342,7 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
         pipe_barrier(PIPE_V);
       }
       wait_flag(PIPE_MTE3, PIPE_V, current_ev);
-      fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(yBulkTile, xBulkTile,
-                                                   RoundMode::CAST_NONE);
+      fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(yBulkTile, xBulkTile, RoundMode::CAST_NONE);
       pipe_barrier(PIPE_V);
     } else {
       wait_flag(PIPE_MTE3, PIPE_V, current_ev);
@@ -391,14 +352,11 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
       for (uint32_t s = 0; s < current_tile.sample_count; ++s) {
         const uint32_t row_index = row_index_base + s;
         const unsigned row_x_base = current_x_base + s * n * sizeof(InputT);
-        const unsigned row_y_base =
-            current_y_base + s * packed_n * sizeof(OutputT);
+        const unsigned row_y_base = current_y_base + s * packed_n * sizeof(OutputT);
 
         for (uint32_t g = 0; g < groups_per_row; ++g) {
-          const unsigned group_x_base =
-              row_x_base + g * group_size * sizeof(InputT);
-          const unsigned group_y_base =
-              row_y_base + g * packed_group_size * sizeof(OutputT);
+          const unsigned group_x_base = row_x_base + g * group_size * sizeof(InputT);
+          const unsigned group_y_base = row_y_base + g * packed_group_size * sizeof(OutputT);
 
           FullTile xGroupTile(1, group_size);
           QuantTile yGroupTile(1, packed_group_size);
@@ -407,9 +365,7 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
 
           InputT group_scale = (InputT)scale;
           if (has_group_scales) {
-            const uint32_t scale_index =
-                (scale_group_stride == 0) ? g
-                                          : row_index * scale_group_stride + g;
+            const uint32_t scale_index = (scale_group_stride == 0) ? g : row_index * scale_group_stride + g;
             group_scale = group_scales[scale_index];
           }
 
@@ -418,17 +374,13 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
           if (has_group_offsets || q_offset != 0.0f) {
             InputT group_offset = (InputT)q_offset;
             if (has_group_offsets) {
-              const uint32_t offset_index =
-                  (offset_group_stride == 0)
-                      ? g
-                      : row_index * offset_group_stride + g;
+              const uint32_t offset_index = (offset_group_stride == 0) ? g : row_index * offset_group_stride + g;
               group_offset = group_offsets[offset_index];
             }
             TADDS(xGroupTile, xGroupTile, group_offset);
             pipe_barrier(PIPE_V);
           }
-          fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(yGroupTile, xGroupTile,
-                                                       RoundMode::CAST_NONE);
+          fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(yGroupTile, xGroupTile, RoundMode::CAST_NONE);
           pipe_barrier(PIPE_V);
         }
       }
@@ -455,18 +407,13 @@ AICORE void runTFastHadamardQuant(__gm__ InputT *x, __gm__ OutputT *y,
 }
 
 template <typename InputT, typename OutputT>
-AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
-                                         __gm__ float *row_scales,
-                                         uint32_t batch, uint32_t full_n,
-                                         uint32_t hadamard_n,
-                                         uint32_t log2_hadamard_n,
-                                         float inv_sqrt_hadamard_n,
-                                         uint32_t num_cores, uint32_t vid) {
+AICORE void runTFastHadamardDynamicQuant(__gm__ InputT* x, __gm__ OutputT* y, __gm__ float* row_scales, uint32_t batch,
+                                         uint32_t full_n, uint32_t hadamard_n, uint32_t log2_hadamard_n,
+                                         float inv_sqrt_hadamard_n, uint32_t num_cores, uint32_t vid) {
   set_mask_norm();
   set_vector_mask(-1, -1);
 
-  if (full_n == 0 || (full_n & 1U) != 0 || full_n > ELEMENTS_PER_TILE ||
-      hadamard_n == 0 || full_n % hadamard_n != 0) {
+  if (full_n == 0 || (full_n & 1U) != 0 || full_n > ELEMENTS_PER_TILE || hadamard_n == 0 || full_n % hadamard_n != 0) {
     return;
   }
 
@@ -485,20 +432,15 @@ AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
   }
 
   using OutShapeDim5 = pto::Shape<1, 1, 1, 1, ELEMENTS_PER_TILE / 2>;
-  using ScaleShapeDim5 =
-      pto::Shape<1, 1, 1, 1, MAX_DYNAMIC_SAMPLES_PER_LOAD>;
+  using ScaleShapeDim5 = pto::Shape<1, 1, 1, 1, MAX_DYNAMIC_SAMPLES_PER_LOAD>;
   using StridDim5 = pto::Stride<1, 1, 1, 1, 1>;
   using OutGlobal = pto::GlobalTensor<OutputT, OutShapeDim5, StridDim5>;
   using ScaleGlobal = pto::GlobalTensor<float, ScaleShapeDim5, StridDim5>;
-  using QuantTile = Tile<TileType::Vec, OutputT, 1, ELEMENTS_PER_TILE / 2,
-                         BLayout::RowMajor, -1, -1>;
-  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE,
-                        BLayout::RowMajor, -1, -1>;
-  using ScaleTile = Tile<TileType::Vec, float, 1, MAX_DYNAMIC_SAMPLES_PER_LOAD,
-                         BLayout::RowMajor, -1, -1>;
+  using QuantTile = Tile<TileType::Vec, OutputT, 1, ELEMENTS_PER_TILE / 2, BLayout::RowMajor, -1, -1>;
+  using FullTile = Tile<TileType::Vec, InputT, 1, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
+  using ScaleTile = Tile<TileType::Vec, float, 1, MAX_DYNAMIC_SAMPLES_PER_LOAD, BLayout::RowMajor, -1, -1>;
 
-  const uint32_t samples_per_load =
-      (full_n < ELEMENTS_PER_TILE) ? (ELEMENTS_PER_TILE / full_n) : 1;
+  const uint32_t samples_per_load = (full_n < ELEMENTS_PER_TILE) ? (ELEMENTS_PER_TILE / full_n) : 1;
   const uint32_t packed_n = full_n >> 1;
   const float scale_divisor = 7.0f;
 
@@ -510,8 +452,7 @@ AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
   uint32_t sample_done = 0;
   TileWork current_tile;
   const uint32_t gm_offset_base = sample_offset * full_n;
-  if (!nextTile(sample_done, gm_offset_base, samples_to_process,
-                samples_per_load, full_n, current_tile)) {
+  if (!nextTile(sample_done, gm_offset_base, samples_to_process, samples_per_load, full_n, current_tile)) {
     return;
   }
 
@@ -527,8 +468,7 @@ AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
 
     TileWork next_tile;
     const bool has_next =
-        nextTile(sample_done, gm_offset_base, samples_to_process,
-                 samples_per_load, full_n, next_tile);
+        nextTile(sample_done, gm_offset_base, samples_to_process, samples_per_load, full_n, next_tile);
     if (has_next) {
       const event_t next_ev = ping ? (event_t)EVENT_ID1 : (event_t)EVENT_ID0;
       const unsigned next_x_base = ping ? X_PONG : X_PING;
@@ -542,25 +482,16 @@ AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
 
     const uint32_t row_index_base = current_tile.gm_offset / full_n;
     using BulkTile =
-        Tile<TileType::Vec, InputT, MAX_DYNAMIC_SAMPLES_PER_LOAD,
-             ELEMENTS_PER_TILE,
-             BLayout::RowMajor, -1, -1>;
+        Tile<TileType::Vec, InputT, MAX_DYNAMIC_SAMPLES_PER_LOAD, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
     using BulkQuantTile =
-        Tile<TileType::Vec, OutputT, MAX_DYNAMIC_SAMPLES_PER_LOAD,
-             ELEMENTS_PER_TILE / 2,
-             BLayout::RowMajor, -1, -1>;
+        Tile<TileType::Vec, OutputT, MAX_DYNAMIC_SAMPLES_PER_LOAD, ELEMENTS_PER_TILE / 2, BLayout::RowMajor, -1, -1>;
     using ReduceTmpTile =
-        Tile<TileType::Vec, InputT, MAX_DYNAMIC_SAMPLES_PER_LOAD,
-             ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
+        Tile<TileType::Vec, InputT, MAX_DYNAMIC_SAMPLES_PER_LOAD, ELEMENTS_PER_TILE, BLayout::RowMajor, -1, -1>;
     // The server PTO toolkit expects compact DN/ColMajor row vectors for
     // TROWEXPAND*, while generic elementwise ops like TMAX still want
     // row-major tiles. Keep both views and reshape between them.
-    using ReduceTileColMajor =
-        Tile<TileType::Vec, InputT, MAX_DYNAMIC_SAMPLES_PER_LOAD, 1,
-             BLayout::ColMajor, -1, -1>;
-    using ReduceTileRowMajor =
-        Tile<TileType::Vec, InputT, 1, MAX_DYNAMIC_SAMPLES_PER_LOAD,
-             BLayout::RowMajor, -1, -1>;
+    using ReduceTileColMajor = Tile<TileType::Vec, InputT, MAX_DYNAMIC_SAMPLES_PER_LOAD, 1, BLayout::ColMajor, -1, -1>;
+    using ReduceTileRowMajor = Tile<TileType::Vec, InputT, 1, MAX_DYNAMIC_SAMPLES_PER_LOAD, BLayout::RowMajor, -1, -1>;
 
     BulkTile xBulkTile(current_tile.sample_count, full_n);
     BulkQuantTile yBulkTile2D(current_tile.sample_count, packed_n);
@@ -574,9 +505,8 @@ AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
     ScaleGlobal scaleGlobal(row_scales + row_index_base);
     TASSIGN(scaleGlobal, (row_scales + row_index_base));
     wait_flag(PIPE_MTE3, PIPE_V, current_ev);
-    runTileBlockwiseHadamardInPlace<InputT>(current_x_base,
-                                            current_tile.sample_count, full_n,
-                                            hadamard_n, log2_hadamard_n);
+    runTileBlockwiseHadamardInPlace<InputT>(current_x_base, current_tile.sample_count, full_n, hadamard_n,
+                                            log2_hadamard_n);
     pipe_barrier(PIPE_V);
     ReduceTmpTile reduceTmpTile(current_tile.sample_count, full_n);
     ReduceTileColMajor rowMaxTile(current_tile.sample_count, 1);
@@ -605,8 +535,7 @@ AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
 
     TCVT(scaleTile, rowMaxTileRm, RoundMode::CAST_RINT);
     pipe_barrier(PIPE_V);
-    TMULS(scaleTile, scaleTile,
-          inv_sqrt_hadamard_n / scale_divisor);
+    TMULS(scaleTile, scaleTile, inv_sqrt_hadamard_n / scale_divisor);
     pipe_barrier(PIPE_V);
 
     TMULS(rowMinTileRm, rowMaxTileRm, (InputT)0.0f);
@@ -630,8 +559,7 @@ AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
     TMAX(scaleTile, scaleTile, scaleFloorTile);
     pipe_barrier(PIPE_V);
 
-    fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(yBulkTile2D, xBulkTile,
-                                                 RoundMode::CAST_RINT);
+    fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(yBulkTile2D, xBulkTile, RoundMode::CAST_RINT);
     pipe_barrier(PIPE_V);
 
     set_flag(PIPE_V, PIPE_MTE3, current_ev);
@@ -657,18 +585,17 @@ AICORE void runTFastHadamardDynamicQuant(__gm__ InputT *x, __gm__ OutputT *y,
 
 }  // namespace
 
-__global__ AICORE void fast_hadamard_quant_fp16_to_int4(
-    __gm__ void *x, __gm__ void *y, __gm__ void *group_scales,
-    __gm__ void *group_offsets, uint32_t scale_group_stride,
-    uint32_t offset_group_stride, uint32_t batch, uint32_t n, uint32_t log2_n,
-    float scale, uint32_t group_size, float q_offset) {
+__global__ AICORE void fast_hadamard_quant_fp16_to_int4(__gm__ void* x, __gm__ void* y, __gm__ void* group_scales,
+                                                        __gm__ void* group_offsets, uint32_t scale_group_stride,
+                                                        uint32_t offset_group_stride, uint32_t batch, uint32_t n,
+                                                        uint32_t log2_n, float scale, uint32_t group_size,
+                                                        float q_offset) {
 #if defined(__DAV_VEC__)
   const uint32_t num_cores = get_block_num() * get_subblockdim();
   const uint32_t vid = get_block_idx() * get_subblockdim() + get_subblockid();
-  runTFastHadamardQuant<half, int8_t>(
-      (__gm__ half *)x, (__gm__ int8_t *)y, (__gm__ half *)group_scales,
-      (__gm__ half *)group_offsets, scale_group_stride, offset_group_stride,
-      batch, n, log2_n, num_cores, vid, scale, group_size, q_offset);
+  runTFastHadamardQuant<half, int8_t>((__gm__ half*)x, (__gm__ int8_t*)y, (__gm__ half*)group_scales,
+                                      (__gm__ half*)group_offsets, scale_group_stride, offset_group_stride, batch, n,
+                                      log2_n, num_cores, vid, scale, group_size, q_offset);
 #else
   (void)x;
   (void)y;
@@ -685,17 +612,14 @@ __global__ AICORE void fast_hadamard_quant_fp16_to_int4(
 #endif
 }
 
-__global__ AICORE void fast_hadamard_dynamic_quant_fp16_to_int4(
-    __gm__ void *x, __gm__ void *y, __gm__ void *row_scales, uint32_t batch,
-    uint32_t full_n, uint32_t hadamard_n, uint32_t log2_hadamard_n,
-    float inv_sqrt_hadamard_n) {
+__global__ AICORE void fast_hadamard_dynamic_quant_fp16_to_int4(__gm__ void* x, __gm__ void* y, __gm__ void* row_scales,
+                                                                uint32_t batch, uint32_t full_n, uint32_t hadamard_n,
+                                                                uint32_t log2_hadamard_n, float inv_sqrt_hadamard_n) {
 #if defined(__DAV_VEC__)
   const uint32_t num_cores = get_block_num() * get_subblockdim();
   const uint32_t vid = get_block_idx() * get_subblockdim() + get_subblockid();
-  runTFastHadamardDynamicQuant<half, int8_t>(
-      (__gm__ half *)x, (__gm__ int8_t *)y, (__gm__ float *)row_scales, batch,
-      full_n, hadamard_n, log2_hadamard_n, inv_sqrt_hadamard_n, num_cores,
-      vid);
+  runTFastHadamardDynamicQuant<half, int8_t>((__gm__ half*)x, (__gm__ int8_t*)y, (__gm__ float*)row_scales, batch,
+                                             full_n, hadamard_n, log2_hadamard_n, inv_sqrt_hadamard_n, num_cores, vid);
 #else
   (void)x;
   (void)y;
@@ -708,28 +632,20 @@ __global__ AICORE void fast_hadamard_dynamic_quant_fp16_to_int4(
 #endif
 }
 
-extern "C" void call_fused_kernel(uint32_t blockDim, void *stream, uint8_t *x,
-                                  uint8_t *y, uint8_t *group_scales,
-                                  uint8_t *group_offsets,
-                                  uint32_t scale_group_stride,
-                                  uint32_t offset_group_stride, uint32_t batch,
-                                  uint32_t n, uint32_t log2_n, float scale,
-                                  uint32_t group_size, float q_offset) {
+extern "C" void call_fused_kernel(uint32_t blockDim, void* stream, uint8_t* x, uint8_t* y, uint8_t* group_scales,
+                                  uint8_t* group_offsets, uint32_t scale_group_stride, uint32_t offset_group_stride,
+                                  uint32_t batch, uint32_t n, uint32_t log2_n, float scale, uint32_t group_size,
+                                  float q_offset) {
   blockDim = blockDim * 2;
-  fast_hadamard_quant_fp16_to_int4<<<blockDim, nullptr, stream>>>(
-      x, y, group_scales, group_offsets, scale_group_stride,
-      offset_group_stride, batch, n, log2_n, scale, group_size, q_offset);
+  fast_hadamard_quant_fp16_to_int4<<<blockDim, nullptr, stream>>>(x, y, group_scales, group_offsets, scale_group_stride,
+                                                                  offset_group_stride, batch, n, log2_n, scale,
+                                                                  group_size, q_offset);
 }
 
-extern "C" void call_dynamic_quant_kernel(uint32_t blockDim, void *stream,
-                                          uint8_t *x, uint8_t *y,
-                                          float *row_scales, uint32_t batch,
-                                          uint32_t full_n,
-                                          uint32_t hadamard_n,
-                                          uint32_t log2_hadamard_n,
-                                          float inv_sqrt_hadamard_n) {
+extern "C" void call_dynamic_quant_kernel(uint32_t blockDim, void* stream, uint8_t* x, uint8_t* y, float* row_scales,
+                                          uint32_t batch, uint32_t full_n, uint32_t hadamard_n,
+                                          uint32_t log2_hadamard_n, float inv_sqrt_hadamard_n) {
   blockDim = blockDim * 2;
-  fast_hadamard_dynamic_quant_fp16_to_int4<<<blockDim, nullptr, stream>>>(
-      x, y, row_scales, batch, full_n, hadamard_n, log2_hadamard_n,
-      inv_sqrt_hadamard_n);
+  fast_hadamard_dynamic_quant_fp16_to_int4<<<blockDim, nullptr, stream>>>(x, y, row_scales, batch, full_n, hadamard_n,
+                                                                          log2_hadamard_n, inv_sqrt_hadamard_n);
 }

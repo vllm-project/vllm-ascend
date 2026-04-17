@@ -18,10 +18,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
-import os
 import math
+import os
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -29,6 +29,7 @@ import torch_npu
 from safetensors import safe_open
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
+
 from vllm_ascend.ops.fast_hadamard import (
     fast_hadamard_dynamic_quant_blockwise_last_dim,
     fast_hadamard_last_dim_custom_op,
@@ -100,6 +101,7 @@ _HADAMARD_BASE_12 = torch.tensor(
 )
 logger = init_logger(__name__)
 
+
 @dataclass(frozen=True)
 class HadamardDispatch:
     kernel_family: str
@@ -108,7 +110,6 @@ class HadamardDispatch:
 
 def _layer_prefix(layer: torch.nn.Module) -> str:
     return getattr(layer, "prefix", None) or getattr(layer, "layer_name", "unknown")
-
 
 
 def _quarot_debug_value_path_enabled() -> bool:
@@ -138,11 +139,11 @@ def _maybe_log_value_path(layer: torch.nn.Module, stage: str, tensor: torch.Tens
     if not _quarot_debug_value_path_enabled():
         return
     prefix = _layer_prefix(layer).lower()
-    allowed_prefixes = {
-        f"model.layers.{idx}.self_attn.qkv_proj" for idx in range(4)
-    } | {
-        f"model.layers.{idx}.self_attn.o_proj" for idx in range(4)
-    } | {"lm_head"}
+    allowed_prefixes = (
+        {f"model.layers.{idx}.self_attn.qkv_proj" for idx in range(4)}
+        | {f"model.layers.{idx}.self_attn.o_proj" for idx in range(4)}
+        | {"lm_head"}
+    )
     if prefix not in allowed_prefixes:
         return
     if tensor.ndim == 0 or tensor.shape[0] > 16:
@@ -248,7 +249,6 @@ def _maybe_log_attention_inputs(
         _tensor_debug_summary(key),
         _tensor_debug_summary(value),
     )
-
 
 
 def _is_quarot_enabled(layer: torch.nn.Module) -> bool:
@@ -358,9 +358,7 @@ def _largest_power_of_two_factor(n: int) -> int:
 def _get_ffn_hadamard_layout(config: dict[str, Any]) -> str:
     layout = config.get("ffn_hadamard_layout", _FFN_HADAMARD_LAYOUT)
     if layout != _FFN_HADAMARD_LAYOUT:
-        raise ValueError(
-            f"Unsupported FFN Hadamard layout {layout!r}; expected {_FFN_HADAMARD_LAYOUT!r}"
-        )
+        raise ValueError(f"Unsupported FFN Hadamard layout {layout!r}; expected {_FFN_HADAMARD_LAYOUT!r}")
     return layout
 
 
@@ -422,9 +420,7 @@ def _normalize_hadamard_kernel_family(kernel_family: str) -> str:
 def _normalize_hadamard_launch_mode(launch_mode: str) -> str:
     name = launch_mode.strip().lower()
     if name not in _VALID_HADAMARD_LAUNCH_MODES:
-        raise ValueError(
-            f"Unknown Hadamard launch mode '{launch_mode}'. Valid: {sorted(_VALID_HADAMARD_LAUNCH_MODES)}"
-        )
+        raise ValueError(f"Unknown Hadamard launch mode '{launch_mode}'. Valid: {sorted(_VALID_HADAMARD_LAUNCH_MODES)}")
     return name
 
 
@@ -444,9 +440,7 @@ def _resolve_hadamard_dispatch(kernel_family: str | None) -> HadamardDispatch:
         normalized_launch_mode = _normalize_hadamard_launch_mode(launch_mode)
     else:
         normalized_launch_mode = (
-            HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP
-            if _is_torch_compile_mode()
-            else HADAMARD_LAUNCH_MODE_EAGER_JIT
+            HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP if _is_torch_compile_mode() else HADAMARD_LAUNCH_MODE_EAGER_JIT
         )
     return HadamardDispatch(normalized_family, normalized_launch_mode)
 
@@ -565,14 +559,11 @@ def _lean_runtime_input_fold_is_embedded(layer: torch.nn.Module) -> bool:
     config = _get_quarot_config(layer)
     prefix = _layer_prefix(layer)
     fold_type = _get_quarot_fold_type(config, prefix)
-    if fold_type != "QT_ALPHA_W":
-        return False
-    return True
+    return fold_type == "QT_ALPHA_W"
 
 
 def _lean_attention_requires_runtime_value_rotation(layer: torch.nn.Module) -> bool:
     return False
-
 
 
 def _use_grouped_native_linear_path(layer: torch.nn.Module, group_size: int) -> bool:
@@ -680,8 +671,7 @@ def _run_attention(
     if require_impl:
         prefix = _layer_prefix(layer)
         raise RuntimeError(
-            f"QuaRot fused attention requires layer.impl.forward for {prefix}; "
-            "python attention fallback is debug-only"
+            f"QuaRot fused attention requires layer.impl.forward for {prefix}; python attention fallback is debug-only"
         )
 
     out = _softmax_attention_fallback(query, key, value, num_heads, head_dim, scale)
@@ -790,7 +780,9 @@ def _apply_exact_deterministic_walsh_last_dim(
     dispatch = _resolve_hadamard_dispatch(kernel_family)
     if _is_power_of_two(n):
         rows = x.reshape(-1, n).contiguous()
-        if dispatch.kernel_family == HADAMARD_KERNEL_FAMILY_PTO and _is_pto_hadamard_supported(rows, dispatch.kernel_family):
+        if dispatch.kernel_family == HADAMARD_KERNEL_FAMILY_PTO and _is_pto_hadamard_supported(
+            rows, dispatch.kernel_family
+        ):
             if dispatch.launch_mode == HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP:
                 return fast_hadamard_last_dim_custom_op(rows).reshape_as(x)
             if dispatch.launch_mode == HADAMARD_LAUNCH_MODE_EAGER_JIT:
@@ -1149,9 +1141,7 @@ def _apply_kronecker_rotation_tensors(
     m = int(rotation_m.shape[0])
     n = int(rotation_n.shape[0])
     if x.shape[-1] != m * n:
-        raise ValueError(
-            f"Cannot apply Kronecker rotation with ({m}, {n}) to activation shape {tuple(x.shape)}."
-        )
+        raise ValueError(f"Cannot apply Kronecker rotation with ({m}, {n}) to activation shape {tuple(x.shape)}.")
     init_shape = x.shape
     reshaped = x.reshape(-1, m, n)
     rot_m = rotation_m if rotation_m.dtype == x.dtype else rotation_m.to(dtype=x.dtype)
@@ -1228,7 +1218,7 @@ def _load_native_quarot_tensor(model_dir: str, tensor_key: str) -> torch.Tensor 
         return None
 
     with safe_open(shard_path, framework="pt", device="cpu") as f:
-        if tensor_key not in f.keys():
+        if tensor_key not in f:
             return None
         tensor = f.get_tensor(tensor_key).detach().clone()
     _NATIVE_QUAROT_TENSOR_CACHE[cache_key] = tensor
@@ -1249,9 +1239,7 @@ def _attach_native_quarot_rotation_tensors(layer: torch.nn.Module) -> None:
     export_rotation_tensors = config.get("export_rotation_tensors")
     _validate_fused_quarot_contract(layer)
     if export_rotation_tensors:
-        raise RuntimeError(
-            f"QuaRot fused mode rejects dense rotation tensors (layer={_layer_prefix(layer)})."
-        )
+        raise RuntimeError(f"QuaRot fused mode rejects dense rotation tensors (layer={_layer_prefix(layer)}).")
     if export_rotation_tensors is False:
         return
     model_dir = _get_model_dir_for_native_quarot()
@@ -1379,7 +1367,6 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
         _validate_fused_quarot_contract(layer)
-        prefix = _layer_prefix(layer)
         original_dtype = x.dtype
         use_grouped_native_linear = _use_grouped_native_linear_path(layer, self.group_size)
         if self.group_size > 0 and not use_grouped_native_linear:

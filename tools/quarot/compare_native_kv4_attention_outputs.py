@@ -48,7 +48,6 @@ from typing import Any
 
 import torch
 
-
 DEFAULT_DENSE_MODEL = "/data/weights/qwen3-8B"
 DEFAULT_QUAROT_MODEL = "/workspace/Qwen3-8B-QuaRot-W4A4-q_random-debug-perchannel"
 DEFAULT_PROMPT = "The capital of France is"
@@ -298,13 +297,14 @@ def _capture(args: argparse.Namespace) -> int:
 
     # Import only after setting mode env vars. The backend reads environment
     # switches during runtime, but late import keeps child mode unambiguous.
-    import vllm_ascend.attention.attention_v1 as attention_v1
     from vllm import LLM, SamplingParams
+    from vllm.model_executor.layers.layernorm import RMSNorm
     from vllm.model_executor.layers.linear import RowParallelLinear
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
-    from vllm.model_executor.layers.layernorm import RMSNorm
     from vllm.model_executor.models.qwen2 import Qwen2DecoderLayer, Qwen2MLP
     from vllm.model_executor.models.qwen3 import Qwen3DecoderLayer, Qwen3MLP
+
+    import vllm_ascend.attention.attention_v1 as attention_v1
 
     original_forward_impl = attention_v1.AscendAttentionBackendImpl.forward_impl
     original_row_parallel_forward = RowParallelLinear.forward
@@ -413,7 +413,12 @@ def _capture(args: argparse.Namespace) -> int:
         call_idx = _latest_call_for_layer(layer_idx)
         result = original_rmsnorm_forward(self, *args, **kwargs)
         payload = payloads_by_call.get(call_idx) if call_idx is not None else None
-        if payload is not None and isinstance(result, tuple) and len(result) >= 2 and isinstance(result[1], torch.Tensor):
+        if (
+            payload is not None
+            and isinstance(result, tuple)
+            and len(result) >= 2
+            and isinstance(result[1], torch.Tensor)
+        ):
             residual = result[1]
             num_tokens = int(payload.get("num_tokens", residual.shape[0]))
             payload["post_attention_residual"] = _clone_to_cpu(_last_token_view(residual, num_tokens))
@@ -425,7 +430,9 @@ def _capture(args: argparse.Namespace) -> int:
         logits = original_logits_forward(self, lm_head, hidden_states, embedding_bias)
         if isinstance(logits, torch.Tensor) and logits.numel() > 0:
             last_logits = logits[-1:].detach()
-            top_values, top_indices = torch.topk(last_logits.to(torch.float32), k=min(10, last_logits.shape[-1]), dim=-1)
+            top_values, top_indices = torch.topk(
+                last_logits.to(torch.float32), k=min(10, last_logits.shape[-1]), dim=-1
+            )
             payload = {
                 "mode": mode,
                 "logits": _clone_to_cpu(last_logits),
@@ -557,7 +564,11 @@ def _load_metadata(mode_dir: Path) -> dict[str, Any]:
     metadata_path = mode_dir / "metadata.json"
     if metadata_path.exists():
         return json.loads(metadata_path.read_text(encoding="utf-8"))
-    output = (mode_dir / "output.txt").read_text(encoding="utf-8").strip() if (mode_dir / "output.txt").exists() else "<missing>"
+    output = (
+        (mode_dir / "output.txt").read_text(encoding="utf-8").strip()
+        if (mode_dir / "output.txt").exists()
+        else "<missing>"
+    )
     return {"output": output, "model": "<unknown>", "quantization": None, "captured_layers": 0}
 
 
@@ -576,19 +587,24 @@ def _print_summary(summary: dict[str, Any]) -> None:
     print(f"quarot_model={summary['quarot_model']}")
     for mode in _CAPTURE_MODES:
         print(f"{mode}_output={summary[f'{mode}_output']}")
-    print(
-        "captures "
-        + " ".join(f"{mode}={summary[f'{mode}_captures']}" for mode in _CAPTURE_MODES)
-    )
-    print(
-        "layers "
-        + " ".join(f"{mode}={summary[f'{mode}_layers']}" for mode in _CAPTURE_MODES)
-    )
+    print("captures " + " ".join(f"{mode}={summary[f'{mode}_captures']}" for mode in _CAPTURE_MODES))
+    print("layers " + " ".join(f"{mode}={summary[f'{mode}_layers']}" for mode in _CAPTURE_MODES))
     for pair in summary["pairs"]:
         left = pair["left"]
         right = pair["right"]
         print(f"\n{left}_vs_{right}")
-        print("layer | query | key | value | attention_output | o_proj_input | o_proj_output | post_attention_residual | mlp_u")
+        headers = [
+            "layer",
+            "query",
+            "key",
+            "value",
+            "attention_output",
+            "o_proj_input",
+            "o_proj_output",
+            "post_attention_residual",
+            "mlp_u",
+        ]
+        print(" | ".join(headers))
         print("-" * 290)
         for row in pair["layers"]:
             print(
@@ -626,10 +642,7 @@ def _compare(args: argparse.Namespace) -> int:
 
     metadata = {mode: _load_metadata(out_dir / mode) for mode in _CAPTURE_MODES}
     logits = {mode: _load_logits(out_dir / mode) for mode in _CAPTURE_MODES}
-    layers = {
-        mode: _select_last_by_layer(mode_captures, args.num_layers)
-        for mode, mode_captures in captures.items()
-    }
+    layers = {mode: _select_last_by_layer(mode_captures, args.num_layers) for mode, mode_captures in captures.items()}
     layer_counts = {mode: len(mode_layers) for mode, mode_layers in layers.items()}
     pair_specs = (("dense", "quarot_native"), ("dense", "kv4"), ("quarot_native", "kv4"))
     summary = {

@@ -22,11 +22,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, fields
 
 import torch
+from typing_extensions import Self
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, spec_manager_map
-from typing_extensions import Self
+from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec
 
 _LEAN_ATTENTION_CONTRACT = "lean_h_only"
 _QUAROT_NATIVE_KV_CACHE_ENV = "VLLM_ASCEND_QUAROT_USE_NATIVE_KV_CACHE"
@@ -65,12 +65,7 @@ class QuaRotInt4KVCacheSpec(FullAttentionSpec):
 
     @property
     def key_scale_page_size_bytes(self) -> int:
-        return (
-            self.block_size
-            * self.num_kv_heads
-            * self.num_scale_groups
-            * get_dtype_size(self.scale_dtype)
-        )
+        return self.block_size * self.num_kv_heads * self.num_scale_groups * get_dtype_size(self.scale_dtype)
 
     @property
     def value_scale_page_size_bytes(self) -> int:
@@ -91,9 +86,7 @@ class QuaRotInt4KVCacheSpec(FullAttentionSpec):
             "All attention layers in the same KV cache group must be QuaRotInt4KVCacheSpec."
         )
         sliding_window = set(spec.sliding_window for spec in specs if spec.sliding_window is not None)
-        attention_chunk_size = set(
-            spec.attention_chunk_size for spec in specs if spec.attention_chunk_size is not None
-        )
+        attention_chunk_size = set(spec.attention_chunk_size for spec in specs if spec.attention_chunk_size is not None)
         group_sizes = set(spec.group_size for spec in specs)
         scale_dtypes = set(spec.scale_dtype for spec in specs)
         codecs = set(spec.codec for spec in specs)
@@ -282,7 +275,8 @@ def dequantize_int4_symmetric_groupwise_packed(
     num_groups = cdiv(d, group_size)
     if scale_rows.shape[-1] != num_groups:
         raise ValueError(
-            f"Scale shape mismatch for packed int4 dequantization: got {tuple(scales.shape)}, expected last dim {num_groups}."
+            "Scale shape mismatch for packed int4 dequantization: "
+            f"got {tuple(scales.shape)}, expected last dim {num_groups}."
         )
 
     low = (packed_rows & 0x0F).to(torch.int8)
