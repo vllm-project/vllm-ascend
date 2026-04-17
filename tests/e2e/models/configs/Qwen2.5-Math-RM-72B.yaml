@@ -1,0 +1,25 @@
+model_name: "Qwen/Qwen2.5-Math-RM-72B"
+model_type: "vllm-rm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 8
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.9
+  trust_remote_code: false
+
+# system_prompt controls the <|im_start|>system block passed to the reward model.
+system_prompt: "Please reason step by step, and put your final answer within \\boxed{}."
+
+tasks:
+  - name: "gsm8k_correctness"
+    dataset: "AI-ModelScope/gsm8k"
+    split: "test"
+    dataset_config: "main"
+    metrics:
+      - name: "accuracy"
+        value: 0.80
+
+limit: 200
+batch_size: 4

@@ -50,6 +50,13 @@
         "gemma-3-4b-it",
         "internlm3-8b-instruct"
       ]
+    },
+    {
+      "name": "pr-accuracy-group-2",
+      "os": "linux-aarch64-a2b3-8",
+      "model_list": [
+        "Qwen2.5-Math-RM-72B"
+      ]
     }
   ]
 }
