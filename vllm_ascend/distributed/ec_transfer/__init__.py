@@ -17,7 +17,7 @@
 
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 
-
+# register the EC connector
 def register_ec_connector():
     ECConnectorFactory.register_connector(
         "SHMConnector",
