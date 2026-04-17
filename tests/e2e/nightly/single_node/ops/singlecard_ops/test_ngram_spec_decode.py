@@ -23,7 +23,7 @@ PERF_ITERS = 20
 # ---------------------------------------------------------------------------
 
 def golden_ngram_spec_decode(
-    token_ids: np.ndarray,           # [B, M], int32, 会被 in-place 修改
+    token_ids: np.ndarray,           # [B, M], int32,
     num_tokens_no_spec: np.ndarray,  # [B], int32
     sampled_token_ids: np.ndarray,   # [B, N], int32
     discard_request_mask: np.ndarray, # [B], int32
@@ -48,7 +48,7 @@ def golden_ngram_spec_decode(
         discard = int(discard_request_mask[i])
         valid_count = 0
 
-        # Stage 1: 采样 token 有效性处理
+        # Stage 1: sample token valid
         backup_pos = max(seq_len - 1, 0)
         backup_token = int(token_ids[i, backup_pos])
 
@@ -72,12 +72,12 @@ def golden_ngram_spec_decode(
         else:
             next_token_ids[i] = backup_token
 
-        # Stage 2: scatter 采样 token 到 token_ids 尾部
+        # Stage 2: scatter sampled token to token_ids tail
         nt = seq_len + valid_count
         for j in range(valid_count):
             token_ids[i, seq_len + j] = int(sampled_token_ids[i, j])
 
-        # Stage 3: 后缀 n-gram 匹配
+        # Stage 3: suffix n-gram match
         best_match_pos = -1
         best_ngram_len = 0
 
@@ -101,7 +101,7 @@ def golden_ngram_spec_decode(
                 if found:
                     break
 
-        # Stage 4: 提取 draft tokens
+        # Stage 4: get draft tokens
         if best_match_pos >= 0:
             draft_start = best_match_pos + best_ngram_len
             tokens_available = nt - draft_start
@@ -110,9 +110,9 @@ def golden_ngram_spec_decode(
                     draft_token_ids[i, j] = int(token_ids[i, draft_start + j])
                 else:
                     draft_token_ids[i, j] = -1
-        # else: 已初始化为 -1
+        # else: init to -1
 
-        # 统计有效 draft token
+        # static valid draft token
         valid_draft_count = 0
         for j in range(k):
             if draft_token_ids[i, j] != -1:
@@ -125,7 +125,7 @@ def golden_ngram_spec_decode(
 
 
 # ---------------------------------------------------------------------------
-# 输入构造 helper
+# inputs construct helper
 # ---------------------------------------------------------------------------
 
 def _make_inputs(
@@ -140,7 +140,7 @@ def _make_inputs(
     invalid_rate: float = 0.0,
     seed: int = SEED,
 ):
-    """构造测试输入，带参数自洽检查。
+    """
 
     Returns:
         (token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
@@ -149,14 +149,11 @@ def _make_inputs(
     rng = np.random.RandomState(seed)
     token_ids = rng.randint(0, vocab_size, size=(batch_size, seq_len), dtype=np.int32)
 
-    # num_tokens_no_spec: 每条序列实际 token 数，至少为 1
-    # 确保留有空间给 sampled tokens: num_tokens + max_new_tokens <= seq_len
     max_valid_tokens = seq_len - max_new_tokens
     if max_valid_tokens < 1:
         max_valid_tokens = 1
     num_tokens_no_spec = rng.randint(1, max_valid_tokens + 1, size=(batch_size,), dtype=np.int32)
 
-    # sampled_token_ids: 有效 token 或 -1
     sampled_token_ids = rng.randint(0, vocab_size, size=(batch_size, max_new_tokens), dtype=np.int32)
     if invalid_rate > 0:
         invalid_mask = rng.rand(batch_size, max_new_tokens) < invalid_rate
@@ -174,7 +171,6 @@ def _make_inputs(
 
 def _run_npu(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
              vocab_size, min_n, max_n, k):
-    """调用 NPU 算子并返回结果。"""
     token_ids_t = torch.from_numpy(token_ids).to("npu")
     num_tokens_t = torch.from_numpy(num_tokens_no_spec).to("npu")
     sampled_t = torch.from_numpy(sampled_token_ids).to("npu")
@@ -190,7 +186,6 @@ def _run_npu(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_m
 
 def _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
                   vocab_size, min_n, max_n, k):
-    """warmup + 多次测量延迟。"""
     token_ids_t = torch.from_numpy(token_ids.copy()).to("npu")
     num_tokens_t = torch.from_numpy(num_tokens_no_spec.copy()).to("npu")
     sampled_t = torch.from_numpy(sampled_token_ids.copy()).to("npu")
@@ -215,7 +210,7 @@ def _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_requ
 
 
 # ===========================================================================
-# Group 1: basic - 基本功能（默认配置）
+# Group 1: basic - basic function
 # ===========================================================================
 
 @pytest.mark.parametrize("batch_size,seq_len,max_new_tokens,k", [
@@ -225,7 +220,6 @@ def _measure_perf(token_ids, num_tokens_no_spec, sampled_token_ids, discard_requ
 ])
 @torch.inference_mode()
 def test_ngram_spec_decode_basic(batch_size, seq_len, max_new_tokens, k):
-    """Group 1: 基本功能测试 - 小/中/大规模 batch。"""
     inputs = _make_inputs(batch_size, seq_len, max_new_tokens, k)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs
@@ -240,7 +234,7 @@ def test_ngram_spec_decode_basic(batch_size, seq_len, max_new_tokens, k):
         token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask,
         vocab_size, min_n, max_n, k)
 
-    # 对比
+    # compare
     assert result_ids.cpu().numpy().tolist() == golden_ids.tolist(), \
         f"token_ids mismatch: B={batch_size}"
     assert result_next.cpu().numpy().tolist() == golden_next.tolist(), \
@@ -255,7 +249,7 @@ def test_ngram_spec_decode_basic(batch_size, seq_len, max_new_tokens, k):
 
 
 # ===========================================================================
-# Group 2: padding / optional - 有 padding 或可选输入
+# Group 2: padding / optional
 # ===========================================================================
 
 @pytest.mark.parametrize("batch_size,seq_len,max_new_tokens,k,invalid_rate", [
@@ -265,7 +259,6 @@ def test_ngram_spec_decode_basic(batch_size, seq_len, max_new_tokens, k):
 ])
 @torch.inference_mode()
 def test_ngram_spec_decode_padding(batch_size, seq_len, max_new_tokens, k, invalid_rate):
-    """Group 2: 含无效采样 token 的场景。"""
     inputs = _make_inputs(batch_size, seq_len, max_new_tokens, k, invalid_rate=invalid_rate)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs
@@ -290,7 +283,6 @@ def test_ngram_spec_decode_padding(batch_size, seq_len, max_new_tokens, k, inval
 @pytest.mark.parametrize("discard_rate", [0.2, 0.5, 1.0])
 @torch.inference_mode()
 def test_ngram_spec_decode_discard(discard_rate):
-    """Group 2: 丢弃请求掩码场景。"""
     inputs = _make_inputs(4, 64, 8, 5, discard_rate=discard_rate)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs
@@ -310,7 +302,7 @@ def test_ngram_spec_decode_discard(discard_rate):
 
 
 # ===========================================================================
-# Group 3: 属性组合 - 不同的 min_n / max_n / k
+# Group 3: min_n / max_n / k
 # ===========================================================================
 
 @pytest.mark.parametrize("min_n,max_n,k", [
@@ -322,7 +314,6 @@ def test_ngram_spec_decode_discard(discard_rate):
 ])
 @torch.inference_mode()
 def test_ngram_spec_decode_attrs(min_n, max_n, k):
-    """Group 3: 不同属性组合。"""
     inputs = _make_inputs(4, 128, 16, k, min_n=min_n, max_n=max_n)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, _, _, _ = inputs
@@ -345,12 +336,11 @@ def test_ngram_spec_decode_attrs(min_n, max_n, k):
 
 
 # ===========================================================================
-# Group 4: large - vLLM 真实负载规模
+# Group 4: large scale
 # ===========================================================================
 
 @torch.inference_mode()
 def test_ngram_spec_decode_prefill():
-    """Group 4: Prefill 场景 - 单请求长序列。"""
     inputs = _make_inputs(1, 2048, 16, 5, vocab_size=32000)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs
@@ -374,7 +364,6 @@ def test_ngram_spec_decode_prefill():
 
 @torch.inference_mode()
 def test_ngram_spec_decode_decode():
-    """Group 4: Decode 场景 - 大 batch 短序列。"""
     inputs = _make_inputs(64, 32, 5, 3, vocab_size=32000)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs
@@ -397,12 +386,11 @@ def test_ngram_spec_decode_decode():
 
 
 # ===========================================================================
-# Group 5: boundary - 数值 / shape 边界
+# Group 5: boundary
 # ===========================================================================
 
 @torch.inference_mode()
 def test_ngram_spec_decode_minimal():
-    """Group 5: 最小规模 - 1 token / 1 request。"""
     inputs = _make_inputs(1, 4, 1, 1, vocab_size=100)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs
@@ -423,11 +411,9 @@ def test_ngram_spec_decode_minimal():
 
 @torch.inference_mode()
 def test_ngram_spec_decode_no_valid_sampled():
-    """Group 5: 所有 sampled token 均无效。"""
     inputs = _make_inputs(4, 64, 8, 5)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs
-    # 全部设为无效
     sampled_token_ids[:] = -1
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
@@ -446,7 +432,6 @@ def test_ngram_spec_decode_no_valid_sampled():
 
 @torch.inference_mode()
 def test_ngram_spec_decode_exact_match():
-    """Group 5: 构造精确匹配场景确保 draft 提取正确。"""
     B, M, N, k = 2, 32, 4, 3
     vocab_size = 1000
     token_ids = np.array([
@@ -456,7 +441,7 @@ def test_ngram_spec_decode_exact_match():
          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     ], dtype=np.int32)
     num_tokens_no_spec = np.array([6, 5], dtype=np.int32)
-    # sampled tokens: 延续序列
+    # sampled tokens
     sampled_token_ids = np.array([
         [1, 2, 3, -1],
         [10, 20, -1, -1],
@@ -479,11 +464,9 @@ def test_ngram_spec_decode_exact_match():
 
 @torch.inference_mode()
 def test_ngram_spec_decode_full_capacity():
-    """Group 5: token_ids 几乎填满（num_tokens + max_new_tokens ≈ max_seq_len）。"""
     inputs = _make_inputs(4, 48, 16, 5, min_n=2, max_n=4)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs
-    # 设置 num_tokens 接近 seq_len，只留刚好够的空间
     num_tokens_no_spec[:] = token_ids.shape[1] - sampled_token_ids.shape[1]
 
     golden_ids, golden_next, golden_draft, golden_valid = golden_ngram_spec_decode(
@@ -502,7 +485,6 @@ def test_ngram_spec_decode_full_capacity():
 
 @torch.inference_mode()
 def test_ngram_spec_decode_k1():
-    """Group 5: k=1 极端场景。"""
     inputs = _make_inputs(4, 64, 8, 1, min_n=2, max_n=3)
     token_ids, num_tokens_no_spec, sampled_token_ids, discard_request_mask, \
         vocab_size, min_n, max_n, k = inputs

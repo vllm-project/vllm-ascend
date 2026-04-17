@@ -1104,10 +1104,9 @@ class NPUModelRunner(GPUModelRunner):
         elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
             draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
         elif isinstance(self.drafter, AscendNgramProposerNPU):
-            logger.info_once("$NPU@")
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
-            # 准备 sampled_token_ids tensor（list → padded tensor）
+            # prepare sampled_token_ids tensor（list → padded tensor）
             sampled_token_ids = valid_sampled_token_ids
             if isinstance(sampled_token_ids, list):
                 max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
@@ -1122,7 +1121,6 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 sampled_token_ids_tensor = sampled_token_ids
 
-            # 调用 vllm-ascend 内置 ngram_spec_decode 算子
             k = self.drafter.k
             (_token_ids, next_token_ids, draft_token_ids,
              num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
@@ -1136,16 +1134,14 @@ class NPUModelRunner(GPUModelRunner):
                 k=k,
             )
 
-            # 只有 async scheduling 模式才设置 prev_sampled_token_ids，
-            # 否则下一步 _prepare_input_ids 会误入 async 代码路径导致
-            # prev_req_id_to_index is None 断言失败。
+            # only async scheduling, set prev_sampled_token_ids，
             if self.use_async_scheduling:
                 self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
-            # 保存 num_valid_draft_tokens 供 scheduler trim 使用
+            # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
 
-            # 异步 D2H 拷贝 num_valid_draft_tokens（逻辑不变，stream/event 复用原有）
+            # async D2H copy num_valid_draft_tokens
             copy_num_valid_draft_tokens(
                 self._num_valid_draft_tokens_cpu,
                 self._num_valid_draft_tokens_copy_stream,

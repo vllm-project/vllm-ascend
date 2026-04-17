@@ -12,8 +12,7 @@
 #include "ngram_spec_decode_tiling.h"
 
 constexpr int32_t ELEM_SIZE = sizeof(int32_t);  // 4 bytes
-// 安全 UB buffer 大小：32768 元素（128KB）
-// 更大 buffer 可能跨越 Ascend 910B 的 CCU 地址边界
+// Safty UB buffer size：32768(128KB)
 constexpr uint32_t SAFE_CHUNK = 32768u;
 
 class KernelNgramSpecDecode {
@@ -25,7 +24,6 @@ public:
         GM_ADDR discard_gm, GM_ADDR next_tokens_gm, GM_ADDR draft_tokens_gm,
         GM_ADDR num_valid_gm, GM_ADDR workspace, GM_ADDR tiling)
     {
-        // 从 CANN 框架读取 tiling 数据
         REGISTER_TILING_DEFAULT(NgramSpecDecodeTilingData);
         GET_TILING_DATA_WITH_STRUCT(NgramSpecDecodeTilingData, tilingData, tiling);
 
@@ -41,16 +39,13 @@ public:
         this->tail_rows = static_cast<int32_t>(tilingData.ngramInfo.tailRows);
         this->block_rows = static_cast<int32_t>(tilingData.ngramInfo.blockRows);
 
-        // 计算对齐（int32: 8个元素对齐32字节）
         int32_t align_elems = 32 / ELEM_SIZE;  // = 8
         this->max_seq_len_align = ((this->max_seq_len + align_elems - 1) / align_elems) * align_elems;
         this->max_new_tokens_align = ((this->max_new_tokens + align_elems - 1) / align_elems) * align_elems;
         this->k_align = ((this->k_val + align_elems - 1) / align_elems) * align_elems;
 
-        // 大行标记：max_seq_len > SAFE_CHUNK 需要分块处理
         this->is_large_row = (this->max_seq_len_align > static_cast<int32_t>(SAFE_CHUNK));
 
-        // 计算当前核的行偏移
         uint32_t blockIdx = AscendC::GetBlockIdx();
         if (blockIdx < static_cast<uint32_t>(this->former_num)) {
             this->my_rows = static_cast<uint32_t>(this->rows_per_core);
@@ -60,7 +55,6 @@ public:
             this->row_offset = static_cast<uint32_t>(this->rows_per_core) * static_cast<uint32_t>(this->former_num);
         }
 
-        // 设置 GlobalTensor 指针
         tokenGm.SetGlobalBuffer((__gm__ int32_t *)token_ids_gm,
             static_cast<uint64_t>(this->batch_size) * this->max_seq_len);
         numTokensGm.SetGlobalBuffer((__gm__ int32_t *)num_tokens_gm,
@@ -76,21 +70,17 @@ public:
         numValidGm.SetGlobalBuffer((__gm__ int32_t *)num_valid_gm,
             static_cast<uint64_t>(this->batch_size));
 
-        // ---- 分配 UB buffer ----
         uint32_t br = static_cast<uint32_t>(this->block_rows);
         uint32_t br_align = ((br * ELEM_SIZE + 31) / 32) * 32 / ELEM_SIZE;
 
         if (!this->is_large_row) {
-            // 标准模式：整行放入 UB
             pipe.InitBuffer(tokenTileBuf, br * static_cast<uint32_t>(this->max_seq_len_align) * ELEM_SIZE);
         } else {
-            // 分块模式：SAFE_CHUNK + max_n 重叠区域（用于分块边界验证）
             uint32_t chunk_ub = SAFE_CHUNK + static_cast<uint32_t>(this->max_n_val);
             uint32_t chunk_ub_align = ((chunk_ub + 7u) / 8u) * 8u;
             pipe.InitBuffer(tokenTileBuf, chunk_ub_align * ELEM_SIZE);
         }
 
-        // maskBuf：位打包比较 mask
         uint32_t mask_bytes = ((SAFE_CHUNK + 7u) / 8u);
         pipe.InitBuffer(maskBuf, mask_bytes);
 
@@ -123,7 +113,6 @@ public:
     }
 
 private:
-    // ===================== 大行分块处理 =====================
 
     __aicore__ inline void ProcessChunkedRows(uint32_t start_row, uint32_t rows)
     {
@@ -131,7 +120,6 @@ private:
         uint32_t mnta = static_cast<uint32_t>(this->max_new_tokens_align);
         uint32_t ka = static_cast<uint32_t>(this->k_align);
 
-        // ---- 加载元数据 ----
         auto sampledLocal = sampledTileBuf.Get<int32_t>();
         auto numTokensLocal = numTokensBuf.Get<int32_t>();
         auto discardLocal = discardTileBuf.Get<int32_t>();
@@ -142,7 +130,6 @@ private:
         auto tokenLocal = tokenTileBuf.Get<int32_t>();
         auto maskLocal = maskBuf.Get<uint8_t>();
 
-        // 加载所有行的 sampled, num_tokens, discard
         uint32_t metaBytes = rows * ELEM_SIZE;
         AscendC::DataCopyExtParams metaParams{1, metaBytes, 0, metaBytes, 0};
         AscendC::DataCopyPadExtParams<int32_t> noPadT{false, 0, 0, 0};
@@ -160,14 +147,12 @@ private:
                 sampledParams, sampledPad);
         }
 
-        // ---- 逐行处理 ----
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t gmRow = static_cast<uint64_t>(start_row + i) * msl;
             int32_t seq_len = numTokensLocal.GetValue(i);
             int32_t discard = discardLocal.GetValue(i);
             int32_t valid_count = 0;
 
-            // 阶段1: 采样 token 有效性处理
             int32_t backup_pos = (seq_len > 0) ? (seq_len - 1) : 0;
 
             for (int32_t j = 0; j < this->max_new_tokens; ++j) {
@@ -185,18 +170,15 @@ private:
             if (avail_space < 0) avail_space = 0;
             if (valid_count > avail_space) valid_count = avail_space;
 
-            // 从 GM 加载 backup_token
             LoadGmElements(gmRow + backup_pos, 1);
             int32_t backup_token = tokenLocal.GetValue(0);
 
-            // 提取 next_token_id
             if (valid_count > 0) {
                 nextLocal.SetValue(i, sampledLocal.GetValue(i * mnta + valid_count - 1));
             } else {
                 nextLocal.SetValue(i, backup_token);
             }
 
-            // 阶段2: scatter 采样 token 到 GM
             int32_t nt = seq_len + valid_count;
             if (valid_count > 0) {
                 for (int32_t j = 0; j < valid_count; ++j) {
@@ -205,12 +187,10 @@ private:
                 StoreGmElements(gmRow + seq_len, valid_count);
             }
 
-            // 阶段3: 分块 n-gram 匹配
             int32_t best_match_pos = -1;
             int32_t best_ngram_len = 0;
 
             if (valid_count > 0 && nt >= this->min_n_val) {
-                // 加载后缀（修改后行的最后 max_n 个元素）
                 int32_t suffix_gm_start = nt - this->max_n_val;
                 if (suffix_gm_start < 0) suffix_gm_start = 0;
                 LoadGmElements(gmRow + suffix_gm_start, this->max_n_val);
@@ -218,7 +198,6 @@ private:
                     suffixLocal.SetValue(static_cast<uint32_t>(s), tokenLocal.GetValue(static_cast<uint32_t>(s)));
                 }
 
-                // 从 min_n 到 max_n 搜索每个 ngram_len
                 for (int32_t ngram_len = this->min_n_val; ngram_len <= this->max_n_val; ++ngram_len) {
                     if (ngram_len > nt) break;
                     int32_t wc = nt - ngram_len;
@@ -227,15 +206,12 @@ private:
                     int32_t suffix_offset = this->max_n_val - ngram_len;
                     int32_t suffix0 = suffixLocal.GetValue(static_cast<uint32_t>(suffix_offset));
 
-                    // 按 SAFE_CHUNK 分块搜索
                     for (int32_t chunk_start = 0; chunk_start < wc; chunk_start += SAFE_CHUNK) {
                         int32_t chunk_count = (chunk_start + SAFE_CHUNK <= wc) ? SAFE_CHUNK : (wc - chunk_start);
-                        // 加载分块 + 重叠区域（用于分块边界验证）
                         int32_t load_count = chunk_count + (ngram_len - 1);
                         if (chunk_start + load_count > nt) load_count = nt - chunk_start;
                         LoadGmElements(gmRow + chunk_start, load_count);
 
-                        // 对前 chunk_count 个元素执行 CompareScalar
                         uint32_t cmp_count = ((static_cast<uint32_t>(chunk_count) + 63u) / 64u) * 64u;
                         uint32_t max_cmp = SAFE_CHUNK > 8192u ? 8192u : SAFE_CHUNK;
                         if (cmp_count > max_cmp) cmp_count = max_cmp;
@@ -243,7 +219,6 @@ private:
                             cmp_count = ((static_cast<uint32_t>(load_count) + 63u) / 64u) * 64u;
                         }
 
-                        // 大分块拆分 CompareScalar
                         for (uint32_t cmp_off = 0; cmp_off < static_cast<uint32_t>(chunk_count); cmp_off += cmp_count) {
                             uint32_t rem = static_cast<uint32_t>(chunk_count) - cmp_off;
                             uint32_t elements = (rem >= cmp_count) ? cmp_count : rem;
@@ -253,11 +228,9 @@ private:
                                 maskLocal, tokenLocal[cmp_off],
                                 suffix0, AscendC::CMPMODE::EQ, aligned);
 
-                            // 扫描 mask
                             for (uint32_t p = 0; p < elements; ++p) {
                                 uint8_t bv = maskLocal.GetValue(p >> 3);
                                 if (bv & (1u << (p & 7u))) {
-                                    // 验证剩余后缀元素
                                     bool all_match = true;
                                     for (int32_t s = 1; s < ngram_len; ++s) {
                                         int32_t sv = suffixLocal.GetValue(static_cast<uint32_t>(suffix_offset + s));
@@ -283,7 +256,6 @@ private:
                 }
             }
 
-            // 阶段4: 从 GM 提取 draft tokens
             if (best_match_pos >= 0) {
                 int32_t draft_start = best_match_pos + best_ngram_len;
                 int32_t tokens_available = nt - draft_start;
@@ -308,7 +280,6 @@ private:
                 }
             }
 
-            // 统计有效 draft token 数
             int32_t valid_draft_count = 0;
             for (int32_t j = 0; j < this->k_val; ++j) {
                 if (draftLocal.GetValue(i * ka + j) != -1) {
@@ -320,7 +291,6 @@ private:
             numValidLocal.SetValue(i, valid_draft_count);
         }
 
-        // ---- 写回结果 ----
         uint16_t metaBytes16 = static_cast<uint16_t>(rows) * ELEM_SIZE;
         AscendC::DataCopyParams nextParams{1, metaBytes16, 0, 0};
         AscendC::DataCopyPad(nextTokensGm[start_row], nextLocal, nextParams);
@@ -337,7 +307,6 @@ private:
         AscendC::DataCopyPad(numValidGm[start_row], numValidLocal, nextParams);
     }
 
-    // 从 GM 加载 count 个 int32 元素到 tokenTileBuf
     __aicore__ inline void LoadGmElements(uint64_t gm_offset, int32_t count)
     {
         if (count <= 0) return;
@@ -350,7 +319,6 @@ private:
         AscendC::DataCopyPad(tokenLocal[0], tokenGm[gm_offset], p, pp);
     }
 
-    // 从 tokenTileBuf 存 count 个 int32 元素到 GM
     __aicore__ inline void StoreGmElements(uint64_t gm_offset, int32_t count)
     {
         if (count <= 0) return;
@@ -364,7 +332,6 @@ private:
         }
     }
 
-    // ===================== 标准（小行）处理 =====================
 
     __aicore__ inline void CopyIn(uint32_t start_row, uint32_t rows)
     {
@@ -449,7 +416,6 @@ private:
         int32_t discard = discardLocal.GetValue(idx);
         int32_t valid_count = 0;
 
-        // 阶段1
         int32_t backup_pos = (seq_len > 0) ? (seq_len - 1) : 0;
         int32_t backup_token = tokenLocal.GetValue(idx * msa + backup_pos);
 
@@ -474,19 +440,16 @@ private:
             nextLocal.SetValue(idx, backup_token);
         }
 
-        // 阶段2
         int32_t num_tokens_tmp = seq_len + valid_count;
         for (int32_t j = 0; j < valid_count; ++j) {
             tokenLocal.SetValue(idx * msa + seq_len + j, sampledLocal.GetValue(idx * mnta + j));
         }
 
-        // 阶段3: n-gram 匹配
         int32_t best_match_pos = -1;
         int32_t best_ngram_len = 0;
 
         if (valid_count > 0 && num_tokens_tmp >= this->min_n_val) {
             if (this->block_rows <= 1) {
-                // SIMD 路径：单行在 UB 中，可安全使用 CompareScalar
                 int32_t nt = num_tokens_tmp;
                 constexpr uint32_t CMP_MAX = 8192u;
 
@@ -508,7 +471,6 @@ private:
                         }
 
                         if (count_aligned == 0) {
-                            // 标量回退：buffer 太小无法使用 CompareScalar
                             for (int32_t p = 0; p < static_cast<int32_t>(elements); ++p) {
                                 if (tokenLocal.GetValue(static_cast<uint32_t>(cmp_off + p)) == suffix0) {
                                     bool all_match = true;
@@ -550,7 +512,6 @@ private:
                     }
                 }
             } else {
-                // 标量路径：多行在 UB 中，逐元素 GetValue
                 int32_t row_base = static_cast<int32_t>(idx) * static_cast<int32_t>(msa);
 
                 for (int32_t ngram_len = this->min_n_val; ngram_len <= this->max_n_val; ++ngram_len) {
@@ -582,7 +543,6 @@ private:
             }
         }
 
-        // 提取 draft tokens
         if (best_match_pos >= 0) {
             int32_t draft_start = best_match_pos + best_ngram_len;
             int32_t tokens_available = num_tokens_tmp - draft_start;
@@ -599,7 +559,6 @@ private:
             }
         }
 
-        // 阶段4
         int32_t valid_draft_count = 0;
         for (int32_t j = 0; j < this->k_val; ++j) {
             if (draftLocal.GetValue(idx * ka + j) != -1) {

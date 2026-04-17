@@ -31,7 +31,6 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
     OPS_CHECK(tilingData == nullptr,
         OPS_LOG_E(nodeName, "tilingData is nullptr."), return ge::GRAPH_FAILED);
 
-    // 读取属性
     auto attrs = context->GetAttrs();
     OPS_CHECK(attrs == nullptr,
         OPS_LOG_E(nodeName, "attrs is nullptr."), return ge::GRAPH_FAILED);
@@ -51,7 +50,6 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
     int64_t max_n = *maxNPtr;
     int64_t k = *kPtr;
 
-    // 读取输入形状
     const gert::StorageShape *tokenIdsShape = context->GetInputShape(INPUT_TOKEN_IDS_INDEX);
     const gert::StorageShape *sampledShape = context->GetInputShape(INPUT_SAMPLED_INDEX);
     OPS_CHECK(tokenIdsShape == nullptr, OPS_LOG_E(nodeName, "tokenIdsShape is null."), return ge::GRAPH_FAILED);
@@ -61,20 +59,17 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
     int64_t max_seq_len = tokenIdsShape->GetStorageShape().GetDim(1);
     int64_t max_new_tokens = sampledShape->GetStorageShape().GetDim(1);
 
-    // 获取平台参数
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     uint64_t ubSize = 0UL;
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
     int64_t ub_size_limit = static_cast<int64_t>(ubSize);
 
-    // 计算对齐（int32: 8个元素对齐32字节）
     int64_t align_elems = 32 / ELEM_SIZE;
     int64_t max_seq_len_align = ((max_seq_len + align_elems - 1) / align_elems) * align_elems;
     int64_t max_new_tokens_align = ((max_new_tokens + align_elems - 1) / align_elems) * align_elems;
     int64_t k_align = ((k + align_elems - 1) / align_elems) * align_elems;
 
-    // 计算 block_rows（每个 block 一次能处理的行数）
     int64_t ub_per_row = (max_seq_len_align + max_new_tokens_align + k_align) * ELEM_SIZE;
     int64_t ub_overhead = 4 * 32 + static_cast<int64_t>(max_n) * ELEM_SIZE
         + ((max_seq_len_align + 7) / 8);  // maskBuf
@@ -82,14 +77,12 @@ static ge::graphStatus NgramSpecDecodeTilingFunc(gert::TilingContext *context)
     int64_t max_block_rows = (ub_available > 0) ? (ub_available / ub_per_row) : 1;
     max_block_rows = std::max(max_block_rows, static_cast<int64_t>(1));
 
-    // Block 级分核
     int64_t block_dim = std::min(batch_size, static_cast<int64_t>(aivNum));
     int64_t rows_per_core = (block_dim > 0) ? (batch_size / block_dim) : 0;
     int64_t former_num = (block_dim > 0) ? (block_dim - 1) : 0;
     int64_t tail_rows = batch_size - former_num * rows_per_core;
     int64_t block_rows = std::min(rows_per_core, max_block_rows);
 
-    // 填充 tiling 数据
     tilingData->ngramInfo.batchSize = static_cast<uint32_t>(batch_size);
     tilingData->ngramInfo.maxSeqLen = static_cast<uint32_t>(max_seq_len);
     tilingData->ngramInfo.maxNewTokens = static_cast<uint32_t>(max_new_tokens);
