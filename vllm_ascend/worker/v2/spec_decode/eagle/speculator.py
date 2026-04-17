@@ -249,6 +249,7 @@ def torch_gather_wrapper():
     finally:
         torch.gather = original_gather
 
+
 @triton.jit
 def _prepare_eagle_docode_kernel(
     draft_tokens_ptr,
@@ -332,7 +333,7 @@ def prepare_eagle_decode(
 ):
     num_reqs = draft_tokens.shape[0]
     hidden_size = output_hidden_states.shape[-1]
-    
+
     _prepare_eagle_docode_kernel[(num_reqs + 1,)](
         draft_tokens,
         output_hidden_states,
