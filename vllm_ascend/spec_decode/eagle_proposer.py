@@ -543,9 +543,9 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.block_table_tensor = self._pad_tensor(
                 common_attn_metadata.block_table_tensor, num_reqs_padded
             )
-            common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
-            common_attn_metadata.seq_lens_cpu = self._adjust_tensor(common_attn_metadata.seq_lens_cpu, num_reqs_padded)
-            common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
+            common_attn_metadata.seq_lens = self._pad_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+            common_attn_metadata.seq_lens_cpu = self._pad_tensor(common_attn_metadata.seq_lens_cpu, num_reqs_padded)
+            common_attn_metadata.num_computed_tokens_cpu = self._pad_tensor(
                 common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
             )
         else:
@@ -553,7 +553,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
             # We need to unpad here for eager mode to maintain compatibility.
             if enable_sp() and not self.use_mla and self.pcp_size * self.dcp_size == 1:
-                common_attn_metadata.block_table_tensor = self._adjust_tensor(
+                common_attn_metadata.block_table_tensor = self._pad_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
