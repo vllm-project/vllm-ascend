@@ -2,7 +2,7 @@
 
 ## Overview
 
-Unified Cache Management (UCM) provides an external KV-cache storage layer designed for prefix-caching scenarios in vLLM/vLLM-Ascend. Unlike KV Pooling, which expands prefix-cache capacity only by aggregating device memory and therefore remains limited by HBM/DRAM size and lacks persistence, UCM decouples compute from storage and adopts a tiered design. Each node uses local DRAM as a fast cache, while a shared backend—such as 3FS or enterprise-grade storage—serves as the persistent KV store. This approach removes the capacity ceiling imposed by device memory, enables durable and reliable prefix caching, and allows cache capacity to scale with the storage system rather than with compute resources.
+Unified Cache Management (UCM) provides an external KV-cache storage layer designed for prefix-caching scenarios in vLLM/vLLM-Ascend. Unlike KV Pooling, which expands prefix-cache capacity only by aggregating device memory and therefore remains limited by on-chip memory/DRAM size and lacks persistence, UCM decouples compute from storage and adopts a tiered design. Each node uses local DRAM as a fast cache, while a shared backend—such as 3FS or enterprise-grade storage—serves as the persistent KV store. This approach removes the capacity ceiling imposed by device memory, enables durable and reliable prefix caching, and allows cache capacity to scale with the storage system rather than with compute resources.
 
 ## Prerequisites
 

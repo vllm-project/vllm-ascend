@@ -18,6 +18,7 @@
 #define MATMUL_ALLREDUCE_ADD_RMSNORM_AIC_KERNEL_H
 
 #define ASCENDC_CUBE_ONLY
+#define CATLASS_ARCH 2201
 
 #include "catlass/catlass.hpp"
 #include "catlass/arch/arch.hpp"

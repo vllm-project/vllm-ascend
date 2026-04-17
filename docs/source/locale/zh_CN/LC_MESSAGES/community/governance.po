@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -17,82 +17,78 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../../source/community/governance.md:1
 msgid "Governance"
-msgstr "管理"
+msgstr "治理"
 
 #: ../../source/community/governance.md:3
 msgid "Mission"
-msgstr "目标"
+msgstr "使命"
 
-#: ../../source/community/governance.md:4
+#: ../../source/community/governance.md:5
 msgid ""
 "As a vital component of vLLM, the vLLM Ascend project is dedicated to "
 "providing an easy, fast, and cheap LLM Serving for everyone on Ascend "
 "NPUs and to actively contributing to the enrichment of vLLM."
 msgstr ""
-"作为 vLLM 生态的关键组成部分，vLLM Ascend 项目致力于为所有 Ascend NPU 用户提供简单、快速、经济的大语言模型（LLM）服务，同时积极回馈并丰富 vLLM 项目本身。"
-
-#: ../../source/community/governance.md:6
-msgid "Principles"
-msgstr "基本原则"
+"作为 vLLM 的重要组成部分，vLLM Ascend 项目致力于为所有 Ascend NPU 用户提供简单、快速、经济的大语言模型（LLM）服务，并积极为丰富 vLLM 生态系统做出贡献。"
 
 #: ../../source/community/governance.md:7
+msgid "Principles"
+msgstr "原则"
+
+#: ../../source/community/governance.md:9
 msgid ""
 "vLLM Ascend follows the vLLM community's code of conduct: [vLLM - CODE OF"
 " CONDUCT](https://github.com/vllm-"
 "project/vllm/blob/main/CODE_OF_CONDUCT.md)"
 msgstr ""
-"vLLM Ascend 遵循 vLLM 社区的行为准则：[vLLM - 行为准则](https://github.com/vllm-"
-"project/vllm/blob/main/CODE_OF_CONDUCT.md)"
+"vLLM Ascend 遵循 vLLM 社区的行为准则：[vLLM - 行为准则](https://github.com/vllm-project/vllm/blob/main/CODE_OF_CONDUCT.md)"
 
-#: ../../source/community/governance.md:9
+#: ../../source/community/governance.md:11
 msgid "Governance - Mechanics"
-msgstr "管理机制"
+msgstr "治理机制"
 
-#: ../../source/community/governance.md:10
+#: ../../source/community/governance.md:13
 msgid ""
 "vLLM Ascend is an open-source project under the vLLM community, where the"
 " authority to appoint roles is ultimately determined by the vLLM "
 "community. It adopts a hierarchical technical governance structure."
-msgstr ""
-"vLLM Ascend 是 vLLM 社区旗下的开源项目，其核心角色的最终任命权归属于 vLLM 社区。本项目采用分层技术治理结构。"
+msgstr "vLLM Ascend 是 vLLM 社区旗下的开源项目，其角色任命的最终决定权归属于 vLLM 社区。项目采用分层技术治理结构。"
 
-#: ../../source/community/governance.md:12
+#: ../../source/community/governance.md:15
 msgid "Contributor:"
 msgstr "贡献者："
 
-#: ../../source/community/governance.md:14
+#: ../../source/community/governance.md:17
 msgid ""
-"**Responsibility:** Help new contributors on boarding, handle and respond"
-" to community questions, review RFCs and code."
-msgstr ""
-"**职责：** 协助新贡献者融入项目，处理并解答社区疑问，评审 RFC 提案与代码提交。"
+"**Responsibility:** Help new contributors onboarding, handle and respond "
+"to community questions, review RFCs and code."
+msgstr "**职责：** 协助新贡献者融入项目，处理并回应社区问题，评审 RFC 和代码。"
 
-#: ../../source/community/governance.md:16
+#: ../../source/community/governance.md:19
 msgid ""
 "**Requirements:** Complete at least 1 contribution. A contributor is "
 "someone who consistently and actively participates in a project, "
 "including but not limited to issue/review/commits/community involvement."
-msgstr ""
-"**要求：** 至少完成一次有效贡献。贡献者是指持续、积极参与项目活动的人员，其贡献形式包括但不限于提交问题报告、参与代码评审、提交代码以及参与社区讨论等。"
+msgstr "**要求：** 至少完成一次贡献。贡献者是指持续、积极参与项目的人员，其参与形式包括但不限于提交问题、评审、提交代码以及参与社区活动。"
 
-#: ../../source/community/governance.md:18
+#: ../../source/community/governance.md:21
 msgid ""
 "The contributor permissions are granted by the [vllm-project/vllm-"
 "ascend](https://github.com/vllm-project/vllm-ascend)'s repo `Triage` on "
 "GitHub, including repo read and clone, issue and PR management, "
 "facilitating efficient collaboration between community developers."
 msgstr ""
-"贡献者将被授予 [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) GitHub 仓库的 `Triage` 权限。该权限包括读取与克隆仓库、管理问题（Issue）和拉取请求（PR），旨在促进社区开发者之间的高效协作。"
+"贡献者权限由 [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) 仓库在 GitHub 上的 `Triage` 角色授予，包括仓库读取和克隆、问题与 PR 管理权限，以促进社区开发者之间的高效协作。"
 
-#: ../../source/community/governance.md:20
+#: ../../source/community/governance.md:23
 msgid "Maintainer:"
 msgstr "维护者："
 
-#: ../../source/community/governance.md:22
+#: ../../source/community/governance.md:25
 msgid ""
 "**Responsibility:** Develop the project's vision and mission. Maintainers"
 " are responsible for shaping the technical direction of the project and "
@@ -101,37 +97,35 @@ msgid ""
 "improvements, and actively participate in community engagement—such as "
 "regular meetings and events."
 msgstr ""
-"**职责：** 制定并践行项目的愿景与使命。维护者负责把握项目的技术方向，确保其长期成功。他们拥有代码合并权限，主导路线图规划，评审社区贡献，持续改进代码，并积极参与社区活动，如定期会议及线上/线下交流。"
+"**职责：** 制定项目的愿景和使命。维护者负责塑造项目的技术方向并确保其长期成功。他们拥有代码合并权限，主导路线图规划，评审社区贡献，持续改进代码，并积极参与社区活动，例如定期会议和活动。"
 
-#: ../../source/community/governance.md:24
+#: ../../source/community/governance.md:27
 msgid ""
 "**Requirements:** Deep understanding of ‌vLLM‌ and ‌vLLM Ascend‌ code "
 "bases, with a commitment to sustained code contributions and competency "
 "in ‌design, development, and PR review workflows‌."
-msgstr ""
-"**要求：** 深刻理解 ‌vLLM‌ 及 ‌vLLM Ascend‌ 的代码库，承诺进行持续代码贡献，并具备在 ‌设计、开发和 PR 评审工作中的专业能力。"
+msgstr "**要求：** 深刻理解 ‌vLLM‌ 和 ‌vLLM Ascend‌ 的代码库，承诺进行持续的代码贡献，并具备在 ‌设计、开发和 PR 评审工作流‌ 中的能力。"
 
-
-#: ../../source/community/governance.md:26
+#: ../../source/community/governance.md:29
 msgid ""
 "**Review quality‌:** Actively participate in community code reviews, "
 "ensuring high-quality code integration."
-msgstr "**评审质量：** 积极参与社区代码评审，确保集成代码的高质量。"
+msgstr "**评审质量：** 积极参与社区代码评审，确保高质量的代码集成。"
 
-#: ../../source/community/governance.md:27
+#: ../../source/community/governance.md:30
 msgid ""
 "**Quality contribution‌:** Successfully develop and deliver at least one "
 "major feature while maintaining consistent high-quality contributions."
-msgstr "**优质贡献：** 成功开发并交付至少一项主要功能，同时保持持续的高质量贡献记录。"
+msgstr "**高质量贡献：** 成功开发并交付至少一项主要功能，同时保持持续的高质量贡献。"
 
-#: ../../source/community/governance.md:28
+#: ../../source/community/governance.md:31
 msgid ""
 "**Community involvement‌:** Actively address issues, respond to forum "
 "inquiries, participate in discussions, and engage in community-driven "
 "tasks."
-msgstr "**社区参与度：** 积极处理问题，回复论坛咨询，参与技术讨论，并投身于社区驱动的各项任务。"
+msgstr "**社区参与度：** 积极处理问题，回应论坛咨询，参与讨论，并投身于社区驱动的任务。"
 
-#: ../../source/community/governance.md:30
+#: ../../source/community/governance.md:33
 msgid ""
 "The approval from existing Maintainers is required. The vLLM community "
 "has the final decision-making authority. Maintainers will be granted "
@@ -140,47 +134,45 @@ msgid ""
 "clone, and push to the repository, as well as manage issues and pull "
 "requests."
 msgstr ""
-"晋升为维护者需获得现有维护者团队的批准，并由 vLLM 社区行使最终决定权。维护者将被授予 "
-"[vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) GitHub 仓库的写入权限，包括读取、克隆、推送代码至仓库，以及管理问题（Issue）和拉取请求（PR）。"
+"需要获得现有维护者的批准。vLLM 社区拥有最终决定权。维护者将被授予 [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) GitHub 仓库的写入权限，包括读取、克隆和推送代码至仓库，以及管理问题和拉取请求。"
 
-#: ../../source/community/governance.md:33
+#: ../../source/community/governance.md:36
 msgid "Nominating and Removing Maintainers"
-msgstr "维护者的提名与卸任"
+msgstr "维护者的提名与移除"
 
-#: ../../source/community/governance.md:35
+#: ../../source/community/governance.md:38
 msgid "The Principles"
-msgstr "核心原则"
+msgstr "原则"
 
-#: ../../source/community/governance.md:37
+#: ../../source/community/governance.md:40
 msgid ""
-"Membership in vLLM Ascend is given to individuals on merit basis after "
+"Membership in vLLM Ascend is given to individuals on a merit basis after "
 "they demonstrate their strong expertise in vLLM/vLLM Ascend through "
 "contributions, reviews, and discussions."
-msgstr ""
-"vLLM Ascend 的成员资格基于个人能力授予。申请者需通过代码贡献、技术评审及社区讨论等方式，展现其在 vLLM / vLLM Ascend 领域的深厚专业能力。"
+msgstr "vLLM Ascend 的成员资格基于个人能力授予，申请者需通过贡献、评审和讨论等方式，展现其在 vLLM/vLLM Ascend 领域的深厚专业知识。"
 
-#: ../../source/community/governance.md:39
+#: ../../source/community/governance.md:42
 msgid ""
 "For membership in the maintainer group, individuals have to demonstrate "
 "strong and continued alignment with the overall vLLM/vLLM Ascend "
 "principles."
-msgstr "要成为维护者团队的一员，个人必须展现出与 vLLM / vLLM Ascend 总体原则高度一致，并能持续践行。"
+msgstr "要成为维护者团队的一员，个人必须展现出与 vLLM/vLLM Ascend 总体原则高度一致，并能持续践行。"
 
-#: ../../source/community/governance.md:41
+#: ../../source/community/governance.md:44
 msgid ""
 "Maintainers who have been inactive for a long time may be transitioned to"
 " **emeritus** status under lenient criteria."
-msgstr "长期未活跃参与的维护者，可依据相对宽松的标准，转为 **荣誉成员** 身份。"
+msgstr "长期不活跃的维护者，可根据宽松的标准转为 **荣誉** 状态。"
 
-#: ../../source/community/governance.md:43
+#: ../../source/community/governance.md:46
 msgid "The membership is for an individual, not a company."
-msgstr "成员资格授予个人，而非其所属公司或组织。"
+msgstr "成员资格授予个人，而非公司。"
 
-#: ../../source/community/governance.md:45
+#: ../../source/community/governance.md:48
 msgid "Nomination and Removal"
-msgstr "提名与卸任流程"
+msgstr "提名与移除"
 
-#: ../../source/community/governance.md:47
+#: ../../source/community/governance.md:50
 msgid ""
 "Nomination: Anyone can nominate a candidate to become a maintainer, "
 "including self-nominations. All existing maintainers are responsible for "
@@ -189,9 +181,9 @@ msgid ""
 "quality, quality contribution, and community involvement—among other "
 "strengths."
 msgstr ""
-"**提名：** 任何人都可以提名候选人成为维护者（包括自荐）。所有现有维护者均有责任审核和评估每项提名。提名人应提供被提名人的相关资质证明，例如其评审质量、代码贡献水平、社区参与度等优势。"
+"提名：任何人都可以提名候选人成为维护者，包括自我提名。所有现有维护者负责审核和评估每项提名。提名人应提供被提名人的相关资质信息，例如其评审质量、贡献质量和社区参与度等优势。"
 
-#: ../../source/community/governance.md:48
+#: ../../source/community/governance.md:51
 msgid ""
 "Removal: Anyone may nominate an individual for removal from the "
 "maintainer role, including self-nominations. All current maintainers are "
@@ -200,18 +192,4 @@ msgid ""
 "inactivity, misalignment with the project's overall direction, or other "
 "factors that may render them unsuitable for the maintainer position."
 msgstr ""
-"**卸任：** 任何人都可以提议某人卸任维护者职务（包括自荐）。所有现任维护者均有责任审核和评估此类提议。提议人应提供相关依据，例如被提议人长期不活跃、与项目整体发展方向不一致，或存在其他使其不再适合担任维护者职务的因素。"
-
-#~ msgid ""
-#~ "Requires approval from existing Maintainers."
-#~ " The vLLM community has the final "
-#~ "decision-making authority."
-#~ msgstr "需要现有维护者的批准。vLLM社区拥有最终决策权。"
-
-#~ msgid ""
-#~ "Light criteria of moving module "
-#~ "maintenance to ‘emeritus’ status if they"
-#~ " don’t actively participate over long "
-#~ "periods of time."
-#~ msgstr "如果维护人员在长期不积极参与，可考虑将其维护状态调整为“荣誉”状态。"
-
+"移除：任何人都可以提议某人卸任维护者职务，包括自我提议。所有现任维护者负责审核和评估此类提议。提议人应提供被提议人的相关信息，例如长期不活跃、与项目整体方向不一致，或其他可能使其不适合担任维护者职务的因素。"

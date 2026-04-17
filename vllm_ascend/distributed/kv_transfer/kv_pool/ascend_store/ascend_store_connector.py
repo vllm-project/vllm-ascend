@@ -64,6 +64,16 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 
 class AscendStoreConnector(KVConnectorBase_V1):
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """
+        AscendStore requires PIECEWISE CUDA graph mode when layerwise
+        operations are enabled. The layerwise load/save hooks perform
+        async synchronization that cannot be safely captured in CUDA
+        graphs.
+        """
+        return extra_config.get("use_layerwise", False)
+
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role

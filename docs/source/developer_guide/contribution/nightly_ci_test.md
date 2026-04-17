@@ -49,7 +49,7 @@ matching the filter will be dispatched, which saves hardware resources.
 ## Differences Between PR and Scheduled Runs
 
 | | Scheduled / Manual Dispatch | PR-triggered |
-|-|----------------------------|-|
+|---|----------------------------|---|
 | Trigger | Cron (daily) or `workflow_dispatch` | Label `nightly-test` + `/nightly` comment |
 | Code tested | Pre-built nightly image | Your PR's HEAD commit (source installed fresh) |
 | Test scope | All tests | Configurable via `/nightly <names>` |
@@ -201,6 +201,7 @@ need to post a new comment.
 
 - For most issues, the stdout pop-up logs from GitHub actions are sufficient (this log always represents the logs from the first node).
 - If the logs from a first node are no longer sufficient to provide effective logging information, see the summary of your jobs to download log archive for the corresponding test, which includes the framework-side logs and plog information for each node, structured as follows:
+
   ```shell
   .
   ├── node0

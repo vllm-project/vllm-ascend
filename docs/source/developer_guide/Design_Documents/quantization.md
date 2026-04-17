@@ -24,7 +24,7 @@ The `embedding` method is generally not implemented for quantization, focusing o
 
 The `create_weights` method is used for weight initialization; the `process_weights_after_loading` method is used for weight post-processing, such as transposition, format conversion, data type conversion, etc.; the `apply` method is used to perform activation quantization and quantized matrix multiplication calculations during the forward process.
 
-We need to implement the `create_weights`, `process_weights_after_loading`, and `apply` methods for different **layers** (**attention**, **mlp**, **moe**).
+We need to implement the `create_weights`, `process_weights_after_loading`, and `apply` methods for different **layers** (**attention**, **mlp**, **MoE (Mixture of Experts)**).
 
 **Supplement**: When loading the model, the quantized model's description file **quant_model_description.json** needs to be read. This file describes the quantization configuration and parameters for each part of the model weights, for example:
 
@@ -54,7 +54,7 @@ Based on the above content, we present a brief description of the adaptation pro
 - **Step 2: Registration**. Use the `@register_scheme` decorator in `vllm_ascend/quantization/methods/registry.py` to register your quantization scheme class.
 
 ```python
-from vllm_ascend.quantization.methods import register_scheme, AscendLinearScheme
+from vllm_ascend.quantization.methods import register_scheme, AscendLinearScheme, AscendMoEScheme
 
 @register_scheme("W4A8_DYNAMIC", "linear")
 class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
@@ -107,7 +107,7 @@ vLLM Ascend supports multiple quantization algorithms. The following table provi
 | `W8A8_DYNAMIC`           | INT8   | INT8       | Per-Channel        | Per-Token              | Dynamic | Dynamic activation quantization with per-token scaling factor calculation                                                                                          |
 | `W4A8_DYNAMIC`           | INT4   | INT8       | Per-Group          | Per-Token              | Dynamic | Supports both direct per-channel quantization to 4-bit and two-step quantization (per-channel to 8-bit then per-group to 4-bit)                                    |
 | `W4A4_FLATQUANT_DYNAMIC` | INT4   | INT4       | Per-Channel        | Per-Token              | Dynamic | Uses FlatQuant for activation distribution smoothing before 4-bit dynamic quantization, with additional matrix multiplications for precision preservation          |
-| `W8A8_MIX`               | INT8   | INT8       | Per-Channel        | Per-Tensor/Token       | Mixed   | PD Colocation Scenario uses dynamic quantization for both P node and D node; PD Disaggregation Scenario uses dynamic quantization for P node and static for D node |
+| `W8A8_MIX`               | INT8   | INT8       | Per-Channel        | Per-Tensor/Token       | Mixed   | We support two deployment modes: PD Colocation (dynamic quantization for both P and D) and PD Disaggregation (dynamic-quant P and static-quant D) |
 
 **Static vs Dynamic:** Static quantization uses pre-computed scaling factors with better performance, while dynamic quantization computes scaling factors on-the-fly for each token/activation tensor with higher precision.
 

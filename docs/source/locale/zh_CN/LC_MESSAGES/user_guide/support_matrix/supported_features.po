@@ -6,9 +6,9 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
 "PO-Revision-Date: 2026-01-22 16:20+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -17,32 +17,32 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:1
 msgid "Supported Features"
-msgstr "支持的特性"
+msgstr "支持的功能"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:3
 msgid ""
-"The feature support principle of vLLM Ascend is: **aligned with the "
-"vLLM**. We are also actively collaborating with the community to "
-"accelerate support."
-msgstr "vLLM Ascend 的特性支持原则是：**与 vLLM 保持一致**。我们也在积极与社区合作，加快支持进度。"
+"The feature support principle of vLLM Ascend is: **aligned with vLLM**. "
+"We are also actively collaborating with the community to accelerate "
+"support."
+msgstr "vLLM Ascend 的功能支持原则是：**与 vLLM 对齐**。我们也在积极与社区合作，以加速支持进度。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:5
-msgid "Functional call: https://docs.vllm.ai/en/latest/features/tool_calling/"
-msgstr "函数调用 (Functional call): <https://docs.vllm.ai/en/latest/features/tool_calling/>"
+msgid "Functional call: <https://docs.vllm.ai/en/latest/features/tool_calling/>"
+msgstr "函数调用：<https://docs.vllm.ai/en/latest/features/tool_calling/>"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:7
 msgid ""
 "You can check the [support status of vLLM V1 Engine][v1_user_guide]. "
 "Below is the feature support status of vLLM Ascend:"
-msgstr "你可以查看 [vLLM V1 引擎的支持状态][v1_user_guide]。下面是 vLLM Ascend 的功能支持情况："
+msgstr "您可以查看 [vLLM V1 引擎的支持状态][v1_user_guide]。以下是 vLLM Ascend 的功能支持状态："
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Feature"
-msgstr "特性"
+msgstr "功能"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Status"
@@ -58,11 +58,11 @@ msgstr "分块预填充"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "🟢 Functional"
-msgstr "🟢 可用"
+msgstr "🟢 功能可用"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Functional, see detailed note: [Chunked Prefill][cp]"
-msgstr "功能可用，详见详细说明：[分块预填充][cp]"
+msgstr "功能可用，详见说明：[分块预填充][cp]"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Automatic Prefix Caching"
@@ -70,19 +70,23 @@ msgstr "自动前缀缓存"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Functional, see detailed note: [vllm-ascend#732][apc]"
-msgstr "功能可用，详见详细说明：[vllm-ascend#732][apc]"
+msgstr "功能可用，详见说明：[vllm-ascend#732][apc]"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "LoRA"
 msgstr "LoRA"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
-msgid "[vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]"
-msgstr "[vllm-ascend#396][multilora]，[vllm-ascend#893][v1 multilora]"
+msgid "🔵 Experimental"
+msgstr "🔵 实验性"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [LoRA][LoRA]"
+msgstr "功能可用，详见说明：[LoRA][LoRA]"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Speculative decoding"
-msgstr "猜测式解码"
+msgstr "推测解码"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Basic support"
@@ -90,7 +94,7 @@ msgstr "基础支持"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Pooling"
-msgstr "池化 (Pooling)"
+msgstr "池化"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "CI needed to adapt to more models; V1 support relies on vLLM support."
@@ -98,7 +102,7 @@ msgstr "需要 CI 以适配更多模型；V1 支持依赖于 vLLM 的支持。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Enc-dec"
-msgstr "Enc-dec (编码-解码)"
+msgstr "编码器-解码器"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "🟡 Planned"
@@ -106,15 +110,15 @@ msgstr "🟡 计划中"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "vLLM should support this feature first."
-msgstr "需要 vLLM 首先支持此特性。"
+msgstr "需要 vLLM 首先支持此功能。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Multi Modality"
 msgstr "多模态"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
-msgid "[Tutorial][multimodal], optimizing and adapting more models"
-msgstr "[教程][multimodal]，正在优化并适配更多模型"
+msgid "[Multi Modality][multimodal], optimizing and adapting more models"
+msgstr "[多模态][multimodal]，正在优化并适配更多模型"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "LogProbs"
@@ -126,7 +130,7 @@ msgstr "需要 CI"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Prompt logProbs"
-msgstr "提示词 logProbs"
+msgstr "提示词 LogProbs"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Async output"
@@ -134,7 +138,7 @@ msgstr "异步输出"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Beam search"
-msgstr "束搜索 (Beam search)"
+msgstr "束搜索"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Guided Decoding"
@@ -146,7 +150,7 @@ msgstr "[vllm-ascend#177][guided_decoding]"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Tensor Parallel"
-msgstr "张量并行 (TP)"
+msgstr "张量并行"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Make TP >4 work with graph mode."
@@ -154,7 +158,7 @@ msgstr "使 TP >4 在图模式下正常工作。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Pipeline Parallel"
-msgstr "流水线并行 (PP)"
+msgstr "流水线并行"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Write official guide and tutorial."
@@ -162,7 +166,7 @@ msgstr "编写官方指南和教程。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Expert Parallel"
-msgstr "专家并行 (EP)"
+msgstr "专家并行"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Support dynamic EPLB."
@@ -170,7 +174,7 @@ msgstr "支持动态 EPLB。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Data Parallel"
-msgstr "数据并行 (DP)"
+msgstr "数据并行"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Data Parallel support for Qwen3 MoE."
@@ -190,39 +194,43 @@ msgstr "量化"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "W8A8 available; working on more quantization method support (W4A8, etc)"
-msgstr "W8A8 已可用；正在开发更多量化方法支持 (W4A8 等)"
+msgstr "W8A8 已可用；正在开发更多量化方法支持（如 W4A8 等）"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Graph Mode"
 msgstr "图模式"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
-msgid "🔵 Experimental"
-msgstr "🔵 实验性"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-msgid "Experimental, see detailed note: [vllm-ascend#767][graph_mode]"
-msgstr "实验性功能，详见详细说明：[vllm-ascend#767][graph_mode]"
+msgid "Functional, see detailed note: [Graph Mode][graph_mode]"
+msgstr "功能可用，详见说明：[图模式][graph_mode]"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Sleep Mode"
 msgstr "睡眠模式"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [Sleep Mode][sleep_mode]"
+msgstr "功能可用，详见说明：[睡眠模式][sleep_mode]"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Context Parallel"
-msgstr "上下文并行 (CP)"
+msgstr "上下文并行"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [Context Parallel][context_parallel]"
+msgstr "功能可用，详见说明：[上下文并行][context_parallel]"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:33
 msgid "🟢 Functional: Fully operational, with ongoing optimizations."
-msgstr "🟢 可用：功能完全正常，正在进行持续优化。"
+msgstr "🟢 功能可用：完全可运行，正在进行持续优化。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:34
 msgid "🔵 Experimental: Experimental support, interfaces and functions may change."
-msgstr "🔵 实验性：实验性支持，接口和功能可能会发生变化。"
+msgstr "🔵 实验性：实验性支持，接口和功能可能发生变化。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:35
 msgid "🚧 WIP: Under active development, will be supported soon."
-msgstr "🚧 WIP：正在积极开发中，即将支持。"
+msgstr "🚧 开发中：正在积极开发，即将支持。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md:36
 msgid ""
@@ -242,3 +250,9 @@ msgstr "🔴 无计划/已弃用：暂无计划或已被 vLLM 弃用。"
 
 #~ msgid "vLLM V1 Engine"
 #~ msgstr "vLLM V1 引擎"
+
+#~ msgid "[vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]"
+#~ msgstr "[vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]"
+
+#~ msgid "Experimental, see detailed note: [vllm-ascend#767][graph_mode]"
+#~ msgstr "实验性，详见说明：[vllm-ascend#767][graph_mode]"

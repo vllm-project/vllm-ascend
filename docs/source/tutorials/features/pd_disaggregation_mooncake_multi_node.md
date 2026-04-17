@@ -4,7 +4,7 @@
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs 16 chips to deploy one service instance.
+Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
 
 ## Verify Multi-Node Communication Environment
 
@@ -240,12 +240,12 @@ If you occasionally see `zmq.error.ZMQError: Address already in use` during star
 ### launch_online_dp.py
 
 Use `launch_online_dp.py` to launch external dp vllm servers.
-[launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+[launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
 ### run_dp_template.sh
 
 Modify `run_dp_template.sh` on each node.
-[run\_dp\_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
+[run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
 #### Layerwise
 
@@ -735,14 +735,14 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
 ### Start the service
 
 ```bash
-# on 190.0.0.1
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 190.0.0.1 --dp-rpc-port 12321 --vllm-start-port 7100
-# on 190.0.0.2
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 190.0.0.2 --dp-rpc-port 12321 --vllm-start-port 7100
-# on 190.0.0.3
-python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 190.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
-# on 190.0.0.4
-python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 190.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
+# on 192.0.0.1
+python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.0.0.1 --dp-rpc-port 12321 --vllm-start-port 7100
+# on 192.0.0.2
+python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.0.0.2 --dp-rpc-port 12321 --vllm-start-port 7100
+# on 192.0.0.3
+python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
+# on 192.0.0.4
+python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
 ```
 
 ## Example Proxy for Deployment

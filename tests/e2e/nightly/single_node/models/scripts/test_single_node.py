@@ -1,10 +1,13 @@
+import asyncio
 import json
 import logging
 import os
 import shlex
 from typing import Any
+import vllm
 
 import openai
+import psutil
 import pytest
 import subprocess
 import sys
@@ -110,11 +113,36 @@ def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
         print(f"✅ Comparison passed: {eval_str} [threshold: {expected_threshold}]")
 
 
+async def run_check_rank0_process_count(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "npu-smi", "info",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate()
+    if proc.returncode == 0:
+        logger.info("npu-smi info:\n%s", stdout_bytes.decode(errors='ignore'))
+    else:
+        logger.warning("npu-smi info failed: %s", stderr_bytes.decode(errors='ignore'))
+
+    vllm_serve_procs = [
+        p for p in psutil.process_iter(attrs=["pid", "cmdline"], ad_value=None)
+        if p.info["cmdline"]
+        and any("vllm" in arg for arg in p.info["cmdline"])
+        and any("serve" in arg for arg in p.info["cmdline"])
+    ]
+    count = len(vllm_serve_procs)
+    assert count == 1, (
+        f"rank0 process count check failed: expected exactly 1 vllm serve process on rank0, found {count}"
+    )
+
+
 # Extend this dictionary to add new test capabilities
 TEST_HANDLERS = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
+    "check_rank0_process_count": run_check_rank0_process_count,
 }
 
 
@@ -344,7 +372,7 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
         "feature": _extract_features(config.server_cmd, config.envs),
-        "vllm_version": os.environ.get("VLLM_VERSION", ""),
+        "vllm_version": vllm.__version__,
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
         "tasks": tasks,
         "serve_cmd": _build_serve_cmd(config),

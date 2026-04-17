@@ -113,6 +113,7 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
+from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
@@ -400,6 +401,9 @@ class NPUModelRunner(GPUModelRunner):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors,
             ),
+            logitsprocs_need_output_token_ids=bool(
+                self.vllm_config.model_config.logits_processors
+            ),
             is_pooling_model=self.is_pooling_model,
             num_speculative_tokens=(
                 self.vllm_config.speculative_config.num_speculative_tokens if self.vllm_config.speculative_config else 0
@@ -451,6 +455,7 @@ class NPUModelRunner(GPUModelRunner):
             AscendNgramProposer
             | AscendEagleProposer
             | AscendDraftModelProposer
+            | AscendDflashProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | None
@@ -970,14 +975,6 @@ class NPUModelRunner(GPUModelRunner):
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
             attn_state = AscendAttentionState.PrefillNoCache
-            # If all prompts are shorter than or equal to decode threshold, they should
-            # be treated as SpecDecoding for correct forward path in mla attention backend
-            if (
-                self.speculative_config
-                and self.speculative_config.method == "mtp"
-                and np.all(num_scheduled_tokens <= self.decode_threshold)
-            ):
-                attn_state = AscendAttentionState.SpecDecoding
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
@@ -1760,7 +1757,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if not self.use_async_scheduling:
             return model_runner_output
-        return AsyncGPUModelRunnerOutput(
+        async_output = AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
             logprobs_tensors=sampler_output.logprobs_tensors,
@@ -1768,11 +1765,17 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
         )
+        self.input_batch.set_async_sampled_token_ids(
+            async_output.sampled_token_ids_cpu,
+            async_output.async_copy_ready_event,
+        )
+        return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
+        self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
             if lmhead_tp_enable() and logits is not None:
                 logits = logits[: self.input_batch.num_reqs]
@@ -2354,7 +2357,7 @@ class NPUModelRunner(GPUModelRunner):
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(kv_cache_gid)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer):
+                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -2735,7 +2738,9 @@ class NPUModelRunner(GPUModelRunner):
                             "Model does not support EAGLE3 interface but "
                             "aux_hidden_state_outputs was requested"
                         )
-                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+                    aux_layers = self._get_eagle3_aux_layers_from_config()
+                    if not aux_layers:
+                        aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
                     self.model.set_aux_hidden_state_layers(aux_layers)
 
             if self.lora_config:
@@ -2775,7 +2780,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.speculative_config and (
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
         ):
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
+            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
             block_size = (self.kernel_block_sizes[0] if isinstance(
             self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
@@ -3430,7 +3435,6 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_c8=self.ascend_config.is_sparse_c8_layer(layer_name),
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    assert isinstance(spec, MLAAttentionSpec)
                     from vllm.v1.kv_cache_interface import MLAAttentionSpec as AscendMLAAttentionSpec
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim

@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 from vllm.v1.metrics.reader import Counter, Vector
+from vllm.tokenizers.registry import resolve_tokenizer_args
 
 from tests.e2e.conftest import VllmRunner
 
@@ -392,8 +393,9 @@ def test_llama_qwen_eagle_acceptance(
     main_model_name = MODELS[method]["main"]
     spec_model_name = MODELS[method]["spec"]
 
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
     tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
+        tokenizer_path,
         trust_remote_code=True,
     )
     sampling_params = SamplingParams(
@@ -499,8 +501,9 @@ def test_parallel_drafting_acceptance(
     main_model_name = DRAFT_PARALLEL_MODELS[method]["main"]
     spec_model_name = DRAFT_PARALLEL_MODELS[method]["spec"]
 
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
     tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
+        tokenizer_path,
         trust_remote_code=True,
     )
     sampling_params = SamplingParams(

@@ -133,7 +133,7 @@ models = [
 
 ```bash
 # Example command to test gsm8k dataset performance using the first 100 prompts. Commands for other datasets are similar.
-ais_bench --models vllm_api_stream_chat \
+ais_bench --models vllm-api-stream-chat \
   --datasets gsm8k_gen_0_shot_cot_str_perf \
   --debug --summarizer default_perf --mode perf --num-prompts 100
 ```

@@ -37,8 +37,17 @@ def is_arm_cpu() -> bool:
 
 
 def execute_command(cmd: list[str]) -> tuple[str, int]:
-    with subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as p:
-        out, _ = p.communicate(timeout=1000)
+    # Force a C locale so subprocess output remains parseable on localized OSes.
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    env["LC_MESSAGES"] = "C"
+    with subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as p:
+        try:
+            out, _ = p.communicate(timeout=1000)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, _ = p.communicate()
     return out.decode(), p.returncode
 
 
