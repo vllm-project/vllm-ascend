@@ -220,17 +220,14 @@ class KVPoolWorker:
         ptrs = []
         lengths = []
         length = len(self.block_len)
-        registered_addrs = set()
         for cache_or_caches in kv_caches.values():
             for i, cache in enumerate(cache_or_caches, 0):
                 base_addr = cache.data_ptr()
-                if base_addr in registered_addrs:
-                    continue
-                registered_addrs.add(base_addr)
-                region_len = self.num_blocks * self.block_len[i % length]
+                if base_addr not in self.kv_caches_base_addr:
+                    region_len = self.num_blocks * self.block_len[i % length]
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
                 self.kv_caches_base_addr.append(base_addr)
-                ptrs.append(base_addr)
-                lengths.append(region_len)
 
         self.m_store.register_buffer(ptrs, lengths)
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
@@ -544,6 +541,8 @@ class KVPoolWorker:
             self._process_load_for_layer(request, block_keys, last_block_keys, layer_id, num_keys_per_block)
 
     def wait_for_layer_load(self) -> None:
+        if self.current_layer in self.independent_layers:
+            return
         is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)  #try---cache
         if not is_finish:
             logger.info(f"Layerwise {self.current_layer} load failed")
@@ -574,7 +573,8 @@ class KVPoolWorker:
             is_finish = self.layer_save_finished_events[self.current_layer].wait(timeout=10)
             if not is_finish:
                 logger.info(f"Layerwise {self.current_layer} save failed")
-            for layer_id in self.layers_need_to_save:
+            self.layer_save_finished_events[self.current_layer].clear()
+            for layer_id in range(self.num_layers):
                 self.layer_save_finished_events[layer_id].clear()
 
         self.current_layer = self.current_layer + 1
