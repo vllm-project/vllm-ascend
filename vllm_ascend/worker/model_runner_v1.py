@@ -337,6 +337,15 @@ class NPUModelRunner(GPUModelRunner):
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
             self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
 
+        self.use_eagle = (
+            vllm_config.speculative_config.method in ("eagle", "eagle3", "mtp")
+            if vllm_config.speculative_config
+            else False
+        )
+        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
+        # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
+        _enpu = get_c_env("ENPU_ENABLE")
+        self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
         self._set_up_drafter()
 
         # kv role
@@ -425,15 +434,6 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
-        self.use_eagle = (
-            vllm_config.speculative_config.method in ("eagle", "eagle3", "mtp")
-            if vllm_config.speculative_config
-            else False
-        )
-        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
-        # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` (not in envs.py).
-        _enpu = get_c_env("ENPU_ENABLE")
-        self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
 
     @property
     def use_cp(self) -> bool:
