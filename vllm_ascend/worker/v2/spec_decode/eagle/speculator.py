@@ -66,6 +66,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: Any = None,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
         because npu attention metadata needs more information,
@@ -92,6 +93,7 @@ class AscendEagleSpeculator(EagleSpeculator):
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
+                is_profile=is_profile,
             )
 
     def generate_draft(
