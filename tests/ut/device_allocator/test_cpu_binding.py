@@ -55,12 +55,32 @@ class TestDeviceInfo(unittest.TestCase):
 
         self.assertEqual(output, 'command-output')
         self.assertEqual(return_code, 7)
-        mock_popen.assert_called_once_with(
-            ['dummy', 'cmd'],
-            shell=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        mock_popen.assert_called_once()
+        args, kwargs = mock_popen.call_args
+        self.assertEqual(args[0], ['dummy', 'cmd'])
+        self.assertEqual(kwargs["shell"], False)
+        self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(kwargs["stderr"], subprocess.PIPE)
+        self.assertEqual(kwargs["env"]["LC_ALL"], "C")
+        self.assertEqual(kwargs["env"]["LANG"], "C")
+        self.assertEqual(kwargs["env"]["LC_MESSAGES"], "C")
+
+    @patch('vllm_ascend.cpu_binding.subprocess.Popen')
+    def test_execute_command_kills_timed_out_process(self, mock_popen):
+        process = MagicMock()
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd=['dummy', 'cmd'], timeout=1000),
+            (b'command-output', b''),
+        ]
+        process.returncode = -9
+        mock_popen.return_value.__enter__.return_value = process
+
+        output, return_code = cpu_binding_module.execute_command(['dummy', 'cmd'])
+
+        self.assertEqual(output, 'command-output')
+        self.assertEqual(return_code, -9)
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.communicate.call_count, 2)
 
     @patch('vllm_ascend.cpu_binding.execute_command')
     def setUp(self, mock_execute_command):

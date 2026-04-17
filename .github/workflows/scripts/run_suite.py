@@ -76,8 +76,8 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
         lightest = sums.index(min(sums))
         buckets[lightest].append(idx)
         sums[lightest] += test.estimated_time
-
-    return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time)
+    # Sort each bucket ascending by estimated_time for better feedback and developer experience
+    return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time, reverse=True)
 
 
 def _find_project_root() -> Path:

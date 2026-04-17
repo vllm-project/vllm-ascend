@@ -22,8 +22,9 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
-MODELS = ["Qwen/Qwen3-0.6B"]
+MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
@@ -45,15 +46,25 @@ def test_qwen3_dense_eager_mode(
         "The future of AI is",
     ]
 
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=0.5,
+        logprobs=2,
+        prompt_logprobs=2,
+        logit_bias={0: -1.0, 1: 0.5},
+        min_p=0.01,
+        bad_words=["the", " the"],
+    )
     with VllmRunner(
         model,
         max_model_len=1024,
         enforce_eager=enforce_eager,
+        async_scheduling=True,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.skipif(vllm_version_is("0.19.0"), reason="no need to support model_runner for v0.19.0")
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
