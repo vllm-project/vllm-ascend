@@ -191,6 +191,23 @@
 #    Future Plan:
 #       Remove this patch after the upcoming KV cache spec refactor.
 #
+# ** 9. File: platform/patch_kv_transfer_scheduler_rescue.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._update_from_kv_xfer_finished`
+#    Why:
+#       In production, KV transfer callbacks may arrive after request abort.
+#       Upstream assertion `assert req_id in self.requests` can then crash engine process.
+
+#    How:
+#       This patch keeps upstream behavior but replaces the hard assert with
+#       warning + skip for missing req_id, so aborted-request race does not kill process.
+#       The state transition / block-free logic is intentionally kept consistent with
+#       vLLM v0.17.0 `Scheduler._update_from_kv_xfer_finished`.
+#       Only the missing-request handling is changed (assert -> warning + continue).
+#    Related PR (if no, explain why):
+#       No. This patch is a defensive fix for aborted-request callback race.
+#    Future Plan:
+#       Remove this patch once upstream provides equivalent guard logic.
 # * Worker Patch:
 # ===============
 #
