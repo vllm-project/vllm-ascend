@@ -105,16 +105,13 @@ class DefaultEplb(EplbPolicy):
                     if min_box_index == -1 or box_weights[i] < box_weights[min_box_index]:
                         min_box_index = i
 
+            # If no valid box is found, place in the first available box (duplicates will be fixed in Step5)
             if min_box_index == -1:
-                # Try to place in the last box first
-                if box_counts[-1] < items_per_box or (box_counts[-1] == items_per_box and remaining_items > 0):
-                    min_box_index = -1
-                else:
-                    # Find any box with capacity
-                    for i in range(card_num):
-                        if box_counts[i] < items_per_box or (box_counts[i] == items_per_box and remaining_items > 0):
-                            min_box_index = i
-                            break
+                # Find any box with capacity
+                for i in range(card_num):
+                    if box_counts[i] < items_per_box or (box_counts[i] == items_per_box and remaining_items > 0):
+                        min_box_index = i
+                        break
 
             # Place the item (id) into the selected box
             boxes[min_box_index].append(item_id)
@@ -321,65 +318,30 @@ class DefaultEplb(EplbPolicy):
 
     @staticmethod
     def constraint_expert_local_exchange(current_expert_table, global_deployment):
-        """
-        Aligns the local expert ranking with the target global deployment plan
-        without moving experts across devices (cards).
-
-        It ensures that the resulting list on each card contains exactly the same
-        set of experts as before, but arranged in the order specified by
-        `global_deployment`.
-
-        Args:
-            current_expert_table: Current expert allocation (list of lists of lists).
-            global_deployment: Target expert allocation plan.
-
-        Returns:
-            Updated global_deployment with locally adjusted expert orders.
-        """
         for layer_id in range(len(global_deployment)):
             # Iterate over available cards, ensuring we don't go out of bounds
             num_cards = min(len(current_expert_table[layer_id]), len(global_deployment[layer_id]))
 
             for card_id in range(num_cards):
-                # Convert lists to numpy arrays for efficient set operations
-                # `local_expert_ids` refers to the experts currently on this card
-                # `target_expert_ids` refers to the desired order from the optimizer
-                local_expert_ids = np.array(current_expert_table[layer_id][card_id])
-                target_expert_ids = np.array(global_deployment[layer_id][card_id])
+                cur_expert_ids = np.array(current_expert_table[layer_id][card_id])
+                new_expert_ids = np.array(global_deployment[layer_id][card_id])
 
-                assert len(local_expert_ids) == len(target_expert_ids), (
-                    "Number of experts must match between current and target deployment."
+                assert len(cur_expert_ids) == len(new_expert_ids), (
+                    "Number of experts must match between current and new deployment."
                 )
 
-                # 1. Identify Expert that are already present in the target list.
-                # These experts will stay on this card, but may need to move positions.
-                mask_common_experts = np.isin(local_expert_ids, target_expert_ids)
-                experts_staying_local = local_expert_ids[mask_common_experts]
+                # 1. Identify experts that are not moved to other NPU.
+                mask_experts_not_move = np.isin(cur_expert_ids, new_expert_ids)
+                experts_not_move = cur_expert_ids[mask_experts_not_move]
 
-                # 2. Identify experts in the target list that need to be placed into the
-                # remaining slots. This step filters out the experts already 'taken' by
-                # `experts_staying_local` conceptualy, or simply identifies the ones
-                # that define the 'new' structure relative to the old one.
-                # Note: In logic, `target_expert_ids` defines the structure.
-                # We need to fill the slots of `target_expert_ids` with items from
-                # `local_expert_ids`.
-                #
-                # Correct Logic: We want to construct a list that is the SAME ORDER as `target_expert_ids`,
-                # but contains ONLY items from `local_expert_ids`.
-                # Since we assume Set(local) == Set(target), we just need to re-order.
-                #
-                # However, preserving the original code's logic (masking based on absolute position):
-                # It treats the array as a set of 'content' and 'structural containers'.
+                # 2. Identify experts in the new list that are moved from other NPU.
+                mask_new_experts = ~np.isin(new_expert_ids, experts_not_move)
+                new_experts = new_expert_ids[mask_new_experts]
 
-                # Extract the experts that are 'newly moved' relative to the comparison.
-                # These are the experts in the target list that were NOT in the 'common' set
-                # (or conceptually, the ones that need to be swapped in).
-                mask_experts_to_move = ~np.isin(target_expert_ids, experts_staying_local)
-                experts_to_relocate = target_expert_ids[mask_experts_to_move]
+                final_expert_list = new_expert_ids.copy()
 
-                # 3. Construct the final list.
-                # We start with a copy of the target structure.
-                final_expert_list = target_expert_ids.copy()
+                # Use mask_experts_not_move to constrain expert local exchange in NPU.
+                final_expert_list[mask_experts_not_move] = experts_not_move
 
                 # Fill the positions occupied by 'common' experts with the actual experts from the local card.
                 # This step maps the intersection back to the target positions.
