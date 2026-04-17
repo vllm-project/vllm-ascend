@@ -120,10 +120,6 @@ class RecomputeScheduler(Scheduler):
             and self.vllm_config.kv_transfer_config.is_kv_consumer
         )
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
-        self.is_hybrid_model = (
-            "qwen3_next" in self.vllm_config.model_config.hf_text_config.model_type
-            or "qwen3_5" in self.vllm_config.model_config.hf_text_config.model_type
-        )
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -144,10 +140,6 @@ class RecomputeScheduler(Scheduler):
                 request.streaming_queue = deque()
             # Fill in placeholder tokens to enable full graph compatibility. Without
             # placeholders, graph matching may fail, forcing eager mode execution.
-            if self.is_kv_producer and self.is_hybrid_model and request.num_tokens > 1:
-                request.prompt_token_ids.pop()
-                request._all_token_ids.pop()
-                request.num_prompt_tokens -= 1
             if self.is_mtp_kv_consumer:
                 request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
             self._enqueue_waiting_request(request)
