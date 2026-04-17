@@ -19,7 +19,6 @@ import torch
 import torch_npu
 from torch.nn.functional import pad
 from vllm.triton_utils import HAS_TRITON
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
@@ -347,34 +346,11 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if activation.is_gated:
-        # Activations with gated multiplication (gate × activation(up))
-        assert w2.size(-1) * 2 == gate_up_out.size(-1), (
-            f"{activation.value} expects 2x ratio: "
-            f"{w2.size(-1) * 2} vs {gate_up_out.size(-1)}"
-        )
-        if activation == MoEActivation.SWIGLUOAI:
-            num_experts, _, hidden_size = w1.shape
-            gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
-        else:
-            gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    if activation == "swigluoai":
+        num_experts, _, hidden_size = w1.shape
+        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     else:
-        # Activations without gated multiplication
-        assert w2.size(-1) == gate_up_out.size(-1), (
-            f"{activation.value} expects equal sizes: "
-            f"{w2.size(-1)} vs {gate_up_out.size(-1)}"
-        )
-        if activation == MoEActivation.SILU_NO_MUL:
-            gate_up_out = torch_npu.npu_silu(gate_up_out)
-        elif activation == MoEActivation.GELU_NO_MUL:
-            gate_up_out = torch_npu.npu_gelu(gate_up_out, approximate="none")
-        elif activation == MoEActivation.RELU2_NO_MUL:
-            gate_up_out = torch.relu(gate_up_out)
-            gate_up_out = torch.square(gate_up_out)
-        else:
-            raise ValueError(
-                    f"Unsupported FusedMoE activation: {activation}"
-                )         
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
