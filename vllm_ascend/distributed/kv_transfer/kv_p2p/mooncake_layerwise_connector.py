@@ -762,7 +762,7 @@ class MooncakeLayerwiseConnectorScheduler:
             )
         else:
             self.metaserver_client = httpx.Client(limits=httpx.Limits(max_connections=100000), timeout=None)
-        
+
         self.use_mamba = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups)
 
     def _mamba_prefill_token_count(self, num_prompt_tokens: int) -> int:
