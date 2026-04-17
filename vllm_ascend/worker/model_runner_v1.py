@@ -1121,7 +1121,6 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 sampled_token_ids_tensor = sampled_token_ids
 
-            k = self.drafter.k
             (_token_ids, next_token_ids, draft_token_ids,
              num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
                 self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
@@ -1131,7 +1130,7 @@ class NPUModelRunner(GPUModelRunner):
                 vocab_size=self.model_config.get_vocab_size(),
                 min_n=self.drafter.min_n,
                 max_n=self.drafter.max_n,
-                k=k,
+                k=self.drafter.k,
             )
 
             # only async scheduling, set prev_sampled_token_ids，
