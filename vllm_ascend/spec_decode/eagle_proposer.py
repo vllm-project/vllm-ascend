@@ -329,6 +329,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                     self.vllm_config,
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
                 )
             else:
                 self._runnable = ACLGraphWrapper(
@@ -336,6 +337,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                     self.vllm_config,
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
+                    enable_enpu=self.enable_enpu,
                 )
 
     def get_model(self) -> nn.Module:
@@ -475,9 +477,7 @@ class SpecDecodeBaseProposer(EagleProposer):
         num_input_tokens: int,
         multi_steps_attn_metadata: list[dict[str, Any]],
     ) -> None:
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-            if self.enable_enpu and not is_draft_eagle:
+            if self.enable_enpu:
                 torch.npu.current_stream().synchronize()
 
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)

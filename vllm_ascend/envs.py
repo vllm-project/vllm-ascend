@@ -23,14 +23,6 @@ from collections.abc import Callable
 from typing import Any
 
 
-def _is_enpu_enabled_from_c_env() -> bool:
-    """Read ``ENPU_ENABLE`` via libc ``getenv`` (see ``vllm_ascend.utils.get_c_env``)."""
-    from vllm_ascend.utils import get_c_env
-
-    raw = get_c_env("ENPU_ENABLE")
-    return raw is not None and raw.lower() == "true"
-
-
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -116,11 +108,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
-    # When True, full-graph + ACL path coordinates ``update_full_graph_params`` before
-    # model forward and skips the default pre-replay synchronize in ``ACLGraphWrapper``.
-    # Backing name is ``ENPU_ENABLE`` (C ``getenv``) for parity with non-Python launchers;
-    # set to ``true`` (case-insensitive) to enable. Default: disabled.
-    "VLLM_ASCEND_ENABLE_ENPU": _is_enpu_enabled_from_c_env,
 }
 
 # end-env-vars-definition

@@ -90,7 +90,6 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -125,6 +124,7 @@ from vllm_ascend.utils import (
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
+    get_c_env,
     global_stream,
     lmhead_tp_enable,
     set_weight_prefetch_method,
@@ -426,12 +426,14 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.use_eagle = (
-            vllm_config.speculative_config.method in ("eagle", "eagle3")
+            vllm_config.speculative_config.method in ("eagle", "eagle3", "mtp")
             if vllm_config.speculative_config
             else False
         )
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
-        self.enable_enpu = ascend_envs.VLLM_ASCEND_ENABLE_ENPU
+        # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` (not in envs.py).
+        _enpu = get_c_env("ENPU_ENABLE")
+        self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
 
     @property
     def use_cp(self) -> bool:
@@ -1788,9 +1790,7 @@ class NPUModelRunner(GPUModelRunner):
             and not forward_context.capturing
             and not self.use_sparse
         ):
-            if self.enable_enpu and not (
-                _EXTRA_CTX.is_draft_model and self.use_eagle
-            ):
+            if self.enable_enpu:
                 torch.npu.current_stream().synchronize()
 
             assert positions is not None
@@ -2595,6 +2595,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 runtime_mode=CUDAGraphMode.FULL,
                 use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
             )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
