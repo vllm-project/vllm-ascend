@@ -63,9 +63,7 @@ def _patched_parse_tool_calls_from_content(
     )
 
 
-OpenAIServing._parse_tool_calls_from_content = staticmethod(
-    _patched_parse_tool_calls_from_content
-)
+OpenAIServing._parse_tool_calls_from_content = staticmethod(_patched_parse_tool_calls_from_content)
 
 _original_delegating_parse_tool_calls = DelegatingParser._parse_tool_calls
 
