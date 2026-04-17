@@ -293,7 +293,7 @@ class BalanceScheduler(Scheduler):
 
                 # Skip request if the structured output request is still waiting
                 # for FSM compilation.
-                if request.status == RequestStatus.WAITING_FOR_FSM:
+                if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
                     structured_output_req = request.structured_output_request
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
