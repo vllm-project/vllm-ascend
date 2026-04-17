@@ -61,6 +61,11 @@ jobs:
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git checkout -B "${BRANCH_NAME}" "upstream/${TARGET_BRANCH}"
 
+          # Use latest translation script from upstream/main
+          git checkout upstream/main -- .github/workflows/scripts/po_translate.py
+          git checkout upstream/main -- docs/requirements-docs.txt
+          git restore --staged .github/workflows/scripts/po_translate.py docs/requirements-docs.txt
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
