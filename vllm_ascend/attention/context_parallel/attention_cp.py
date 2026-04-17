@@ -549,9 +549,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
-
-        k_nope = self.key_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
-        value = self.value_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
+        query = query.view(1, query.shape[0], query.shape[1], -1)
+        k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
+        value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
 
         # Get MTP attention mask and expand to target length
         spec_attn_mask = None
@@ -571,7 +571,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         common_kwargs = {
             "num_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
-            "input_layout": "TND",
+            "input_layout": "BSND",
             "atten_mask": spec_attn_mask,
             "scale": self.scale,
             "antiquant_mode": 0,
@@ -631,6 +631,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             graph_params.handles[num_tokens].append(handle)
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
+            attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
+            attn_lse = attn_lse.view(attn_lse.shape[1], attn_lse.shape[0], -1)
         attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
