@@ -23,6 +23,7 @@ from vllm_ascend.ops.triton.gdn_chunk_meta import (
     _validate_cu_seqlens,
     build_chunk_meta_device,
 )
+from vllm_ascend.utils import is_310p
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -596,7 +597,7 @@ def _patched_build(
     return attn_metadata
 
 
-if not _IS_PATCHED:
+if not _IS_PATCHED and not is_310p():
     gdn_attn.GDNChunkedPrefillMetadata = GDNChunkedPrefillMetadata
     gdn_attn.GDNCausalConv1dHostMetadata = GDNCausalConv1dHostMetadata
     gdn_attn.GDNPrefillFallbackMeta = GDNPrefillFallbackMeta
