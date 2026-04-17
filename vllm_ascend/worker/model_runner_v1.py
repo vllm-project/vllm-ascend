@@ -2722,36 +2722,67 @@ class NPUModelRunner(GPUModelRunner):
                                               Optional[torch.Tensor]]] = {}
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
-        # 12 25
-        # deepseek
-        import os
-        REUSE = 3
-        # 需要重构这里
+
         model_config = self.vllm_config.model_config
         parallel_config = self.vllm_config.parallel_config
         num_layers = model_config.get_num_layers(parallel_config)
-        reuse_kvcache_layers = [i for i in range(REUSE, num_layers)]
-        enable_kvcache_offload = True
-        # Step 1: Classify layers into reuse and non-reuse categories
-        reuse_layers = []
-        non_reuse_layers = []
 
+        # KV cache offloading configuration
+        # NUM_SHARED_BUFFERS: number of shared KV cache buffers for round-robin reuse
+        # INDEPENDENT_LAYER_INDICES: layer indices that have their own dedicated KV cache
+        NUM_SHARED_BUFFERS = 2
+        INDEPENDENT_LAYER_INDICES = {0, num_layers - 1}
+        enable_kvcache_offload = True
+
+        # Step 1: Collect all attention layer indices and names
+        attn_layer_map = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name_inner = kv_cache_tensor.shared_by[idx]
-                if ("attn" in layer_name_inner and "linear_attn" not in layer_name_inner):
-                    layer_idx = int(layer_name_inner.split('.')[2])
-                    if enable_kvcache_offload and layer_idx in reuse_kvcache_layers:
-                        reuse_layers.append(layer_name_inner)
-                    else:
-                        non_reuse_layers.append(layer_name_inner)
+            for layer_name in kv_cache_tensor.shared_by:
+                if "attn" in layer_name and "linear_attn" not in layer_name:
+                    layer_idx = int(layer_name.split('.')[2])
+                    attn_layer_map[layer_idx] = layer_name
+
+        sorted_attn_indices = sorted(attn_layer_map.keys())
+
+        # Step 2: Classify layers into three categories
+        # - independent: own dedicated KV cache, no offloading (e.g., first/last layer)
+        # - buffer_owner: owns a shared buffer, first NUM_SHARED_BUFFERS non-independent layers
+        # - reuse: references a buffer_owner's KV cache in round-robin pattern
+        #
+        # Example with 61 layers, INDEPENDENT={0,60}, NUM_SHARED_BUFFERS=2:
+        #   Layer 0  -> independent (own KV cache)
+        #   Layer 1  -> buffer_owner A (own KV cache)
+        #   Layer 2  -> buffer_owner B (own KV cache)
+        #   Layer 3  -> reuse A (references layer 1)
+        #   Layer 4  -> reuse B (references layer 2)
+        #   Layer 5  -> reuse A (references layer 1)
+        #   ...
+        #   Layer 59 -> reuse A (references layer 1)
+        #   Layer 60 -> independent (own KV cache)
+        if enable_kvcache_offload and len(sorted_attn_indices) > NUM_SHARED_BUFFERS + len(INDEPENDENT_LAYER_INDICES):
+            shared_layer_indices = [i for i in sorted_attn_indices
+                                    if i not in INDEPENDENT_LAYER_INDICES]
+            buffer_owner_indices = shared_layer_indices[:NUM_SHARED_BUFFERS]
+            buffer_owner_set = set(buffer_owner_indices)
+            allocating_indices = INDEPENDENT_LAYER_INDICES | buffer_owner_set
+
+            reuse_mapping = {}
+            for i, layer_idx in enumerate(shared_layer_indices):
+                if layer_idx not in buffer_owner_set:
+                    owner_idx = shared_layer_indices[i % NUM_SHARED_BUFFERS]
+                    reuse_mapping[layer_idx] = owner_idx
+        else:
+            allocating_indices = set(sorted_attn_indices)
+            reuse_mapping = {}
+            enable_kvcache_offload = False
+
+        # Step 3: Process kv_cache_tensors - allocate for independent and buffer_owner layers
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if "linear_attn" in layer_name and layer_name not in kv_cache_raw_tensors.keys(
-                ):
-                    # for mamba linear attention
+
+                if "linear_attn" in layer_name and layer_name not in kv_cache_raw_tensors:
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size,
                                              dtype=torch.int8,
@@ -2768,103 +2799,98 @@ class NPUModelRunner(GPUModelRunner):
                         # shared the kvcache between the self_attn specs in the same group
                         if "linear_attn" in layer_name_inner:
                             kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors.keys(
-                ):
-                    # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
-                    # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
-                    # as it only support the 0-dim of kv_cache is `num_blocks`.
-                    # For deepseek mla, we need to spilt cache tensor accrodding to the nope head dim
-                    # and rope head dim.
-                    if self.model_config.use_mla:
-                        head_size = self.model_config.hf_text_config.qk_rope_head_dim + \
-                            self.model_config.hf_text_config.kv_lora_rank
 
-                    dsa_k_cache_factor = None
-                    dsa_k_cache_size = None
-                    if not self.model_config.use_mla:
-                        # for non-mla model, use FullAttentionSpec
-                        k_tensor_split_factor = 2
-                        v_tensor_split_factor = 2
-                    elif self.use_sparse:
-                        # for deepseek v3.2, DSA use FullAttentionSpec
-                        # FullAttentionSpec allocate 2 * mla page size bytes,
-                        # and we use half of that for k cache in DSA
-                        dsa_k_cache_factor = 2
-                        k_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.kv_lora_rank
-                        v_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.qk_rope_head_dim
-                        dsa_k_cache_size = int(kv_cache_tensor.size //
-                                               dsa_k_cache_factor)
-                    else:
-                        # for other deepseek models, use MLAAttentionSpec
-                        k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
-                        v_tensor_split_factor = head_size / self.model_config.hf_text_config.qk_rope_head_dim
+                elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors:
+                    layer_idx = int(layer_name.split('.')[2])
 
-                    k_tensor_size = int(kv_cache_tensor.size //
-                                        k_tensor_split_factor)
-                    v_tensor_size = int(kv_cache_tensor.size //
-                                        v_tensor_split_factor)
+                    if layer_idx in allocating_indices:
+                        layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+                        current_kv_cache_spec = layer_kv_cache_spec[layer_name]
 
-                    # Step 2: Calculate memory savings from reuse layers
-                    if layer_name in non_reuse_layers:
-                        if enable_kvcache_offload and reuse_layers:
-                            # Calculate the memory size per layer (k + v + dsa_k if needed)
-                            base_memory_per_layer = k_tensor_size + v_tensor_size
-                            if self.use_sparse and dsa_k_cache_size is not None:
-                                base_memory_per_layer += dsa_k_cache_size
+                        dsa_k_tensor_size = None
+                        dsa_k_scale_tensor_size = None
+                        if not self.model_config.use_mla:
+                            k_tensor_split_factor = 2
+                            v_tensor_split_factor = 2
+                        elif self.use_sparse:
+                            sparse_kv_cache_ratio = current_kv_cache_spec.sparse_kv_cache_ratio
+                            k_tensor_split_factor = sparse_kv_cache_ratio[0]
+                            v_tensor_split_factor = sparse_kv_cache_ratio[1]
+                            dsa_k_tensor_split_factor = sparse_kv_cache_ratio[2]
+                            dsa_k_scale_tensor_split_factor = sparse_kv_cache_ratio[3]
+                        else:
+                            k_dim, v_dim = self._get_attention_kv_cache_dims(
+                                layer_name, current_kv_cache_spec)
+                            assert k_dim > 0 and v_dim > 0
+                            kv_head_dim_list = [k_dim, v_dim]
+                            if self.is_kv_consumer and enable_fa_quant(self.vllm_config):
+                                k_tensor_split_factor, v_tensor_split_factor = (
+                                    self.vllm_config.quant_config.get_kv_quant_split_factor(
+                                        layer_name, kv_head_dim_list))
+                            else:
+                                k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(
+                                    kv_head_dim_list)
 
-                            # Total memory saved by reusing instead of allocating
-                            total_saved_memory = base_memory_per_layer * len(reuse_layers)
+                        k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
+                        v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
+                        if self.use_sparse:
+                            dsa_k_tensor_size = int(
+                                kv_cache_tensor.size // dsa_k_tensor_split_factor)
+                        if self.use_sparse_c8_indexer:
+                            dsa_k_scale_tensor_size = int(
+                                kv_cache_tensor.size // dsa_k_scale_tensor_split_factor)
 
-                            # Step 3: Distribute saved memory to non-reuse layers
-                            # Additional memory per non-reuse layer
-                            additional_memory_per_layer = total_saved_memory // len(non_reuse_layers)
-
-                            # Increase k and v tensor sizes proportionally
-                            k_increase = int(
-                                additional_memory_per_layer * (k_tensor_size / (k_tensor_size + v_tensor_size)))
-                            v_increase = additional_memory_per_layer - k_increase
-
-                            # Update tensor sizes with additional memory
-                            # k_tensor_size += k_increase
-                            # v_tensor_size += v_increase
-
-                            # If using sparse attention, also increase dsa_k cache size proportionally
-                            if self.use_sparse and dsa_k_cache_size is not None:
-                                dsa_k_increase = int(
-                                    total_saved_memory * (dsa_k_cache_size / base_memory_per_layer) // len(
-                                        non_reuse_layers))
-                                # dsa_k_cache_size += dsa_k_increase
-
-                        # Recreate tensors with updated sizes
                         if self.vllm_config.kv_transfer_config is None:
                             k_tensor = torch.zeros(k_tensor_size, dtype=torch.int8, device=self.device)
                             v_tensor = torch.zeros(v_tensor_size, dtype=torch.int8, device=self.device)
-                            if self.use_sparse and dsa_k_cache_factor is not None:
-                                dsa_k_cache_tensor = torch.zeros(dsa_k_cache_size, dtype=torch.int8, device=self.device)
+                            if dsa_k_tensor_size is not None:
+                                dsa_k_tensor = torch.zeros(
+                                    dsa_k_tensor_size, dtype=torch.int8, device=self.device)
+                            if dsa_k_scale_tensor_size is not None:
+                                dsa_k_scale_tensor = torch.zeros(
+                                    dsa_k_scale_tensor_size, dtype=torch.int8, device=self.device)
                         else:
                             k_tensor = torch.zeros(k_tensor_size + alignment, dtype=torch.int8, device=self.device)
                             v_tensor = torch.zeros(v_tensor_size + alignment, dtype=torch.int8, device=self.device)
                             k_tensor = self._align_memory(k_tensor, alignment)[:k_tensor_size]
                             v_tensor = self._align_memory(v_tensor, alignment)[:v_tensor_size]
-                            if self.use_sparse and dsa_k_cache_factor is not None and dsa_k_cache_size is not None:
-                                dsa_k_cache_tensor = torch.zeros(dsa_k_cache_size + alignment, dtype=torch.int8,
-                                                                 device=self.device)
-                                dsa_k_cache_tensor = self._align_memory(dsa_k_cache_tensor, alignment)[
-                                    :dsa_k_cache_size]
-                        # Step 5: Allocate memory only for non-reuse layers with increased sizes
-                        print(f"================> set layer_name {layer_name}")
-                        kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor) if \
-                            not self.use_sparse else (k_tensor, v_tensor, dsa_k_cache_tensor)
+                            if dsa_k_tensor_size is not None:
+                                dsa_k_tensor = torch.zeros(
+                                    dsa_k_tensor_size + alignment, dtype=torch.int8, device=self.device)
+                                dsa_k_tensor = self._align_memory(
+                                    dsa_k_tensor, alignment)[:dsa_k_tensor_size]
+                            if dsa_k_scale_tensor_size is not None:
+                                dsa_k_scale_tensor = torch.zeros(
+                                    dsa_k_scale_tensor_size + alignment, dtype=torch.int8, device=self.device)
+                                dsa_k_scale_tensor = self._align_memory(
+                                    dsa_k_scale_tensor, alignment)[:dsa_k_scale_tensor_size]
 
-                    # Step 6: Set references for reuse layers without allocating new memory
-                    if layer_name in reuse_layers:
-                        # print(f"================> set layer_name_inner {layer_name_inner}")
-                        layer_idx = int(layer_name.split('.')[2])
-                        src_layer_name = 'model.layers.' + str(layer_idx - REUSE) + '.self_attn.attn'
-                        print(
-                            f"==============> {layer_name} reuse the KV Cache of {src_layer_name}, saving {(k_tensor_size + v_tensor_size):,} bytes")
-                        kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[src_layer_name]
-                        # TODO 需要判断什么时候加载
+                        if self.use_sparse:
+                            if self.use_sparse_c8_indexer:
+                                kv_cache_raw_tensors[layer_name] = (
+                                    k_tensor, v_tensor, dsa_k_tensor, dsa_k_scale_tensor)
+                            else:
+                                kv_cache_raw_tensors[layer_name] = (
+                                    k_tensor, v_tensor, dsa_k_tensor)
+                        else:
+                            kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+
+                        layer_type = ("independent" if layer_idx in INDEPENDENT_LAYER_INDICES
+                                      else "buffer_owner")
+                        print(f"================> allocated KV cache for layer {layer_name}"
+                              f" (idx={layer_idx}, type={layer_type})")
+
+        # Step 4: Set references for reuse layers (must be after all allocations)
+        if enable_kvcache_offload and reuse_mapping:
+            for layer_idx, owner_idx in sorted(reuse_mapping.items()):
+                layer_name = attn_layer_map[layer_idx]
+                owner_name = attn_layer_map[owner_idx]
+                if owner_name in kv_cache_raw_tensors:
+                    kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[owner_name]
+                    print(f"==============> {layer_name} reuses KV cache of {owner_name}")
+                else:
+                    raise ValueError(
+                        f"Buffer owner {owner_name} not found for reuse layer {layer_name}")
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
