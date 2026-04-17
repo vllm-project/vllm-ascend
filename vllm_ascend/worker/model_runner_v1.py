@@ -91,7 +91,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 
