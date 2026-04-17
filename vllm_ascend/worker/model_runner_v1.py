@@ -1976,11 +1976,11 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
             invalid_req_indices_set = set(invalid_req_indices)
 
-            # Cache the sampled tokens on the NPU and avoid CPU sync.
-            # These will be copied into input_ids in the next step
-            # when preparing inputs.
-            # With spec decoding, this is done in propose_draft_token_ids().
-            if self.input_batch.prev_sampled_token_ids is None:
+            if self.num_spec_tokens <= 0:
+                assert sampled_token_ids.shape[-1] == 1
+                # Cache the sampled tokens on the NPU and avoid CPU sync.
+                # These will be copied into input_ids in the next step
+                # when preparing inputs.
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
 
             self.input_batch.prev_req_id_to_index = {
