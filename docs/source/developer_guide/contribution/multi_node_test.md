@@ -55,14 +55,14 @@ From the workflow perspective, we can see how the final test script is executed,
     deployment:
     -
         envs:
-            # fill with envs like: <key>:<value>
+        # fill with envs like: <key>:<value>
         server_cmd: >
-            vllm serve ...
+        vllm serve ...
     -
         envs:
-            # fill with envs like: <key>:<value>
+        # fill with envs like: <key>:<value>
         server_cmd: >
-            vllm serve ...
+        vllm serve ...
     benchmarks:
     perf:
         # fill with performance test kwargs
@@ -76,34 +76,34 @@ Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml]
 
    ```yaml
     multi-node-tests:
-        name: multi-node
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-        strategy:
+    name: multi-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
         fail-fast: false
         max-parallel: 1
         matrix:
-            test_config:
+        test_config:
             - name: multi-node-deepseek-pd
-                config_file_path: DeepSeek-V3.yaml
-                size: 2
+            config_file_path: DeepSeek-V3.yaml
+            size: 2
             - name: multi-node-qwen3-dp
-                config_file_path: Qwen3-235B-A22B.yaml
-                size: 2
+            config_file_path: Qwen3-235B-A22B.yaml
+            size: 2
             - name: multi-node-qwenw8a8-2node
-                config_file_path: Qwen3-235B-W8A8.yaml
-                size: 2
+            config_file_path: Qwen3-235B-W8A8.yaml
+            size: 2
             - name: multi-node-qwenw8a8-2node-eplb
-                config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-                size: 2
-        uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-        with:
+            config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
         soc_version: a3
         runner: linux-aarch64-a3-0
         image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
         replicas: 1
         size: ${{ matrix.test_config.size }}
         config_file_path: ${{ matrix.test_config.config_file_path }}
-        secrets:
+    secrets:
         KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
    ```
   
@@ -119,7 +119,7 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
 
     See <https://lws.sigs.k8s.io/docs/installation/> Which can be used as a reference
 
-- Step 2. Deploy the following yaml file `lws.yaml` as what you want
+- Step 2. Deploy the following yaml file `lws.yaml` as needed
 
     ```yaml
     apiVersion: leaderworkerset.x-k8s.io/v1
@@ -179,14 +179,14 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                     name: dshm
             volumes:
             - name: dshm
-            emptyDir:
+                emptyDir:
                 medium: Memory
                 sizeLimit: 15Gi
             - name: shared-volume
-            persistentVolumeClaim:
+                persistentVolumeClaim:
                 claimName: nv-action-vllm-benchmarks-v2
             - name: driver-tools
-            hostPath:
+                hostPath:
                 path: /usr/local/Ascend/driver/tools
         workerTemplate:
         spec:
@@ -224,14 +224,14 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                     name: dshm
             volumes:
             - name: dshm
-            emptyDir:
+                emptyDir:
                 medium: Memory
                 sizeLimit: 15Gi
             - name: shared-volume
-            persistentVolumeClaim:
+                persistentVolumeClaim:
                 claimName: nv-action-vllm-benchmarks-v2
             - name: driver-tools
-            hostPath:
+                hostPath:
                 path: /usr/local/Ascend/driver/tools
     ---
     apiVersion: v1

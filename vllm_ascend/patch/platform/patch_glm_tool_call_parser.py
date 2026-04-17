@@ -68,26 +68,38 @@ def _create_remaining_args_delta(
     fallback_tool_call_type: str | None = None,
     fallback_tool_call_name: str | None = None,
 ) -> DeltaMessage:
-    original_tc = next(
-        (tc for tc in delta_message.tool_calls if tc.index == index),
-        None,
+    """
+    Create a delta message for remaining tool arguments.
+
+    Per OpenAI streaming semantics, id/type/function.name must only appear
+    in the *first* chunk for a given tool call index.  Callers must pass
+    non-None fallback_* values only when this is genuinely the first chunk
+    (i.e. nothing has been streamed yet for this tool call).  When all
+    fallback_* are None the header fields are omitted entirely, which is the
+    correct behaviour for continuing/finishing chunks.
+    """
+    include_header = any(
+        v is not None for v in (fallback_tool_call_id, fallback_tool_call_type, fallback_tool_call_name)
     )
-    original_fn = original_tc.function if original_tc else None
-
-    original_fn_name = None
-    if isinstance(original_fn, DeltaFunctionCall):
-        original_fn_name = original_fn.name
-    elif isinstance(original_fn, dict):
-        original_fn_name = original_fn.get("name")
-
+    if not include_header:
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=index,
+                    function=DeltaFunctionCall(
+                        arguments=remaining_call,
+                    ),
+                )
+            ]
+        )
     return DeltaMessage(
         tool_calls=[
             DeltaToolCall(
                 index=index,
-                id=(original_tc.id if original_tc and original_tc.id is not None else fallback_tool_call_id),
-                type=(original_tc.type if original_tc and original_tc.type is not None else fallback_tool_call_type),
+                id=fallback_tool_call_id,
+                type=fallback_tool_call_type,
                 function=DeltaFunctionCall(
-                    name=(original_fn_name if original_fn_name is not None else fallback_tool_call_name),
+                    name=fallback_tool_call_name,
                     arguments=remaining_call,
                 ),
             )
@@ -643,34 +655,45 @@ async def _patched_chat_completion_stream_generator(
                         index = 0
 
                     if self._should_check_for_unstreamed_tool_arg_tokens(delta_message, output) and tool_parser:
+                        already_streamed = index in streamed_tool_args[i]
+                        already_streamed_args = streamed_tool_args[i].get(index, "")
                         remaining_call = self._compute_remaining_tool_args(
                             expected_args=tool_parser.prev_tool_call_arr[index].get("arguments", {}),
-                            streamed_args=streamed_tool_args[i].get(index, ""),
+                            streamed_args=already_streamed_args,
                         )
 
-                        fallback_tool_call = (
-                            tool_parser.prev_tool_call_arr[index] if index < len(tool_parser.prev_tool_call_arr) else {}
-                        )
+                        # Per OpenAI streaming semantics, id/type/name must only
+                        # appear in the *first* chunk for a tool call index.
+                        # Use `already_streamed` (key existence) rather than
+                        # `already_streamed_args` (string truthiness) so that a
+                        # first chunk with an empty arguments string does not
+                        # cause the header to be re-emitted in a later chunk.
                         fallback_tool_call_id = None
                         fallback_tool_call_type = None
                         fallback_tool_call_name = None
-                        if isinstance(fallback_tool_call, dict):
-                            fallback_tool_call_id = fallback_tool_call.get("id")
-                            fallback_tool_call_type = fallback_tool_call.get("type")
-                            fallback_tool_call_name = fallback_tool_call.get("name")
+                        if not already_streamed:
+                            fallback_tool_call = (
+                                tool_parser.prev_tool_call_arr[index]
+                                if index < len(tool_parser.prev_tool_call_arr)
+                                else {}
+                            )
+                            if isinstance(fallback_tool_call, dict):
+                                fallback_tool_call_id = fallback_tool_call.get("id")
+                                fallback_tool_call_type = fallback_tool_call.get("type")
+                                fallback_tool_call_name = fallback_tool_call.get("name")
 
-                        tool_call_ids = getattr(tool_parser, "_tool_call_ids", None)
-                        if (
-                            fallback_tool_call_id is None
-                            and isinstance(tool_call_ids, list)
-                            and index < len(tool_call_ids)
-                        ):
-                            fallback_tool_call_id = tool_call_ids[index]
+                            tool_call_ids = getattr(tool_parser, "_tool_call_ids", None)
+                            if (
+                                fallback_tool_call_id is None
+                                and isinstance(tool_call_ids, list)
+                                and index < len(tool_call_ids)
+                            ):
+                                fallback_tool_call_id = tool_call_ids[index]
 
-                        if fallback_tool_call_type is None and (
-                            fallback_tool_call_id is not None or fallback_tool_call_name is not None
-                        ):
-                            fallback_tool_call_type = "function"
+                            if fallback_tool_call_type is None and (
+                                fallback_tool_call_id is not None or fallback_tool_call_name is not None
+                            ):
+                                fallback_tool_call_type = "function"
 
                         delta_message = self._create_remaining_args_delta(
                             delta_message,

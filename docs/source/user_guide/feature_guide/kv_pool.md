@@ -97,7 +97,7 @@ export PYTHONHASHSEED=0
 | :--- | :--- | :--- | :--- |
 | 800 I/T A3 series | HDK >= 26.0.0<br>CANN >= 9.0.0 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
 | 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
-| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission cheme on 800 I/T A2 series|
+| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
 ### FAQ for HIXL (ascend_direct) backend
 
@@ -163,7 +163,7 @@ export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
 
-#Minimum retransmission timeout of the RDMA，equals 4.096 μs * 2 ^ timeout.
+#Minimum retransmission timeout of the RDMA, equals 4.096 μs * 2 ^ timeout.
 #Needs to satisfy the equation: ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
 #HCCL_RDMA_TIMEOUT also affects collective communication behavior and should be configured carefully.
 export HCCL_RDMA_TIMEOUT=17
