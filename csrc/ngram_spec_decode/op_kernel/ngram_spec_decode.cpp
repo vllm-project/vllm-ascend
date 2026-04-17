@@ -12,7 +12,7 @@
 #include "ngram_spec_decode_tiling.h"
 
 constexpr int32_t ELEM_SIZE = sizeof(int32_t);  // 4 bytes
-// Safty UB buffer size：32768(128KB)
+// Safety UB buffer size：32768(128KB)
 constexpr uint32_t SAFE_CHUNK = 32768u;
 
 class KernelNgramSpecDecode {

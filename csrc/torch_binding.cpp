@@ -1078,7 +1078,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
 
-    // N-gram 投机解码
+    // N-gram spec decode
     ops.def(
         "npu_ngram_spec_decode(Tensor(a!) token_ids, Tensor num_tokens_no_spec, "
         "Tensor sampled_token_ids, Tensor discard_request_mask, "
