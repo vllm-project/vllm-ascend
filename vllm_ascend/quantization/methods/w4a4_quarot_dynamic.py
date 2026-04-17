@@ -81,7 +81,6 @@ _FFN_HADAMARD_LAYOUT = "pow2_last_dim"
 _LEAN_ATTENTION_CONTRACT = "lean_h_only"
 _QUAROT_DEBUG_VALUE_PATH_ENV = "VLLM_ASCEND_QUAROT_DEBUG_VALUE_PATH"
 _QUAROT_DEBUG_ATTN_COMPARE_ENV = "VLLM_ASCEND_QUAROT_DEBUG_ATTN_COMPARE"
-_QUAROT_TRACE_QKV_REF_ENV = "VLLM_ASCEND_QUAROT_TRACE_QKV_REF"
 _HADAMARD_BASE_12 = torch.tensor(
     [
         [1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
@@ -118,10 +117,6 @@ def _quarot_debug_value_path_enabled() -> bool:
 
 def _quarot_debug_attn_compare_enabled() -> bool:
     return os.getenv(_QUAROT_DEBUG_ATTN_COMPARE_ENV) == "1"
-
-
-def _quarot_trace_qkv_ref_enabled() -> bool:
-    return os.getenv(_QUAROT_TRACE_QKV_REF_ENV) == "1"
 
 
 def _tensor_debug_summary(tensor: torch.Tensor) -> dict[str, object]:
@@ -254,37 +249,6 @@ def _maybe_log_attention_inputs(
         _tensor_debug_summary(value),
     )
 
-
-def _maybe_log_qkv_reference_trace(
-    layer: torch.nn.Module,
-    *,
-    use_reference: bool,
-    x: torch.Tensor,
-    output: torch.Tensor,
-) -> None:
-    if not _quarot_trace_qkv_ref_enabled():
-        return
-    prefix = _layer_prefix(layer)
-    if prefix != "model.layers.0.self_attn.qkv_proj":
-        return
-    logger.info(
-        "[quarot-qkv-ref] layer=%s use_reference=%s input=%s output=%s",
-        prefix,
-        use_reference,
-        _tensor_debug_summary(x),
-        _tensor_debug_summary(output),
-    )
-    if not use_reference:
-        return
-    ref_output = _apply_reference_qkv_linear(layer, x, output_dtype=output.dtype)
-    diff = (output.to(torch.float32) - ref_output.to(torch.float32)).abs()
-    logger.info(
-        "[quarot-qkv-ref-compare] layer=%s max_abs=%.9f mean_abs=%.9f ref=%s",
-        prefix,
-        float(diff.max().item()),
-        float(diff.mean().item()),
-        _tensor_debug_summary(ref_output),
-    )
 
 
 def _is_quarot_enabled(layer: torch.nn.Module) -> bool:
@@ -610,26 +574,9 @@ def _lean_attention_requires_runtime_value_rotation(layer: torch.nn.Module) -> b
     return False
 
 
-def _use_reference_linear_path(layer: torch.nn.Module) -> bool:
-    prefix = _layer_prefix(layer).lower()
-    return "qkv_proj" in prefix or "self_attn.o_proj" in prefix or "self_attn.out_proj" in prefix
-
-
-def _use_perchannel_native_override_reference_path(layer: torch.nn.Module, group_size: int) -> bool:
-    if group_size > 0:
-        return False
-    return _use_reference_linear_path(layer)
-
-
-def _grouped_native_override_reference_path(layer: torch.nn.Module) -> bool:
-    prefix = _layer_prefix(layer).lower()
-    return "qkv_proj" in prefix or "self_attn.o_proj" in prefix or "self_attn.out_proj" in prefix
-
 
 def _use_grouped_native_linear_path(layer: torch.nn.Module, group_size: int) -> bool:
     if group_size <= 0:
-        return False
-    if _use_reference_linear_path(layer) and not _grouped_native_override_reference_path(layer):
         return False
     scale = getattr(layer, "weight_scale", None)
     if not isinstance(scale, torch.Tensor) or scale.ndim < 2 or scale.shape[-1] <= 1:
@@ -639,53 +586,6 @@ def _use_grouped_native_linear_path(layer: torch.nn.Module, group_size: int) -> 
         if torch.count_nonzero(offset).item() != 0:
             return False
     return True
-
-
-def _use_grouped_reference_linear_path(layer: torch.nn.Module, group_size: int) -> bool:
-    return group_size > 0 and not _use_grouped_native_linear_path(layer, group_size)
-
-
-def _apply_reference_qkv_linear(
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    *,
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    ref_weight = getattr(layer, "quarot_ref_weight_int8", None)
-    if not isinstance(ref_weight, torch.Tensor):
-        raise RuntimeError(f"QuaRot qkv reference path missing raw weight for layer={_layer_prefix(layer)}")
-    ref_weight = ref_weight.to(device=x.device, dtype=torch.float32)
-    scale = layer.weight_scale.data.to(device=x.device, dtype=torch.float32)
-    offset = layer.weight_offset.data.to(device=x.device, dtype=torch.float32)
-    if scale.ndim == 1:
-        scale = scale.view(-1, 1)
-    if offset.ndim == 1:
-        offset = offset.view(-1, 1)
-    if scale.shape[-1] == 1:
-        dequant_weight = (ref_weight - offset.view(-1, 1)) * scale.view(-1, 1)
-    else:
-        out_features, input_size = ref_weight.shape
-        num_groups = scale.shape[-1]
-        group_size = (input_size + num_groups - 1) // num_groups
-        dequant_weight = torch.empty_like(ref_weight, dtype=torch.float32)
-        for group_idx in range(num_groups):
-            start = group_idx * group_size
-            end = min(input_size, start + group_size)
-            dequant_weight[:, start:end] = (
-                ref_weight[:, start:end] - offset[:, group_idx].unsqueeze(-1)
-            ) * scale[:, group_idx].unsqueeze(-1)
-    return torch.matmul(x.to(torch.float32), dequant_weight.transpose(0, 1)).to(output_dtype)
-
-
-def _apply_reference_groupwise_linear(
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    *,
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    x_q, x_scale = _quantize_int4_symmetric(x)
-    x_qdq = _dequantize_int4_symmetric(x_q, x_scale, torch.float32)
-    return _apply_reference_qkv_linear(layer, x_qdq, output_dtype=output_dtype)
 
 
 def _apply_grouped_native_weight_quant_batchmatmul(
@@ -1481,15 +1381,14 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
         _validate_fused_quarot_contract(layer)
         prefix = _layer_prefix(layer)
         original_dtype = x.dtype
-        use_reference_linear = _use_reference_linear_path(layer)
-        use_perchannel_native_linear = _use_perchannel_native_override_reference_path(layer, self.group_size)
         use_grouped_native_linear = _use_grouped_native_linear_path(layer, self.group_size)
-        use_grouped_reference_linear = _use_grouped_reference_linear_path(layer, self.group_size)
-        use_fused_down_proj_dynamic_quant = (
-            not use_grouped_native_linear
-            and not use_grouped_reference_linear
-            and not use_reference_linear
-            and _use_perchannel_fused_down_proj_dynamic_quant(layer, self.group_size, x.shape[-1])
+        if self.group_size > 0 and not use_grouped_native_linear:
+            raise NotImplementedError(
+                f"QuaRot group-wise weights require native grouped quantized matmul, "
+                f"but layer {_layer_prefix(layer)} is not in a supported grouped layout."
+            )
+        use_fused_down_proj_dynamic_quant = _use_perchannel_fused_down_proj_dynamic_quant(
+            layer, self.group_size, x.shape[-1]
         )
 
         if not use_fused_down_proj_dynamic_quant:
@@ -1504,10 +1403,6 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
                 group_size=self.group_size,
                 output_dtype=original_dtype,
             )
-        elif use_grouped_reference_linear:
-            output = _apply_reference_groupwise_linear(layer, x, output_dtype=original_dtype)
-        elif use_reference_linear and not use_perchannel_native_linear:
-            output = _apply_reference_qkv_linear(layer, x, output_dtype=original_dtype)
         elif self.float_weight:
             if use_fused_down_proj_dynamic_quant:
                 x_for_linear = _apply_matrix_free_down_proj_rotation(
@@ -1542,12 +1437,6 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
                 bias=None,
                 output_dtype=original_dtype,
             )
-        _maybe_log_qkv_reference_trace(
-            layer,
-            use_reference=(use_reference_linear or use_grouped_reference_linear),
-            x=x,
-            output=output,
-        )
         if bias is not None:
             output = output + bias.to(original_dtype)
         _maybe_log_value_path(layer, "linear_output", output)
@@ -1564,19 +1453,12 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
         _attach_native_quarot_rotation_tensors(layer)
         layer.weight_scale.data = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.to(torch.float32)
-        prefix = _layer_prefix(layer).lower()
-        use_perchannel_native_linear = _use_perchannel_native_override_reference_path(layer, self.group_size)
         use_grouped_native_linear = _use_grouped_native_linear_path(layer, self.group_size)
-        if (
-            _use_grouped_reference_linear_path(layer, self.group_size)
-            or ("qkv_proj" in prefix and not use_grouped_native_linear and not use_perchannel_native_linear)
-            or (
-                ("self_attn.o_proj" in prefix or "self_attn.out_proj" in prefix)
-                and not use_grouped_native_linear
-                and not use_perchannel_native_linear
+        if self.group_size > 0 and not use_grouped_native_linear:
+            raise NotImplementedError(
+                f"QuaRot group-wise weights require native grouped quantized matmul, "
+                f"but layer {_layer_prefix(layer)} is not in a supported grouped layout."
             )
-        ):
-            _register_or_update_buffer(layer, "quarot_ref_weight_int8", layer.weight.data.to(torch.int8).clone())
         if use_grouped_native_linear:
             logical_weight_kn = layer.weight.data.to(torch.int32).transpose(0, 1).contiguous()
             layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(logical_weight_kn).contiguous()
