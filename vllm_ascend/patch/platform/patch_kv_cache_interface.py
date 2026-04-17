@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 
 import torch
+import vllm.model_executor.layers.attention.mla_attention
 import vllm.v1.kv_cache_interface
 from typing_extensions import Self
 from vllm.utils.torch_utils import get_dtype_size
@@ -140,3 +141,4 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
 
 vllm.v1.kv_cache_interface.MLAAttentionSpec = AscendMLAAttentionSpec
+vllm.model_executor.layers.attention.mla_attention.MLAAttentionSpec = AscendMLAAttentionSpec
