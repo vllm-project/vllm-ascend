@@ -88,10 +88,7 @@ class AisbenchRunner:
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
-<<<<<<< HEAD
-=======
         self.logprobs = aisbench_config.get("logprobs")
->>>>>>> 8ee12fc1... add nightly Qwen3-235B-A22B-piece-wise Qwen3.5-9B
         self.exp_folder = None
         self.result_line = None
         self._init_dataset_conf()
@@ -141,11 +138,8 @@ class AisbenchRunner:
             content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            top_k={self.top_k},", content)
         if self.seed:
             content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            seed={self.seed},", content)
-<<<<<<< HEAD
-=======
         if self.logprobs:
             content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            logprobs={self.logprobs},", content)
->>>>>>> 8ee12fc1... add nightly Qwen3-235B-A22B-piece-wise Qwen3.5-9B
         if self.repetition_penalty:
             content = re.sub(
                 r"ignore_eos.*",
