@@ -223,10 +223,6 @@ jobs:
               test_script="./tests/e2e/models/test_lm_eval_correctness.py"
             fi
             echo "  model_type=${model_type} → ${test_script}"
-            if [[ "$model_type" == "vllm-rm" ]]; then
-              unset HF_DATASETS_OFFLINE
-              unset HF_HUB_OFFLINE
-            fi
             pytest -sv "${test_script}" \
               --config "${config_path}" || {
               echo "Test failed for model: $model"

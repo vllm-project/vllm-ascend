@@ -3,7 +3,7 @@ model_type: "vllm-rm"
 hardware: "Atlas A2 Series"
 
 serve:
-  tensor_parallel_size: 8
+  tensor_parallel_size: 4
   dtype: auto
   max_model_len: 4096
   gpu_memory_utilization: 0.9

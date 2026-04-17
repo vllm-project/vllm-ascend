@@ -1,11 +1,11 @@
 import os
-import re
 from dataclasses import dataclass
 
 import pytest
+import regex as re
 import yaml
 from jinja2 import Environment, FileSystemLoader
-from modelscope.msdatasets import MsDataset
+from modelscope.msdatasets import MsDataset  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import VllmRunner
 
@@ -15,9 +15,7 @@ RTOL = 0.05
 TEST_DIR = os.path.dirname(__file__)
 
 # Default system prompt for Qwen2.5-Math-RM style models.
-_DEFAULT_SYSTEM_PROMPT = (
-    "Please reason step by step, and put your final answer within \\boxed{}."
-)
+_DEFAULT_SYSTEM_PROMPT = "Please reason step by step, and put your final answer within \\boxed{}."
 
 
 @dataclass
@@ -145,9 +143,7 @@ def test_rm_eval_param(config_filename, tp_size, report_dir, env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
     if eval_config.get("model_type", "vllm") != "vllm-rm":
-        pytest.skip(
-            f"Skipping non-RM config (model_type={eval_config.get('model_type', 'vllm')})"
-        )
+        pytest.skip(f"Skipping non-RM config (model_type={eval_config.get('model_type', 'vllm')})")
 
     model_name: str = eval_config["model_name"]
     limit: int | None = eval_config.get("limit", None)
@@ -156,19 +152,19 @@ def test_rm_eval_param(config_filename, tp_size, report_dir, env_config):
     serve_cfg: dict = eval_config.get("serve", {})
 
     # CLI --tp-size takes precedence over the YAML tensor_parallel_size.
-    effective_tp = int(tp_size) if (tp_size and tp_size != "1") else int(
-        serve_cfg.get("tensor_parallel_size", 1)
-    )
+    effective_tp = int(tp_size) if (tp_size and tp_size != "1") else int(serve_cfg.get("tensor_parallel_size", 1))
 
     runner_kwargs: dict = {
-        k: v for k, v in {
+        k: v
+        for k, v in {
             "runner": "pooling",
             "dtype": serve_cfg.get("dtype", "auto"),
             "tensor_parallel_size": effective_tp,
             "enforce_eager": serve_cfg.get("enforce_eager", False),
             "max_model_len": serve_cfg.get("max_model_len"),
             "gpu_memory_utilization": serve_cfg.get("gpu_memory_utilization"),
-        }.items() if v is not None
+        }.items()
+        if v is not None
     }
 
     print(f"\nLoading reward model: {model_name}")
@@ -195,10 +191,7 @@ def test_rm_eval_param(config_filename, tp_size, report_dir, env_config):
             rejected_col: str = task.get("rejected_column", "rejected")
 
             split_expr = f"{split}[:{limit}]" if limit is not None else split
-            print(
-                f"\nLoading dataset via ModelScope: {dataset_name} / "
-                f"{dataset_config_name} ({split_expr})"
-            )
+            print(f"\nLoading dataset via ModelScope: {dataset_name} / {dataset_config_name} ({split_expr})")
 
             # MsDataset may bypass the HF_HUB_OFFLINE lock; patch temporarily.
             ds = MsDataset.load(
@@ -212,28 +205,15 @@ def test_rm_eval_param(config_filename, tp_size, report_dir, env_config):
             total_count = 0
 
             for batch_start in range(0, len(ds), batch_size):
-                batch = ds.select(
-                    range(batch_start, min(batch_start + batch_size, len(ds)))
-                )
+                batch = ds.select(range(batch_start, min(batch_start + batch_size, len(ds))))
 
                 if task_type == "pairwise":
-                    positive_texts = [
-                        format_rm_input(system_prompt, s[prompt_col], s[chosen_col])
-                        for s in batch
-                    ]
-                    negative_texts = [
-                        format_rm_input(system_prompt, s[prompt_col], s[rejected_col])
-                        for s in batch
-                    ]
+                    positive_texts = [format_rm_input(system_prompt, s[prompt_col], s[chosen_col]) for s in batch]
+                    negative_texts = [format_rm_input(system_prompt, s[prompt_col], s[rejected_col]) for s in batch]
                 else:
-                    positive_texts = [
-                        format_rm_input(system_prompt, s[problem_col], s[solution_col])
-                        for s in batch
-                    ]
+                    positive_texts = [format_rm_input(system_prompt, s[problem_col], s[solution_col]) for s in batch]
                     negative_texts = [
-                        format_rm_input(system_prompt, s[problem_col],
-                                        perturb_answer(s[solution_col]))
-                        for s in batch
+                        format_rm_input(system_prompt, s[problem_col], perturb_answer(s[solution_col])) for s in batch
                     ]
 
                 pos_rewards = vllm_model.reward(positive_texts)
@@ -247,9 +227,7 @@ def test_rm_eval_param(config_filename, tp_size, report_dir, env_config):
                 if (batch_start // batch_size + 1) % 5 == 0:
                     print(f"  processed {batch_start + len(batch)}/{len(ds)} samples …")
 
-            measured_accuracy = (
-                round(correct_count / total_count, 4) if total_count > 0 else 0.0
-            )
+            measured_accuracy = round(correct_count / total_count, 4) if total_count > 0 else 0.0
             print(f"\n{task_name} accuracy = {measured_accuracy:.4f}")
 
             for metric in task["metrics"]:
@@ -262,10 +240,7 @@ def test_rm_eval_param(config_filename, tp_size, report_dir, env_config):
                 success = success and task_success
 
                 status = "✅" if task_success else "❌"
-                print(
-                    f"{task_name} | accuracy: ground_truth={ground_truth} | "
-                    f"measured={measured_accuracy} | {status}"
-                )
+                print(f"{task_name} | accuracy: ground_truth={ground_truth} | measured={measured_accuracy} | {status}")
 
                 report_data["rows"].append(
                     {
@@ -277,6 +252,4 @@ def test_rm_eval_param(config_filename, tp_size, report_dir, env_config):
                 )
 
     generate_rm_report(eval_config, report_data, report_dir, env_config)
-    assert success, (
-        "One or more RM tasks did not meet the accuracy threshold. See output above."
-    )
+    assert success, "One or more RM tasks did not meet the accuracy threshold. See output above."
