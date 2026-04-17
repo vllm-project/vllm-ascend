@@ -301,7 +301,7 @@ class AscendSFACPImpl(AscendSFAImpl):
     def _align_to_graph_bucket_tokens(self, attn_output: torch.Tensor | None, attn_metadata: M) -> torch.Tensor | None:
         if attn_output is None or self.pcp_size == 1:
             return attn_output
-        # In graph/piecewise mode, output buffer uses graph bucket token size
+        # In graph mode, output buffer uses graph bucket token size
         # (forward_context.num_tokens), while PCP path may compute only valid
         # tokens. Align to the larger one to avoid later write-back mismatch.
         forward_context = get_forward_context()
@@ -355,8 +355,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         return req_kv_cache, block_num
 
     def gather_kv_cross_cp_compact(self, kv_cache: torch.Tensor, valid_block_ids: torch.Tensor) -> torch.Tensor:
-        # Prefill path uses compact KV: valid_block_ids is already the remap
-        # source for block_table_cp, so attention/indexer must use it together.
+        # prefill path uses compact KV: valid_block_ids
         kv_cache = torch.index_select(kv_cache, 0, valid_block_ids)
         if self.dcp_size > 1:
             kv_cache = get_dcp_group().all_gather(kv_cache, 0)
@@ -414,8 +413,6 @@ class AscendSFACPImpl(AscendSFAImpl):
         num_prefills = attn_metadata.num_prefills
         decode_topk_indices = None
         if num_decode_tokens > 0:
-            # Keep decode indexer aligned with decode attention: both read the
-            # same request-scoped KV buffer and remapped decode block table.
             decode_block_table_src = attn_metadata.block_table[:num_decodes]
             decode_key, decode_block_num = self.gather_kv_cross_cp(key, decode_block_table_src)
             decode_block_table = self.gather_block_table(
@@ -436,7 +433,6 @@ class AscendSFACPImpl(AscendSFAImpl):
         prefill_valid_block_ids = sfa_cp_metadata.valid_block_ids
         prefill_block_table = sfa_cp_metadata.block_table_cp
         assert prefill_valid_block_ids is not None and prefill_block_table is not None
-        # Prefill indexer uses the same compact KV view as prefill attention.
         prefill_key = self.gather_kv_cross_cp_compact(key, prefill_valid_block_ids)
         prefill_q = q[num_decode_tokens:]
         prefill_weights = weights[num_decode_tokens:]
