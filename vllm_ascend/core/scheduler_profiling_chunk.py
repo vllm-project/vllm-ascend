@@ -653,6 +653,7 @@ class ProfilingChunkScheduler(Scheduler):
                     )
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
                     for i in encoder_inputs_to_schedule:

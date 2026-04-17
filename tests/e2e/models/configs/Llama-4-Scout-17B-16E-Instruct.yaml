@@ -1,0 +1,10 @@
+model: meta-llama/Llama-4-Scout-17B-16E-Instruct
+tensor_parallel_size: 4
+dtype: bfloat16
+max_model_len: 2048
+trust_remote_code: true
+
+eval_config:
+  datasets:
+    - gsm8k
+  limit: 100
