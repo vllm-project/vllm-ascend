@@ -182,9 +182,8 @@ class KVPoolWorker:
                 self.reuse_mapping[layer_idx] = owner_idx
 
         self.layer_next_map = {}
-        for i in range(len(shared_layer_indices) - 1):
-            self.layer_next_map[shared_layer_indices[i]] = shared_layer_indices[i + 1]
-
+        for i in range(len(shared_layer_indices) - NUM_SHARED_BUFFERS):
+            self.layer_next_map[shared_layer_indices[i]] = shared_layer_indices[i + NUM_SHARED_BUFFERS]
         self.offload_start_ids = buffer_owner_indices
         self.layers_need_to_save = [i for i in range(self.num_layers) if i not in self.independent_layers]
         self.sync_save_events = None
