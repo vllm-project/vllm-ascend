@@ -19,6 +19,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.key_lru_cache import (
+    KeyLRUCache,
+)
 
 
 class KVPoolScheduler:
@@ -63,6 +66,12 @@ class KVPoolScheduler:
             self.store_scheduler.init(device_id=0, init_bm=False)
         else:
             self.store_scheduler = None
+        if self.store_scheduler is not None:
+            lru_capacity = 1000000
+            self.key_lru_cache = KeyLRUCache(lru_capacity, self.store_scheduler)
+            logger.info("KV pool LRU cache enabled with capacity %d", lru_capacity)
+        else:
+            self.key_lru_cache = None
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
@@ -84,7 +93,9 @@ class KVPoolScheduler:
         block_keys_by_layer, last_block_keys_by_layer = self.generate_keys(block_hashes, req_id=req_id)
         all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
         all_keys.extend([key for layer_keys in last_block_keys_by_layer for key in layer_keys])
-        if self.store_scheduler is not None:
+        if self.key_lru_cache is not None:
+            gvas = self.key_lru_cache.batch_get_and_alloc(all_keys, self.page_size_bytes)
+        elif self.store_scheduler is not None:
             gvas = self.store_scheduler.batch_alloc(all_keys,
                                                     [self.page_size_bytes for _ in range(len(all_keys))])
         else:
@@ -466,9 +477,6 @@ class KVPoolScheduler:
         if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
         delay_free_blocks = len(block_ids) > 0
-        # TODO 删除是否是异步的？
-        res = self.store_scheduler.remove_batch(list(tracker.key_gva_mapping.keys()))
-        logger.info(f">>>>>>>>>>>>>>>>>>>> res {res} remove {len(list(tracker.key_gva_mapping.keys()))} keys of request {request.request_id}")
         if delay_free_blocks:
             logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
