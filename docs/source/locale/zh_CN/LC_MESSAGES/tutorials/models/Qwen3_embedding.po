@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-04-17 02:05+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -37,9 +37,9 @@ msgid ""
 "model with vLLM Ascend. Note that only 0.9.2rc1 and higher versions of "
 "vLLM Ascend support the model."
 msgstr ""
-"Qwen3 Embedding 模型系列是通义千问家族最新的专有模型，专门设计用于文本嵌入和排序任务。"
-"该系列基于 Qwen3 系列的密集基础模型，提供全面的文本嵌入和重排序模型，涵盖多种规模（0.6B、4B 和 8B）。"
-"本指南介绍如何使用 vLLM Ascend 运行该模型。请注意，只有 vLLM Ascend 0.9.2rc1 及更高版本支持该模型。"
+"Qwen3 Embedding 模型系列是通义千问家族最新的专有模型，专门设计用于文本嵌入和排序任务。该系列基于 Qwen3 "
+"系列的密集基础模型，提供全面的文本嵌入和重排序模型，涵盖多种规模（0.6B、4B 和 8B）。本指南介绍如何使用 vLLM Ascend "
+"运行该模型。请注意，只有 vLLM Ascend 0.9.2rc1 及更高版本支持该模型。"
 
 #: ../../source/tutorials/models/Qwen3_embedding.md:7
 msgid "Supported Features"
@@ -50,8 +50,7 @@ msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the"
 " model's supported feature matrix."
-msgstr ""
-"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+msgstr "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
 #: ../../source/tutorials/models/Qwen3_embedding.md:11
 msgid "Environment Preparation"
@@ -65,19 +64,22 @@ msgstr "模型权重"
 msgid ""
 "`Qwen3-Embedding-8B` [Download model "
 "weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)"
-msgstr "`Qwen3-Embedding-8B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)"
+msgstr ""
+"`Qwen3-Embedding-8B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)"
 
 #: ../../source/tutorials/models/Qwen3_embedding.md:16
 msgid ""
 "`Qwen3-Embedding-4B` [Download model "
 "weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)"
-msgstr "`Qwen3-Embedding-4B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)"
+msgstr ""
+"`Qwen3-Embedding-4B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)"
 
 #: ../../source/tutorials/models/Qwen3_embedding.md:17
 msgid ""
 "`Qwen3-Embedding-0.6B` [Download model "
 "weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)"
-msgstr "`Qwen3-Embedding-0.6B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)"
+msgstr ""
+"`Qwen3-Embedding-0.6B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)"
 
 #: ../../source/tutorials/models/Qwen3_embedding.md:19
 msgid ""
@@ -99,8 +101,7 @@ msgstr "您可以使用官方 Docker 镜像运行 `Qwen3-Embedding` 系列模型
 msgid ""
 "Start the docker image on your node, refer to [using "
 "docker](../../installation.md#set-up-using-docker)."
-msgstr ""
-"在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+msgstr "在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
 
 #: ../../source/tutorials/models/Qwen3_embedding.md:27
 msgid ""
@@ -146,10 +147,10 @@ msgstr "性能"
 
 #: ../../source/tutorials/models/Qwen3_embedding.md:98
 msgid ""
-"Run performance of `Qwen3-Reranker-8B` as an example. Refer to [vllm "
+"Run performance of `Qwen3-Embedding-8B` as an example. Refer to [vllm "
 "benchmark](https://docs.vllm.ai/en/latest/contributing/) for more "
 "details."
-msgstr "以 `Qwen3-Reranker-8B` 为例运行性能测试。更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/contributing/)。"
+msgstr "以 `Qwen3-Embedding-8B` 为例运行性能测试。更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/contributing/)。"
 
 #: ../../source/tutorials/models/Qwen3_embedding.md:101
 msgid "Take the `serve` as an example. Run the code as follows."
