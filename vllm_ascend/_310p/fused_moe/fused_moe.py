@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
@@ -159,8 +160,13 @@ class AscendFusedMoE310(FusedMoE):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
         self.quant_type = self.get_quant_type()
-
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
+        # --- Compatibility Fix: Safely retrieve gate and shared_experts weights ---
+        # Older versions use _gate/_shared_experts, newer versions might use gate/shared_experts.
+        current_gate = getattr(self, "gate", getattr(self, "_gate", kwargs.get("gate")))
+        current_shared_experts = getattr(
+            self, "shared_experts", getattr(self, "_shared_experts", kwargs.get("shared_experts"))
+        )
 
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
@@ -170,8 +176,8 @@ class AscendFusedMoE310(FusedMoE):
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self.gate if is_legacy else kwargs.pop("gate", None),
-            self.shared_experts if is_legacy else kwargs.pop("shared_experts", None),
+            current_gate,
+            current_shared_experts,
             self.quant_method,
             self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
@@ -302,6 +308,35 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
     def is_internal_router(self) -> bool:
         # 310P Ascend path expects router logits from the model forward path.
         return False
+
+        # --- Compatibility Fix: Weight Attribute Access ---
+        # Ensure we set both the internal _gate and the expected gate attribute
+        # to satisfy different vLLM core versions.
+        _gate_val = getattr(self, "gate", getattr(self, "_gate", None))
+        self.gate: Any = _gate_val
+        if not hasattr(self, "gate") or self.gate is None:
+            self.gate = _gate_val
+
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+
+        is_legacy = vllm_version_is("0.19.0")
+
+        # --- Compatibility Fix: Using getattr for safety ---
+        # We use getattr to dynamically fetch the gate weights, ensuring
+        # the runner gets the correct module regardless of the attribute name.
+        current_gate = getattr(self, "gate", getattr(self, "_gate", None))
+
+        self.runner = AscendMoERunner(
+            self if is_legacy else self.layer_name,
+            self.moe_config,
+            self.router,
+            self._routed_input_transform,
+            current_gate,
+            self._shared_experts,
+            self.quant_method,
+            self.reduce_results,
+            self.vllm_config.parallel_config.enable_dbo,
+        )
 
     def forward(
         self,

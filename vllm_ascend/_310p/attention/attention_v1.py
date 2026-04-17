@@ -221,7 +221,7 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
 
         return output
 
-    def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
+    def forward_impl(self, query, key, value, kv_cache, attn_metadata, output, layer=None):
         """
         Main dispatch method for attention operations.
 

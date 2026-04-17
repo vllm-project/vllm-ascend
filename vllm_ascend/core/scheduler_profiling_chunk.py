@@ -637,8 +637,10 @@ class ProfilingChunkScheduler(Scheduler):
                 time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                # --- vLLM Compatibility Fix ---
                 if vllm_version_is("0.19.0"):
-                    if request.num_cached_tokens < 0:
+                    _cached = getattr(request, "num_cached_tokens", -1)
+                    if _cached < 0:
                         request.num_cached_tokens = num_computed_tokens
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
