@@ -672,7 +672,7 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, (block_ids,))
+        return self.connector_scheduler.request_finished_all_groups(request, (block_ids,))
 
     def request_finished_all_groups(
         self,
