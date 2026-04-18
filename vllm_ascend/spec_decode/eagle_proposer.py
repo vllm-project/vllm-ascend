@@ -1860,20 +1860,20 @@ class AscendEagleProposer(SpecDecodeBaseProposer):
     ) -> list[torch.Tensor]:
         """Tree speculative decoding draft generation on NPU.
 
-        与 GPU 端 eagle.py 的 propose_tree 逻辑一致，但使用 NPU 特有的 API：
-        - set_ascend_forward_context 替代 set_forward_context
-        - 使用 AscendTreeAttentionMetadata 进行 tree attention
+        Logic mirrors GPU-side eagle.py propose_tree, but uses NPU-specific APIs:
+        - set_ascend_forward_context instead of set_forward_context
+        - AscendTreeAttentionMetadata for tree attention
 
         Args:
-            batch_size: batch 大小
-            logits: [num_tokens, vocab_size] 模型输出的 logits
-            positions: [num_tokens] token 位置
-            hidden_states: [num_tokens, hidden_size] 隐藏状态
-            common_attn_metadata: 通用 attention metadata
-            slot_mappings: slot mapping 字典
+            batch_size: batch size
+            logits: [num_tokens, vocab_size] model output logits
+            positions: [num_tokens] token positions
+            hidden_states: [num_tokens, hidden_size] hidden states
+            common_attn_metadata: shared attention metadata
+            slot_mappings: slot mapping dict
 
         Returns:
-            draft_token_ids_list: 每层的 draft token IDs 列表
+            draft_token_ids_list: per-layer draft token IDs
         """
         from dataclasses import replace
 

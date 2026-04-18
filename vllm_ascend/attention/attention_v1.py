@@ -1428,7 +1428,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 try:
     from vllm_ascend.attention.backends.tree_attn import AscendTreeAttentionBackend
 
-    # 直接注册 AscendTreeAttentionBackend，覆盖 GPU 版本
+    # Register AscendTreeAttentionBackend, overriding GPU version
     register_backend(
         AttentionBackendEnum.TREE_ATTN,
         "vllm_ascend.attention.backends.tree_attn.AscendTreeAttentionBackend"

@@ -101,18 +101,18 @@ def get_tree_attn_mask(
     device: torch.device,
     pad_size: int = 2048,
 ) -> torch.Tensor:
-    """将 GPU 格式 tree mask 转换为 NPU 格式。
+    """Convert GPU-format tree mask to NPU format.
 
     Args:
-        tree_len: tree 的长度 (root + draft tokens)
-        gpu_tree_mask: GPU 格式 mask (tree_len x tree_len)，float32
-            语义: 0 = attend, -inf = block
-        device: 目标设备
-        pad_size: NPU kernel 要求的 pad 大小，默认 2048
+        tree_len: tree length (root + draft tokens)
+        gpu_tree_mask: GPU-format mask (tree_len x tree_len), float32
+            Semantics: 0 = attend, -inf = block
+        device: target device
+        pad_size: NPU kernel required pad size, default 2048
 
     Returns:
-        NPU 格式 mask (pad_size x pad_size)，int8
-        语义: 0 = attend, 1 = block
+        NPU-format mask (pad_size x pad_size), int8
+        Semantics: 0 = attend, 1 = block
     """
     npu_mask = torch.ones((pad_size, pad_size), dtype=torch.int8, device=device)
     # GPU mask: 0 = attend, -inf = block

@@ -1,6 +1,20 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Ascend NPU Tree Attention Backend for speculative_token_tree
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+"""Ascend NPU Tree Attention Backend for speculative_token_tree."""
 
 import ast
 from dataclasses import dataclass, field
@@ -26,11 +40,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
-# NPU kernel 要求 mask pad 到 2048x2048
+# NPU kernel requires mask padding to 2048x2048
 PAD_SIZE = 2048
 
 
-# 定义本地的 AscendAttentionState，避免循环导入
+# Local AscendAttentionState to avoid circular imports
 class AscendAttentionState(Enum):
     PrefillNoCache = 0
     PrefillCacheHit = 1
@@ -41,9 +55,9 @@ class AscendAttentionState(Enum):
 
 @dataclass
 class AscendMetadataForTree:
-    """简化的 AscendMetadata，用于 tree attention。
+    """Simplified AscendMetadata for tree attention.
 
-    避免从 attention_v1.py 导入造成循环依赖。
+    Avoids circular dependency with attention_v1.py.
     """
     # Basic Properties
     attn_mask: torch.Tensor | None = None
@@ -68,7 +82,7 @@ class AscendMetadataForTree:
 
 
 class AscendTreeAttentionBackend(AttentionBackend):
-    """NPU 版 Tree Attention Backend for Ascend NPU."""
+    """Tree Attention Backend for Ascend NPU."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -117,10 +131,10 @@ class AscendTreeAttentionBackend(AttentionBackend):
 
 @dataclass
 class AscendTreeAttentionMetadata(AscendMetadataForTree):
-    """继承 AscendMetadataForTree，添加 tree attention 相关字段。
+    """Extends AscendMetadataForTree with tree attention fields.
 
-    tree_attn_bias: GPU 格式 float32 mask (0=attend, -inf=block)，用于参考
-    tree_attn_mask: NPU 格式 int8 mask (0=attend, 1=block, pad 2048x2048)
+    tree_attn_bias: GPU-format float32 mask (0=attend, -inf=block), for reference
+    tree_attn_mask: NPU-format int8 mask (0=attend, 1=block, pad 2048x2048)
     """
     tree_attn_bias: torch.Tensor | None = None
     tree_attn_mask: torch.Tensor | None = None
@@ -153,7 +167,7 @@ class AscendTreeAttentionMetadata(AscendMetadataForTree):
             seq_lens=kv_seqlens,
             block_tables=self.block_tables[self.num_decodes:],
             slot_mapping=self.slot_mapping[self.num_decode_tokens:],
-            tree_attn_mask=None,  # prefill 不需要 tree mask
+            tree_attn_mask=None,  # prefill does not need tree mask
         )
         return self._cached_prefill_metadata
 
@@ -184,14 +198,14 @@ class AscendTreeAttentionMetadata(AscendMetadataForTree):
 
 
 def _is_ancestor(potential_ancestor: tuple, potential_descendant: tuple) -> bool:
-    """检查 potential_ancestor 是否是 potential_descendant 的祖先前缀。"""
+    """Check if potential_ancestor is an ancestor prefix of potential_descendant."""
     if len(potential_ancestor) >= len(potential_descendant):
         return False
     return potential_descendant[:len(potential_ancestor)] == potential_ancestor
 
 
 def _get_depth_counts(sorted_tree_choices: list[tuple[int, ...]]) -> list[int]:
-    """计算 tree 每层的节点数。"""
+    """Count the number of nodes at each depth level of the tree."""
     depth_counts = []
     prev_depth = 0
     for path in sorted_tree_choices:
@@ -209,23 +223,23 @@ def _prepare_tree_attn_bias_gpu(
     dtype: torch.dtype | None = None,
     device: torch.device | None = None,
 ) -> torch.Tensor:
-    """构建 GPU 格式的 tree attention mask (float32, 0=attend, -inf=block)。
+    """Build GPU-format tree attention mask (float32, 0=attend, -inf=block).
 
-    与 vLLM 上游 tree_attn.py 的 _prepare_tree_attn_bias 逻辑完全一致。
+    Logic is identical to _prepare_tree_attn_bias in upstream vLLM tree_attn.py.
     """
     tree_len = len(sorted_tree_choices) + 1  # +1 for root
     tree_attn_mask = torch.full(
         (tree_len, tree_len), -torch.inf, device=device, dtype=dtype
     )
 
-    # 对角线: 每个 token attend 自己
+    # Diagonal: each token attends to itself
     for i in range(tree_len):
         tree_attn_mask[i, i] = 0
 
-    # 所有 token attend to root (column 0)
+    # All tokens attend to root (column 0)
     tree_attn_mask[:, 0] = 0
 
-    # 祖先关系: draft token attend to 其祖先节点
+    # Ancestry: draft tokens attend to their ancestor nodes
     start = 0
     for i in range(len(depth_counts)):
         for j in range(depth_counts[i]):
@@ -248,22 +262,22 @@ def _convert_tree_mask_for_npu(
     gpu_mask: torch.Tensor,
     pad_size: int = PAD_SIZE,
 ) -> torch.Tensor:
-    """将 GPU float32 mask 转换为 NPU int8 mask。
+    """Convert GPU float32 mask to NPU int8 mask.
 
     GPU: -inf = block, 0 = attend
     NPU: 0 = attend, 1 = block (int8)
 
     Args:
-        gpu_mask: GPU 格式 mask (tree_len x tree_len)，float32
-        pad_size: NPU kernel 要求的 pad 大小，默认 2048
+        gpu_mask: GPU-format mask (tree_len x tree_len), float32
+        pad_size: NPU kernel required pad size, default 2048
 
     Returns:
-        NPU 格式 mask (pad_size x pad_size)，int8
+        NPU-format mask (pad_size x pad_size), int8
     """
     tree_len = gpu_mask.shape[0]
     npu_mask = torch.ones((pad_size, pad_size), dtype=torch.int8)
-    # GPU mask 中 0 的位置 → NPU mask 中 0（attend）
-    # GPU mask 中 -inf 的位置 → NPU mask 中 1（block）
+    # GPU mask where 0 → NPU mask 0 (attend)
+    # GPU mask where -inf → NPU mask 1 (block)
     npu_mask[:tree_len, :tree_len] = (gpu_mask == float('-inf')).to(torch.int8)
     return npu_mask
 
@@ -271,9 +285,9 @@ def _convert_tree_mask_for_npu(
 class AscendTreeAttentionMetadataBuilder(
     AttentionMetadataBuilder[AscendTreeAttentionMetadata]
 ):
-    """NPU 版 Tree Attention Metadata Builder。
+    """NPU Tree Attention Metadata Builder.
 
-    解析 speculative_token_tree 配置，构建 NPU 适配的 tree mask。
+    Parses speculative_token_tree config and builds NPU-adapted tree mask.
     """
 
     def __init__(
@@ -289,7 +303,7 @@ class AscendTreeAttentionMetadataBuilder(
         self.vllm_config = vllm_config
         self.device = device
 
-        # 解析 speculative_token_tree 配置
+        # Parse speculative_token_tree config
         spec_config = vllm_config.speculative_config
         spec_token_tree: str | None = None
         if spec_config:
@@ -301,7 +315,7 @@ class AscendTreeAttentionMetadataBuilder(
             else [(0,)]
         )
 
-        # 构建 GPU 格式的 tree attention bias
+        # Build GPU-format tree attention bias
         depth_counts = _get_depth_counts(tree_choices)
         self.tree_attn_bias = _prepare_tree_attn_bias_gpu(
             tree_choices,
@@ -310,22 +324,22 @@ class AscendTreeAttentionMetadataBuilder(
             device=device,
         )
 
-        # 转换为 NPU 格式的 mask
+        # Convert to NPU-format mask
         self.tree_attn_mask = _convert_tree_mask_for_npu(
             self.tree_attn_bias, pad_size=PAD_SIZE
         )
 
         self.reorder_batch_threshold = self.tree_attn_bias.shape[0]
 
-        # Mask 缓存优化：预计算所有可能的 slice mask
+        # Mask caching: precompute all possible slice masks
         self._mask_cache: dict[tuple[int, int], torch.Tensor] = {}
         self._bias_cache: dict[tuple[int, int], torch.Tensor] = {}
         self._precompute_slice_masks()
 
     def _precompute_slice_masks(self):
-        """预计算所有可能的 slice mask，避免运行时重复计算。"""
+        """Precompute all possible slice masks to avoid redundant computation."""
         tree_len = self.tree_attn_bias.shape[0]
-        # 预计算所有可能的 [start:end, start:end] slice
+        # Precompute all possible [start:end, start:end] slices
         for start in range(1, tree_len):
             for end in range(start + 1, tree_len + 1):
                 key = (start, end)
@@ -377,10 +391,10 @@ class AscendTreeAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         draft_index: int,
     ) -> AscendTreeAttentionMetadata:
-        """为 tree 层级构建 attention metadata。
+        """Build attention metadata for a tree level.
 
-        draft_index=0: prefill (root level)，使用空 bias
-        draft_index>0: draft level，slice tree mask（使用缓存）
+        draft_index=0: prefill (root level), use empty bias
+        draft_index>0: draft level, slice tree mask (uses cache)
         """
         # Cache the original tree attention bias.
         orig_tree_attn_bias = self.tree_attn_bias
@@ -391,14 +405,14 @@ class AscendTreeAttentionMetadataBuilder(
             self.tree_attn_bias = torch.empty(0)
             self.tree_attn_mask = torch.empty(0, dtype=torch.int8)
         else:
-            # 使用缓存的 slice mask，避免重复计算
+            # Use cached slice mask to avoid redundant computation
             start, end = 1, 1 + common_attn_metadata.max_query_len
             cache_key = (start, end)
             if cache_key in self._bias_cache:
                 self.tree_attn_bias = self._bias_cache[cache_key]
                 self.tree_attn_mask = self._mask_cache[cache_key]
             else:
-                # 缓存未命中，回退到实时计算
+                # Cache miss, fall back to on-the-fly computation
                 self.tree_attn_bias = self.tree_attn_bias[start:end, start:end].contiguous()
                 self.tree_attn_mask = _convert_tree_mask_for_npu(
                     self.tree_attn_bias, pad_size=PAD_SIZE
@@ -414,9 +428,9 @@ class AscendTreeAttentionMetadataBuilder(
 
 
 class AscendTreeAttentionImpl(AttentionImpl):
-    """NPU 版 Tree Attention Implementation。
+    """NPU Tree Attention Implementation.
 
-    使用 npu_fused_infer_attention_score 进行 attention 计算。
+    Uses npu_fused_infer_attention_score for attention computation.
     - Prefill: BSH layout + sparse_mode=0
     - Decode: TND layout + sparse_mode=3 + tree_attn_mask
     """
@@ -466,7 +480,7 @@ class AscendTreeAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        """更新 KV cache。"""
+        """Update KV cache."""
         from vllm import _custom_ops as ops
 
         key_cache, value_cache = kv_cache.unbind(0)
@@ -521,7 +535,7 @@ class AscendTreeAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        # Prefill: 使用 BSH layout + sparse_mode=0
+        # Prefill: BSH layout + sparse_mode=0
         if prefill_meta := attn_metadata.prefill_metadata:
             self._forward_prefill(
                 query=query[num_decode_tokens:num_actual_tokens],
@@ -532,7 +546,7 @@ class AscendTreeAttentionImpl(AttentionImpl):
                 layer=layer,
             )
 
-        # Decode: 使用 TND layout + sparse_mode=3 + tree_attn_mask
+        # Decode: TND layout + sparse_mode=3 + tree_attn_mask
         if decode_meta := attn_metadata.decode_metadata:
             self._forward_decode(
                 query=query[:num_decode_tokens],
@@ -554,18 +568,18 @@ class AscendTreeAttentionImpl(AttentionImpl):
         prefill_meta: AscendTreeAttentionMetadata,
         layer: torch.nn.Module,
     ):
-        """Prefill 阶段: BSH layout + sparse_mode=0。
+        """Prefill phase: BSH layout + sparse_mode=0.
 
-        使用完整的自定义 mask（如果有的话）。
+        Uses full custom mask if available.
         """
         # BSH layout: [batch, seq, hidden]
-        # 将 [tokens, heads, head_size] 转换为 [1, tokens, heads * head_size]
+        # Reshape [tokens, heads, head_size] to [1, tokens, heads * head_size]
         batch_size = prefill_meta.query_start_loc.shape[0] - 1
         q_bsh = query.view(batch_size, -1, self.num_heads * self.head_size)
         k_bsh = key.view(batch_size, -1, self.num_kv_heads * self.head_size)
         v_bsh = value.view(batch_size, -1, self.num_kv_heads * self.head_size)
 
-        # 使用 prefill 阶段的标准 mask (causal mask)
+        # Standard prefill mask (causal mask)
         attn_mask = prefill_meta.attn_mask
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
@@ -580,7 +594,7 @@ class AscendTreeAttentionImpl(AttentionImpl):
             sparse_mode=0,
         )
 
-        # 将输出展平回 [tokens, heads * head_size]
+        # Flatten output back to [tokens, heads * head_size]
         output.copy_(attn_output.view(-1, self.num_heads * self.head_size))
 
     def _forward_decode(
@@ -592,28 +606,28 @@ class AscendTreeAttentionImpl(AttentionImpl):
         decode_meta: AscendTreeAttentionMetadata,
         layer: torch.nn.Module,
     ):
-        """Decode 阶段: TND layout + sparse_mode=3 + tree_attn_mask。
+        """Decode phase: TND layout + sparse_mode=3 + tree_attn_mask.
 
-        使用 tree attention mask 来限制 attend 范围。
-        支持 ACL Graph：当 is_draft_model=True 时，预计算 workspace 并使用
-        .out() 变体避免额外内存分配。
+        Uses tree attention mask to restrict attend scope.
+        Supports ACL Graph: when is_draft_model=True, precompute workspace and use
+        .out() variant to avoid extra memory allocation.
         """
         num_tokens = decode_meta.num_actual_tokens
         query = query[:num_tokens]
 
-        # 准备 actual_seq_lengths（使用 tensor 避免 CPU-GPU 同步）
+        # Prepare actual_seq_lengths (use tensor to avoid CPU-GPU sync)
         actual_seq_lengths = decode_meta.query_start_loc[1:].to(torch.int64)
         actual_seq_lengths_kv = decode_meta.seq_lens.to(torch.int64)
 
-        # 使用 tree attention mask
+        # Use tree attention mask
         tree_mask = decode_meta.tree_attn_mask
         if tree_mask is None:
-            # 如果没有 tree mask，使用标准 causal mask
+            # Fall back to standard causal mask if tree mask is unavailable
             tree_mask = decode_meta.attn_mask
 
         block_size = key_cache.shape[1]
 
-        # ACL Graph 支持：当在 draft model 上下文中时，预计算 workspace 并使用 .out()
+        # ACL Graph: when in draft model context, precompute workspace and use .out()
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
         if _EXTRA_CTX.is_draft_model:
