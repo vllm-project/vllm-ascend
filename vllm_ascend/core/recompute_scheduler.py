@@ -120,10 +120,6 @@ class RecomputeScheduler(Scheduler):
             and self.vllm_config.kv_transfer_config.is_kv_consumer
         )
         self.is_kv_producer = self.vllm_config.kv_transfer_config and self.vllm_config.kv_transfer_config.is_kv_producer
-        self.is_hybrid_model = (
-            "qwen3_next" in self.vllm_config.model_config.hf_text_config.model_type
-            or "qwen3_5" in self.vllm_config.model_config.hf_text_config.model_type
-        )
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -144,74 +140,12 @@ class RecomputeScheduler(Scheduler):
                 request.streaming_queue = deque()
             # Fill in placeholder tokens to enable full graph compatibility. Without
             # placeholders, graph matching may fail, forcing eager mode execution.
-            if self.is_kv_producer and self.is_hybrid_model and request.num_tokens > 1:
-                request.prompt_token_ids.pop()
-                request._all_token_ids.pop()
-                request.num_prompt_tokens -= 1
             if self.is_mtp_kv_consumer:
                 request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
-
-    def _update_waiting_for_remote_kv(self, request: Request) -> None:
-        """
-        KV Connector: update request state after async recv is finished.
-
-        The finished_recving_kv_req_ids list is populated
-        on the previous steps()'s update_from_output based
-        on the worker side connector.
-
-        When the kv transfer is ready, we cache the blocks
-        and the request state will be moved back to WAITING from
-        WAITING_FOR_REMOTE_KV.
-
-        NOTE: The check for whether request.request_id is in
-        finished_recving_kv_req_ids is now done by the caller
-        (_try_promote_blocked_waiting_request in the parent Scheduler),
-        so this method is only called when the recv is confirmed finished.
-        """
-        assert self.connector is not None
-
-        if request.request_id in self.failed_recving_kv_req_ids:
-            # Request had KV load failures; num_computed_tokens was already
-            # updated in _update_requests_with_invalid_blocks
-            if request.num_computed_tokens:
-                # Cache any valid computed tokens.
-                self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
-            else:
-                # No valid computed tokens, release allocated blocks.
-                # There may be a local cache hit on retry.
-                self.kv_cache_manager.free(request)
-
-            self.failed_recving_kv_req_ids.remove(request.request_id)
-        else:
-            # Now that the blocks are ready, actually cache them.
-            # Use Ascend-specific block_ids logic to handle multi-group KV
-            # cache configurations (e.g. MLA) where len(block_ids) > 1.
-            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
-            if len(block_ids) == 1:
-                num_computed_tokens = len(block_ids[0]) * self.block_size
-                # Handle the case where num request tokens less than one block.
-                num_computed_tokens = min(num_computed_tokens, request.num_tokens)
-            else:
-                num_computed_tokens = request.num_tokens
-            # on a full prompt hit, we need to re-compute the last token
-            # in order to be able to sample the next token
-            if num_computed_tokens == request.num_tokens:
-                num_computed_tokens -= 1
-            # This will cache the blocks iff caching is enabled.
-            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
-
-            # Update the request state for scheduling.
-            request.num_computed_tokens = num_computed_tokens
-
-            # Count the number of prefix cached tokens.
-            if request.num_cached_tokens < 0:
-                request.num_cached_tokens = request.num_computed_tokens
-
-        self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def schedule(self) -> RecomputeSchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:

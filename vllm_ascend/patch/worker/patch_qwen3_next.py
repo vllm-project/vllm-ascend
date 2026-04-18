@@ -87,7 +87,7 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        maybe_save_kv_layer_to_connector("", [])
+        maybe_save_kv_layer_to_connector(self.prefix, [])
         z_shape_og = z.shape
         # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
