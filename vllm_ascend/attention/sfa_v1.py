@@ -155,7 +155,10 @@ class AscendSFAMetadata:
     num_decodes: int = 0
     num_decode_tokens: int = 0
     num_prefills: int = 0
-
+    block_size:int =0 
+    group_len: torch.Tensor | None = None
+    group_key_idx: torch.Tensor | None = None
+    group_key_cache_idx: torch.Tensor | None = None
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -236,6 +239,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+        block_size = 128
+        if envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+            slot_mapping_cpu = torch.empty_like(slot_mapping, device="cpu").pin_memory()
+            slot_mapping_cpu.copy_(slot_mapping, non_blocking=True)
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
@@ -331,6 +338,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
+        if envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:       
+            slot_mapping_list = slot_mapping_cpu.tolist()
+            group_len,group_key_idx,group_key_cache_idx=torch.ops._C_ascend.store_kv_block_pre( slot_mapping, slot_mapping_list , block_size)
+        else:
+            group_len,group_key_idx,group_key_cache_idx=None,None,None
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -345,6 +357,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
             dsa_cp_context=dsa_cp_context,
+            block_size=block_size,
+            group_len=group_len,
+            group_key_idx=group_key_idx,
+            group_key_cache_idx=group_key_cache_idx,
         )
 
     def build_for_graph_capture(
@@ -1201,32 +1217,42 @@ class AscendSFAImpl(MLAAttentionImpl):
                         )
                     else:
                         k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
-                    k_nope = k_nope.view(k_nope.shape[0], 1, -1)
-                    k_pe = k_pe.view(k_pe.shape[0], 1, -1)
-                    DeviceOperator.reshape_and_cache(
-                        key=k_nope[: attn_metadata.num_actual_tokens],
-                        value=k_pe[: attn_metadata.num_actual_tokens],
-                        key_cache=kv_cache[0],
-                        value_cache=kv_cache[1],
-                        slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
-                    )
+                    if self.is_kv_producer and envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+                        torch.ops._C_ascend.store_kv_block(k_nope, kv_cache[0], attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
+                        torch.ops._C_ascend.store_kv_block(k_pe, kv_cache[1],  attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
+                    else:
+                        k_nope = k_nope.view(k_nope.shape[0], 1, -1)
+                        k_pe = k_pe.view(k_pe.shape[0], 1, -1)
+                        DeviceOperator.reshape_and_cache(
+                            key=k_nope[: attn_metadata.num_actual_tokens],
+                            value=k_pe[: attn_metadata.num_actual_tokens],
+                            key_cache=kv_cache[0],
+                            value_cache=kv_cache[1],
+                            slot_mapping=slot_mapping[: attn_metadata.num_actual_tokens],
+                        )
 
             k_li = self._get_full_kv(k_li, attn_metadata)
 
         if kv_cache is not None:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
-            torch_npu.npu_scatter_nd_update_(
-                kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
-            )  # b, s, n, d
+            if self.is_kv_producer and envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+                torch.ops._C_ascend.store_kv_block( k_li, kv_cache[2], attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
+            else:
+                torch_npu.npu_scatter_nd_update_(
+                    kv_cache[2].view(-1, k_li.shape[-1]), slot_mapping.view(-1, 1), k_li.view(-1, k_li.shape[-1])
+                )  # b, s, n, d
             if self.use_sparse_c8_indexer:
                 assert len(kv_cache) == 4
                 assert k_li_scale is not None
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[3].view(-1, k_li_scale.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
-                )
+                if self.is_kv_producer and envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
+                    torch.ops._C_ascend.store_kv_block(k_li_scale, kv_cache[3], attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
+                else:
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[3].view(-1, k_li_scale.shape[-1]),
+                        slot_mapping.view(-1, 1),
+                        k_li_scale.view(-1, k_li_scale.shape[-1]),
+                    )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
 
