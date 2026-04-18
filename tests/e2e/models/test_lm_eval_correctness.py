@@ -67,7 +67,7 @@ def build_model_args(eval_config, tp_size):
 
 def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
     env = Environment(loader=FileSystemLoader(TEST_DIR))
-    template = env.get_template("report_template.md")
+    template = env.get_template("report_template_v2.md")
     model_args = build_model_args(eval_config, tp_size)
 
     parallel_mode = f"TP{model_args.get('tensor_parallel_size', 1)}"

@@ -50,6 +50,9 @@ class AscendConfig:
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
 
+        profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
+        self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config, vllm_config)
+
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
         self.layer_sharding = additional_config.get("layer_sharding", None)
@@ -311,6 +314,32 @@ class FinegrainedTPConfig:
             logger.info(f"finegrained_tp_config enabled: {', '.join(enabled_configs)}")
 
 
+class ProfilingChunkConfig:
+    """
+    Configuration object for profiling-based dynamic chunk scheduling.
+    """
+
+    def __init__(self, profiling_chunk_config: dict | None = None, vllm_config: "VllmConfig" = None):
+        if profiling_chunk_config is None:
+            profiling_chunk_config = {}
+
+        if not isinstance(profiling_chunk_config, dict):
+            raise TypeError("profiling_chunk_config must be a dict")
+
+        self.enabled = profiling_chunk_config.get("enabled", False)
+        self.smooth_factor = profiling_chunk_config.get("smooth_factor", 0.8)
+        self.min_chunk = profiling_chunk_config.get("min_chunk", 4096)
+
+        if not 0.0 < self.smooth_factor <= 1.0:
+            raise ValueError("profiling_chunk_config.smooth_factor must be in (0, 1]")
+
+        if not isinstance(self.min_chunk, int) or self.min_chunk <= 0:
+            raise ValueError("profiling_chunk_config.min_chunk must be a positive integer")
+
+        if self.enabled and vllm_config is not None and vllm_config.parallel_config.pipeline_parallel_size <= 1:
+            raise ValueError("profiling_chunk_config requires pipeline parallelism to be enabled")
+
+
 class AscendCompilationConfig:
     """
     Configuration for controlling the behavior of Ascend graph optimization.
@@ -497,8 +526,15 @@ def init_ascend_config(vllm_config):
     global _ASCEND_CONFIG
     if _ASCEND_CONFIG is not None and not refresh:
         return _ASCEND_CONFIG
-    _ASCEND_CONFIG = AscendConfig(vllm_config)
-    return _ASCEND_CONFIG
+    ascend_config = AscendConfig(vllm_config)
+    # Some unit tests mock ``AscendConfig.__init__`` and only stub
+    # ``get_ascend_config``. Avoid caching a half-initialized object across
+    # tests, otherwise later callers may observe missing attributes.
+    if hasattr(ascend_config, "ascend_compilation_config"):
+        _ASCEND_CONFIG = ascend_config
+    else:
+        _ASCEND_CONFIG = None
+    return ascend_config
 
 
 def clear_ascend_config():

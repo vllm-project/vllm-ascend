@@ -628,7 +628,7 @@ class ProfilingChunkScheduler(Scheduler):
                 time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if request.num_cached_tokens < 0:
+                if getattr(request, "num_cached_tokens", -1) < 0:
                     request.num_cached_tokens = num_computed_tokens
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule

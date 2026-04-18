@@ -151,6 +151,8 @@ e2e-multicard-4-cards:
   estimated_time: 322
 - name: tests/e2e/multicard/4-cards/test_kimi_k2.py
   estimated_time: 37
+- name: tests/e2e/multicard/4-cards/test_profiling_chunk_performance.py
+  estimated_time: 420
 - name: tests/e2e/multicard/4-cards/long_sequence/test_accuracy.py
   estimated_time: 1287
 - name: tests/e2e/multicard/4-cards/long_sequence/test_basic.py
