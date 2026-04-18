@@ -39,16 +39,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> cache_by_group_pre(
         // 1. 获取当前起始元素的索引和所属block信息
         int32_t current_idx = slot_mapping_list[idx_slotmap];
         if(current_idx <0){
-            while(idx_slotmap<slot_mapping_len){
-                if(slot_mapping_list[idx_slotmap++] >=0){
-                    TORCH_CHECK(0>1, "cache_by_group_pre find slot_mapping_list err ");
-                    at::Tensor group_len = at::empty_like({slot_mapping_npu});
-                    at::Tensor group_key_idx = at::empty_like({slot_mapping_npu});
-                    at::Tensor group_key_cache_idx = at::empty_like({slot_mapping_npu});
-                    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(group_len, group_key_idx, group_key_cache_idx);
-                }
-            }
-            break;
+            at::Tensor group_len = at::empty_like({slot_mapping_npu});
+            at::Tensor group_key_idx = at::empty_like({slot_mapping_npu});
+            at::Tensor group_key_cache_idx = at::empty_like({slot_mapping_npu});
+            return std::tuple<at::Tensor, at::Tensor, at::Tensor>(group_len, group_key_idx, group_key_cache_idx);
+
         }
         // 检测slotMapping有小于0的异常值
         // if(slot_mapping_list[idx_slotmap]<0){
@@ -83,7 +78,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> cache_by_group_pre(
             }else{
                 // 3. 找该组实际的最后一个元素位置
                 // 循环条件：不越界 + 当前元素属于当前block + 未超过理论最后元素; 
-                while (j < slot_mapping_len && slot_mapping_list[j] / block_size == block_id && slot_mapping_list[j] <= expected_last) {
+                while (j < slot_mapping_len && slot_mapping_list[j] / block_size == block_id && j+1 < slot_mapping_len && slot_mapping_list[j+1]==slot_mapping_list[j]+1 ) {
                     j++;
                 }
             }

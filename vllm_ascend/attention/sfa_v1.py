@@ -1222,6 +1222,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                         torch.ops._C_ascend.reshape_and_cache_by_group(k_nope, kv_cache[0], attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
                         torch.ops._C_ascend.reshape_and_cache_by_group(k_pe, kv_cache[1],  attn_metadata.group_len, attn_metadata.group_key_idx, attn_metadata.group_key_cache_idx, attn_metadata.block_size)
                     else:
+                        k_nope = k_nope.view(k_nope.shape[0], 1, -1)
+                        k_pe = k_pe.view(k_pe.shape[0], 1, -1)
                         DeviceOperator.reshape_and_cache(
                             key=k_nope[: attn_metadata.num_actual_tokens],
                             value=k_pe[: attn_metadata.num_actual_tokens],
