@@ -567,6 +567,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     target_kv_len,
                     template_seq=captured_actual_seq_lengths_kv,
                 )
+                actual_seq_lengths_kv = actual_seq_lengths_kv.tolist()
 
                 # Only TND layout uses query cumulative lengths. For BNSD path
                 # this argument should stay as captured (typically None).

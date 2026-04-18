@@ -1464,7 +1464,7 @@ class MooncakeConnectorWorker:
                                         p_port_remote_list.append(p_port)
                             local_remote_block_port_mappings[d_port].append(p_port_remote_list)
 
-            logger.info(
+            logger.debug(
                 "p_node_cp_group_meta is:: %s. d_node_cp_group_meta is:: %s. "
                 "local_remote_block_port_mappings is:: %s. ",
                 p_node_cp_group_meta,
