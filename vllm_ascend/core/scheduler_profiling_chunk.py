@@ -482,7 +482,6 @@ class ProfilingChunkScheduler(Scheduler):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
                         connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
@@ -490,6 +489,15 @@ class ProfilingChunkScheduler(Scheduler):
 
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
                     assert num_computed_tokens <= request.num_tokens
+
+                    # Track first scheduled prefill, not post-preemption repeat prefills
+                    if request.prefill_stats is not None:
+                        assert num_computed_tokens <= request.num_prompt_tokens
+                        request.prefill_stats.set(
+                            num_prompt_tokens=request.num_prompt_tokens,
+                            num_local_cached_tokens=num_new_local_computed_tokens,
+                            num_external_cached_tokens=num_external_computed_tokens,
+                        )
                 else:
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
@@ -628,8 +636,6 @@ class ProfilingChunkScheduler(Scheduler):
                 time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = num_computed_tokens
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
                     for i in encoder_inputs_to_schedule:
