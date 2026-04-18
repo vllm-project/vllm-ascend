@@ -341,13 +341,13 @@ class KVPoolWorker:
                 layer_load_task = self.layer_load_tasks[layer_id]
                 self.kv_recv_thread.add_request((None, layer_load_task, layer_id))
 
-    def _get_or_init_layer_tracker(self, req_id: str, layer_id: int, tracker_key: str | None = None) -> dict:
+    def _get_or_init_layer_tracker(self, req_id: str, layer_id: int, tracker_key: str | None = None, initial_processed_count: int = 0) -> dict:
         key = tracker_key if tracker_key else req_id
         if key not in self._request_addr_tracker:
             self._request_addr_tracker[key] = {}
         if layer_id not in self._request_addr_tracker[key]:
             self._request_addr_tracker[key][layer_id] = {
-                'processed_count': 0,
+                'processed_count': initial_processed_count,
                 'chunk_addr_list': [],
                 'chunk_size_list': [],
                 'chunk_gvas_list': [],
@@ -477,8 +477,15 @@ class KVPoolWorker:
         if request.can_save is None or not request.can_save:
             return
 
-        tracker = self._get_or_init_layer_tracker(request.req_id, layer_id)
+        num_cached_blocks = 0
+        if request.load_spec is not None:
+            num_cached_blocks = request.load_spec.kvpool_cached_tokens // self.block_size
+
         num_blocks = request.token_len_chunk // self.block_size
+        num_cached_blocks = min(num_cached_blocks, num_blocks)
+
+        tracker = self._get_or_init_layer_tracker(
+            request.req_id, layer_id, initial_processed_count=num_cached_blocks)
 
         has_last_block = request.token_len_chunk % self.block_size != 0
         self._process_chunks_incremental(
@@ -489,8 +496,9 @@ class KVPoolWorker:
             tracker, last_block_keys, request.block_ids, layer_id,
             request.key_gva_mapping, num_blocks, has_last_block)
 
+        save_block_keys = block_keys[num_cached_blocks * num_keys_per_block:] if num_cached_blocks > 0 else block_keys
         req_meta = self._build_req_meta(
-            request, block_keys, last_block_keys, layer_id, tracker, request.is_last_chunk)
+            request, save_block_keys, last_block_keys, layer_id, tracker, request.is_last_chunk)
         self.layer_save_tasks[layer_id].append(req_meta)
 
     def _process_load_for_layer(
