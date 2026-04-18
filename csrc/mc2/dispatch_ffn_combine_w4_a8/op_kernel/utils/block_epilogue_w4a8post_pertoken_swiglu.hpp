@@ -251,13 +251,11 @@ public:
                 DataCopyExtParams copyParams{1, static_cast<uint32_t>(blockN * sizeof(float)), 0, 0, 0};
                 DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
                 AscendC::GlobalTensor<float> weightAux;
-                if (listLen == 1) { // Large tensor
-                    weightAux.SetGlobalBuffer(gmWeightAux);
-                    DataCopyPad(ubweighAux, weightAux[curGroupIdx[ubListId] * blockN], copyParams, padParams);
-                } else {
-                    weightAux.SetGlobalBuffer(GetTensorAddr<float>(curGroupIdx[ubListId], reinterpret_cast<GM_ADDR>(gmWeightAux)));
-                    DataCopyPad(ubweighAux, weightAux, copyParams, padParams); // groupid = curGroupIdx[ubListId]
-                }
+                int32_t arrayGroupIdx = listLen == 1 ? 0 : curGroupIdx[ubListId];
+                weightAux.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(GetTensorAddr<float>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(gmWeightAux))));
+                int64_t gmOffsetwA = listLen == 1 ? curGroupIdx[ubListId] * blockN : 0;
+                DataCopyPad(ubweighAux, weightAux[gmOffsetwA], copyParams, padParams); // groupid = curGroupIdx[ubListId]
+
             } else {  // May need to update auxiliary matrix in subsequent iterations
                 uint32_t lastGroupIdx = curGroupIdx[ubListId];
                 for (; globalOffset >= curSum[ubListId] && curGroupIdx[ubListId] < expertPerRank;
@@ -269,13 +267,11 @@ public:
                     DataCopyExtParams copyParams{1, static_cast<uint32_t>(blockN * sizeof(float)), 0, 0, 0};
                     DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
                     AscendC::GlobalTensor<float> weightAux;
-                    if (listLen == 1) { // Large tensor
-                        weightAux.SetGlobalBuffer(gmWeightAux);
-                        DataCopyPad(ubweighAux, weightAux[curGroupIdx[ubListId] * blockN], copyParams, padParams);
-                    } else {
-                        weightAux.SetGlobalBuffer(GetTensorAddr<float>(curGroupIdx[ubListId], reinterpret_cast<GM_ADDR>(gmWeightAux)));
-                        DataCopyPad(ubweighAux, weightAux, copyParams, padParams);
-                    }
+                    int32_t arrayGroupIdx = listLen == 1 ? 0 : curGroupIdx[ubListId];
+                    weightAux.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(GetTensorAddr<float>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(gmWeightAux))));
+                    int64_t gmOffsetwA = listLen == 1 ? curGroupIdx[ubListId] * blockN : 0;
+                    DataCopyPad(ubweighAux, weightAux[gmOffsetwA], copyParams, padParams); // groupid = curGroupIdx[ubListId]
+
                 }
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbWAMTE2VList[ubListId]);
