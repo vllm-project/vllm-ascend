@@ -37,7 +37,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. Currently only DeepSeek series models are supported. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `multistream_overlap_gate`          | bool | `False` | Whether to enable multi-stream overlap gate. This option only takes effect on MoE models with shared experts.  |
-| `recompute_scheduler_enable`        | bool | `False` | Whether to enable recompute scheduler.                                                                    |
+| `recompute_scheduler_enable`        | bool | `False` | Whether to enable the recompute scheduler. **Only valid in PD-disaggregated mode** (`kv_role` is `kv_producer` or `kv_consumer`). **Do not enable in PD-mixed mode** (no `kv_transfer_config`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
 | `enable_cpu_binding`                | bool | `True`  | Whether to enable CPU binding. Only takes effect on ARM CPUs; A3 uses the global-slicing CPU allocation strategy and other device types use the topo-affinity CPU allocation strategy. |
 | `SLO_limits_for_dynamic_batch`      | int  | `-1`    | SLO limits for dynamic batch. This is new scheduler to support dynamic batch feature                            |
 | `enable_npugraph_ex`                | bool | `False` | Whether to enable npugraph_ex graph mode.                                                                 |
@@ -46,6 +46,15 @@ The following table lists additional configuration options available in vLLM Asc
 | `layer_sharding`                    | dict | `{}`    | Configuration options for Layer Sharding Linear. In PD-disaggregated deployments, it is supported only on P nodes with `kv_role="kv_producer"`. |
 | `enable_sparse_c8`                  | bool | `False` | Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and GLM5). Not supported on A5 devices now |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
+
+### Environment variables (scheduling and fused MoE)
+
+These variables are read at process startup. vLLM Ascend validates them against PD disaggregation settings (`kv_transfer_config` and `kv_role` from KV transfer configuration):
+
+| Name | Description |
+| ---- | ----------- |
+| `VLLM_ASCEND_BALANCE_SCHEDULING` | When set to `1`, enables balance scheduling in the v1 scheduler. **Only valid in PD-mixed mode** (`kv_role` is `kv_both`, or `kv_transfer_config` is unset). **Do not enable in PD-disaggregated mode** (`kv_producer` / `kv_consumer` only); startup will fail. |
+| `VLLM_ASCEND_ENABLE_FUSED_MC2` | Selects fused MC2 MoE communication (`dispatch_ffn_combine` / `dispatch_gmm_combine_decode`). **Only valid on PD-disaggregated decode nodes** (`kv_role` is `kv_consumer`). **Do not enable in PD-mixed mode or on prefill-only nodes** (`kv_producer`); startup will fail. See also the inline comments in `vllm_ascend/envs.py` for values `0`, `1`, and `2`. |
 
 The details of each configuration option are as follows:
 
