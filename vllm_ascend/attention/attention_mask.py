@@ -93,3 +93,29 @@ class AttentionMaskBuilder:
             return self.get_pcp_mla_mask(model_config.dtype)
         # Prefill stages use 512x512 mask with appropriate dtype
         return self.get_mla_mask(model_config.dtype)
+
+
+def get_tree_attn_mask(
+    tree_len: int,
+    gpu_tree_mask: torch.Tensor,
+    device: torch.device,
+    pad_size: int = 2048,
+) -> torch.Tensor:
+    """将 GPU 格式 tree mask 转换为 NPU 格式。
+
+    Args:
+        tree_len: tree 的长度 (root + draft tokens)
+        gpu_tree_mask: GPU 格式 mask (tree_len x tree_len)，float32
+            语义: 0 = attend, -inf = block
+        device: 目标设备
+        pad_size: NPU kernel 要求的 pad 大小，默认 2048
+
+    Returns:
+        NPU 格式 mask (pad_size x pad_size)，int8
+        语义: 0 = attend, 1 = block
+    """
+    npu_mask = torch.ones((pad_size, pad_size), dtype=torch.int8, device=device)
+    # GPU mask: 0 = attend, -inf = block
+    # NPU mask: 0 = attend, 1 = block
+    npu_mask[:tree_len, :tree_len] = (gpu_tree_mask == float('-inf')).to(torch.int8)
+    return npu_mask

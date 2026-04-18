@@ -1384,3 +1384,21 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output
         return output
+
+
+# Register TREE_ATTN backend for speculative_token_tree
+try:
+    from vllm_ascend.attention.backends.tree_attn import AscendTreeAttentionBackend
+
+    # 直接注册 AscendTreeAttentionBackend，覆盖 GPU 版本
+    register_backend(
+        AttentionBackendEnum.TREE_ATTN,
+        "vllm_ascend.attention.backends.tree_attn.AscendTreeAttentionBackend"
+    )
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.info("Registered AscendTreeAttentionBackend as TREE_ATTN")
+except ImportError as e:
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.debug(f"Failed to register AscendTreeAttentionBackend: {e}")

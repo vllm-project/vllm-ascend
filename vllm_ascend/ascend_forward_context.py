@@ -45,6 +45,7 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    slot_mapping: dict | list | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -58,6 +59,7 @@ def set_ascend_forward_context(
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
+        "slot_mapping": slot_mapping,
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
