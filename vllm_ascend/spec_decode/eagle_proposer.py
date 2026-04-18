@@ -1983,7 +1983,7 @@ class AscendEagleProposer(SpecDecodeBaseProposer):
             block_size = tree_attn_metadata_builder.kv_cache_spec.block_size
             query_positions = flattened_draft_positions[:, level : level + query_len]
             block_numbers = query_positions // block_size
-            block_ids = attn_metadata.block_table.gather(dim=1, index=block_numbers)
+            block_ids = attn_metadata.block_tables.gather(dim=1, index=block_numbers)
             slot_mapping = block_ids * block_size + query_positions % block_size
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the

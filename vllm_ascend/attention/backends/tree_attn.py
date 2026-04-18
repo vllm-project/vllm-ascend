@@ -637,7 +637,7 @@ class AscendTreeAttentionImpl(AttentionImpl):
             )
 
             graph_params = get_draft_graph_params()
-            num_input_tokens = decode_meta.query_start_loc[-1].item()
+            num_input_tokens = num_tokens
             workspace = graph_params.workspaces.get(num_input_tokens)
             if workspace is None:
                 workspace = (
