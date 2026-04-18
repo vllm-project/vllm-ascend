@@ -1263,22 +1263,10 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded = self._pad_query_start_loc_for_fia(
                         num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_mode, batch_desc.num_reqs
                     )
-
-
-                    # FIA may add a virtual request in Mixed Batch scenarios.
-                    # here we revert the request added by _pad_query_start_loc_for_fia if SP is enabled.
-                    # RELAXED CONDITION: Check if num_reqs_padded was actually increased, rather than
-                    # strictly checking token equality. This handles cases where num_tokens_padded
-                    # != num_tokens_unpadded due to SP alignment (e.g., 29292 vs 29290).
-                    if enable_sp() and num_reqs_padded > old_num_reqs_padded:
-                        if num_tokens_padded == num_tokens_unpadded:
+                    if enable_sp() and num_tokens_padded == num_tokens_unpadded:
+                        if num_reqs_padded > old_num_reqs_padded:
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
-                        if num_tokens_padded != num_tokens_unpadded and not self.speculative_config:
-                            num_reqs_padded = old_num_reqs_padded
-                            self.query_start_loc.np[num_reqs_padded + 1] = 0
-                            self.query_start_loc.np[num_reqs_padded] = num_tokens_padded
-                            self.query_start_loc.gpu[num_reqs_padded] = num_tokens_padded
 
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
