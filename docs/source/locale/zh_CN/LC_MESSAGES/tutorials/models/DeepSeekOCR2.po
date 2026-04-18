@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-04-18 01:54+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -31,8 +31,7 @@ msgstr "简介"
 msgid ""
 "DeepSeekOCR2 is a model to investigate the role of vision encoders from "
 "an LLM-centric viewpoint."
-msgstr ""
-"DeepSeekOCR2 是一个从以 LLM 为中心的视角研究视觉编码器作用的模型。"
+msgstr "DeepSeekOCR2 是一个从以 LLM 为中心的视角研究视觉编码器作用的模型。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:7
 msgid "The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0`."
@@ -43,8 +42,7 @@ msgid ""
 "This document will show the main verification steps of the model, "
 "including supported features, feature configuration, environment "
 "preparation, single-node deployment, accuracy and performance evaluation."
-msgstr ""
-"本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点部署、精度评估和性能评估。"
+msgstr "本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点部署、精度评估和性能评估。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:11
 msgid "Supported Features"
@@ -55,15 +53,13 @@ msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the"
 " model's supported feature matrix."
-msgstr ""
-"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+msgstr "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:15
 msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
 "the feature's configuration."
-msgstr ""
-"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:17
 msgid "Environment Preparation"
@@ -77,7 +73,9 @@ msgstr "模型权重"
 msgid ""
 "`DeepSeek-OCR-2`: [Download model weight](https://huggingface.co"
 "/deepseek-ai/DeepSeek-OCR-2)."
-msgstr "`DeepSeek-OCR-2`：[下载模型权重](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2)。"
+msgstr ""
+"`DeepSeek-OCR-2`：[下载模型权重](https://huggingface.co/deepseek-ai/DeepSeek-"
+"OCR-2)。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:23
 msgid ""
@@ -95,7 +93,8 @@ msgid ""
 "node communication according to [verify multi-node communication "
 "environment](../../installation.md#verify-multi-node-communication)."
 msgstr ""
-"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
+"communication)验证多节点通信。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:29
 msgid "Installation"
@@ -111,7 +110,8 @@ msgid ""
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md"
+"#set-up-using-docker)。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:71
 msgid ""
@@ -148,7 +148,7 @@ msgid "Prefill-Decode Disaggregation"
 msgstr "预填充-解码分离部署"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:115
-msgid "We don't neel to Prefill-Decode disaggregation"
+msgid "We don't need to Prefill-Decode disaggregation"
 msgstr "我们不需要预填充-解码分离部署"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:117
@@ -182,14 +182,14 @@ msgid ""
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
 "details."
 msgstr ""
-"详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+"详细信息请参考[使用 AISBench "
+"进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:148
 msgid ""
 "After execution, you can get the result, here is the result of `DeepSeek-"
 "OCR-2` for reference only."
-msgstr ""
-"执行后即可获得结果，以下是 `DeepSeek-OCR-2` 的结果，仅供参考。"
+msgstr "执行后即可获得结果，以下是 `DeepSeek-OCR-2` 的结果，仅供参考。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:35
 msgid "dataset"
@@ -252,7 +252,7 @@ msgid "Using Language Model Evaluation Harness"
 msgstr "使用 Language Model Evaluation Harness"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:157
-msgid "Not test yet."
+msgid "Not tested yet."
 msgstr "尚未测试。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:159
@@ -265,7 +265,9 @@ msgid ""
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
 msgstr ""
-"详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+"详细信息请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
 
 #: ../../source/tutorials/models/DeepSeekOCR2.md:165
 msgid "The performance result is:"

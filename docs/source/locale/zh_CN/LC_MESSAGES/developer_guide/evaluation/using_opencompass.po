@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-18 01:54+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -50,8 +50,10 @@ msgid ""
 msgstr "服务器启动后，您可以在新的终端中使用输入提示词查询模型。"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:56
-msgid "2. Run C-Eval using OpenCompass for accuracy testing"
-msgstr "2. 使用 OpenCompass 运行 C-Eval 准确率测试"
+msgid ""
+"2. Run C-Eval (a Chinese language model evaluation benchmark) using "
+"OpenCompass for accuracy testing"
+msgstr "2. 使用 OpenCompass 运行 C-Eval（一个中文语言模型评估基准）进行准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:58
 msgid ""

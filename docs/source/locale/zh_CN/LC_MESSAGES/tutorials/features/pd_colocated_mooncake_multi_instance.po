@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-04-18 01:54+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -32,8 +32,7 @@ msgid ""
 "vLLM-Ascend now supports PD-colocated deployment with Mooncake features. "
 "This guide provides step-by-step instructions to test these features with"
 " constrained resources."
-msgstr ""
-"vLLM-Ascend 现已支持基于 Mooncake 特性的 PD 共置部署。本指南提供逐步说明，指导如何在有限资源下测试这些特性。"
+msgstr "vLLM-Ascend 现已支持基于 Mooncake 特性的 PD 共置部署。本指南提供逐步说明，指导如何在有限资源下测试这些特性。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:9
 msgid ""
@@ -42,8 +41,8 @@ msgid ""
 "Atlas 800T A2 nodes to deploy two vLLM instances. Each instance occupies "
 "4 NPU cards and uses PD-colocated deployment."
 msgstr ""
-"本指南以 Qwen2.5-72B-Instruct 模型为例，演示如何在两台 Atlas 800T A2 节点上使用 vllm-ascend v0.11.0（配合 vLLM v0.11.0）"
-"部署两个 vLLM 实例。每个实例占用 4 张 NPU 卡，并采用 PD 共置部署模式。"
+"本指南以 Qwen2.5-72B-Instruct 模型为例，演示如何在两台 Atlas 800T A2 节点上使用 vllm-ascend "
+"v0.11.0（配合 vLLM v0.11.0）部署两个 vLLM 实例。每个实例占用 4 张 NPU 卡，并采用 PD 共置部署模式。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:14
 msgid "Verify Multi-Node Communication Environment"
@@ -58,15 +57,13 @@ msgid ""
 "The two Atlas 800T A2 nodes must be physically interconnected via a RoCE "
 "network. Without RoCE interconnection, cross-node KV Cache access "
 "performance will be significantly degraded."
-msgstr ""
-"两台 Atlas 800T A2 节点必须通过 RoCE 网络进行物理互联。如果没有 RoCE 互联，跨节点 KV 缓存访问性能将显著下降。"
+msgstr "两台 Atlas 800T A2 节点必须通过 RoCE 网络进行物理互联。如果没有 RoCE 互联，跨节点 KV 缓存访问性能将显著下降。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:21
 msgid ""
 "All NPU cards must communicate properly. Intra-node communication uses "
 "HCCS, while inter-node communication uses the RoCE network."
-msgstr ""
-"所有 NPU 卡必须能够正常通信。节点内通信使用 HCCS，节点间通信使用 RoCE 网络。"
+msgstr "所有 NPU 卡必须能够正常通信。节点内通信使用 HCCS，节点间通信使用 RoCE 网络。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:24
 msgid "Verification Process"
@@ -76,8 +73,7 @@ msgstr "验证流程"
 msgid ""
 "The following process serves as a reference example. Please modify "
 "parameters such as IP addresses according to your actual environment."
-msgstr ""
-"以下流程仅供参考。请根据实际环境修改 IP 地址等参数。"
+msgstr "以下流程仅供参考。请根据实际环境修改 IP 地址等参数。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:29
 msgid "Single Node Verification:"
@@ -87,8 +83,7 @@ msgstr "单节点验证："
 msgid ""
 "Execute the following commands sequentially. The results must all be "
 "`success` and the status must be `UP`:"
-msgstr ""
-"依次执行以下命令。结果必须全部为 `success`，状态必须为 `UP`："
+msgstr "依次执行以下命令。结果必须全部为 `success`，状态必须为 `UP`："
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:47
 msgid "Check NPU HCCN Configuration:"
@@ -98,8 +93,7 @@ msgstr "检查 NPU HCCN 配置："
 msgid ""
 "Ensure that the hccn.conf file exists in the environment. If using "
 "Docker, mount it into the container."
-msgstr ""
-"确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其挂载到容器中。"
+msgstr "确保环境中存在 hccn.conf 文件。如果使用 Docker，请将其挂载到容器中。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:56
 msgid "Get NPU IP Addresses:"
@@ -129,8 +123,7 @@ msgstr "（可选）安装 Mooncake"
 msgid ""
 "Mooncake is pre-installed and functional in the v0.11.0 image. The "
 "following installation steps are optional."
-msgstr ""
-"Mooncake 在 v0.11.0 镜像中已预安装并可正常使用。以下安装步骤为可选操作。"
+msgstr "Mooncake 在 v0.11.0 镜像中已预安装并可正常使用。以下安装步骤为可选操作。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:117
 msgid ""
@@ -138,8 +131,9 @@ msgid ""
 " by Moonshot AI. Installation and compilation guide: <https://github.com"
 "/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>."
 msgstr ""
-"Mooncake 是 Moonshot AI 提供的领先大语言模型服务 Kimi 的服务平台。安装与编译指南："
-"<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>。"
+"Mooncake 是 Moonshot AI 提供的领先大语言模型服务 Kimi "
+"的服务平台。安装与编译指南：<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file"
+"#build-and-use-binaries>。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:121
 msgid "First, obtain the Mooncake project using the following command:"
@@ -169,8 +163,7 @@ msgstr "启动 Mooncake 主服务"
 msgid ""
 "To start the Mooncake master service in one of the node containers, use "
 "the following command:"
-msgstr ""
-"要在其中一个节点容器中启动 Mooncake 主服务，请使用以下命令："
+msgstr "要在其中一个节点容器中启动 Mooncake 主服务，请使用以下命令："
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "Parameter"
@@ -186,7 +179,7 @@ msgstr "说明"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "port"
-msgstr "port"
+msgstr "端口"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md
 msgid "50088"
@@ -288,8 +281,9 @@ msgid ""
 " on the first Atlas 800T A2 server, while Instance 2 utilizes cards [0-3]"
 " on the second server."
 msgstr ""
-"在节点 1 和节点 2 上分别创建容器，并在每个容器中启动 Qwen2.5-72B-Instruct 模型服务，以测试跨节点、跨实例 KV 缓存的复用性和性能。"
-"实例 1 使用第一台 Atlas 800T A2 服务器上的 NPU 卡 [0-3]，实例 2 使用第二台服务器上的 NPU 卡 [0-3]。"
+"在节点 1 和节点 2 上分别创建容器，并在每个容器中启动 Qwen2.5-72B-Instruct 模型服务，以测试跨节点、跨实例 KV "
+"缓存的复用性和性能。实例 1 使用第一台 Atlas 800T A2 服务器上的 NPU 卡 [0-3]，实例 2 使用第二台服务器上的 NPU "
+"卡 [0-3]。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:208
 msgid "Deploy Instance 1"
@@ -299,8 +293,7 @@ msgstr "部署实例 1"
 msgid ""
 "Replace file paths, host, and port parameters based on your actual "
 "environment configuration."
-msgstr ""
-"请根据实际环境配置替换文件路径、主机和端口参数。"
+msgstr "请根据实际环境配置替换文件路径、主机和端口参数。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:242
 msgid "Deploy Instance 2"
@@ -311,8 +304,7 @@ msgid ""
 "The deployment method for Instance 2 is identical to Instance 1. Simply "
 "modify the `--host` and `--port` parameters according to your Instance 2 "
 "configuration."
-msgstr ""
-"实例 2 的部署方法与实例 1 相同。只需根据实例 2 的配置修改 `--host` 和 `--port` 参数即可。"
+msgstr "实例 2 的部署方法与实例 1 相同。只需根据实例 2 的配置修改 `--host` 和 `--port` 参数即可。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:248
 msgid "Configuration Parameters"
@@ -394,15 +386,13 @@ msgstr "**关于 use_layerwise 的说明：**"
 msgid ""
 "`false`: Transfer entire KV Cache (suitable for cross-node with "
 "sufficient bandwidth)"
-msgstr ""
-"`false`：传输整个 KV 缓存（适用于带宽充足的跨节点场景）"
+msgstr "`false`：传输整个 KV 缓存（适用于带宽充足的跨节点场景）"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:263
 msgid ""
 "`true`: Layer-by-layer transfer (suitable for single-node memory "
 "constraints)"
-msgstr ""
-"`true`：逐层传输（适用于单节点内存受限场景）"
+msgstr "`true`：逐层传输（适用于单节点内存受限场景）"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:266
 msgid "Benchmark"
@@ -413,8 +403,7 @@ msgid ""
 "We recommend using the **AISBench** tool to assess performance. The test "
 "uses **Dataset A**, consisting of fully random data, with the following "
 "configuration:"
-msgstr ""
-"我们推荐使用 **AISBench** 工具评估性能。测试使用完全随机数据的**数据集 A**，配置如下："
+msgstr "我们推荐使用 **AISBench** 工具评估性能。测试使用完全随机数据的**数据集 A**，配置如下："
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:272
 msgid "Input/output tokens: 1024/10"
@@ -440,8 +429,7 @@ msgstr "步骤 1：基线（无缓存）"
 msgid ""
 "Send Dataset A to Instance 1 on Node 1 and record the Time to First Token"
 " (TTFT) as **TTFT1**."
-msgstr ""
-"将数据集 A 发送到节点 1 上的实例 1，记录首 token 时间（TTFT）为 **TTFT1**。"
+msgstr "将数据集 A 发送到节点 1 上的实例 1，记录首 token 时间（TTFT）为 **TTFT1**。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:283
 msgid "Preparation for Step 2"
@@ -450,12 +438,10 @@ msgstr "步骤 2 的准备"
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:285
 msgid ""
 "Before Step 2, send a fully random Dataset B to Instance 1. Due to the "
-"unified HBM/DRAM KV Cache with LRU (Least Recently Used) eviction policy,"
-" Dataset B's cache evicts Dataset A's cache from HBM, leaving Dataset A's"
-" cache only in Node 1's DRAM."
-msgstr ""
-"在步骤 2 之前，将完全随机的数据集 B 发送到实例 1。由于采用 LRU（最近最少使用）淘汰策略的统一 HBM/DRAM KV 缓存，"
-"数据集 B 的缓存会将数据集 A 的缓存从 HBM 中淘汰，使得数据集 A 的缓存仅保留在节点 1 的 DRAM 中。"
+"unified on-chip memory/DRAM KV Cache with LRU (Least Recently Used) "
+"eviction policy, Dataset B's cache evicts Dataset A's cache from on-chip "
+"memory, leaving Dataset A's cache only in Node 1's DRAM."
+msgstr "在步骤 2 之前，将完全随机的数据集 B 发送到实例 1。由于采用 LRU（最近最少使用）淘汰策略的统一片上内存/DRAM KV 缓存，数据集 B 的缓存会将数据集 A 的缓存从片上内存中淘汰，使得数据集 A 的缓存仅保留在节点 1 的 DRAM 中。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:290
 msgid "Step 2: Local DRAM Hit"
@@ -465,8 +451,7 @@ msgstr "步骤 2：本地 DRAM 命中"
 msgid ""
 "Send Dataset A to Instance 1 again to measure the performance when "
 "hitting the KV Cache in local DRAM. Record the TTFT as **TTFT2**."
-msgstr ""
-"再次将数据集 A 发送到实例 1，测量命中本地 DRAM 中 KV 缓存时的性能。记录 TTFT 为 **TTFT2**。"
+msgstr "再次将数据集 A 发送到实例 1，测量命中本地 DRAM 中 KV 缓存时的性能。记录 TTFT 为 **TTFT2**。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:295
 msgid "Step 3: Cross-Node DRAM Hit"
@@ -477,8 +462,7 @@ msgid ""
 "Send Dataset A to Instance 2. With the Mooncake KV Cache pool, this "
 "results in a cross-node KV Cache hit from Node 1's DRAM. Record the TTFT "
 "as **TTFT3**."
-msgstr ""
-"将数据集 A 发送到实例 2。借助 Mooncake KV 缓存池，这将实现从节点 1 DRAM 的跨节点 KV 缓存命中。记录 TTFT 为 **TTFT3**。"
+msgstr "将数据集 A 发送到实例 2。借助 Mooncake KV 缓存池，这将实现从节点 1 DRAM 的跨节点 KV 缓存命中。记录 TTFT 为 **TTFT3**。"
 
 #: ../../source/tutorials/features/pd_colocated_mooncake_multi_instance.md:301
 msgid "**Model Configuration**:"

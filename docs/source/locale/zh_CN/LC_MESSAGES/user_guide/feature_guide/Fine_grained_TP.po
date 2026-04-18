@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-18 01:54+0000\n"
 "PO-Revision-Date: 2026-01-22 17:15+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -20,7 +20,7 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:1
-msgid "Fine-Grained Tensor Parallelism (Finegrained TP)"
+msgid "Fine-Grained Tensor Parallelism (Fine-grained TP)"
 msgstr "细粒度张量并行"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:3
@@ -53,7 +53,7 @@ msgstr ""
 "架构兼容，并无缝集成到 vLLM 的推理流水线中。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:11
-msgid "Benefits of Finegrained TP"
+msgid "Benefits of Fine-grained TP"
 msgstr "细粒度 TP 的优势"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:13
@@ -65,11 +65,12 @@ msgstr "细粒度张量并行通过有针对性的权重分片，带来两个主
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:15
 msgid ""
 "**Reduced Per-Device Memory Footprint**:   Fine-grained TP shards large "
-"weight matrices(e.g., LM Head, o_proj)across devices, lowering peak "
+"weight matrices (e.g., LM Head, o_proj) across devices, lowering peak "
 "memory usage and enabling larger batches or deployment on memory-limited "
 "hardware—without quantization."
 msgstr ""
-"**降低单设备内存占用**：细粒度 TP 将大型权重矩阵跨设备分片，从而降低峰值内存使用量。这使得在不使用量化的情况下，也能支持更大的批次或在内存受限的硬件上进行部署。"
+"**降低单设备内存占用**：细粒度 TP "
+"将大型权重矩阵跨设备分片，从而降低峰值内存使用量。这使得在不使用量化的情况下，也能支持更大的批次或在内存受限的硬件上进行部署。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:18
 msgid ""
@@ -79,9 +80,8 @@ msgid ""
 "efficiency—especially for latency-sensitive layers like LM Head and "
 "o_proj."
 msgstr ""
-"**加速 GEMM 内存访问**：在以解码为主的工作负载中，GEMM "
-"性能通常受限于内存带宽。权重分片减少了单个设备需要获取的权重数据量，降低了 DRAM 流量并提高了带宽效率——对于像 LM Head 和 o_proj "
-"这样对延迟敏感的层尤其有效。"
+"**加速 GEMM 内存访问**：在以解码为主的工作负载中，GEMM 性能通常受限于内存带宽。权重分片减少了单个设备需要获取的权重数据量，降低了 "
+"DRAM 流量并提高了带宽效率——对于像 LM Head 和 o_proj 这样对延迟敏感的层尤其有效。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:21
 msgid ""
@@ -89,8 +89,7 @@ msgid ""
 "communication, and compute—particularly in high-concurrency serving "
 "scenarios—while maintaining compatibility with standard dense transformer"
 " models."
-msgstr ""
-"综上所述，这些优化使得开发者能够更好地平衡内存、通信和计算资源，同时保持对标准密集 Transformer 模型的兼容性。"
+msgstr "综上所述，这些优化使得开发者能够更好地平衡内存、通信和计算资源，同时保持对标准密集 Transformer 模型的兼容性。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:25
 msgid "Supported Scenarios"
@@ -200,7 +199,7 @@ msgid ""
 msgstr "⚠️ 违反这些约束将导致运行时错误或未定义的行为。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:56
-msgid "How to Use Finegrained TP"
+msgid "How to Use Fine-grained TP"
 msgstr "如何使用细粒度 TP"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:58
@@ -225,12 +224,12 @@ msgstr "实验结果"
 msgid ""
 "To evaluate the effectiveness of fine-grained TP in large-scale service "
 "scenarios, we use the model **DeepSeek-R1-W8A8**, deploy PD separated "
-"decode instances in an environment of 32 cards Ascend 910B*64G (A2), with"
-" parallel configuration as DP32+EP32, and fine-grained TP size of 8; the "
-"performance data is as follows."
+"decode instances in an environment of 32 cards Ascend Atlas A2 inference "
+"products*64G (A2), with parallel configuration as DP32+EP32, and fine-"
+"grained TP size of 8; the performance data is as follows."
 msgstr ""
-"为了评估细粒度 TP 在大规模服务场景下的有效性，我们使用 **DeepSeek-R1-W8A8** 模型，在 32 卡 Ascend 910B*64G "
-"环境下部署 PD 分离的解码实例。并行配置为 DP32+EP32，细粒度 TP 大小设为 8。性能数据如下。"
+"为评估细粒度 TP 在大规模服务场景下的有效性，我们使用 **DeepSeek-R1-W8A8** 模型，在 32 卡 Ascend Atlas A2 "
+"推理产品*64G 环境下部署 PD 分离的解码实例。并行配置为 DP32+EP32，细粒度 TP 大小设为 8。性能数据如下。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md
 msgid "Module"
@@ -312,4 +311,6 @@ msgid ""
 "PD separation, where models are typically deployed in all-DP mode. In "
 "this setup, sharding weight-heavy layers reduces redundant storage and "
 "memory pressure."
-msgstr "细粒度 TP 在 PD 分离的**解码实例**中**最为有效**。在该场景下，模型通常以全 DP 模式部署，通过对权重密集的层进行分片，可以有效减少冗余存储并缓解内存压力。"
+msgstr ""
+"细粒度 TP 在 PD 分离的**解码实例**中**最为有效**。在该场景下，模型通常以全 DP "
+"模式部署，通过对权重密集的层进行分片，可以有效减少冗余存储并缓解内存压力。"
