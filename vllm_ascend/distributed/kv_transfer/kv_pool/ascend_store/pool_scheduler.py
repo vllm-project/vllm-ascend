@@ -90,11 +90,12 @@ class KVPoolScheduler:
         self.model_name = model_config.model.split('/')[-1]
 
     def _generate_keys_and_alloc(self, block_hashes, req_id='') -> tuple[list[list[str]], list[list[str]], dict[str, int | None]]:
-        block_keys_by_layer, last_block_keys_by_layer = self.generate_keys(block_hashes, req_id=req_id)
+        block_keys_by_layer, last_block_keys_by_layer, block_hash_groups = self.generate_keys(block_hashes, req_id=req_id)
         all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
         all_keys.extend([key for layer_keys in last_block_keys_by_layer for key in layer_keys])
         if self.key_lru_cache is not None:
-            gvas = self.key_lru_cache.batch_get_and_alloc(all_keys, self.page_size_bytes)
+            gvas = self.key_lru_cache.batch_get_and_alloc(
+                all_keys, self.page_size_bytes, block_hash_groups)
         elif self.store_scheduler is not None:
             gvas = self.store_scheduler.batch_alloc(all_keys,
                                                     [self.page_size_bytes for _ in range(len(all_keys))])
@@ -105,16 +106,22 @@ class KVPoolScheduler:
 
     def generate_keys(self, chunk_hashes, req_id=''):
         has_last_block = req_id != ''
+        block_hash_groups: dict[bytes, list[str]] = {}
 
         def _build_layer_keys(layer_id: int) -> tuple[list[str], list[str]]:
-            chunk_keys = [
-                f"{self.model_name}@pcp{pcp_rank}@dcp{dcp_rank}"
-                f"@head_or_tp_rank:{head_or_tp_rank}@{chunk_hash.hex()}@{layer_id}"
-                for pcp_rank in range(self.pcp_size)
-                for dcp_rank in range(self.dcp_size)
-                for head_or_tp_rank in range(self.tp_size // self.put_step)
-                for chunk_hash in chunk_hashes
-            ]
+            chunk_keys = []
+            for chunk_hash in chunk_hashes:
+                if chunk_hash not in block_hash_groups:
+                    block_hash_groups[chunk_hash] = []
+                keys_for_hash = [
+                    f"{self.model_name}@pcp{pcp_rank}@dcp{dcp_rank}"
+                    f"@head_or_tp_rank:{head_or_tp_rank}@{chunk_hash.hex()}@{layer_id}"
+                    for pcp_rank in range(self.pcp_size)
+                    for dcp_rank in range(self.dcp_size)
+                    for head_or_tp_rank in range(self.tp_size // self.put_step)
+                ]
+                chunk_keys.extend(keys_for_hash)
+                block_hash_groups[chunk_hash].extend(keys_for_hash)
 
             last_block_keys = []
             if has_last_block:
@@ -129,7 +136,7 @@ class KVPoolScheduler:
         results = [_build_layer_keys(layer_id) for layer_id in range(self.num_layers)]
         block_keys_by_layer = [r[0] for r in results]
         last_block_keys_by_layer = [r[1] for r in results]
-        return block_keys_by_layer, last_block_keys_by_layer
+        return block_keys_by_layer, last_block_keys_by_layer, block_hash_groups
 
     def get_num_new_matched_tokens(
         self,
@@ -148,7 +155,6 @@ class KVPoolScheduler:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-        return 0, False
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
             return 0, False
 
@@ -160,7 +166,17 @@ class KVPoolScheduler:
         if token_len < self._block_size:
             return 0, False
 
-        num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
+        num_blocks = token_len // self._block_size
+        if self.key_lru_cache is not None:
+            num_hit_blocks = 0
+            for bh in request.block_hashes[:num_blocks]:
+                if self.key_lru_cache.has_block(bh):
+                    num_hit_blocks += 1
+                else:
+                    break
+            num_external_hit_tokens = num_hit_blocks * self._block_size
+        else:
+            num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
@@ -477,6 +493,11 @@ class KVPoolScheduler:
         if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
         delay_free_blocks = len(block_ids) > 0
+        # if self.key_lru_cache is not None and request.block_hashes:
+        #     removed_keys = self.key_lru_cache.remove_blocks(
+        #         request.block_hashes[:len(block_ids)])
+        #     if removed_keys and self.store_scheduler is not None:
+        #         self.store_scheduler.remove_batch(removed_keys)
         if delay_free_blocks:
             logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
