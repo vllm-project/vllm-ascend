@@ -2,18 +2,18 @@
 
 ## How Does It Work?
 
-This is an optimization based on Fx graphs, which can be considered an acceleration solution for the aclgraph mode.
+This is an optimization based on FX graphs, which can be considered an acceleration solution for the aclgraph mode.
 
 You can get its code [code](https://gitcode.com/Ascend/torchair)
 
-## Default Fx Graph Optimization
+## Default FX Graph Optimization
 
-### Fx Graph pass
+### FX Graph pass
 
 - For the intermediate nodes of the model, replace the non-in-place operators contained in the nodes with in-place operators to reduce memory movement during computation and improve performance.
 - For the original input parameters of the model, if they include in-place operators, Dynamo's Functionalize process will replace the in-place operators with a form of non-in-place operators + copy operators. npugraph_ex will reverse this process, restoring the in-place operators and reducing memory movement.
 
-### Fx fusion pass
+### FX fusion pass
 
 npugraph_ex now provides three default operator fusion passes, and more will be added in the future.
 

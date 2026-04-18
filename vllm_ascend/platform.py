@@ -234,11 +234,24 @@ class NPUPlatform(Platform):
         torch.npu.set_device(device)
 
     @classmethod
+    def _validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
+        additional_config = vllm_config.additional_config or {}
+        layer_sharding = additional_config.get("layer_sharding") or []
+        if not layer_sharding:
+            return
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.kv_role != "kv_producer":
+            raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
         if vllm_config.model_config is not None:
             maybe_auto_detect_quantization(vllm_config)
+
+        cls._validate_layer_sharding_config(vllm_config)
 
         # initialize ascend config from vllm additional_config
         cls._fix_incompatible_config(vllm_config)
@@ -446,6 +459,13 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.enable_chunked_prefill = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
+        # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
+        if ascend_config.profiling_chunk_config.enabled:
+            vllm_config.scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
+            )
+            import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
+
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         if (
             vllm_config.kv_transfer_config is not None
@@ -609,7 +629,6 @@ class NPUPlatform(Platform):
             vllm_config (VllmConfig): configuration of vllm.
             dp_metadata (Dpmetadata): metadata for data parallelism.
                 lack of typehint because of circular import.
-            virtual_engine (int, optional): index of virtual engine. Defaults to 0.
             num_tokens (int | None, optional): number of tokens. Defaults to None.
             num_tokens_across_dp (torch.Tensor | None, optional): number of tokens
                 across data parallelism.Defaults to None.
@@ -624,7 +643,11 @@ class NPUPlatform(Platform):
             dict[str, Any]: _description_
         """
         # NOTE(Ronald1995): avoid circular import.
-        from vllm_ascend.ascend_forward_context import get_mc2_mask, select_moe_comm_method
+        from vllm_ascend.ascend_forward_context import (
+            get_mc2_mask,
+            get_mrv2_in_profile_run,
+            select_moe_comm_method,
+        )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
@@ -640,14 +663,14 @@ class NPUPlatform(Platform):
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
         # compared to v1, v2's forward context lacks some fields, such as:
-        # in_profile_run, is_first_layer, prefetch_mlp_gate_up_proj,
-        # prefetch_mlp_gate_down_proj, prefetch_mlp_enabled, model_instance,
-        # is_draft_model.
+        # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
+        # prefetch_mlp_enabled, model_instance, is_draft_model.
         if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
             return {}
 
         # is_draft_model will be removed later, so we set it to False temporarily.
         is_draft_model = False
+        in_profile_run = get_mrv2_in_profile_run()
         moe_comm_type = select_moe_comm_method(
             num_tokens,
             vllm_config,
@@ -694,6 +717,7 @@ class NPUPlatform(Platform):
         else:
             max_tokens_across_dp = num_tokens
         mc2_mask = None
+        padded_num_tokens = None
         if num_tokens is not None:
             num_actual_tokens = num_tokens
             # NOTE: token num which need to pad to when mc2
@@ -716,6 +740,8 @@ class NPUPlatform(Platform):
             "max_tokens_across_dp": max_tokens_across_dp,
             "mc2_mask": mc2_mask,
             "is_draft_model": is_draft_model,
+            "in_profile_run": in_profile_run,
+            "padded_num_tokens": padded_num_tokens,
         }
 
     @staticmethod
@@ -866,3 +892,7 @@ class NPUPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        pass

@@ -53,7 +53,7 @@ curl http://localhost:8000/v1/completions \
     }'
 ```
 
-## 2. Run C-Eval using OpenCompass for accuracy testing
+## 2. Run C-Eval (a Chinese language model evaluation benchmark) using OpenCompass for accuracy testing
 
 Install OpenCompass and configure the environment variables in the container:
 

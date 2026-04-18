@@ -137,9 +137,9 @@ The problem is usually caused by the installation of a development or editable v
 
 OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/usage/troubleshooting/#out-of-memory).
 
-In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
+In scenarios where NPUs have limited high bandwidth memory (on-chip memory) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
 
-- **Limit `--max-model-len`**: It can save the HBM usage for KV cache initialization step.
+- **Limit `--max-model-len`**: It can save the on-chip memory usage for KV cache initialization step.
 
 - **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/cli/serve/#-gpu-memory-utilization).
 
@@ -147,7 +147,7 @@ In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynam
 
 ### 13. Failed to enable NPU graph mode when running DeepSeek
 
-Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
+Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA (Multi-Head Latent Attention) and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, `num_heads`/`num_kv_heads` is {32, 64, 128}.
 
@@ -260,7 +260,7 @@ The performance of `torch_npu.npu_fused_infer_attention_score` in small batch sc
 
 ```bash
 bash tools/install_flash_infer_attention_score_ops_a2.sh
-## change to run the following instruction if you're using A3 machine
+# change to run the following instruction if you're using A3 machine
 # bash tools/install_flash_infer_attention_score_ops_a3.sh
 ```
 
