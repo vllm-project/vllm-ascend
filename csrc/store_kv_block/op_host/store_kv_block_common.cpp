@@ -63,7 +63,7 @@ void StoreKVBlockCommonTiling::SetTiling()
     else tilingData_.set_numCache(params.numCache); 
 
     if (params.groupInfoLen<=0) printf("[ZTLOG] params.groupInfoLen<=0 \n");
-    else tilingData_.set_groupInfoLen(params.groupInfoLen*3); 
+    else tilingData_.set_groupInfoLen(params.groupInfoLen); 
 
     size_t* workspaceSize = context_->GetWorkspaceSizes(1);
     *workspaceSize = params.workspaceSize + params.sysWorkspaceSize;

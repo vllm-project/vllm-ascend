@@ -45,6 +45,9 @@ static ge::graphStatus StoreKVBlockTilingFunc(gert::TilingContext* context) {
 }
 
 struct Tiling4StoreKVBlockCompileInfo {
+    uint32_t coreNum;
+    uint64_t ubSizePlatForm;
+    uint32_t sysWorkspaceSize;
 };
 static ge::graphStatus TilingParseForStoreKVBlock(gert::TilingParseContext* context) {
     return ge::GRAPH_SUCCESS;

@@ -9,7 +9,7 @@
 #add_definitions(-DMAX_BLOCK_NUM_=3)
 add_ops_compile_options(
         OP_NAME StoreKVBlock
-        OPTIONS --cce-auto-sync=off
+        OPTIONS --cce-auto-sync=on
                 -Wno-deprecated-declarations
                 -Werror
 )

@@ -15,8 +15,8 @@
  */
 //  #include "../aclnn_torch_adapter/op_api_common.h"
 
-#ifndef RESHAPE_AND_CACHE_BY_GROUP_TORCH_ADPT_H
-#define RESHAPE_AND_CACHE_BY_GROUP_TORCH_ADPT_H
+#ifndef STORE_KV_BLOCK_TORCH_ADPT_H
+#define STORE_KV_BLOCK_TORCH_ADPT_H
 #include <climits>  
 namespace vllm_ascend {
 
@@ -39,12 +39,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> store_kv_block_pre(
         // 1. 获取当前起始元素的索引和所属block信息
         int32_t current_idx = slot_mapping_list[idx_slotmap];
         if(current_idx <0){
-
-            at::Tensor group_len = at::empty_like({slot_mapping_npu});
-            at::Tensor group_key_idx = at::empty_like({slot_mapping_npu});
-            at::Tensor group_key_cache_idx = at::empty_like({slot_mapping_npu});
-            return std::tuple<at::Tensor, at::Tensor, at::Tensor>(group_len, group_key_idx, group_key_cache_idx);
-
+            idx_slotmap++;
+            continue;
         }
 
         int32_t block_id = current_idx / block_size;       // 所属block编号
@@ -68,7 +64,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> store_kv_block_pre(
             }else{
                 // 3. 找该组实际的最后一个元素位置
                 // 循环条件：不越界 + 当前元素属于当前block + 未超过理论最后元素; 
-                while (j < slot_mapping_len && slot_mapping_list[j] / block_size == block_id && j+1 < slot_mapping_len && slot_mapping_list[j+1]!=slot_mapping_list[j]+1) {
+                while(j+1 < slot_mapping_len && slot_mapping_list[j] / block_size == block_id && slot_mapping_list[j+1] ==slot_mapping_list[j]+1) {
                     j++;
                 }
             }

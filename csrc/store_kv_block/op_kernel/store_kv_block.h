@@ -107,15 +107,15 @@ public:
 
         pipeThis->InitBuffer(tokenBuf,  blockTableSize*tokenByteSize);
         tokenLocal = tokenBuf.Get<T>();
-        // printf("data type %d\n",sizeof(T));
+
         AscendC::DataCopyExtParams copyParams{1, 0,  0, 0, 0};//todo完整块长度
         AscendC::DataCopyPadExtParams<T> padParams{false, 0, 0, 0};
         for (uint32_t i = 0; i < corePerNum; i++) {
             uint32_t idx = (coreId+i*blockNum);
          
-            if( groupLenGt.GetValue(idx)<= 0 || groupKeyIdxGt.GetValue(idx)<0 || groupKeyCacheIdxGt.GetValue(idx)<0){
-                continue;
-            }
+            // if( groupLenGt.GetValue(idx)<= 0 || groupKeyIdxGt.GetValue(idx)<0 || groupKeyCacheIdxGt.GetValue(idx)<0){
+            //     continue;
+            // }
            
             copyParams.blockLen = groupLenGt.GetValue(idx)*tokenByteSize; //单位字节
             DataCopyPad(tokenLocal, keyInputGt[ groupKeyIdxGt.GetValue(idx)*tokenSize], copyParams, padParams); //注意偏移顺序
