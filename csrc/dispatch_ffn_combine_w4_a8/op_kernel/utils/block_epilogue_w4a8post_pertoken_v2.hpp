@@ -153,17 +153,15 @@ public:
         int32_t gmCOffsetL = (preSrcExpertSum * params.n2 + blockCoord.m() * params.n2) + blockCoord.n() + params.n2;
         auto gmTileCH = gmC[gmCOffsetH];
         auto gmTileCL = gmC[gmCOffsetL];
-        int32_t gmweighAuxOffset = groupIdx * params.n2 + blockCoord.n();
 
         AscendC::GlobalTensor<float> weightAux;
         AscendC::GlobalTensor<float> gmWeighAux;
-        if (listLen == 1) { // Large tensor
-            weightAux.SetGlobalBuffer(gmWeightAux);
-            gmWeighAux = weightAux[gmweighAuxOffset];
-        } else {
-            weightAux.SetGlobalBuffer(GetTensorAddr<float>(groupIdx, reinterpret_cast<GM_ADDR>(gmWeightAux)));
-            gmWeighAux = weightAux[blockCoord.n()];
-        }
+
+        int32_t arrayGroupIdx = listLen == 1 ? 0 : groupIdx;
+        weightAux.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(GetTensorAddr<float>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(gmWeightAux))));
+        int64_t gmOffsetwA = blockCoord.n() + (listLen == 1 ? groupIdx * params.n2 : 0);
+        gmWeighAux = weightAux[gmOffsetwA];
+
 
 #ifdef W4A8_DEBUG
         int32_t gmCOffset = (preSrcExpertSum * params.n2 + blockCoord.m() * params.n2) / 2 + blockCoord.n();
