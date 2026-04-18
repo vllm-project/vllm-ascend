@@ -47,6 +47,15 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_sparse_c8`                  | bool | `False` | Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and GLM5). Not supported on A5 devices now |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
 
+### Environment variables (scheduling and fused MoE)
+
+These variables are read at process startup. vLLM Ascend validates them against PD disaggregation settings (`kv_transfer_config` and `kv_role` from KV transfer configuration):
+
+| Name | Description |
+| ---- | ----------- |
+| `VLLM_ASCEND_BALANCE_SCHEDULING` | When set to `1`, enables balance scheduling in the v1 scheduler. **Only valid in PD-mixed mode** (`kv_role` is `kv_both`, or `kv_transfer_config` is unset). **Do not enable in PD-disaggregated mode** (`kv_producer` / `kv_consumer` only); startup will fail. |
+| `VLLM_ASCEND_ENABLE_FUSED_MC2` | Selects fused MC2 MoE communication (`dispatch_ffn_combine` / `dispatch_gmm_combine_decode`). **Only valid on PD-disaggregated decode nodes** (`kv_role` is `kv_consumer`). **Do not enable in PD-mixed mode or on prefill-only nodes** (`kv_producer`); startup will fail. See also the inline comments in `vllm_ascend/envs.py` for values `0`, `1`, and `2`. |
+
 The details of each configuration option are as follows:
 
 **xlite_graph_config**
