@@ -45,7 +45,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  scale1,
                  scale2,
                  probs,
-                 x_active_mask.has_value() ? x_active_mask.value() : at::Tensor()
+                 x_active_mask.has_value() ? x_active_mask.value() : at::Tensor(),
                  group_ep_ptr,
                  max_output_size,
                  out,
