@@ -112,13 +112,17 @@ def create_test_attention_operator_with_mask():
     actual_seq_lengths_q = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device='npu')
 
     # Create query tensor: [1, 16, 4, 128] - layout BNSD
-    query = torch.randn(1, num_heads, num_tokens, head_size, dtype=torch.float16, device='npu')
+    query = torch.randn(1, num_tokens, num_heads, head_size, dtype=torch.float16, device='npu')
     k_nope = torch.randn(268, 1, 128, 128, dtype=torch.float16, device='npu')
     value = torch.randn(268, 1, 128, 128, dtype=torch.float16, device='npu')
 
     # Create block table: [1, 128], block_table[:,0]=1, others=0
     block_tables = torch.zeros((batch_size, max_blocks_per_seq), dtype=torch.int32, device='npu')
     block_tables[:, 0] = 1  # First block is valid
+
+
+    mask = torch.tensor([[1,1,1,0,0],[1,1,1,1,0],[1,1,1,1,0],[1,1,1,1,]], dtype=torch.bool, device='npu')
+    
 
     # Scale for attention
     scale = 1.0 / (head_size ** 0.5)
@@ -128,8 +132,8 @@ def create_test_attention_operator_with_mask():
     common_kwargs = {
         "num_heads": num_heads,
         "num_key_value_heads": num_kv_heads,
-        "input_layout": "TND",
-        "atten_mask": None,
+        "input_layout": "BSND",
+        "atten_mask": mask,
         "scale": scale,
         "antiquant_mode": 0,
         "antiquant_scale": None,
@@ -166,4 +170,6 @@ if __name__ == "__main__":
     print("\n" + "=" * 50)
     print("Test 2: Call with workspace (graph path)")
     print("=" * 50)
-    test_with_workspace()
+    create_test_attention_operator_with_mask()
+
+
