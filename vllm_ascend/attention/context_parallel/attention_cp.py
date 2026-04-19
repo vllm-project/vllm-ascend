@@ -635,7 +635,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
             attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
-            attn_lse = attn_lse.transpose(1,2).view(-1, attn_lse.shape[2], 1)
+            attn_lse = attn_lse.transpose(1,2).transpose(-1, attn_lse.shape[2], 1)
         attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
