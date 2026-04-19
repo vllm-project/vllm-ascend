@@ -336,6 +336,15 @@ class NPUModelRunner(GPUModelRunner):
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
             self.positions = self._make_buffer(max_buffer_num_tokens, dtype=torch.int64)
 
+        self.use_eagle = (
+            vllm_config.speculative_config.method in ("eagle", "eagle3", "mtp")
+            if vllm_config.speculative_config
+            else False
+        )
+        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
+        # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
+        _enpu = get_c_env("ENPU_ENABLE")
+        self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
         self._set_up_drafter()
 
         # kv role
@@ -424,9 +433,6 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
-        env_enpu_enable = get_c_env("ENPU_ENABLE")
-        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
-        self.enable_enpu = env_enpu_enable is not None and env_enpu_enable.lower() == "true"
 
     @property
     def use_cp(self) -> bool:
@@ -1783,6 +1789,9 @@ class NPUModelRunner(GPUModelRunner):
             and not forward_context.capturing
             and not self.use_sparse
         ):
+            if self.enable_enpu:
+                torch.npu.current_stream().synchronize()
+
             assert positions is not None
             update_full_graph_params(
                 self.attn_backend,
@@ -2580,7 +2589,13 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+            self.model = ACLGraphWrapper(
+                self.model,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -3298,12 +3313,19 @@ class NPUModelRunner(GPUModelRunner):
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
+        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+        capture_sizes = sorted({
+            desc.num_tokens
+            for _, descs in capture_descs
+            for desc in descs
+        })
+
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
         if self.use_aclgraph:
-            set_graph_params(self.cudagraph_batch_sizes)
+            set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(self.cudagraph_batch_sizes)
+                set_draft_graph_params(capture_sizes)
 
     def capture_model(self) -> None:
         gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)

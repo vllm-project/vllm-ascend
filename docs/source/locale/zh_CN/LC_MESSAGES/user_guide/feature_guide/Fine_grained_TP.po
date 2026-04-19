@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-15 09:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,8 +20,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:1
-msgid "Fine-Grained Tensor Parallelism (Finegrained TP)"
-msgstr "细粒度张量并行 (Finegrained TP)"
+msgid "Fine-Grained Tensor Parallelism (Fine-grained TP)"
+msgstr "细粒度张量并行 (Fine-grained TP)"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:3
 msgid "Overview"
@@ -37,7 +37,10 @@ msgid ""
 "model head (lm_head), attention output projection (o_proj), and MLP "
 "blocks—via the `finegrained_tp_config` parameter."
 msgstr ""
-"细粒度张量并行 (Fine-grained TP) 扩展了标准张量并行，允许为**不同的模型组件设置独立的张量并行规模**。与对所有层应用单一的全局 `tensor_parallel_size` 不同，细粒度 TP 允许用户通过 `finegrained_tp_config` 参数为关键模块（如嵌入层、语言模型头部 (lm_head)、注意力输出投影层 (o_proj) 和 MLP 块）配置独立的 TP 规模。"
+"细粒度张量并行 (Fine-grained TP) "
+"扩展了标准张量并行，允许为**不同的模型组件设置独立的张量并行规模**。与对所有层应用单一的全局 `tensor_parallel_size` "
+"不同，细粒度 TP 允许用户通过 `finegrained_tp_config` 参数为关键模块（如嵌入层、语言模型头部 "
+"(lm_head)、注意力输出投影层 (o_proj) 和 MLP 块）配置独立的 TP 规模。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:7
 msgid ""
@@ -47,10 +50,11 @@ msgid ""
 "compatible with standard dense transformer architectures and integrates "
 "seamlessly into vLLM’s serving pipeline."
 msgstr ""
-"此功能支持在单个模型内使用异构并行策略，从而能更精细地控制跨设备的权重分布、内存布局和通信模式。该特性与标准的密集 Transformer 架构兼容，并能无缝集成到 vLLM 的服务流水线中。"
+"此功能支持在单个模型内使用异构并行策略，从而能更精细地控制跨设备的权重分布、内存布局和通信模式。该特性与标准的密集 Transformer "
+"架构兼容，并能无缝集成到 vLLM 的服务流水线中。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:11
-msgid "Benefits of Finegrained TP"
+msgid "Benefits of Fine-grained TP"
 msgstr "细粒度 TP 的优势"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:13
@@ -62,11 +66,12 @@ msgstr "细粒度张量并行通过有针对性的权重分片带来两个主要
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:15
 msgid ""
 "**Reduced Per-Device Memory Footprint**:   Fine-grained TP shards large "
-"weight matrices(e.g., LM Head, o_proj)across devices, lowering peak "
+"weight matrices (e.g., LM Head, o_proj) across devices, lowering peak "
 "memory usage and enabling larger batches or deployment on memory-limited "
 "hardware—without quantization."
 msgstr ""
-"**降低单设备内存占用**：   细粒度 TP 将大型权重矩阵（例如 LM Head、o_proj）分片到多个设备上，降低了峰值内存使用量，从而支持更大的批次或在内存受限的硬件上进行部署——无需量化。"
+"**降低单设备内存占用**：   细粒度 TP 将大型权重矩阵（例如 LM "
+"Head、o_proj）分片到多个设备上，降低了峰值内存使用量，从而支持更大的批次或在内存受限的硬件上进行部署——无需量化。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:18
 msgid ""
@@ -76,7 +81,9 @@ msgid ""
 "efficiency—especially for latency-sensitive layers like LM Head and "
 "o_proj."
 msgstr ""
-"**加速 GEMM 中的内存访问**：   在解码密集型工作负载中，GEMM 性能通常受内存带宽限制。权重分片减少了每个设备需要获取的权重数据量，从而降低了 DRAM 流量并提高了带宽效率——对于 LM Head 和 o_proj 等延迟敏感层尤其如此。"
+"**加速 GEMM 中的内存访问**：   在解码密集型工作负载中，GEMM "
+"性能通常受内存带宽限制。权重分片减少了每个设备需要获取的权重数据量，从而降低了 DRAM 流量并提高了带宽效率——对于 LM Head 和 "
+"o_proj 等延迟敏感层尤其如此。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:21
 msgid ""
@@ -99,7 +106,9 @@ msgid ""
 "Fine-grained TP is **model-agnostic** and supports all standard dense "
 "transformer architectures, including Llama, Qwen, DeepSeek (base/dense "
 "variants), and others."
-msgstr "细粒度 TP 是**模型无关的**，支持所有标准的密集 Transformer 架构，包括 Llama、Qwen、DeepSeek（基础/密集变体）等。"
+msgstr ""
+"细粒度 TP 是**模型无关的**，支持所有标准的密集 Transformer 架构，包括 "
+"Llama、Qwen、DeepSeek（基础/密集变体）等。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:31
 msgid "Component & Execution Mode Support"
@@ -161,7 +170,9 @@ msgstr "⚠️ 注意："
 msgid ""
 "`o_proj` TP is only supported in Graph mode during Decode, because "
 "dummy_run in eager mode will not trigger o_proj."
-msgstr "`o_proj` TP 仅在 Decode 阶段的 Graph 模式下受支持，因为 eager 模式下的 dummy_run 不会触发 o_proj。"
+msgstr ""
+"`o_proj` TP 仅在 Decode 阶段的 Graph 模式下受支持，因为 eager 模式下的 dummy_run 不会触发 "
+"o_proj。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:43
 msgid ""
@@ -194,7 +205,7 @@ msgid ""
 msgstr "⚠️ 违反这些约束将导致运行时错误或未定义行为。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:56
-msgid "How to Use Finegrained TP"
+msgid "How to Use Fine-grained TP"
 msgstr "如何使用细粒度 TP"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md:58
@@ -222,7 +233,9 @@ msgid ""
 "decode instances in an environment of 32 cards Ascend 910B*64G (A2), with"
 " parallel configuration as DP32+EP32, and fine-grained TP size of 8; the "
 "performance data is as follows."
-msgstr "为评估细粒度 TP 在大规模服务场景中的有效性，我们使用模型 **DeepSeek-R1-W8A8**，在 32 卡 Ascend 910B*64G (A2) 环境中部署 PD 分离的解码实例，并行配置为 DP32+EP32，细粒度 TP 规模为 8；性能数据如下。"
+msgstr ""
+"为评估细粒度 TP 在大规模服务场景中的有效性，我们使用模型 **DeepSeek-R1-W8A8**，在 32 卡 Ascend "
+"910B*64G (A2) 环境中部署 PD 分离的解码实例，并行配置为 DP32+EP32，细粒度 TP 规模为 8；性能数据如下。"
 
 #: ../../source/user_guide/feature_guide/Fine_grained_TP.md
 msgid "Module"
@@ -304,4 +317,6 @@ msgid ""
 "PD separation, where models are typically deployed in all-DP mode. In "
 "this setup, sharding weight-heavy layers reduces redundant storage and "
 "memory pressure."
-msgstr "细粒度 TP 在 PD 分离的**解码实例**中**最有效**，因为模型通常以全 DP 模式部署。在此设置中，对权重密集的层进行分片可以减少冗余存储和内存压力。"
+msgstr ""
+"细粒度 TP 在 PD 分离的**解码实例**中**最有效**，因为模型通常以全 DP "
+"模式部署。在此设置中，对权重密集的层进行分片可以减少冗余存储和内存压力。"
