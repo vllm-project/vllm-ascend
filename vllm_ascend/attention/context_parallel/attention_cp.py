@@ -543,7 +543,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
     def _forward_decode_pcp_dcp(self, query: torch.Tensor, attn_metadata: AscendMetadata) -> torch.Tensor:
         num_decodes = len(attn_metadata.decode_meta.actual_seq_lengths_q)
         lst = attn_metadata.decode_meta.actual_seq_lengths_q[:num_decodes]
-        attn_metadata.decode_meta.actual_seq_lengths_q = list(np.diff([0] + lst))
+        lst = list(np.diff([0] + lst))
         assert self.key_cache is not None
         assert self.value_cache is not None
 
@@ -586,7 +586,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
                 :, self.pcp_rank, self.dcp_rank
             ],
-            "actual_seq_lengths": attn_metadata.decode_meta.actual_seq_lengths_q,
+            "actual_seq_lengths": lst,
         }
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
