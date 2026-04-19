@@ -541,7 +541,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         return attn_out, attn_lse
 
     def _forward_decode_pcp_dcp(self, query: torch.Tensor, attn_metadata: AscendMetadata) -> torch.Tensor:
-        num_decodes = attn_metadata.decode_meta.actual_seq_lengths_q.shape[0]
+        num_decodes = len(attn_metadata.decode_meta.actual_seq_lengths_q)
         assert self.key_cache is not None
         assert self.value_cache is not None
 
@@ -550,7 +550,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
-        query = query.view(1, query.shape[0], query.shape[1], -1)
+        query = query.view(num_decodes, query.shape[0], query.shape[1], -1)
         k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
         value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
 
@@ -577,7 +577,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "scale": self.scale,
             "antiquant_mode": 0,
             "antiquant_scale": None,
-            "sparse_mode":3,
+            "sparse_mode":0,
             "softmax_lse_flag": True,
             "block_table": attn_metadata.decode_meta.block_tables,
             "block_size": self.key_cache.shape[1],
