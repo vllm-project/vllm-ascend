@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-19 02:07+0000\n"
 "PO-Revision-Date: 2026-01-22 16:18+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -89,7 +89,7 @@ msgstr "W8A8"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Chunked Prefill"
-msgstr "分块预填充 (Chunked Prefill)"
+msgstr "分块预填充"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Automatic Prefix Cache"
@@ -294,8 +294,8 @@ msgid "192k"
 msgstr "192k"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-msgid "[DeepSeekOCR2](../../tutorials/models/MiniMax-M2.5.md)"
-msgstr "[DeepSeekOCR2](../../tutorials/models/MiniMax-M2.5.md)"
+msgid "[MiniMax-M2.5](../../tutorials/models/MiniMax-M2.5.md)"
+msgstr "[MiniMax-M2.5](../../tutorials/models/MiniMax-M2.5.md)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:34
 #: ../../source/user_guide/support_matrix/supported_models.md:88

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-19 02:07+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -118,6 +118,9 @@ msgstr "昇腾编译选项配置"
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`eplb_config`"
 msgstr "`eplb_config`"
+
+msgid "Configuration options for eplb"
+msgstr "EPLB 的配置选项"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`refresh`"
@@ -346,7 +349,9 @@ msgstr "`prefetch_ratio`"
 msgid ""
 "`{\"attn\": {\"qkv\": 1.0, \"o\": 1.0}, \"moe\": {\"gate_up\": 0.8}, "
 "\"mlp\": { \"gate_up\": 1.0,  \"down\": 1.0}}`"
-msgstr "`{\"attn\": {\"qkv\": 1.0, \"o\": 1.0}, \"moe\": {\"gate_up\": 0.8}, \"mlp\": { \"gate_up\": 1.0,  \"down\": 1.0}}`"
+msgstr ""
+"`{\"attn\": {\"qkv\": 1.0, \"o\": 1.0}, \"moe\": {\"gate_up\": 0.8}, "
+"\"mlp\": { \"gate_up\": 1.0,  \"down\": 1.0}}`"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "Prefetch ratio of each weight."
