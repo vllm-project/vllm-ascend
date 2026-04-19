@@ -31,14 +31,18 @@
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "apply_top_k_top_p_custom/apply_top_k_top_p_custom_torch_adpt.h"
+#ifndef ASCEND_PLATFORM_950
 #include "batch_matmul_transpose/batch_matmul_transpose_torch_adpt.h"
+#endif
 #include "dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "dispatch_gmm_combine_decode/dispatch_gmm_combine_decode_torch_adpt.h"
 #include "dispatch_layout/dispatch_layout_torch_adpt.h"
 #include "grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
 #include "matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
+#ifndef ASCEND_PLATFORM_950
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
+#endif
 #include "moe_combine_normal/moe_combine_normal_torch_adpt.h"
 #include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
@@ -844,14 +848,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
 
     // vLLM-Ascend custom ops
-    // Gemma RmsNorm
-    ops.def(
-        "npu_gemma_rms_norm(Tensor x, "
-                            "Tensor gamma, "
-                            "float epsilon=1e-6)"
-        "-> (Tensor y ,Tensor rstd)"
-        );
-    ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
     ops.def("weak_ref_tensor(Tensor input) -> Tensor");
     ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
 
@@ -880,6 +876,44 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
 
+    ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");
+    ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
+
+    ops.def("device_print(str msg) -> ()");
+    ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
+
+    ops.def("device_print_tensor(Tensor tensor) -> ()");
+    ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
+
+    ops.def(
+        "moe_gating_top_k(Tensor x, "
+                            "int k, "
+                            "int k_group, "
+                            "int group_count, "
+                            "int group_select_mode, "
+                            "int renorm, "
+                            "int norm_type, "
+                            "bool out_flag, "
+                            "float routed_scaling_factor, "
+                            "float eps,"
+                            "Tensor? bias_opt=None)"
+
+        "-> (Tensor y ,Tensor expert_idx, Tensor out)"
+        );
+    ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
+
+#ifndef ASCEND_PLATFORM_950
+    // Gemma RmsNorm
+    ops.def(
+        "npu_gemma_rms_norm(Tensor x, "
+                            "Tensor gamma, "
+                            "float epsilon=1e-6)"
+        "-> (Tensor y ,Tensor rstd)"
+        );
+    ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
+
     ops.def(
         "mla_preprocess(Tensor hiddenState, Tensor wdqkv,"
         "               Tensor? descale0, Tensor gamma1, Tensor? beta1, Tensor wuq, Tensor? descale1,"
@@ -895,19 +929,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     //batch_matmul ops refer to sgl-kernel-npu
     ops.def(
-            "batch_matmul_transpose(Tensor tensor_a, Tensor tensor_b, Tensor tensor_c, str? format_mode=None, str? quant_mode=None) -> ()");    
+            "batch_matmul_transpose(Tensor tensor_a, Tensor tensor_b, Tensor tensor_c, str? format_mode=None, str? quant_mode=None) -> ()");
     ops.impl("batch_matmul_transpose", torch::kPrivateUse1, &vllm_ascend::batch_matmul_transpose);
-
-    ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
-    ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
-
-    ops.def("device_print(str msg) -> ()");
-    ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
-             static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
-
-    ops.def("device_print_tensor(Tensor tensor) -> ()");
-    ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
-             static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
@@ -994,23 +1017,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int row_idx_type=0) -> (Tensor, Tensor, Tensor, Tensor)"
     );
     ops.impl("npu_moe_init_routing_custom", torch::kPrivateUse1, &vllm_ascend::npu_moe_init_routing_custom);
-    // vLLM-Ascend custom ops
-    ops.def(
-        "moe_gating_top_k(Tensor x, "
-                            "int k, "
-                            "int k_group, "
-                            "int group_count, "
-                            "int group_select_mode, "
-                            "int renorm, "
-                            "int norm_type, "
-                            "bool out_flag, "
-                            "float routed_scaling_factor, "
-                            "float eps,"
-                            "Tensor? bias_opt=None)"
-                            
-        "-> (Tensor y ,Tensor expert_idx, Tensor out)"
-        );
-    ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
 
     ops.def(
         "npu_add_rms_norm_bias(Tensor x1, "
@@ -1076,5 +1082,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
+#endif // ASCEND_PLATFORM_950
 }
 #endif

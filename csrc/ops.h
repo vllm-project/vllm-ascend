@@ -118,6 +118,7 @@ namespace vllm_ascend {
         uint32_t slice_offset,
         uint32_t output_full_dim);
 
+#ifndef ASCEND_PLATFORM_950
     extern void mla_preprocess_impl(
         void* stream,
         void* hidden_state,
@@ -161,4 +162,5 @@ namespace vllm_ascend {
         void* gm_tiling_data,
         const uint32_t block_dim
     );
+#endif // ASCEND_PLATFORM_950
 }

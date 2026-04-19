@@ -61,28 +61,26 @@ set(VLLM_ASCEND_CUSTOM_OP
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
-)
-
-if(SOC_VERSION MATCHES "ascend950")
-    message(STATUS "A5 hardware detected: disabling MLAPO operators")
-    message(STATUS "A5 hardware detected: excluding batch_matmul_transpose operators")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
-endif()
-
 if(SOC_VERSION MATCHES "ascend310p.*")
     message(STATUS "310P hardware detected: skip vllm_ascend_kernels compile")
-else()
-    ascendc_library(vllm_ascend_kernels SHARED
-        ${VLLM_ASCEND_CUSTOM_OP}
+elseif(SOC_VERSION MATCHES "ascend950")
+    message(STATUS "A5 hardware detected: excluding mla_preprocess and batch_matmul_transpose operators")
+    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
     )
+    ascendc_library(vllm_ascend_kernels SHARED ${VLLM_ASCEND_CUSTOM_OP})
+else()
+    ascendc_library(vllm_ascend_kernels SHARED ${VLLM_ASCEND_CUSTOM_OP})
 endif()
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
 if(SOC_VERSION MATCHES "ascend310p.*")
+    file(GLOB VLLM_ASCEND_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
+elseif(SOC_VERSION MATCHES "ascend950")
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
@@ -120,6 +118,8 @@ target_include_directories(vllm_ascend_C BEFORE PRIVATE
 
 if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
+elseif(SOC_VERSION MATCHES "ascend950")
+    target_compile_definitions(vllm_ascend_C PRIVATE ASCEND_PLATFORM_950)
 endif()
 
 target_link_directories(
