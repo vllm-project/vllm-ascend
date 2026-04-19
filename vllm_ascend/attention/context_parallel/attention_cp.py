@@ -541,6 +541,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         return attn_out, attn_lse
 
     def _forward_decode_pcp_dcp(self, query: torch.Tensor, attn_metadata: AscendMetadata) -> torch.Tensor:
+        num_decodes = attn_metadata.decode_meta.actual_seq_lengths_q.shape[0]
         assert self.key_cache is not None
         assert self.value_cache is not None
 
@@ -563,9 +564,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             mtp_mask = attn_metadata.decode_meta.mtp_attn_mask
             B = mtp_mask.shape[0]
             L = mtp_mask.shape[1]
-            target_length = 2048
-            new_mask = torch.zeros(target_length, target_length, dtype=torch.bool, device=query.device)
-            new_mask[: B, : L] = mtp_mask
+            target_length = 16384
+            new_mask = torch.ones(num_decodes, target_length, target_length, dtype=torch.bool, device=query.device)
+            new_mask[:, : B, : L] = ~mtp_mask
             spec_attn_mask = new_mask
 
         common_kwargs = {
