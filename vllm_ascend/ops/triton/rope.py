@@ -108,10 +108,14 @@ def _triton_rope(
                 first_q_mask = ((q_head_base + q_heads)[:, None] < n_qh) & (
                     tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2)
                 )
-                q_tile_1 = tl.load(q_tile_start_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(sin_row.dtype)
+                q_tile_1 = tl.load(q_tile_start_ptr + first_half_q_offsets, mask=first_q_mask, other=0).to(
+                    sin_row.dtype
+                )
                 second_half_q_offsets = first_half_q_offsets + (rope_dim // 2)
                 second_q_mask = first_q_mask
-                q_tile_2 = tl.load(q_tile_start_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(sin_row.dtype)
+                q_tile_2 = tl.load(q_tile_start_ptr + second_half_q_offsets, mask=second_q_mask, other=0).to(
+                    sin_row.dtype
+                )
                 new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
                 tl.store(q_tile_start_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
                 new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
@@ -132,7 +136,6 @@ def _triton_rope(
                 q_tile_out = tl.join(new_q_tile_1, new_q_tile_2)
                 tl.store(q_tile_start_ptr + pair_offsets, q_tile_out, mask=pair_mask)
 
-
         # ####################################################################
         # Tile over k heads in chunks of BLOCK_SIZE_HEAD
         # ####################################################################
@@ -144,10 +147,14 @@ def _triton_rope(
                 first_k_mask = ((k_head_base + k_heads)[:, None] < n_kh) & (
                     tl.arange(0, pad_rope_dim // 2)[None, :] < (rope_dim // 2)
                 )
-                k_tile_1 = tl.load(k_tile_start_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(sin_row.dtype)
+                k_tile_1 = tl.load(k_tile_start_ptr + first_half_k_offsets, mask=first_k_mask, other=0).to(
+                    sin_row.dtype
+                )
                 second_half_k_offsets = first_half_k_offsets + (rope_dim // 2)
                 second_k_mask = first_k_mask
-                k_tile_2 = tl.load(k_tile_start_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(sin_row.dtype)
+                k_tile_2 = tl.load(k_tile_start_ptr + second_half_k_offsets, mask=second_k_mask, other=0).to(
+                    sin_row.dtype
+                )
                 new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
                 tl.store(k_tile_start_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
                 new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
