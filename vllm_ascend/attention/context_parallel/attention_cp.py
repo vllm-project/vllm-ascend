@@ -550,7 +550,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
-        query = query.view(num_decodes, query.shape[0] / num_decodes, query.shape[1], -1)
+        query = query.view(num_decodes, int(query.shape[0] / num_decodes), query.shape[1], -1)
         k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
         value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
 
