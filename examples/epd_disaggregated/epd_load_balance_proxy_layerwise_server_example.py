@@ -96,12 +96,14 @@
 
 import argparse
 import asyncio
+import copy
 import base64
 import functools
 import heapq
 import io
 import ipaddress
 import math
+import json
 import os
 import sys
 import uuid
@@ -362,6 +364,43 @@ def with_cancellation(handler_func):
 app = FastAPI(lifespan=lifespan)
 
 
+async def send_request_to_service(
+    client: httpx.AsyncClient,
+    prefiller_id: int,
+    endpoint: str,
+    req_data: dict,
+    request_id: str,
+    max_retries: int = 3,
+    base_delay: float = 0.2,
+):
+    proxy_state.acquire_aborted_prefiller_requests(prefiller_id)
+    req_data = req_data.copy()
+    req_data["stream"] = False
+    req_data["max_tokens"] = 1
+    req_data["min_tokens"] = 1
+    if "max_completion_tokens" in req_data:
+        req_data["max_completion_tokens"] = 1
+    if "stream_options" in req_data:
+        del req_data["stream_options"]
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = await client.post(endpoint, json=req_data, headers=headers)
+            response.raise_for_status()
+            if request_id in proxy_state.req_id_future:
+                result_future = proxy_state.req_id_future[request_id]
+                result_future.set_result(response.json()["kv_transfer_params"])
+            return
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            last_exc = e
+            if attempt < max_retries:
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            else:
+                logger.error(f"All {max_retries} attempts failed for {endpoint}.")
+                raise last_exc
+
 async def send_request_to_encode_service(
     client: httpx.AsyncClient,
     encoder_id: int,
@@ -469,7 +508,6 @@ def parse_jpeg_size(data: bytes):
 
         marker = data[idx + 1]
 
-        # 跳过填充字节
         if marker == 0xFF:
             idx += 1
             continue
@@ -642,24 +680,97 @@ async def _handle_completions(api: str, request: Request):
             logger.debug("Decoder score: %f", decoder_score)
             # Use the prefiller's kv_transfer_params to select decoder
             decoder_idx = proxy_state.select_decoder(decoder_score)
-            print("d", decoder_idx, decoder_score)
+
             decoder = proxy_state.decoders[decoder_idx]
             # logger.debug("Using %s %s", prefiller.url, decoder.url)
             # Stream response from decoder
             released_kv = False
 
+            # Record request info for recompute
+            stream_flag = bool(req_data.get("stream", False))
+            chat_flag = "messages" in req_data
+            if "prompt" in req_data:
+                origin_prompt = req_data["prompt"]
+            elif chat_flag:
+                messages = req_data["messages"]
+                origin_prompt = messages[0].get("content", "")
+                if isinstance(origin_prompt, list):
+                    origin_prompt = origin_prompt[0].get("text", "")
+            else:
+                origin_prompt = ""
+            # refer to vLLM sampling_params: max_token default value
+            origin_max_tokens = req_data.get("max_tokens", 16)
+
             async def generate_stream():
                 nonlocal released_kv
+                generated_token = ""
+                released_kv = False
+                retry_count = 0
+                retry = True
+                completion_tokens = 0
+                # Only one await per chunk, minimal logic in loop
                 try:
-                    async for chunk in stream_service_response_with_retry(
-                        decoder.client,
-                        api,
-                        req_data,
-                        request_id=request_id,
-                        max_retries=global_args.max_retries,
-                        base_delay=global_args.retry_delay,
-                    ):
-                        yield chunk
+                    while retry:
+                        retry = False
+                        async for chunk in stream_service_response_with_retry(
+                            decoder.client,
+                            api,
+                            req_data,
+                            request_id=request_id,
+                            max_retries=global_args.max_retries,
+                            base_delay=global_args.retry_delay,
+                        ):
+                            try:
+                                chunk_str = chunk.decode("utf-8").strip()
+                            except UnicodeDecodeError:
+                                logger.debug(f"Skipping chunk: {chunk}")
+                                yield chunk
+                                continue
+                            if not chunk_str:
+                                continue
+                            if chunk_str.startswith("data: "):
+                                chunk_str = chunk_str[len("data: ") :]
+                            try:
+                                chunk_json = json.loads(chunk_str)
+                            except json.JSONDecodeError:
+                                # if chunk is [done], skip it.
+                                logger.debug(f"Skipping chunk: {chunk_str}")
+                                yield chunk
+                                continue
+                            choices = chunk_json.get("choices", [])
+                            if not choices:
+                                yield chunk
+                                continue
+
+                            choice = choices[0]
+                            delta = choice.get("delta") or {}
+                            message = choice.get("message") or {}
+                            content = delta.get("content") or message.get("content") or choice.get("text") or ""
+                            generated_token += content
+
+                            stop_reason = choice.get("stop_reason")
+                            usage = chunk_json.get("usage", {})
+                            completion_tokens = (
+                                (completion_tokens + 1)
+                                if stream_flag
+                                else (completion_tokens + usage.get("completion_tokens"))
+                            )
+                            if stop_reason == "recomputed":
+                                retry = True
+                                retry_count += 1
+                                if chat_flag:
+                                    messages[0]["content"] = origin_prompt + generated_token
+                                else:
+                                    req_data["prompt"] = origin_prompt + generated_token
+                                req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                                break
+                            if retry_count > 0 and not stream_flag:
+                                if chat_flag:
+                                    choice["message"]["content"] = generated_token
+                                else:
+                                    choice["text"] = generated_token
+                                chunk = json.dumps(chunk_json).encode("utf-8")
+                            yield chunk
                 except Exception as e:
                     logger.error(
                         f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} \
@@ -669,8 +780,10 @@ async def _handle_completions(api: str, request: Request):
                 # After streaming done, release tokens
                 proxy_state.release_decoder(decoder_idx, decoder_score)
 
-            return StreamingResponse(generate_stream(), media_type="application/json")
-
+            if stream_flag:
+                return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            else:
+                return StreamingResponse(generate_stream(), media_type="application/json")
     except Exception as e:
         import traceback
 
@@ -748,7 +861,6 @@ async def metaserver(request: Request):
 
         request_id = kv_transfer_params["request_id"]
         assert request_id in proxy_state.req_data_dict
-
         req_data, token_score, api = proxy_state.req_data_dict[request_id]
         request_id = get_origin_request_id(api, request_id)
         req_data["kv_transfer_params"] = kv_transfer_params
@@ -788,7 +900,6 @@ async def _forward_profile(
     try:
         resp = await client.post(url, json=req_data, headers=headers, timeout=10.0)
         resp.raise_for_status()
-        # 直接返回 httpx.Response，保持原始格式
         return service_name, idx, {"status_code": resp.status_code, "body": resp.text}
     except Exception as e:
         return service_name, idx, {"error": str(e)}
