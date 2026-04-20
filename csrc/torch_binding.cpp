@@ -958,7 +958,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
 
     ops.def("npu_scatter_pa_kv_cache_vllm(Tensor key, Tensor key_cache, Tensor slot_mapping,"
-            "Tensor value, Tensor value_cache, Tensor? compress_lens=None, Tensor? compress_seq_offsets=None, Tensor? seq_lens=None, str? cache_mode='PA_NZ')-> (Tensor key_cache, Tensor value_cache)");
+            "Tensor value, Tensor value_cache, Tensor? compress_lens=None, Tensor? compress_seq_offsets=None, Tensor? seq_lens=None, str? cache_mode='Norm')-> (Tensor key_cache, Tensor value_cache)");
 
     ops.impl("npu_scatter_pa_kv_cache_vllm", torch::kPrivateUse1, &vllm_ascend::npu_scatter_pa_kv_cache_vllm);
 
