@@ -64,7 +64,7 @@ def test_qwen3_dense_eager_mode(
         runner.model.generate(prompts, sampling_params)
 
 
-@pytest.mark.skipif(vllm_version_is("0.19.0"), reason="no need to support model_runner for v0.19.0")
+@pytest.mark.skipif(vllm_version_is("0.19.1"), reason="no need to support model_runner for v0.19.1")
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
