@@ -770,8 +770,7 @@ Before you start, please
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-          
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         vllm serve /root/.cache/glm5-w8a8 \
@@ -851,8 +850,7 @@ Before you start, please
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-       
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         vllm serve /root/.cache/glm5-w8a8 \
@@ -1320,7 +1318,7 @@ python load_balance_proxy_server_example.py \
 Some configurations for optimization are shown below:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable following fused operators: dispatch_gmm_combine_decode and dispatch_ffn_combine operator. and please **note** that this environment variable can only be enabled on decode nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO`: Enable fused operator MlaPreprocessOperation.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
