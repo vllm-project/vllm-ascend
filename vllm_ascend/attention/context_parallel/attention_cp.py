@@ -642,8 +642,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             graph_params.handles[num_tokens].append(handle)
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
-            attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
-            attn_lse = attn_lse.transpose(1,2).reshape(-1, attn_lse.shape[1], 1)
+            if input_layerout == "BSND":
+                attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
+                attn_lse = attn_lse.transpose(1,2).reshape(-1, attn_lse.shape[1], 1)
         attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out
