@@ -50,16 +50,13 @@ plugins.md029.enabled = false # ol-prefix
 line-length = 120
 # Folder to be modified
 exclude = [
-    # Batch (1)
-    # "tests/e2e/__init__.py",
-    # "tests/e2e/310p/",
-    # "tests/e2e/conftest.py",
-    # "tests/e2e/doctests/",
-    # "tests/e2e/model_utils.py",
-    # "tests/e2e/models/",
-    # "tests/e2e/multicard/2-cards/",
-    
-    # Batch (2)
+    "tests/e2e/__init__.py",
+    "tests/e2e/310p/",
+    "tests/e2e/conftest.py",
+    "tests/e2e/doctests/",
+    "tests/e2e/model_utils.py",
+    "tests/e2e/models/",
+    "tests/e2e/multicard/2-cards/",
     "tests/e2e/multicard/4-cards/",
     "tests/e2e/nightly/multi_node/",
     "tests/e2e/singlecard/pooling/",
@@ -67,11 +64,31 @@ exclude = [
     "tests/e2e/utils.py",
     "tests/e2e/vllm_interface/",
     "tests/e2e/weekly/",
-    
-    # Batch (3)
     "tests/e2e/nightly/single_node/",
 
-    "tests/ut/",
+    "tests/ut/_310p/",
+    "tests/ut/attention/",
+    "tests/ut/base.py",
+    
+    "tests/ut/batch_invariant/",
+    "tests/ut/compilation/",
+    "tests/ut/conftest.py",
+    "tests/ut/core/",
+    "tests/ut/device_allocator/",
+    "tests/ut/distributed/",
+    "tests/ut/eplb/",
+
+    "tests/ut/ops/",
+    "tests/ut/patch/",
+    "tests/ut/quantization/",
+    "tests/ut/sample/",
+
+    "tests/ut/spec_decode/",
+    "tests/ut/test_ascend_config.py",
+    "tests/ut/test_envs.py",
+    "tests/ut/test_platform.py",
+    "tests/ut/test_utils.py",
+    "tests/ut/worker/",
 ]
 
 [tool.ruff.lint]
