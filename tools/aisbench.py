@@ -312,15 +312,26 @@ def maybe_download_from_modelscope(
     # downloading the same model weights at the same time.
     with get_lock(model, download_dir):
         if not os.path.exists(model):
-            model_path = snapshot_download(
+            kwargs = dict(
                 model_id=model,
                 repo_type=repo_type,
                 cache_dir=download_dir,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                 revision=revision,
                 ignore_file_pattern=ignore_patterns,
                 allow_patterns=allow_patterns,
             )
+            if huggingface_hub.constants.HF_HUB_OFFLINE:
+                # Try local cache first; if not found, fall back to download.
+                try:
+                    model_path = snapshot_download(**kwargs, local_files_only=True)
+                except Exception:
+                    logging.warning(
+                        "HF_HUB_OFFLINE is set but '%s' was not found in local cache. Falling back to online download.",
+                        model,
+                    )
+                    model_path = snapshot_download(**kwargs, local_files_only=False)
+            else:
+                model_path = snapshot_download(**kwargs, local_files_only=False)
         else:
             model_path = model
     return model_path

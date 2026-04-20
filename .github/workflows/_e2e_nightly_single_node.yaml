@@ -126,6 +126,7 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash -l {0}
         run: |
+          git clone -b v3.0-20250930-master --depth 1 https://liuhaiyang27:db2ca53b0c07b803bf70e7a5c6a45b2b@gitee.com/aisbench/benchmark.git /vllm-workspace/vllm-ascend/benchmark
           cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
           cd /vllm-workspace/vllm-ascend/benchmark
           pip install pytest asyncio pytest-asyncio
