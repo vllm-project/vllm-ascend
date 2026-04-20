@@ -75,6 +75,10 @@ def mock_true():
     return True
 
 
+def _get_num_logical_experts(layer: torch.nn.Module, fallback: int) -> int:
+    return getattr(layer, "logical_num_experts", fallback)
+
+
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
@@ -158,7 +162,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=global_num_experts,
+                num_experts=_get_num_logical_experts(layer, global_num_experts),
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
