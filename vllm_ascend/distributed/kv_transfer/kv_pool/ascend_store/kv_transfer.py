@@ -16,7 +16,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ChunkedTokenDatabase,
     LayerMultiBlockReqMeta,
     ReqMeta,
-    _build_tp_mismatch_keys_and_addrs,
 )
 # isort: on
 
@@ -152,91 +151,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
 
-    def _handle_tp_mismatch_request(self, req_meta: ReqMeta) -> None:
-        """Store KV cache with TP mismatch by issuing strided puts.
-
-        Stores each (chunk, sub_idx) combination so the keys align with the
-        peer's effective TP layout. Existing keys are skipped via a lookup,
-        mirroring the dedup gating in the non-mismatch path of
-        :meth:`_handle_request`.
-        """
-        req_id = req_meta.req_id
-        # Match the dedup gating in the non-mismatch path.
-        if req_id not in self.stored_requests:
-            return
-        token_len = req_meta.token_len_chunk
-        keys, addrs, sizes = _build_tp_mismatch_keys_and_addrs(
-            self.worker, req_meta.block_hashes, req_meta.block_ids, token_len, mask_num=0
-        )
-        if not keys:
-            self.dec_stored_request(req_id)
-            return
-        exists_states = self.lookup(keys)
-        missing_indices = [i for i, exists in enumerate(exists_states) if not exists]
-        if not missing_indices:
-            self.dec_stored_request(req_id)
-            return
-        keys = [keys[i] for i in missing_indices]
-        addrs = [addrs[i] for i in missing_indices]
-        sizes = [sizes[i] for i in missing_indices]
-        if req_meta.current_event is not None:
-            req_meta.current_event.synchronize()
-        self.m_store.put(keys, addrs, sizes)
-        logger.debug(
-            "TP-mismatch stored %d sub-keys for request %s",
-            len(keys),
-            req_id,
-        )
-
-        # Emit BlockStored events per chunk, matching the normal path's
-        # granularity (one event per chunk rather than per sub-key).
-        if self.enable_kv_event:
-            num_sub_keys = self.worker.num_sub_keys
-            stored_events: list[BlockStored] = []
-            prev_key = None
-            chunk_idx = 0
-            for start, end, _base_key in self.token_database.process_tokens(
-                token_len, req_meta.block_hashes, 0
-            ):
-                # Check if any sub-key of this chunk was actually stored
-                # (i.e. at least one sub-key index falls in missing_indices).
-                chunk_sub_start = chunk_idx * num_sub_keys
-                chunk_sub_end = chunk_sub_start + num_sub_keys
-                chunk_stored = any(
-                    chunk_sub_start <= idx < chunk_sub_end
-                    for idx in missing_indices
-                )
-                if chunk_stored:
-                    block_hash = maybe_convert_block_hash(
-                        req_meta.block_hashes[chunk_idx]
-                    )
-                    token_ids = (
-                        req_meta.token_ids[start:end]
-                        if req_meta.token_ids is not None
-                        else None
-                    )
-                    stored_events.append(
-                        BlockStored(
-                            block_hashes=[block_hash],
-                            parent_block_hash=prev_key,
-                            token_ids=token_ids,
-                            block_size=req_meta.original_block_size,
-                            lora_id=None,
-                            medium="cpu",
-                            lora_name=None,
-                        )
-                    )
-                    prev_key = block_hash
-                chunk_idx += 1
-            if stored_events:
-                self.update_kv_event(stored_events)
-
-        self.dec_stored_request(req_id)
-
     def _handle_request(self, req_meta: ReqMeta):
         if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
             try:
-                self._handle_tp_mismatch_request(req_meta)
+                self.worker._store_kv_tp_mismatch(req_meta)
             finally:
                 self.request_queue.task_done()
             return
@@ -352,31 +270,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         )
         self.worker = worker
 
-    def _handle_tp_mismatch_request(
-        self,
-        req_meta: ReqMeta,
-        token_len: int,
-        mask_num: int,
-    ) -> None:
-        """Load KV cache with TP mismatch by issuing strided gets.
-
-        Each rank generates ``num_sub_keys`` keys per chunk and tells the
-        backend to write the result directly into the per-token strided
-        positions of its own KV cache. No temporary buffer is required.
-        """
-        keys, addrs, sizes = _build_tp_mismatch_keys_and_addrs(
-            self.worker, req_meta.block_hashes, req_meta.block_ids, token_len, mask_num
-        )
-        if not keys:
-            return
-        # Optional rotation for load-balancing across mooncake masters,
-        # mirroring the non-mismatch path below.
-        offset = self.tp_rank % len(keys)
-        keys_c = keys[offset:] + keys[:offset]
-        addrs_c = addrs[offset:] + addrs[:offset]
-        sizes_c = sizes[offset:] + sizes[:offset]
-        self.m_store.get(keys_c, addrs_c, sizes_c)
-
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
@@ -387,7 +280,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         )
 
         if self.worker is not None and self.worker.tp_mismatch:
-            self._handle_tp_mismatch_request(req_meta, token_len, mask_num)
+            self.worker._load_kv_tp_mismatch(
+                req_meta.block_hashes, req_meta.block_ids, token_len, mask_num
+            )
         else:
             addr_list = []
             size_list = []
