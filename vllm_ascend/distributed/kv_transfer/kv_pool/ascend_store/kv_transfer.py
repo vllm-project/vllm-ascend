@@ -141,6 +141,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
 
+    def is_stored_request(self, req_id: str) -> bool:
+        with self.done_task_lock:
+            return req_id in self.stored_requests
+
+    def get_stored_request_count(self, req_id: str) -> int | None:
+        """Return the remaining job count for req_id, or None if not tracked."""
+        with self.done_task_lock:
+            return self.stored_requests.get(req_id)
+
+    def get_stored_requests_snapshot(self) -> dict[str, int]:
+        """Return a snapshot of stored_requests under the lock."""
+        with self.done_task_lock:
+            return dict(self.stored_requests)
+
     def dec_stored_request(self, req_id: str):
         with self.done_task_lock:
             if req_id in self.stored_requests:
@@ -166,7 +180,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ends = []
         keys = []
         block_hashes = []
-        if req_id not in self.stored_requests:
+        if not self.is_stored_request(req_id):
             self.request_queue.task_done()
             return
 
