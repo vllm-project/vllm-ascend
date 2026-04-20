@@ -101,6 +101,9 @@ class KVPoolWorker:
         else:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
+        self.my_key_index = (self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step) +
+                             self.dcp_rank * (self.tp_size // self.put_step) +
+                             self.head_or_tp_rank)
 
         self.metadata = KeyMetadata(
             model_config.model.rstrip("/").split("/")[-1],
@@ -165,9 +168,8 @@ class KVPoolWorker:
         # req_id, layer_id, block info
         self._request_addr_tracker: dict[str, dict[int, dict]] = {}
 
-        import os
-        NUM_SHARED_BUFFERS = 2
-        INDEPENDENT_LAYER_INDICES = {0, self.num_layers - 1}
+        NUM_SHARED_BUFFERS = 3
+        INDEPENDENT_LAYER_INDICES = {}
         self.independent_layers = list(INDEPENDENT_LAYER_INDICES)
 
         shared_layer_indices = [i for i in range(self.num_layers)
@@ -196,16 +198,10 @@ class KVPoolWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         block_rank = 3
         self.block_len = []
-        if self.use_mla or self.use_sparse:
-            for i in range(len(first_kv_cache_tuple)):
-                block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
-                logger.info("block_shape: %s", block_shape)
-                self.block_len.append(first_kv_cache[i].element_size() * math.prod(block_shape))
-        else:
-            # [num_block, block_size, num_head, hidden_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
+        for i in range(len(first_kv_cache_tuple)):
+            block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
             logger.info("block_shape: %s", block_shape)
-            self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
+            self.block_len.append(first_kv_cache_tuple[i].element_size() * math.prod(block_shape))
 
         logger.info(
             "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
@@ -372,11 +368,8 @@ class KVPoolWorker:
             return
 
         blocks_to_process = num_blocks - processed_count
-        my_key_index = (self.pcp_rank * self.dcp_size * (self.tp_size//self.put_step) +
-                        self.dcp_rank * (self.tp_size//self.put_step) +
-                        self.head_or_tp_rank)
         for block_idx in range(blocks_to_process):
-            key = keys_multi_blocks[(processed_count + block_idx) * num_keys_per_block + my_key_index]
+            key = keys_multi_blocks[(processed_count + block_idx) * num_keys_per_block + self.my_key_index]
             start = (processed_count + block_idx) * self.block_size
             end = start + self.block_size
             addr, size = self.token_database.prepare_value_layer(
@@ -410,10 +403,7 @@ class KVPoolWorker:
             return
 
         # last_block_keys = keys_multi_chunk[num_blocks * num_keys_per_block:]
-        my_key_index = (self.pcp_rank * self.dcp_size * (self.tp_size//self.put_step) +
-                        self.dcp_rank * (self.tp_size//self.put_step) +
-                        self.head_or_tp_rank)
-        key = last_block_keys[my_key_index]
+        key = last_block_keys[self.my_key_index]
         last_block_start = num_blocks * self.block_size
         last_block_end = last_block_start + self.block_size
 
@@ -517,16 +507,13 @@ class KVPoolWorker:
         num_saved_blocks = token_len // self.block_size
         has_load_last_block = token_len % self.block_size != 0
 
-        my_key_index = (self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step) +
-                        self.dcp_rank * (self.tp_size // self.put_step) +
-                        self.head_or_tp_rank)
-        load_keys = block_keys[my_key_index: my_key_index + num_saved_blocks * num_keys_per_block: num_keys_per_block]
+        load_keys = block_keys[self.my_key_index: self.my_key_index + num_saved_blocks * num_keys_per_block: num_keys_per_block]
 
         load_tracker_key = f"{request.req_id}_load"
         tracker = self._get_or_init_layer_tracker(request.req_id, layer_id, load_tracker_key)
 
         self._process_chunks_incremental(
-            tracker, load_keys, request.block_ids, layer_id,
+            tracker, block_keys, request.block_ids, layer_id,
             request.key_gva_mapping, num_keys_per_block, num_saved_blocks)
 
         self._process_last_block(
