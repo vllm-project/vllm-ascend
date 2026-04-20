@@ -117,68 +117,6 @@ public:
 
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
-
-        // OpAICoreConfig config_950;
-        // config_950.Input("key")
-        //     .ParamType(REQUIRED)
-        //     .DataType(DataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950);
-        // config_950.Input("key_cache")
-        //     .ParamType(REQUIRED)
-        //     .DataType(DataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950)
-        //     .IgnoreContiguous();
-        // config_950.Input("slot_mapping")
-        //     .ParamType(REQUIRED)
-        //     .DataType(indexDataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950);
-        // config_950.Input("value")
-        //     .ParamType(REQUIRED)
-        //     .DataType(DataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950);
-        // config_950.Input("value_cache")
-        //     .ParamType(REQUIRED)
-        //     .DataType(DataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950)
-        //     .IgnoreContiguous();
-        // config_950.Input("compress_lens")
-        //     .ParamType(OPTIONAL)
-        //     .DataType(indexDataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950);
-        // config_950.Input("compress_seq_offset")
-        //     .ParamType(OPTIONAL)
-        //     .DataType(indexDataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950);
-        // config_950.Input("seq_lens")
-        //     .ParamType(OPTIONAL)
-        //     .DataType(indexDataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950);
-        // config_950.Output("key_cache")
-        //     .ParamType(REQUIRED)
-        //     .DataType(DataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950);
-        // config_950.Output("value_cache")
-        //     .ParamType(REQUIRED)
-        //     .DataType(DataType_950)
-        //     .Format(DataFormat_950)
-        //     .UnknownShapeFormat(DataFormat_950);
-        // config_950.DynamicCompileStaticFlag(true)
-        //     .DynamicFormatFlag(false)
-        //     .DynamicRankSupportFlag(true)
-        //     .DynamicShapeSupportFlag(true)
-        //     .NeedCheckSupportFlag(false)
-        //     .PrecisionReduceFlag(true)
-        //     .ExtendCfgInfo("opFile.value", "scatter_pa_kv_cache_vllm_apt");
-        // this->AICore().AddConfig("ascend950", config_950);
     }
 };
 OP_ADD(ScatterPaKvCacheVllm);

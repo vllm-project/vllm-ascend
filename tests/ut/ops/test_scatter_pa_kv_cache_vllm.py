@@ -21,7 +21,7 @@ head_size = 16
 block_size = 16
 num_blocks = 100
 
-def cal_nd(, key, value, key_cache, value_cache, slot_mapping):
+def cal_nd(key, value, key_cache, value_cache, slot_mapping):
     key_expect = key_cache.clone()
     value_expect = value_cache.clone()
     for i, slot in enumerate(slot_mapping):
@@ -39,10 +39,7 @@ def cal_nd(, key, value, key_cache, value_cache, slot_mapping):
     'head_size_k',
     [128, 256],
 )
-def test_reshape_and_cache():
-    head_size_k = 256
-    head_size_v = head_size_k
-
+def test_reshape_and_cache(head_size_k):
     key = torch.rand((num_tokens, num_head, head_size_k), dtype=torch.float16)
     value = torch.rand((num_tokens, num_head, head_size_k), dtype=torch.float16)
 
@@ -69,7 +66,7 @@ def test_reshape_and_cache():
     value_cache = value_cache.npu()
     slot_mapping = torch.from_numpy(slot_mapping).to(torch.int32).npu()
     
-    torch.ops._C_ascend.npu_scatter_pa_kv_cache_vllm(key, value, key_cache, value_cache, slot_mapping, cache_mode="Norm")
+    torch.ops._C_ascend.npu_scatter_pa_kv_cache_vllm(key, value, key_cache, value_cache, slot_mapping)
     torch.testing.assert_close(key_expect.cpu(), key_cache.cpu())
     torch.testing.assert_close(value_expect.cpu(), value_cache.cpu())
 
@@ -81,7 +78,7 @@ def test_reshape_and_cache():
     'head_size_v',
     [128, 256],
 )
-def test_reshape_and_cache_origin():
+def test_reshape_and_cache_origin(head_size_k, head_size_v):
     key = torch.rand((num_tokens, num_head, head_size_k), dtype=torch.float16)
     value = torch.rand((num_tokens, num_head, head_size_v), dtype=torch.float16)
     num_slots = block_size * num_blocks
@@ -95,6 +92,6 @@ def test_reshape_and_cache_origin():
     key_cache = key_cache.npu()
     value_cache = value_cache.npu()
     slot_mapping = torch.from_numpy(slot_mapping).to(torch.int32).npu()
-    torch.ops._C_ascend.npu_scatter_pa_kv_cache_vllm(key, value, key_cache, value_cache, slot_mapping, cache_mode="Norm")
+    torch.ops._C_ascend.npu_scatter_pa_kv_cache_vllm(key, value, key_cache, value_cache, slot_mapping)
     torch.testing.assert_close(key_expect.cpu(), key_cache.cpu())
     torch.testing.assert_close(value_expect.cpu(), value_cache.cpu())
