@@ -24,7 +24,7 @@ import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_pcp_group
+from vllm.distributed import get_pcp_group, get_dycp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
@@ -190,29 +190,21 @@ class KVCacheSendingThread(threading.Thread):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tp_rank: int,
-        prefill_tp_size: int,
         local_engine_id: str,
         side_channel_host: str,
-        side_channel_port: int,
+        handshake_port: int,
         metadata: MooncakeAgentMetadata,
         ready_event: threading.Event,
         kv_caches: dict[str, Any],
-        pcp_rank: int,
     ):
         super().__init__(daemon=True, name="KVCacheSendingThread")
-        self.tp_rank = tp_rank
-        self.prefill_tp_size = prefill_tp_size
-        self.pp_rank = get_pp_group().rank_in_group
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.tp_size = get_tensor_model_parallel_world_size()
         self.local_engine_id = local_engine_id
         self.side_channel_host = side_channel_host
-        self.side_channel_port = side_channel_port
+        self.handshake_port = handshake_port
         self.metadata = metadata
         self.ready_event = ready_event
         self.kv_caches = kv_caches
-        self.pcp_rank = pcp_rank
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
@@ -238,9 +230,7 @@ class KVCacheSendingThread(threading.Thread):
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
             # the scheduler.
-            device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
-            handshake_port = self.side_channel_port + device_index
-            path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
+            path = make_zmq_path("tcp", self.side_channel_host, self.handshake_port)
             logger.info("Starting listening on path: %s", path)
             with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
                 self.ready_event.set()
@@ -279,9 +269,7 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        device_index = self.pp_rank * self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
-                        handshake_port = self.side_channel_port + device_index
-                        if self.port_send_num[request_id] >= remote_port_send_num[handshake_port]["num"]:
+                        if self.port_send_num[request_id] >= remote_port_send_num[self.handshake_port]["num"]:
                             self.task_tracker.update_done_task_count(request_id)
                             del self.port_send_num[request_id]
                     else:
@@ -940,14 +928,22 @@ class MooncakeConnectorScheduler:
         )
         self.dp_per_domain = vllm_config.parallel_config.dp_per_domain
 
-        # Handshake base port
-        self.port_base = vllm_config.kv_transfer_config.kv_port
+        # Handshake base port for dp
+        # self.port_base = vllm_config.kv_transfer_config.kv_port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
             + vllm_config.parallel_config.data_parallel_rank
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
+        )
+        # Handshake base port for domain
+        self.domain_port_base = (
+            vllm_config.kv_transfer_config.kv_port
+            + vllm_config.parallel_config.domain_parallel_rank
+            * vllm_config.parallel_config.tensor_parallel_size
+            * vllm_config.parallel_config.pipeline_parallel_size
+            * self.dp_per_domain
         )
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -1099,7 +1095,7 @@ class MooncakeConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
-            remote_port=self.port_base if self.dp_per_domain > 1 else self.side_channel_port,
+            remote_port=self.domain_port_base if self.dp_per_domain > 1 else self.side_channel_port,
             remote_pcp_size=self.pcp_size,
             remote_dcp_size=self.dcp_size,
             remote_ptp_size=self.tp_size,
@@ -1143,32 +1139,42 @@ class MooncakeConnectorWorker:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
         self.pp_rank = get_pp_group().rank_in_group
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        # self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        # self.dp_rank_global = vllm_config.parallel_config.data_parallel_rank
         self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
-        self.pcp_size = get_pcp_group().world_size
+        # Assert that pcp_size and dycp_size cannot both be greater than 1
+        assert not (get_pcp_group().world_size > 1 and get_dycp_group().world_size > 1), "pcp and dycp cannot open in same time"
+        self.pcp_size = get_pcp_group().world_size * get_dycp_group().world_size
+        self.pcp_rank = get_pcp_group().rank_in_group + get_dycp_group().rank_in_group
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
-
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
         self.dp_per_domain = self.vllm_config.parallel_config.dp_per_domain
 
-        # Handshake base port
-        self.port_base = vllm_config.kv_transfer_config.kv_port
+        # Handshake base port for dp
+        # self.port_base = vllm_config.kv_transfer_config.kv_port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
             + vllm_config.parallel_config.data_parallel_rank
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
+        )
+        # Handshake base port for domain
+        self.domain_port_base = (
+            vllm_config.kv_transfer_config.kv_port
+            + vllm_config.parallel_config.domain_parallel_rank
+            * vllm_config.parallel_config.tensor_parallel_size
+            * vllm_config.parallel_config.pipeline_parallel_size
+            * self.dp_per_domain
         )
         device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
@@ -1282,15 +1288,12 @@ class MooncakeConnectorWorker:
         if self.kv_role == "kv_producer":
             self.kv_send_thread = KVCacheSendingThread(
                 self.vllm_config,
-                self.tp_rank,
-                self._prefill_tp_size,
                 self.engine_id,
                 self.side_channel_host,
-                self.side_channel_port,
+                self.handshake_port,
                 metadata,
                 ready_event,
                 self.kv_caches,
-                self.pcp_rank,
             )
             self.kv_send_thread.start()
         else:
@@ -1301,7 +1304,7 @@ class MooncakeConnectorWorker:
                 self.engine,
                 self.engine_id,
                 self.handshake_port,
-                self.side_channel_port,
+                self.side_channel_port if self.dp_per_domain == 1 else self.domain_port_base,
                 kv_caches_base_addr,
                 self.block_len,
                 ready_event,
@@ -1354,7 +1357,7 @@ class MooncakeConnectorWorker:
         prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
         prefill_dycp_enable = True if meta.remote_dycp_ranks else False
         decode_dycp_enable = True if meta.local_dycp_ranks else False
-        if decode_dycp_enable and self.dp_rank not in meta.local_dycp_ranks:
+        if decode_dycp_enable and self.pcp_rank not in meta.local_dycp_ranks:
             self.remote_port_send_num[meta.remote_engine_id] = None
             return [], [], []
         remote_dycp_ranks = meta.remote_dycp_ranks if prefill_dycp_enable else list(range(meta.remote_pcp_size))
@@ -1362,10 +1365,10 @@ class MooncakeConnectorWorker:
         assert len(local_dycp_ranks) == 1 or len(local_dycp_ranks) == self.dp_size
         remote_pcp_size = len(remote_dycp_ranks)
         local_pcp_size = len(local_dycp_ranks)
-        local_pcp_rank = self.dp_rank
+        local_pcp_rank = self.pcp_rank
         remote_cp_size = remote_pcp_size * meta.remote_dcp_size
         local_cp_size = local_pcp_size * self.dcp_size  # decode pcp is not supported now
-        local_block_ids = meta.local_block_ids[self.dp_rank] if decode_dycp_enable else meta.local_block_ids
+        local_block_ids = meta.local_block_ids[self.pcp_rank] if decode_dycp_enable else meta.local_block_ids
         meta_remote_block_ids = copy.deepcopy(meta.remote_block_ids)
 
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1 and not prefill_dycp_enable and not decode_dycp_enable:
@@ -1433,7 +1436,14 @@ class MooncakeConnectorWorker:
             p_node_cp_group_meta = get_cp_group_meta(
                 prefill_tp_size, remote_pcp_size, meta.remote_dcp_size, meta.remote_port, remote_dycp_ranks
             )
-            port_base = self.port_base if decode_dycp_enable else self.side_channel_port
+            port_base = self.domain_port_base if decode_dycp_enable else self.side_channel_port
+
+            # if decode_dycp_enable:
+            #     domain_start_rank = (self.dp_rank_global // self.dp_per_domain) * self.dp_per_domain
+            #     port_base = self.port_base + domain_start_rank * self.tp_size * self.pp_size
+            # else:
+            #     port_base = self.side_channel_port
+
             d_node_cp_group_meta = get_cp_group_meta(
                 self.tp_size, local_pcp_size, self.dcp_size, port_base, local_dycp_ranks
             )
