@@ -551,16 +551,18 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             num_heads = self.num_heads
 
         sparse_mode = None
+        input_layerout= "TND"
         # Get MTP attention mask and expand to target length
-        spec_attn_mask = None
+        attn_mask = None
+        actual_seq_lengths_q = attn_metadata.decode_meta.actual_seq_lengths_q
         if (
             attn_metadata.decode_meta
             and attn_metadata.decode_meta.mtp_attn_mask is not None
             and self.vllm_config.speculative_config is not None
         ):
-            num_decodes = len(attn_metadata.decode_meta.actual_seq_lengths_q)
-            lst = attn_metadata.decode_meta.actual_seq_lengths_q[:num_decodes]
-            lst = list(np.diff([0] + lst))
+            num_decodes = len(actual_seq_lengths_q)
+            lst = actual_seq_lengths_q[:num_decodes]
+            actual_seq_lengths_q = list(np.diff([0] + lst))
             query_len = self.vllm_config.speculative_config.num_speculative_tokens + 1
             new_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool, device=query.device)
             mtp_mask = attn_metadata.decode_meta.mtp_attn_mask[:num_decodes]
@@ -569,9 +571,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 L = mask.shape[1]
                 new_mask[i, : B, : L] = ~mask
             
-            spec_attn_mask = new_mask
+            attn_mask = new_mask
 
-            query = query.view(num_decodes, query_len, query.shape[1], -1)
+            query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
             k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
             value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
             sparse_mode = 0
@@ -579,8 +581,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         common_kwargs = {
             "num_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
-            "input_layout": "BSND",
-            "atten_mask": spec_attn_mask,
+            "input_layout": input_layerout,
+            "atten_mask": attn_mask,
             "scale": self.scale,
             "antiquant_mode": 0,
             "antiquant_scale": None,
@@ -591,7 +593,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
                 :, self.pcp_rank, self.dcp_rank
             ],
-            "actual_seq_lengths": lst,
+            "actual_seq_lengths": actual_seq_lengths_q,
         }
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
