@@ -1083,7 +1083,7 @@ class MooncakeConnectorScheduler:
         computed_block_ids = block_ids
         delay_free_blocks = len(computed_block_ids) > 0
         if delay_free_blocks:
-            logger.info(f"Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
+            logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)

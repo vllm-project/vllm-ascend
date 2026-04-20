@@ -298,7 +298,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         speculative_config=None,
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
-        num_dycp_reqs: int = 0,
     ):
         graph_params = get_graph_params()
         # FIXME: Behold! We are using a temporary hack here to update the args

@@ -203,21 +203,6 @@ class AscendMLAMetadata:
     dp_metadata: Any | None = None
     dycp_metadata: Any | None = None
 
-    def __post_init__(self):
-        # 根据 num_dycp_reqs 生成 dycp_mask
-        # mask 大小为 num_decodes 个, 前 num_dycp_reqs 为 1, 后面为 0
-        if self.num_decodes > 0 and self.num_dycp_reqs > 0:
-            self.dycp_mask = torch.zeros(self.num_decodes,
-                                         dtype=torch.int32,
-                                         device="npu")
-            self.dycp_mask[:self.num_dycp_reqs] = 1
-        # supported_head_sizes = AscendMLABackend.get_supported_head_sizes()
-        # if self.head_dim is not None and self.head_dim \
-        #         not in supported_head_sizes:
-        #     raise ValueError(
-        #         f"Only {supported_head_sizes} are supported for head_dim,",
-        #         f"received {self.head_dim}.")
-
 
 M = TypeVar("M", bound=AscendMLAMetadata)
 
