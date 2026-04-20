@@ -2723,15 +2723,12 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
 
-        model_config = self.vllm_config.model_config
-        parallel_config = self.vllm_config.parallel_config
-        num_layers = model_config.get_num_layers(parallel_config)
-
         # KV cache offloading configuration
         # NUM_SHARED_BUFFERS: number of shared KV cache buffers for round-robin reuse
         # INDEPENDENT_LAYER_INDICES: layer indices that have their own dedicated KV cache
-        NUM_SHARED_BUFFERS = 2
-        INDEPENDENT_LAYER_INDICES = {0, num_layers - 1}
+        NUM_SHARED_BUFFERS = 3
+        INDEPENDENT_LAYER_INDICES = {}
+        INDEPENDENT_LAYER_INDICES = set()
         enable_kvcache_offload = True
 
         # Step 1: Collect all attention layer indices and names
