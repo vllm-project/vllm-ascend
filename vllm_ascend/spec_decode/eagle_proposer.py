@@ -39,6 +39,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -800,7 +801,6 @@ class SpecDecodeBaseProposer(EagleProposer):
         else:
             last_hidden_states, hidden_states = ret_hidden_states
 
-        if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
                 last_hidden_states, model_positions, hidden_states
             )
@@ -834,13 +834,16 @@ class SpecDecodeBaseProposer(EagleProposer):
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
-        logits = self.model.compute_logits(sample_hidden_states)
-
-        if lmhead_tp_enable() and num_indices < logits.shape[0]:
+        if get_ascend_config().enable_reduce_sample:
+            draft_token_ids = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+        else:
+            logits = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
+        if lmhead_tp_enable() and num_indices < logits.shape[0] and not get_ascend_config().enable_reduce_sample:
             logits = logits[:num_indices]
             token_indices_to_sample = token_indices_to_sample[:num_indices]
 
-        draft_token_ids = logits.argmax(dim=-1)
+        if not get_ascend_config().enable_reduce_sample:
+            draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -848,7 +851,8 @@ class SpecDecodeBaseProposer(EagleProposer):
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
-            draft_token_ids = logits.argmax(dim=-1)
+            if not get_ascend_config().enable_reduce_sample:
+                draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list = []
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
@@ -959,15 +963,21 @@ class SpecDecodeBaseProposer(EagleProposer):
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
-            logits = self.model.compute_logits(sample_hidden_states)
+            if get_ascend_config().enable_reduce_sample:
+                draft_token_ids = self.model.compute_logits(
+                    sample_hidden_states, get_ascend_config().enable_reduce_sample
+                )
+            else:
+                logits = self.model.compute_logits(sample_hidden_states, get_ascend_config().enable_reduce_sample)
 
-            if lmhead_tp_enable() and num_indices < logits.shape[0]:
+            if lmhead_tp_enable() and num_indices < logits.shape[0] and not get_ascend_config().enable_reduce_sample:
                 logits = logits[:num_indices]
                 token_indices_to_sample = token_indices_to_sample[:num_indices]
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids = logits.argmax(dim=-1)
+            if not get_ascend_config().enable_reduce_sample:
+                draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_tensor[draft_step + 1] = draft_token_ids
 
         # [batch_size, num_speculative_tokens]

@@ -43,6 +43,7 @@ if not is_310p():
     if not vllm_version_is("0.19.0"):
         import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
+import vllm_ascend.patch.worker.patch_llama_eagle3  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
 import vllm_ascend.patch.worker.patch_routed_experts_capturer  # noqa

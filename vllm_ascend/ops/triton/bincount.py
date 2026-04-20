@@ -21,6 +21,7 @@
 # Reference: https://github.com/vllm-project/vllm-ascend/pull/6979
 
 import torch
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -35,6 +36,7 @@ def token_bin_counts_and_mask_kernel(
     seq_len,
     vocab_size,
     bin_counts_ptr,
+    tp_rank,
     counts_batch_stride,
     counts_vocab_stride,
     SEQ_BLOCK: tl.constexpr,
@@ -55,6 +57,7 @@ def token_bin_counts_and_mask_kernel(
     pid1 = tl.program_id(axis=1)
     progs = tl.num_programs(axis=0)
 
+    vocab_start_idx = tp_rank * vocab_size
     n_seq_blocks = tl.cdiv(seq_len, SEQ_BLOCK)
     linear_block = pid1 * progs + pid0
     total_blocks = batch_size * n_seq_blocks
@@ -73,12 +76,14 @@ def token_bin_counts_and_mask_kernel(
     token = tl.load(
         batch_tokens_start + pos_offsets * tokens_seq_stride,
         mask=pos_mask,
-        other=vocab_size,  # force invalid
+        other=vocab_size + vocab_start_idx,
     )
-    # Only count valid token ids in [0, vocab_size). Padding must use id >= vocab_size
-    # (see vLLM apply_penalties contract); those positions are masked out here.
-    token_in_range = (token >= 0) & (token < vocab_size) & pos_mask
-    count_ptr = batch_counts_start + token * counts_vocab_stride
+
+    local_token = token - vocab_start_idx
+
+    token_in_range = pos_mask & (token >= vocab_start_idx) & (local_token < vocab_size)
+
+    count_ptr = batch_counts_start + local_token * counts_vocab_stride
     tl.atomic_add(count_ptr, 1, mask=token_in_range)
 
 
@@ -124,6 +129,8 @@ def get_token_bin_counts_and_mask_triton(
     progs = min(core_num, total_blocks)
     grid = (progs, triton.cdiv(total_blocks, progs))
 
+    tp_group = get_tp_group()
+    tp_rank = tp_group.rank_in_group
     token_bin_counts_and_mask_kernel[grid](
         tokens,
         tokens.stride(0),
@@ -132,6 +139,7 @@ def get_token_bin_counts_and_mask_triton(
         n_cols,
         vocab_size,
         bin_counts,
+        tp_rank,
         bin_counts.stride(0),
         bin_counts.stride(1),
         SEQ_BLOCK=SEQ_BLOCK,
