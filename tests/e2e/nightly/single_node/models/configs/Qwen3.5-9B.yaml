@@ -49,7 +49,7 @@ test_cases:
         request_conf: vllm_api_general_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
         num_prompts: 32
-        max_out_len: 32768
+        max_out_len: 8192
         batch_size: 32
         baseline: 95
         threshold: 5
