@@ -276,9 +276,146 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             offset=test_req["offset"],
             tp_num_need_pulls=test_req["tp_num_need_pulls"],
             all_task_done=test_req["all_task_done"])
-        queued = self.thread.request_queue.get_nowait()
+        # Verify task is routed to the correct queue
+        remote_rank_key = ("localhost", 6666)
+        self.assertIn(remote_rank_key, self.thread.remote_rank_to_queue)
+        queue_id = self.thread.remote_rank_to_queue[remote_rank_key]
+        self.assertIn(queue_id, self.thread.task_queues)
+        queued = self.thread.task_queues[queue_id].get_nowait()
         self.assertEqual(queued["request_id"], "req1")
         self.assertEqual(queued["remote_host"], "localhost")
+
+    def test_add_request_routes_same_remote_rank_to_same_queue(self):
+        """Test that tasks with same remote_rank go to the same queue."""
+        # Add two requests for the same remote rank
+        self.thread.add_request(
+            request_id="req1",
+            local_block_ids=[1],
+            remote_block_ids=[1],
+            remote_engine_id="remote_engine",
+            remote_host="host1",
+            remote_handshake_port=1000,
+            offset=0,
+            tp_num_need_pulls=1,
+            all_task_done=False)
+        self.thread.add_request(
+            request_id="req2",
+            local_block_ids=[2],
+            remote_block_ids=[2],
+            remote_engine_id="remote_engine",
+            remote_host="host1",
+            remote_handshake_port=1000,
+            offset=0,
+            tp_num_need_pulls=1,
+            all_task_done=False)
+
+        # Both should go to the same queue
+        queue_id = self.thread.remote_rank_to_queue[("host1", 1000)]
+        self.assertEqual(self.thread.task_queues[queue_id].qsize(), 2)
+
+    def test_load_balancing_under_max_workers(self):
+        """Test that different remote_ranks get different queues when under max_workers."""
+        # Add requests for 3 different remote ranks
+        self.thread.add_request(
+            request_id="req1",
+            local_block_ids=[1],
+            remote_block_ids=[1],
+            remote_engine_id="remote_engine",
+            remote_host="host1",
+            remote_handshake_port=1000,
+            offset=0,
+            tp_num_need_pulls=1,
+            all_task_done=False)
+        self.thread.add_request(
+            request_id="req2",
+            local_block_ids=[2],
+            remote_block_ids=[2],
+            remote_engine_id="remote_engine",
+            remote_host="host2",
+            remote_handshake_port=2000,
+            offset=0,
+            tp_num_need_pulls=1,
+            all_task_done=False)
+        self.thread.add_request(
+            request_id="req3",
+            local_block_ids=[3],
+            remote_block_ids=[3],
+            remote_engine_id="remote_engine",
+            remote_host="host3",
+            remote_handshake_port=3000,
+            offset=0,
+            tp_num_need_pulls=1,
+            all_task_done=False)
+
+        # Each remote rank should get a different queue (load balancing)
+        queue_ids = [
+            self.thread.remote_rank_to_queue[("host1", 1000)],
+            self.thread.remote_rank_to_queue[("host2", 2000)],
+            self.thread.remote_rank_to_queue[("host3", 3000)],
+        ]
+        # All queue_ids should be unique
+        self.assertEqual(len(set(queue_ids)), 3)
+        # Each queue should have load 1
+        for qid in queue_ids:
+            self.assertEqual(self.thread.queue_loads[qid], 1)
+
+    def test_all_queues_pre_created(self):
+        """Test that all queues are pre-created in __init__."""
+        # All queues should be pre-created
+        self.assertEqual(len(self.thread.task_queues), self.thread.max_workers)
+        for i in range(self.thread.max_workers):
+            self.assertIn(i, self.thread.task_queues)
+            self.assertIsInstance(self.thread.task_queues[i], queue.Queue)
+        # queue_loads should be initialized to 0
+        self.assertEqual(len(self.thread.queue_loads), self.thread.max_workers)
+        for load in self.thread.queue_loads.values():
+            self.assertEqual(load, 0)
+
+    def test_load_balancing_exceeds_max_workers(self):
+        """Test load balancing when remote_ranks exceed max_workers."""
+        # Set a small max_workers for testing
+        self.thread.max_workers = 2
+        self.thread.task_queues = {i: queue.Queue() for i in range(2)}
+        self.thread.queue_loads = {i: 0 for i in range(2)}
+
+        # Add requests for 4 different remote ranks
+        for i in range(4):
+            self.thread.add_request(
+                request_id=f"req{i}",
+                local_block_ids=[i],
+                remote_block_ids=[i],
+                remote_engine_id="remote_engine",
+                remote_host=f"host{i}",
+                remote_handshake_port=1000 * (i + 1),
+                offset=0,
+                tp_num_need_pulls=1,
+                all_task_done=False)
+
+        # With load balancing: first 2 go to queue 0,1; next 2 go to queue 0,1 again
+        # Each queue should have 2 remote_ranks
+        self.assertEqual(self.thread.queue_loads[0], 2)
+        self.assertEqual(self.thread.queue_loads[1], 2)
+
+    def test_mapping_consistency(self):
+        """Test that same remote_rank always maps to same queue."""
+        # Add multiple requests for the same remote rank
+        for i in range(3):
+            self.thread.add_request(
+                request_id=f"req{i}",
+                local_block_ids=[i],
+                remote_block_ids=[i],
+                remote_engine_id="remote_engine",
+                remote_host="host1",
+                remote_handshake_port=1000,
+                offset=0,
+                tp_num_need_pulls=1,
+                all_task_done=False)
+
+        # All should map to the same queue
+        queue_id = self.thread.remote_rank_to_queue[("host1", 1000)]
+        self.assertEqual(self.thread.task_queues[queue_id].qsize(), 3)
+        # Load should still be 1 (one remote_rank mapped)
+        self.assertEqual(self.thread.queue_loads[queue_id], 1)
 
     @patch.object(KVCacheTaskTracker, 'get_and_clear_finished_requests')
     def test_get_finished_requests(self, mock_tracker):
@@ -371,7 +508,6 @@ class TestCoreFunctionality(unittest.TestCase):
             vllm_config=self.vllm_config,
             kv_caches=self.kv_caches,
             prefill_pp_layer_partition=None)
-        self.thread.request_queue = self.mock_queue
         self.test_req = {
             "request_id": "req1",
             "local_block_ids": [1, 2],
@@ -397,7 +533,7 @@ class TestCoreFunctionality(unittest.TestCase):
         mock_transfer.return_value = None
         mock_send.return_value = None
 
-        self.thread._handle_request(self.test_req)
+        self.thread._handle_request(self.test_req, self.mock_queue)
 
         mock_transfer.assert_called_once_with(self.test_req)
         mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
@@ -531,10 +667,25 @@ class TestMainThreadLoop(unittest.TestCase):
             vllm_config=self.vllm_config,
             kv_caches=self.kv_caches,
             prefill_pp_layer_partition=None)
-        self.thread.request_queue = queue.Queue()
 
-    @patch.object(KVCacheRecvingThread, '_handle_request')
-    def test_run_loop_normal(self, mock_handle):
+    @patch.object(KVCacheRecvingThread, '_worker_loop')
+    def test_run_starts_multiple_workers(self, mock_worker_loop):
+        """Test that run() starts multiple worker threads."""
+        mock_worker_loop.return_value = None
+
+        self.thread.run()
+
+        # Verify ready_event is set
+        self.assertTrue(self.thread.ready_event.is_set())
+
+        # Verify correct number of worker threads started
+        self.assertEqual(len(self.thread.workers), self.thread.max_workers)
+
+        # Verify worker_loop was called for each worker
+        self.assertEqual(mock_worker_loop.call_count, self.thread.max_workers)
+
+    def test_worker_loop_processes_tasks(self):
+        """Test that worker_loop processes tasks from its queue."""
         test_request = {
             "request_id": "req1",
             "local_block_ids": [1, 2],
@@ -548,16 +699,28 @@ class TestMainThreadLoop(unittest.TestCase):
             "all_task_done": False
         }
 
-        self.thread.request_queue.put(test_request)
-        self.thread.request_queue.put(None)
+        # Queue already pre-created in __init__, add a task to queue 0
+        queue_id = 0
+        self.thread.task_queues[queue_id].put(test_request)
+        # Add None to signal shutdown after processing the task
+        self.thread.task_queues[queue_id].put(None)
 
-        self.thread.start()
-        time.sleep(0.1)
-        self.thread.join(timeout=1.0)
+        with patch.object(self.thread, '_handle_request') as mock_handle:
+            self.thread._worker_loop(queue_id)
 
-        self.assertTrue(self.thread.ready_event.is_set())
-        mock_handle.assert_called_once_with(test_request)
-        self.assertTrue(self.thread.request_queue.empty())
+            # Verify task was processed
+            mock_handle.assert_called_once()
+            self.assertTrue(self.thread.task_queues[queue_id].empty())
+
+    def test_shutdown_sends_none_to_all_queues(self):
+        """Test that shutdown sends None to all queues."""
+        self.thread.shutdown()
+
+        # Verify each queue has a None signal
+        for qid, q in self.thread.task_queues.items():
+            self.assertEqual(q.qsize(), 1)
+            item = q.get_nowait()
+            self.assertIsNone(item)
 
 
 class MockVllmConfig:
@@ -574,6 +737,7 @@ class MockVllmConfig:
         self.parallel_config.data_parallel_size_local = 1
         self.parallel_config.pipeline_parallel_size = 1
         self.parallel_config.data_parallel_rank_local = 0
+        self.parallel_config.prefill_context_parallel_size = 1
         self.model_config.get_num_layers_by_block_type = MagicMock(
             return_value=32)
         self.cache_config.block_size = 16

@@ -11,7 +11,6 @@ import threading
 import time
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -334,9 +333,6 @@ class KVCacheRecvingThread(threading.Thread):
         # TODO(jianzs): find a better way to detect MLA.
         self.use_mla = len(block_len) == 2
 
-        self.request_queue: queue.Queue[Any] = queue.Queue()
-        self.executor = ThreadPoolExecutor(max_workers=32)
-
         self.task_tracker = KVCacheTaskTracker()
 
         self.encoder = msgspec.msgpack.Encoder()
@@ -369,6 +365,83 @@ class KVCacheRecvingThread(threading.Thread):
                 self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
 
+        # Multi-queue architecture for parallel KV transfer
+        # Default max_workers = prefill total ranks (tp * pp * dp * pcp)
+        default_max_workers = (
+            vllm_config.parallel_config.tensor_parallel_size
+            * vllm_config.parallel_config.pipeline_parallel_size
+            * vllm_config.parallel_config.data_parallel_size_local
+            * vllm_config.parallel_config.prefill_context_parallel_size
+        )
+        self.max_workers = int(os.getenv("VLLM_ASCEND_KV_RECV_WORKERS", default_max_workers))
+        logger.info("KVCacheRecvingThread max_workers: %d", self.max_workers)
+
+        # Pre-create all queues upfront to avoid synchronization overhead
+        # Each worker thread handles one queue
+        self.task_queues: dict[int, queue.Queue[Any]] = {i: queue.Queue() for i in range(self.max_workers)}
+        # (remote_host, remote_handshake_port) -> queue_id
+        self.remote_rank_to_queue: dict[tuple[str, int], int] = {}
+        # Track number of remote_ranks mapped to each queue for load balancing
+        self.queue_loads: dict[int, int] = {i: 0 for i in range(self.max_workers)}
+        self.remote_rank_lock = threading.Lock()
+
+        # Worker threads
+        self.workers: list[threading.Thread] = []
+
+    def shutdown(self):
+        """Shutdown all worker threads gracefully.
+
+        Sends None to each queue as a shutdown signal.
+        Workers will exit after processing pending tasks.
+        """
+        for q in self.task_queues.values():
+            q.put(None)
+
+    def _get_or_create_queue_id(self, remote_host: str, remote_handshake_port: int) -> int:
+        """Get the queue ID for a given remote rank using load balancing.
+
+        Strategy:
+        - All queues are pre-created in __init__
+        - New remote_rank is assigned to the queue with the lowest load
+        - This ensures: when remote_ranks < max_workers, each gets its own queue
+        - When remote_ranks >= max_workers, load is balanced across queues
+
+        Args:
+            remote_host: The remote host address
+            remote_handshake_port: The remote handshake port
+
+        Returns:
+            The queue_id that should handle tasks for this remote_rank
+        """
+        remote_rank_key = (remote_host, remote_handshake_port)
+
+        # Fast path: already mapped
+        if remote_rank_key in self.remote_rank_to_queue:
+            return self.remote_rank_to_queue[remote_rank_key]
+
+        with self.remote_rank_lock:
+            # Double check after acquiring lock
+            if remote_rank_key in self.remote_rank_to_queue:
+                return self.remote_rank_to_queue[remote_rank_key]
+
+            # Find the queue with minimum load
+            min_load = min(self.queue_loads.values())
+            candidates = [qid for qid, load in self.queue_loads.items() if load == min_load]
+            # Choose the first candidate (smallest queue_id among ties)
+            queue_id = candidates[0]
+
+            # Update mapping and load
+            self.remote_rank_to_queue[remote_rank_key] = queue_id
+            self.queue_loads[queue_id] += 1
+            logger.debug(
+                "Mapped remote rank %s:%d to queue %d (load: %d)",
+                remote_host,
+                remote_handshake_port,
+                queue_id,
+                self.queue_loads[queue_id],
+            )
+            return queue_id
+
     def add_request(
         self,
         request_id: str,
@@ -383,25 +456,36 @@ class KVCacheRecvingThread(threading.Thread):
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         all_task_done: bool = False,
     ):
-        """Add a new request to the queue for processing."""
+        """Add a new request to the appropriate queue for processing.
+
+        Tasks are routed to queues based on (remote_host, remote_handshake_port).
+        Same remote rank tasks go to the same queue (serial execution).
+        Different remote rank tasks go to different queues (parallel execution).
+        """
         if remote_port_send_num is None:
             remote_port_send_num = {}
-        logger.debug(f"Adding request {request_id} to the queue.")
-        self.request_queue.put(
-            {
-                "request_id": request_id,
-                "local_block_ids": local_block_ids,
-                "remote_block_ids": remote_block_ids,
-                "remote_engine_id": remote_engine_id,
-                "remote_request_id": remote_request_id,
-                "remote_host": remote_host,
-                "remote_handshake_port": remote_handshake_port,
-                "offset": offset,
-                "tp_num_need_pulls": tp_num_need_pulls,
-                "remote_port_send_num": remote_port_send_num,
-                "all_task_done": all_task_done,
-            }
+        logger.debug(
+            "Adding request %s to queue for remote rank %s:%d",
+            request_id,
+            remote_host,
+            remote_handshake_port,
         )
+
+        queue_id = self._get_or_create_queue_id(remote_host, remote_handshake_port)
+        task_data = {
+            "request_id": request_id,
+            "local_block_ids": local_block_ids,
+            "remote_block_ids": remote_block_ids,
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": remote_request_id,
+            "remote_host": remote_host,
+            "remote_handshake_port": remote_handshake_port,
+            "offset": offset,
+            "tp_num_need_pulls": tp_num_need_pulls,
+            "remote_port_send_num": remote_port_send_num,
+            "all_task_done": all_task_done,
+        }
+        self.task_queues[queue_id].put(task_data)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -412,20 +496,58 @@ class KVCacheRecvingThread(threading.Thread):
         return self.task_tracker.get_and_clear_finished_requests()
 
     def run(self):
-        """Run the thread to handle KV cache transfer requests."""
-        self.ready_event.set()
-        while True:
-            try:
-                request_data = self.request_queue.get()
-                if request_data is None:
-                    logger.warning("Received a None request!")
-                    self.request_queue.task_done()
-                    continue
-                self._handle_request(request_data)
-            except Exception as e:
-                logger.error(f"Error in KVCacheTransferThread: {e}")
+        """Run the thread to start all worker threads for KV cache transfer.
 
-    def _handle_request(self, req_meta: dict[str, Any]):
+        Each worker thread handles one queue. Tasks in the same queue are
+        processed serially (same remote rank), while different queues are
+        processed in parallel (different remote ranks).
+        """
+        self.ready_event.set()
+
+        # Start worker threads
+        for i in range(self.max_workers):
+            worker = threading.Thread(
+                target=self._worker_loop,
+                args=(i,),
+                daemon=True,
+                name=f"KVCacheRecvWorker-{i}",
+            )
+            worker.start()
+            self.workers.append(worker)
+
+        logger.info(
+            "Started %d KV cache receive workers for parallel transfer",
+            self.max_workers,
+        )
+
+    def _worker_loop(self, queue_id: int):
+        """Worker loop for processing tasks from a specific queue.
+
+        Args:
+            queue_id: The ID of the queue this worker is responsible for.
+
+        Note:
+            All queues are pre-created in __init__, so this worker can
+            immediately start processing tasks from its assigned queue.
+            Worker blocks indefinitely on q.get() until a task arrives,
+            achieving zero CPU overhead when idle.
+            Worker exits when it receives None as a shutdown signal.
+        """
+        q = self.task_queues[queue_id]
+        while True:
+            request_data = q.get()  # Block indefinitely, no timeout
+
+            if request_data is None:
+                # None is the shutdown signal
+                q.task_done()
+                break
+
+            try:
+                self._handle_request(request_data, q)
+            except Exception as e:
+                logger.error("Worker %d error: %s", queue_id, e, exc_info=True)
+
+    def _handle_request(self, req_meta: dict[str, Any], q: queue.Queue):
         request_id = req_meta["request_id"]
         remote_request_id = req_meta["remote_request_id"]
         remote_host = req_meta["remote_host"]
@@ -446,7 +568,7 @@ class KVCacheRecvingThread(threading.Thread):
                     self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
-            self.request_queue.task_done()
+            q.task_done()
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
             # remote host.
