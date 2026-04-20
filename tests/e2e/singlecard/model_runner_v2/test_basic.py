@@ -30,6 +30,7 @@ MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
 
 
+@pytest.mark.skipif(vllm_version_is("0.19.0"), reason="no need to support model_runner for v0.19.0")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -98,6 +99,7 @@ def test_egale_spec_decoding(
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.skipif(vllm_version_is("0.19.0"), reason="no need to support model_runner for v0.19.0")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
@@ -125,4 +127,26 @@ def test_qwen3_dense_graph_mode(
         enforce_eager=enforce_eager,
         compilation_config=compilation_config,
     ) as runner:
-        runner.model.generate(prompts, sampling_params)
+        outputs = runner.model.generate(prompts, sampling_params)
+
+    if model != "Qwen/Qwen3-0.6B":
+        return
+
+    expected_outputs = [
+        " Lina. I'm a 22-year-old student from China.",
+        " the same as the president of the United Nations. This is because the president",
+        " Paris. The capital of France is also the capital of the Republic of France",
+        " not just about the technology itself but also about the human aspect-how we",
+    ]
+
+    matches = 0
+    misses = 0
+    for output, expected_output in zip(outputs, expected_outputs):
+        if output.outputs[0].text[:10] == expected_output[:10]:
+            matches += 1
+        else:
+            misses += 1
+            print(f"output: {output.outputs[0].text}")
+            print(f"expected_output: {expected_output}")
+
+    assert misses == 0
