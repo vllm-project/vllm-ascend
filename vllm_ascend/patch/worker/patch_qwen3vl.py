@@ -9,7 +9,6 @@ from vllm.model_executor.models.qwen3_vl import (
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
-from vllm_ascend.utils import vllm_version_is
 
 
 def tensor_parallel_wrap(func):
@@ -73,8 +72,9 @@ Qwen3VLForConditionalGeneration._get_deepstack_input_embeds = tensor_parallel_wr
     Qwen3VLForConditionalGeneration._get_deepstack_input_embeds
 )
 
-if not vllm_version_is("0.19.0"):
-    # Only patch for latest main
+# Only patch if pos_embed_interpolate_native exists
+# This function was introduced in vLLM 0.19.0+
+try:
     from vllm.model_executor.models.qwen3_vl import pos_embed_interpolate_native
 
     def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
@@ -94,3 +94,6 @@ if not vllm_version_is("0.19.0"):
         return torch.cat(outputs, dim=0)
 
     Qwen3_VisionTransformer.fast_pos_embed_interpolate = _fast_pos_embed_interpolate
+except ImportError:
+    # pos_embed_interpolate_native not available in this vLLM version
+    pass

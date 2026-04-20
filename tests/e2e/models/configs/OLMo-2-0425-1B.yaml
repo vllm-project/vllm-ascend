@@ -1,0 +1,14 @@
+model_name: "allenai/OLMo-2-0425-1B"
+model: "vllm"
+hardware: "Atlas A2 Series"
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,flexible-extract"
+        value: 0.6
+num_fewshot: 5
+trust_remote_code: True
+gpu_memory_utilization: 0.7
+max_model_len: 4096
+apply_chat_template: false
+enforce_eager: True

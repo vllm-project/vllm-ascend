@@ -249,7 +249,8 @@
       "MiniMax/MiniMax-M2.5",
       "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
       "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
-      "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+      "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
+      "allenai/OLMo-2-0425-1B"
     ], 
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",

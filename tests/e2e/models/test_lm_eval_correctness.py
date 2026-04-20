@@ -107,9 +107,39 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
 
 def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
-    model_args = build_model_args(eval_config, tp_size)
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
+
+    # For lm_eval with vllm, we need to pass the model name directly in the model_args string
+    # This is a workaround for the issue where lm_eval expects a specific format
+    model_name = eval_config["model_name"]
+    trust_remote_code = eval_config.get("trust_remote_code", False)
+    max_model_len = eval_config.get("max_model_len", 4096)
+    dtype = eval_config.get("dtype", "auto")
+
+    # Build model_args as a string in the format expected by lm_eval
+    # Note: vLLM's __init__ method requires the 'pretrained' parameter
+    model_args = (
+        f"pretrained={model_name},tensor_parallel_size={tp_size},dtype={dtype},"
+        f"trust_remote_code={trust_remote_code},max_model_len={max_model_len}"
+    )
+
+    # Add other optional parameters
+    for s in [
+        "max_images",
+        "gpu_memory_utilization",
+        "enable_expert_parallel",
+        "tensor_parallel_size",
+        "enforce_eager",
+        "enable_thinking",
+        "quantization",
+    ]:
+        val = eval_config.get(s, None)
+        if val is not None:
+            model_args += f",{s}={val}"
+
+    print("Model Parameters:")
+    print(model_args)
 
     eval_params = {
         "model": eval_config.get("model", "vllm"),

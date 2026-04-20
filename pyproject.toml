@@ -143,4 +143,5 @@ exclude = [
     "docs/source/tutorials/models/Qwen3_embedding.md",
     "docs/source/tutorials/models/Qwen3_reranker.md",
     "docs/source/tutorials/models/index.md",
+    "docs/source/tutorials/models/OLMo-2-0425-1B.md",
 ]
