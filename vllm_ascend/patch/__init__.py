@@ -191,6 +191,34 @@
 #    Future Plan:
 #       Remove this patch after the upcoming KV cache spec refactor.
 #
+# ** 9. File: platform/patch_profiling_chunk.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.__init__`
+#   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
+#   3. `Scheduler.update_from_output` (scheduler class, wrapped when profiling chunk is enabled)
+#    Why:
+#       Profiling-based dynamic chunk sizing needs to run a one-shot profiling pass
+#       after `model_executor` is ready, and to feed per-step execution latency back
+#       into `ProfilingChunkManager` so the history-aware chunk predictor can refine
+#       online. In multiprocessing `spawn` mode the child process starts a fresh
+#       interpreter, so monkey-patches applied in the parent are lost unless the
+#       subprocess entry point re-applies them before any `EngineCore` is created.
+#    How：
+#       Replace `EngineCore.__init__` to call `scheduler.run_profiling_chunk_init`
+#       when present, then wrap `scheduler.update_from_output` once per process to
+#       read `model_output.execution_time_ms` and `scheduler_output` token/chunk
+#       metadata and call `ProfilingChunkManager.record_batch_execution_time` (and
+#       bootstrap target latency for the first chunk when needed). Replace
+#       `EngineCoreProc.run_engine_core` so importing this module in the child
+#       re-runs the idempotent patch helper before delegating to the original
+#       implementation.
+#    Related PR (if no, explain why):
+#       No, vllm-ascend-specific profiling / scheduling integration.
+#    Future Plan:
+#       Remove or narrow this patch if upstream exposes stable hooks for backend
+#       profiling startup and per-step timing callbacks without monkey-patching
+#       `EngineCore` and the multiprocess entry point.
+#
 # * Worker Patch:
 # ===============
 #

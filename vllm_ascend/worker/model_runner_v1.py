@@ -19,6 +19,7 @@
 
 import math
 import sys
+import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
@@ -1241,6 +1242,10 @@ class NPUModelRunner(GPUModelRunner):
                 capturer.clear_buffer()
             else:
                 logger.warning("RoutedExpertsCapturer is not initialized.")
+
+        if self.ascend_config.profiling_chunk_config.enabled:
+            self._sync_device()
+            self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
@@ -1729,6 +1734,9 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
         )
+        if self.ascend_config.profiling_chunk_config.enabled and hasattr(self, '_execution_start_time'):
+            self._sync_device()
+            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB update"):
@@ -1985,6 +1993,36 @@ class NPUModelRunner(GPUModelRunner):
         if enable_sp(self.vllm_config) or enable_sp_by_pass():
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
+
+    # This is a function from the upstream vllm used to handle PP+SP. Since the judgment logic 
+    # of flashcomm1 in Ascend is inconsistent with SP in vllm, it needs to be overridden.
+    def sync_and_slice_intermediate_tensors(
+        self,
+        num_tokens: int,
+        intermediate_tensors: IntermediateTensors | None,
+        sync_self: bool,
+    ) -> IntermediateTensors:
+        assert self.intermediate_tensors is not None
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+
+        # When sequence parallelism is enabled, the "residual" tensor is sharded
+        # across tensor parallel ranks, so each rank only needs its own slice.
+        if sync_self:
+            assert intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                self.intermediate_tensors[k][:copy_len].copy_(
+                    v[:copy_len], non_blocking=True
+                )
+
+        return IntermediateTensors(
+            {
+                k: v[: (num_tokens + tp - 1) // tp]
+                if enable_sp()
+                else v[:num_tokens]
+                for k, v in self.intermediate_tensors.items()
+            }
+        )
 
     def _sync_batch_across_dp(
         self,
@@ -2424,6 +2462,7 @@ class NPUModelRunner(GPUModelRunner):
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        profile_cpp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -2449,11 +2488,13 @@ class NPUModelRunner(GPUModelRunner):
         if create_mixed_batch:
             raise NotImplementedError("create_mixed_batch is used for warmup deepgemm, vllm-ascend does not need it")
         elif uniform_decode:
-            assert not create_mixed_batch
             num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
+        elif profile_cpp:
+            num_reqs = 1
+            num_scheduled_tokens_list = [num_tokens] * num_reqs
         else:
             num_reqs = min(num_tokens, max_num_reqs)
             min_tokens_per_req = num_tokens // num_reqs
@@ -2476,7 +2517,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_scheduled_tokens=max_query_len,
             use_cascade_attn=False,
             allow_microbatching=allow_microbatching,
-            force_eager=is_profile or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+            force_eager=is_profile or (cudagraph_runtime_mode == CUDAGraphMode.NONE) or profile_cpp,
             # `force_uniform_decode` is used for cudagraph capture; because for
             # capturing mixed prefill-decode batches, we sometimes use
             # num_tokens == num_reqs which looks like a uniform decode batch to the
@@ -2547,9 +2588,11 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens, self.query_pos.np)
             self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
-            num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
-            )
+
+            if not profile_cpp:
+                num_reqs_padded = self._pad_query_start_loc_for_fia(
+                    num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_runtime_mode, batch_desc.num_reqs
+                )
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             attn_metadata, _ = self._build_attention_metadata(
@@ -3473,12 +3516,20 @@ class NPUModelRunner(GPUModelRunner):
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
+
+        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+        capture_sizes = sorted({
+            desc.num_tokens
+            for _, descs in capture_descs
+            for desc in descs
+        })
+
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
         if self.use_aclgraph:
-            set_graph_params(self.cudagraph_batch_sizes)
+            set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(self.cudagraph_batch_sizes)
+                set_draft_graph_params(capture_sizes)
 
     def capture_model(self) -> None:
         gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)
