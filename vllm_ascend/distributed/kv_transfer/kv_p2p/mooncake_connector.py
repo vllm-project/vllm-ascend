@@ -1147,8 +1147,8 @@ class MooncakeConnectorWorker:
         self.side_channel_host = get_ip()
         # Assert that pcp_size and dycp_size cannot both be greater than 1
         assert not (get_pcp_group().world_size > 1 and get_dycp_group().world_size > 1), "pcp and dycp cannot open in same time"
-        self.pcp_size = get_pcp_group().world_size * get_dycp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group + get_dycp_group().rank_in_group
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group().rank_in_group
         # Assert that pp_size and pcp_size cannot both be greater than 1
         assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.dcp_size = get_decode_context_model_parallel_world_size()
@@ -1357,7 +1357,8 @@ class MooncakeConnectorWorker:
         prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
         prefill_dycp_enable = True if meta.remote_dycp_ranks else False
         decode_dycp_enable = True if meta.local_dycp_ranks else False
-        if decode_dycp_enable and self.pcp_rank not in meta.local_dycp_ranks:
+        local_pcp_rank = self.pcp_rank + get_dycp_group().rank_in_group
+        if decode_dycp_enable and local_pcp_rank not in meta.local_dycp_ranks:
             self.remote_port_send_num[meta.remote_engine_id] = None
             return [], [], []
         remote_dycp_ranks = meta.remote_dycp_ranks if prefill_dycp_enable else list(range(meta.remote_pcp_size))
@@ -1365,10 +1366,9 @@ class MooncakeConnectorWorker:
         assert len(local_dycp_ranks) == 1 or len(local_dycp_ranks) == self.dp_size
         remote_pcp_size = len(remote_dycp_ranks)
         local_pcp_size = len(local_dycp_ranks)
-        local_pcp_rank = self.pcp_rank
         remote_cp_size = remote_pcp_size * meta.remote_dcp_size
         local_cp_size = local_pcp_size * self.dcp_size  # decode pcp is not supported now
-        local_block_ids = meta.local_block_ids[self.pcp_rank] if decode_dycp_enable else meta.local_block_ids
+        local_block_ids = meta.local_block_ids[local_pcp_rank] if decode_dycp_enable else meta.local_block_ids
         meta_remote_block_ids = copy.deepcopy(meta.remote_block_ids)
 
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1 and not prefill_dycp_enable and not decode_dycp_enable:
