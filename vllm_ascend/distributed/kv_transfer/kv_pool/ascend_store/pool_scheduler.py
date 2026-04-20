@@ -88,20 +88,48 @@ class KVPoolScheduler:
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model_name = model_config.model.split('/')[-1]
+        self._req_last_block_gvas: dict[str, dict[str, int | None]] = {}
 
     def _generate_keys_and_alloc(self, block_hashes, req_id='') -> tuple[list[list[str]], list[list[str]], dict[str, int | None]]:
+        has_last_block = req_id != ''
         block_keys_by_layer, last_block_keys_by_layer, block_hash_groups = self.generate_keys(block_hashes, req_id=req_id)
-        all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
-        all_keys.extend([key for layer_keys in last_block_keys_by_layer for key in layer_keys])
-        if self.key_lru_cache is not None:
-            gvas = self.key_lru_cache.batch_get_and_alloc(
-                all_keys, self.page_size_bytes, block_hash_groups)
-        elif self.store_scheduler is not None:
-            gvas = self.store_scheduler.batch_alloc(all_keys,
-                                                    [self.page_size_bytes for _ in range(len(all_keys))])
+        need_alloc_last_block = has_last_block and req_id not in self._req_last_block_gvas
+
+        if need_alloc_last_block:
+            all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
+            all_keys.extend([key for layer_keys in last_block_keys_by_layer for key in layer_keys])
+            if self.key_lru_cache is not None:
+                gvas = self.key_lru_cache.batch_get_and_alloc(
+                    all_keys, self.page_size_bytes, block_hash_groups)
+            elif self.store_scheduler is not None:
+                gvas = self.store_scheduler.batch_alloc(all_keys,
+                                                        [self.page_size_bytes for _ in range(len(all_keys))])
+            else:
+                gvas = [None] * len(all_keys)
+            key_gva_mapping: dict[str, Any] = dict(zip(all_keys, gvas))
+            last_block_keys_flat = [key for layer_keys in last_block_keys_by_layer for key in layer_keys]
+            self._req_last_block_gvas[req_id] = {
+                k: key_gva_mapping[k] for k in last_block_keys_flat if k in key_gva_mapping
+            }
         else:
-            gvas = [None] * len(all_keys)
-        key_gva_mapping: dict[str, Any] = dict(zip(all_keys, gvas))
+            chunk_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
+            chunk_block_hash_groups = {
+                k: v for k, v in block_hash_groups.items()
+                if not k.endswith(b'_lastblock')
+            }
+            if self.key_lru_cache is not None:
+                gvas = self.key_lru_cache.batch_get_and_alloc(
+                    chunk_keys, self.page_size_bytes,
+                    chunk_block_hash_groups if chunk_block_hash_groups else None)
+            elif self.store_scheduler is not None:
+                gvas = self.store_scheduler.batch_alloc(chunk_keys,
+                                                        [self.page_size_bytes for _ in range(len(chunk_keys))])
+            else:
+                gvas = [None] * len(chunk_keys)
+            key_gva_mapping: dict[str, Any] = dict(zip(chunk_keys, gvas))
+            if has_last_block and req_id in self._req_last_block_gvas:
+                key_gva_mapping.update(self._req_last_block_gvas[req_id])
+
         return block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping
 
     def generate_keys(self, chunk_hashes, req_id=''):
@@ -125,6 +153,9 @@ class KVPoolScheduler:
 
             last_block_keys = []
             if has_last_block:
+                last_block_hash = f"{req_id}_lastblock".encode()
+                if last_block_hash not in block_hash_groups:
+                    block_hash_groups[last_block_hash] = []
                 last_block_keys = [
                     f"{self.model_name}@pcp{pcp_rank}@dcp{dcp_rank}"
                     f"@head_or_tp_rank:{head_or_tp_rank}@{req_id}_lastblock@{layer_id}"
@@ -132,6 +163,7 @@ class KVPoolScheduler:
                     for dcp_rank in range(self.dcp_size)
                     for head_or_tp_rank in range(self.tp_size // self.put_step)
                 ]
+                block_hash_groups[last_block_hash].extend(last_block_keys)
             return chunk_keys, last_block_keys
         results = [_build_layer_keys(layer_id) for layer_id in range(self.num_layers)]
         block_keys_by_layer = [r[0] for r in results]
@@ -258,6 +290,7 @@ class KVPoolScheduler:
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
             self._preempted_req_ids.discard(finished_req_id)
+            self._req_last_block_gvas.pop(finished_req_id, None)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
