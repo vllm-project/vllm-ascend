@@ -395,6 +395,8 @@ class NPUModelRunner(GPUModelRunner):
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
         self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None)
+        if self.parallel_config.enable_elastic_ep:
+            self.eplb_enable = False
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
             self.policy_type = eplb_config.eplb_policy_type

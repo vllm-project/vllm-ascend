@@ -56,7 +56,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
-from vllm_ascend.distributed.utils import use_stateless_pg_init_and_destroy_with_world
+from vllm_ascend.distributed.utils import use_stateless_pg_with_world_registration
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -301,7 +301,7 @@ class NPUWorker(WorkerBase):
             )
 
         # Initialize the distributed environment.
-        with use_stateless_pg_init_and_destroy_with_world():
+        with use_stateless_pg_with_world_registration():
             self._init_worker_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)

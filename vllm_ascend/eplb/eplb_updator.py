@@ -21,7 +21,6 @@ import numpy
 import torch
 import torch.distributed as dist
 import vllm.envs as envs
-from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
@@ -35,7 +34,6 @@ class EplbUpdator:
         self.eplb_config = eplb_config
         self.multi_stage = eplb_config.eplb_policy_type == 3
         self.comm_group = get_dynamic_eplb_group()
-        self.is_stateless = isinstance(self.comm_group, StatelessGroupCoordinator)
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
         self.eplb_process = eplb_process
@@ -45,18 +43,12 @@ class EplbUpdator:
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         local_load = self.adaptor.get_rank_expert_workload()
-        if self.is_stateless:
-            self.world_size = self.comm_group.world_size
-        else:
-            self.world_size = dist.get_world_size()
+        self.world_size = self.comm_group.world_size
         self.device = local_load.device
         self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path, process):
-        if self.is_stateless:
-            self.rank_id = self.comm_group.rank_in_group
-        else:
-            self.rank_id = dist.get_rank()
+        self.rank_id = self.comm_group.rank_in_group
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
         self.expert_heat_collection_interval: torch.int64 = self.eplb_config.expert_heat_collection_interval

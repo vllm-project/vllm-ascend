@@ -59,6 +59,8 @@ def all_gather_async(
 
 
 def stateless_init_pg_with_world_registration(**kwargs) -> ProcessGroup | tuple[ProcessGroup, Store]:
+    # Initializes a ProcessGroup and registers it into PyTorch's global `_world` state.
+    # This is required for operations like `dist.P2POp` that need global metadata.
     if kwargs.get("return_store", False):
         pg, store = stateless_init_torch_distributed_process_group(**kwargs)
     else:
@@ -86,6 +88,7 @@ def stateless_init_pg_with_world_registration(**kwargs) -> ProcessGroup | tuple[
 
 
 def stateless_destroy_pg_with_world_cleanup(pg: ProcessGroup) -> None:
+    # Destroys the ProcessGroup and cleans up its entries from the global `_world` state.
     stateless_destroy_torch_distributed_process_group(pg)
 
     # Remove related attributes from _world
@@ -99,7 +102,7 @@ _PATCH_LOCK = threading.Lock()
 
 
 @contextmanager
-def use_stateless_pg_init_and_destroy_with_world():
+def use_stateless_pg_with_world_registration():
     with _PATCH_LOCK:
         old_init_impl = stateless_init_torch_distributed_process_group
         old_destroy_impl = stateless_destroy_torch_distributed_process_group
