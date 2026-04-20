@@ -6,10 +6,11 @@ import torch
 import torch.nn as nn
 import torchair
 import vllm.config
+from vllm import ir
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.utils.system_utils import update_environment_variables
-from vllm import ir
+
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.qknorm_rope_fusion_pass import (
     QKNormRopeFusionPattern,

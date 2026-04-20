@@ -31,7 +31,7 @@ def rms_norm(
     weight: Tensor | None,
     epsilon: float,
     variance_size: int | None = None,
-) -> Tensor:
+) -> tuple[Tensor, Tensor]:
     import torch_npu
 
     if weight is None:
