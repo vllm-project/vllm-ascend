@@ -46,7 +46,10 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias(
     rstd = at::empty(new_shape, x1.options().dtype(at::kFloat));
     at::Tensor y = at::empty(x1.sizes(), x1.options());
     at::Tensor x = at::empty(x1.sizes(), x1.options());
-    EXEC_NPU_CMD(aclnnAddRmsNormBias, x1, x2, gamma, beta, epsilon, y, rstd, x);
+    EXEC_NPU_CMD(aclnnAddRmsNorm, x1, x2, gamma, epsilon, y, rstd, x);
+    if (beta.has_value()) {
+        y.add_(beta.value());
+    }
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 }

@@ -57,6 +57,8 @@ dataclass directly.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm_ascend.ops.fused_moe.moe_stage_params as _stage_params
@@ -77,6 +79,9 @@ from vllm_ascend.ops.fused_moe.moe_stage_params import (
     MoERoutingParams,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 
 def _build_mxfp_params(
@@ -128,7 +133,7 @@ def build_fused_experts_input(
     apply_router_weight_on_input: bool = False,
     log2phy: torch.Tensor | None = None,
     pertoken_scale: torch.Tensor | None = None,
-    activation: str = "silu",
+    activation: MoEActivation | str | None = "silu",
     need_trans: bool = False,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,

@@ -612,8 +612,16 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
-        shared_gate_up, _ = self._shared_experts.gate_up_proj(hidden_states)  # type: ignore
-        return shared_gate_up
+        if hasattr(self._shared_experts, "gate_up_proj"):
+            shared_proj, _ = self._shared_experts.gate_up_proj(hidden_states)  # type: ignore
+        elif hasattr(self._shared_experts, "up_proj"):
+            shared_proj, _ = self._shared_experts.up_proj(hidden_states)
+        else:
+            raise AttributeError(
+                    f"{type(self._shared_experts)} has neither "
+                    "'gate_up_proj' nor 'up_proj'; cannot split shared expert computation."
+                )
+        return shared_proj
 
     def _shared_experts_part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
         shared_act = self._shared_experts.act_fn(shared_gate_up)  # type: ignore
