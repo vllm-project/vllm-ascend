@@ -359,7 +359,7 @@ class KVPoolWorker:
         keys_multi_blocks: list[str],
         block_ids: list[int],
         layer_id: int,
-        key_gva_mapping: dict | None,
+        key_gva_mapping: dict,
         num_keys_per_block: int,
         num_blocks: int,
     ) -> None:
@@ -376,13 +376,12 @@ class KVPoolWorker:
                 start, end, block_ids, layer_id)
             tracker['chunk_addr_list'].extend(addr)
             tracker['chunk_size_list'].extend(size)
-            if key_gva_mapping is not None:
-                gva = key_gva_mapping.get(key)
-                if gva is not None:
-                    offset = 0
-                    for s in size:
-                        tracker['chunk_gvas_list'].append(gva + offset)
-                        offset += s
+            gva = key_gva_mapping.get(key)
+            if gva is not None:
+                offset = 0
+                for s in size:
+                    tracker['chunk_gvas_list'].append(gva + offset)
+                    offset += s
 
         tracker['processed_count'] = num_blocks
 
@@ -392,7 +391,7 @@ class KVPoolWorker:
         last_block_keys: list[str],
         block_ids: list[int],
         layer_id: int,
-        key_gva_mapping: dict | None,
+        key_gva_mapping: dict,
         num_blocks: int,
         has_last_block: bool,
     ) -> None:
@@ -415,13 +414,12 @@ class KVPoolWorker:
             last_block_start, last_block_end, block_ids, layer_id)
         last_block_addr.extend(addr)
         last_block_size.extend(size)
-        if key_gva_mapping is not None:
-            gva = key_gva_mapping.get(key)
-            if gva is not None:
-                offset = 0
-                for s in size:
-                    last_block_gvas.append(gva + offset)
-                    offset += s
+        gva = key_gva_mapping.get(key)
+        if gva is not None:
+            offset = 0
+            for s in size:
+                last_block_gvas.append(gva + offset)
+                offset += s
 
         tracker['last_block_addr'] = last_block_addr
         tracker['last_block_size'] = last_block_size

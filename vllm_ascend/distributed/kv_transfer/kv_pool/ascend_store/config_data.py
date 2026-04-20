@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
@@ -268,7 +268,7 @@ class RequestTracker:
     # NOTE: This field will only be used when you enable kv-event
     token_ids: list[int] | None = None
 
-    key_gva_mapping: dict[str, int | None] | None = None
+    key_gva_mapping: dict[str, int | None] = field(default_factory=dict)
 
     block_keys_by_layer: list[list[str]] | None = None
 
@@ -350,7 +350,7 @@ class ReqMeta:
     token_ids: list[int] | None = None
     original_block_size: int | None = None
 
-    key_gva_mapping: dict[str, int | None] | None = None
+    key_gva_mapping: dict[str, int | None] = field(default_factory=dict)
     block_keys_by_layer: list[list[str]] | None = None
     last_block_keys_by_layer: list[list[str]] | None = None
 
@@ -457,7 +457,7 @@ class LasyerMultiBlockReqMeta:
     layer_id: int
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
-    key_gva_mapping: dict[str, int | None] | None = None
+    key_gva_mapping: dict[str, int | None] = field(default_factory=dict)
     addr_list: list[int] | None = None
     size_list: list[int] | None = None
     gvas_list: list[int] | None = None
