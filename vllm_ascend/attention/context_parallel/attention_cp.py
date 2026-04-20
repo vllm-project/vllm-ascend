@@ -226,7 +226,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             if common_long_seq_metadata and common_long_seq_metadata.mtp_attention_masks_for_decode:
                 mtp_masks = common_long_seq_metadata.mtp_attention_masks_for_decode
                 if mtp_masks and mtp_masks[0] is not None:
-                    mtp_attn_mask = mtp_masks[0]
+                    mtp_attn_mask = mtp_masks
             # TODO: numpy array mode of the shared memory is used to improve performance
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -563,7 +563,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             and attn_metadata.decode_meta.mtp_attn_mask is not None
             and self.vllm_config.speculative_config is not None
         ):
-            mtp_mask = attn_metadata.decode_meta.mtp_attn_mask
+            mtp_mask = torch.stack(attn_metadata.decode_meta.mtp_attn_mask, dim=0)
             B = mtp_mask.shape[0]
             L = mtp_mask.shape[1]
             target_length = 16384
