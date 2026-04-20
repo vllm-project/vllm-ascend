@@ -86,8 +86,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     w2=torch.randn(2, 16, 8),
                     quant_type=quant_type,
                     dynamic_eplb=True,
-                    expert_map=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
-                    global_redundant_expert_num=2,
                     mc2_mask=torch.tensor([True, False, True, False]),
                     apply_router_weight_on_input=True,
                     log2phy=torch.tensor([3, 2, 1, 0], dtype=torch.int32),
@@ -101,7 +99,6 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertIs(fused_experts_input.topk_ids, topk_ids)
                 self.assertTrue(fused_experts_input.dynamic_eplb)
                 self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
-                self.assertEqual(fused_experts_input.routing.global_redundant_expert_num, 2)
                 self.assertEqual(fused_experts_input.activation, "gelu")
                 self.assertEqual(fused_experts_input.quant.quant_type, quant_type)
 

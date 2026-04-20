@@ -226,7 +226,6 @@ class AscendMoEScheme(ABC):
         renormalize: bool,
         use_grouped_topk: bool = False,
         global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
         custom_routing_function: Callable | None = None,
@@ -252,7 +251,6 @@ class AscendMoEScheme(ABC):
             renormalize: Whether to renormalize expert weights.
             use_grouped_topk: Whether to use grouped top-k selection.
             global_num_experts: Total number of experts globally.
-            expert_map: Mapping from local to global expert indices.
             topk_group: Group size for grouped top-k.
             num_expert_group: Number of expert groups.
             custom_routing_function: Custom routing function.

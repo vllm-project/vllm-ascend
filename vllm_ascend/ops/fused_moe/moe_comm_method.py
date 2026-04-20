@@ -210,7 +210,7 @@ class MC2CommImpl(MoECommMethod):
     """
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return TokenDispatcherWithMC2(num_experts=self.moe_config.num_experts)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
@@ -255,7 +255,7 @@ class FusedMC2CommImpl(MoECommMethod):
             self.expert_token_nums = None
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return TokenDispatcherWithMC2(num_experts=self.moe_config.num_experts)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
@@ -297,7 +297,6 @@ class FusedMC2CommImpl(MoECommMethod):
             )
             expert_tokens = self.expert_token_nums
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
-            assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
                 x=fused_experts_input.hidden_states,
                 expert_ids=topk_ids,

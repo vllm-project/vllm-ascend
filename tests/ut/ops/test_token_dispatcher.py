@@ -47,8 +47,6 @@ def build_token_dispatch_input_fixture(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    expert_map: torch.Tensor | None = None,
-    global_redundant_expert_num: int = 0,
     apply_router_weight_on_input: bool = False,
     pertoken_scale: torch.Tensor | None = None,
     quant_type: QuantType = QuantType.NONE,
@@ -63,8 +61,6 @@ def build_token_dispatch_input_fixture(
         topk_weights=topk_weights,
         topk_ids=topk_ids,
         routing=MoERoutingParams(
-            expert_map=expert_map,
-            global_redundant_expert_num=global_redundant_expert_num,
             mc2_mask=None,
             apply_router_weight_on_input=apply_router_weight_on_input,
             pertoken_scale=pertoken_scale,
@@ -142,26 +138,22 @@ class TestTokenDispatcherWithMC2(TestBase):
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
-        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            expert_map=expert_map,
-            global_redundant_expert_num=0,
             apply_router_weight_on_input=False,
             pertoken_scale=None,
         )
         kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
         self.assertIn("x", kwargs)
         self.assertIn("expert_ids", kwargs)
-        self.assertEqual(kwargs["moe_expert_num"], 8)
+        self.assertEqual(kwargs["moe_expert_num"], 128)
 
     def test_token_permutation_dispatch(self):
         hidden_states = torch.randn(10, 128)
         topk_weights = torch.randn(10, 1)
         topk_ids = torch.randint(0, 8, (10, 1))
-        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
         with patch("torch_npu.npu_moe_distribute_dispatch_v2",
                    return_value=(torch.randn(10, 128), ) * 5 +
@@ -170,7 +162,6 @@ class TestTokenDispatcherWithMC2(TestBase):
                 hidden_states=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                expert_map=expert_map,
             )
             output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
             mock_dispatch.assert_called_once()
@@ -189,7 +180,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         combine_metadata = MoEMC2CombineMetadata(
             topk_ids=topk_ids,
             topk_weights=topk_weights,
-            expert_map=expert_map,
             ep_recv_counts=ep_recv_counts,
             tp_recv_counts=tp_recv_counts,
             assist_info_for_combine=assist_info_for_combine,
@@ -208,14 +198,12 @@ class TestTokenDispatcherWithMC2(TestBase):
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
-        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
         self.dispatcher.a5_need_extra_args = True
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            expert_map=expert_map,
             quant_type=QuantType.MXFP8,
             act_quant_type=torch.float8_e4m3fn,
         )
@@ -230,14 +218,12 @@ class TestTokenDispatcherWithMC2(TestBase):
         hidden_states = torch.randn(10, 128)
         topk_weights = torch.randn(10, 1)
         topk_ids = torch.randint(0, 8, (10, 1))
-        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
         self.dispatcher.a5_need_extra_args = True
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            expert_map=expert_map,
             quant_type=QuantType.MXFP4,
             act_quant_type=MXFP4_TEST_DTYPE,
         )
@@ -539,7 +525,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         hidden_states = torch.randn(8, 16)
         topk_weights = torch.rand(8, 4)
         topk_ids = torch.randint(0, 4, (8, 2)).long()
-        expert_map = torch.tensor([0, 1, 2, 3])
 
         self.dispatcher.expert_ids_per_ep_rank = torch.tensor(
             [0, 1], dtype=torch.int32)
@@ -549,7 +534,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            expert_map=expert_map,
         )
         result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
@@ -589,7 +573,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         hidden_states = torch.randn(8, 16)
         topk_weights = torch.rand(8, 4)
         topk_ids = torch.randint(0, 4, (8, 2)).long()
-        expert_map = torch.tensor([0, 1, 2, 3])
 
         self.dispatcher.expert_ids_per_ep_rank = torch.tensor(
             [0, 1], dtype=torch.int32)
@@ -599,7 +582,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            expert_map=expert_map,
             quant_type=QuantType.W8A8,
         )
         result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
@@ -623,7 +605,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         hidden_states = torch.randn(8, 16)
         topk_weights = torch.rand(8, 4)
         topk_ids = torch.randint(0, 4, (8, 2)).long()
-        expert_map = torch.tensor([0, 1, 2, 3])
 
         self.dispatcher.expert_ids_per_ep_rank = torch.tensor(
             [0, 1], dtype=torch.int32)
@@ -633,7 +614,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            expert_map=expert_map,
             quant_type=QuantType.W8A8,
         )
         result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
