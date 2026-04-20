@@ -128,8 +128,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
 
 try:
     from vllm.logger import init_logger
@@ -605,9 +605,8 @@ async def send_request_to_service(
     for attempt in range(1, max_retries + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
-            response.raise_for_status()
             return response
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except httpx.RequestError as e:
             logger.warning(f"Attempt {attempt} failed for {endpoint}: {str(e)}")
             last_exc = e
             if attempt < max_retries:
@@ -674,6 +673,11 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
         base_delay=global_args.retry_delay,
     )
     proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text
+        )
     response_json = response.json()
     kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
@@ -817,6 +821,11 @@ async def _handle_completions(api: str, request: Request):
         # Determine the correct media type based on stream flag
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
+    except HTTPException as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"detail": e.detail}
+        )
     except Exception as e:
         import traceback
 
