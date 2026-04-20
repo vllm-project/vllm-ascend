@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -407,3 +407,75 @@ class LayerMultiBlockReqMeta:
     layer_id: int
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
+
+
+def _make_sub_key_str(worker: Any, base_key: PoolKey, effective_rank: int) -> str:
+    """Override the ``@head_or_tp_rank:`` field of ``base_key.to_string()`` with
+    ``effective_rank``.
+
+    Under TP mismatch, both sides agree to address the pool at granularity
+    ``effective_tp_size = max(local_tp, peer_tp)``. The key field
+    ``@head_or_tp_rank:`` therefore carries the effective rank rather than
+    the local TP rank.
+    """
+    key_str = base_key.to_string()
+    return key_str.replace(
+        f"@head_or_tp_rank:{worker.metadata.head_or_tp_rank}",
+        f"@head_or_tp_rank:{effective_rank}",
+        1,
+    )
+
+
+def _build_strided_addrs(
+    worker: Any, block_id: int, token_count: int, sub_idx: int
+) -> tuple[list[int], list[int]]:
+    """Build per-token strided ``(addr, size)`` pairs into the local KV cache
+    memory for one sub-key at one block.
+
+    For each layer-entry (K and V of every layer) and each token within the
+    block, emit one ``(addr, size)`` pair pointing to the slice of heads that
+    belongs to ``sub_idx`` of this rank's local cache. The KV cache layout is
+    ``[num_block, block_size, num_kv_head_per_local_rank, head_dim]``, so the
+    heads of consecutive tokens are interleaved with token positions and a
+    sub-slice of heads requires one transfer per token.
+    """
+    head_offset_bytes = sub_idx * worker.sub_size_bytes
+    addrs: list[int] = []
+    sizes: list[int] = []
+    for base_addr in worker.kv_caches_base_addr:
+        block_base = base_addr + block_id * worker.block_len[0]
+        for t in range(token_count):
+            addrs.append(block_base + t * worker.per_token_bytes + head_offset_bytes)
+            sizes.append(worker.sub_size_bytes)
+    return addrs, sizes
+
+
+def _build_tp_mismatch_keys_and_addrs(
+    worker: Any,
+    block_hashes: list,
+    block_ids: list[int],
+    token_len: int,
+    mask_num: int = 0,
+) -> tuple[list[str], list[list[int]], list[list[int]]]:
+    """Walk all chunks × sub-keys and build ``(keys, addrs, sizes)`` suitable
+    for ``backend.put`` / ``backend.get``.
+
+    Each emitted key represents one ``(chunk, sub_idx)`` pair. Its addrs/sizes
+    cover all layer-entries × all tokens in the chunk, addressed at the
+    head-slice owned by ``sub_idx`` within this rank's local cache.
+    """
+    all_keys: list[str] = []
+    all_addrs: list[list[int]] = []
+    all_sizes: list[list[int]] = []
+    for start, end, base_key in worker.token_database.process_tokens(
+        token_len, block_hashes, mask_num
+    ):
+        block_id = block_ids[start // worker.block_size]
+        token_count = end - start
+        for sub_idx in range(worker.num_sub_keys):
+            effective_rank = worker.tp_rank * worker.num_sub_keys + sub_idx
+            addrs, sizes = _build_strided_addrs(worker, block_id, token_count, sub_idx)
+            all_keys.append(_make_sub_key_str(worker, base_key, effective_rank))
+            all_addrs.append(addrs)
+            all_sizes.append(sizes)
+    return all_keys, all_addrs, all_sizes
