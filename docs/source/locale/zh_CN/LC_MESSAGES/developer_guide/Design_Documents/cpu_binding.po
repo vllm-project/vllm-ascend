@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-15 09:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -35,9 +35,8 @@ msgid ""
 "Ascend NPUs and is automatically executed during worker initialization "
 "when enabled."
 msgstr ""
-"CPU 绑定将 vLLM Ascend 工作进程和关键线程固定到特定的 CPU 核心，以减少 CPU-"
-"NPU 跨 NUMA 流量，并在多进程工作负载下稳定延迟。它专为运行 Ascend NPU 的 ARM "
-"服务器设计，启用后会在工作进程初始化期间自动执行。"
+"CPU 绑定将 vLLM Ascend 工作进程和关键线程固定到特定的 CPU 核心，以减少 CPU-NPU 跨 NUMA "
+"流量，并在多进程工作负载下稳定延迟。它专为运行 Ascend NPU 的 ARM 服务器设计，启用后会在工作进程初始化期间自动执行。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:7
 msgid "Background"
@@ -53,10 +52,9 @@ msgid ""
 "purely a host‑side affinity policy and does not change model execution "
 "logic."
 msgstr ""
-"在多插槽 ARM 系统上，操作系统调度器可能会将 vLLM 线程放置在远离本地 NPU 的 "
-"CPU 上，从而导致 NUMA 跨域流量和延迟抖动。CPU 绑定强制执行一种确定性的 CPU "
-"放置策略，并可选地将 NPU IRQ 绑定到同一个 CPU 池。这与其他性能特性（如图模式"
-"或动态批处理）不同，因为它纯粹是主机端的亲和性策略，不改变模型执行逻辑。"
+"在多插槽 ARM 系统上，操作系统调度器可能会将 vLLM 线程放置在远离本地 NPU 的 CPU 上，从而导致 NUMA "
+"跨域流量和延迟抖动。CPU 绑定强制执行一种确定性的 CPU 放置策略，并可选地将 NPU IRQ 绑定到同一个 CPU "
+"池。这与其他性能特性（如图模式或动态批处理）不同，因为它纯粹是主机端的亲和性策略，不改变模型执行逻辑。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:11
 msgid "Design & How it works"
@@ -71,8 +69,8 @@ msgid ""
 "**Allowed CPU list**: The cpuset from /proc/self/status "
 "(Cpus_allowed_list). All allocations are constrained to this list."
 msgstr ""
-"**允许的 CPU 列表**：来自 /proc/self/status (Cpus_allowed_list) 的 cpuset。"
-"所有分配都受限于此列表。"
+"**允许的 CPU 列表**：来自 /proc/self/status (Cpus_allowed_list) 的 "
+"cpuset。所有分配都受限于此列表。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:16
 msgid ""
@@ -86,8 +84,7 @@ msgstr ""
 msgid ""
 "**CPU pool per NPU**: The CPU list assigned to each logical NPU ID based "
 "on the binding mode."
-msgstr ""
-"**每个 NPU 的 CPU 池**：根据绑定模式分配给每个逻辑 NPU ID 的 CPU 列表。"
+msgstr "**每个 NPU 的 CPU 池**：根据绑定模式分配给每个逻辑 NPU ID 的 CPU 列表。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:18
 msgid "**Binding modes & Device behavior**:"
@@ -119,8 +116,8 @@ msgid ""
 "logical NPUs**, ensuring each NPU is assigned a contiguous segment of CPU"
 " cores. This prevents CPU core overlap across multiple process groups."
 msgstr ""
-"根据**全局逻辑 NPU 总数**均匀分割允许的 CPU 列表，确保每个 NPU 被分配一个连"
-"续的 CPU 核心段。这可以防止多个进程组之间的 CPU 核心重叠。"
+"根据**全局逻辑 NPU 总数**均匀分割允许的 CPU 列表，确保每个 NPU 被分配一个连续的 CPU 核心段。这可以防止多个进程组之间的 "
+"CPU 核心重叠。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md
 msgid "A2 / 310P / Others"
@@ -136,8 +133,8 @@ msgid ""
 "If multiple NPUs are assigned to a single NUMA node (which may cause "
 "bandwidth contention), the CPU allocation extends to adjacent NUMA nodes."
 msgstr ""
-"基于 NPU 拓扑亲和性 (`npu-smi info -t topo`) 分配 CPU。如果多个 NPU 被分配"
-"到单个 NUMA 节点（可能导致带宽争用），则 CPU 分配会扩展到相邻的 NUMA 节点。"
+"基于 NPU 拓扑亲和性 (`npu-smi info -t topo`) 分配 CPU。如果多个 NPU 被分配到单个 NUMA "
+"节点（可能导致带宽争用），则 CPU 分配会扩展到相邻的 NUMA 节点。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:25
 msgid "**Default**: enabled (enable_cpu_binding = true)."
@@ -151,8 +148,7 @@ msgstr "**回退**：如果 NPU 拓扑亲和性不可用，则使用 global_slic
 msgid ""
 "**Failure handling**: Any exception in binding is logged as a warning and"
 " **binding is skipped for that rank**."
-msgstr ""
-"**故障处理**：绑定过程中的任何异常都会记录为警告，并且**跳过该等级的绑定**。"
+msgstr "**故障处理**：绑定过程中的任何异常都会记录为警告，并且**跳过该等级的绑定**。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:29
 msgid "Execution flow (simplified)"
@@ -373,9 +369,7 @@ msgstr "`IRQ`: 600-601, `Main`: 602-637, `ACL`: 638, `Release`: 639"
 msgid ""
 "This layout remains deterministic even when multiple processes share the "
 "same cpuset, because slicing is based on the global logical NPU ID."
-msgstr ""
-"即使多个进程共享同一个 cpuset，此布局也保持确定性，因为切片是基于全局逻辑 "
-"NPU ID 的。"
+msgstr "即使多个进程共享同一个 cpuset，此布局也保持确定性，因为切片是基于全局逻辑 NPU ID 的。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:86
 msgid "Example 2: A3 global_slice, even split"
@@ -388,6 +382,10 @@ msgstr "示例 2：A3 global_slice，均匀分割"
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:182
 msgid "**Inputs**:"
 msgstr "**输入**："
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:90
+msgid "allowed_cpus = [0..23] (24 CPUs)"
+msgstr "allowed_cpus = [0..23] (24个CPU)"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:91
 msgid ""
@@ -520,7 +518,10 @@ msgid ""
 "(6,7) and NUMA1 (8..11). This is a direct consequence of global slicing "
 "over the ordered cpuset; the remainder distribution does not enforce NUMA"
 " boundaries."
-msgstr "在上述对称NUMA布局中 (NUMA0 = 0..7, NUMA1 = 8..16)，NPU0保持在NUMA0内，NPU2保持在NUMA1内，但NPU1跨越了NUMA0 (6,7) 和 NUMA1 (8..11)。这是对有序cpuset进行全局切片的直接结果；余数分配不强制NUMA边界。"
+msgstr ""
+"在上述对称NUMA布局中 (NUMA0 = 0..7, NUMA1 = "
+"8..16)，NPU0保持在NUMA0内，NPU2保持在NUMA1内，但NPU1跨越了NUMA0 (6,7) 和 NUMA1 "
+"(8..11)。这是对有序cpuset进行全局切片的直接结果；余数分配不强制NUMA边界。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:134
 msgid ""
@@ -539,7 +540,9 @@ msgid ""
 "avoid cross‑NUMA pools. A future enhancement should incorporate NUMA node"
 " boundaries into the slicing logic so that pools remain within a single "
 "NUMA node whenever possible."
-msgstr "使用当前的 `global_slice` 策略，某些CPU/NPU布局无法避免跨NUMA池。未来的增强应将NUMA节点边界纳入切片逻辑，以便池尽可能保持在单个NUMA节点内。"
+msgstr ""
+"使用当前的 `global_slice` "
+"策略，某些CPU/NPU布局无法避免跨NUMA池。未来的增强应将NUMA节点边界纳入切片逻辑，以便池尽可能保持在单个NUMA节点内。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:140
 msgid "Example 4: global_slice with visible subset of NPUs"
@@ -594,7 +597,6 @@ msgid "Example 5: A2/310P topo_affinity with NUMA extension"
 msgstr "示例 5: 具有NUMA扩展的 A2/310P topo_affinity"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:163
-#, python-brace-format
 msgid "npu_affinity = {0: [0..7], 1: [0..7]} (from `npu-smi info -t topo`)"
 msgstr "npu_affinity = {0: [0..7], 1: [0..7]} (来自 `npu-smi info -t topo`)"
 
@@ -745,11 +747,12 @@ msgid ""
 "0–31, NUMA1 = CPUs 32–63, and the cpuset is 0–63. With 4 logical NPUs, "
 "global slicing yields 16 CPUs per NPU (0–15, 16–31, 32–47, 48–63), so "
 "each NPU’s pool stays within a single NUMA node."
-msgstr "示例（对称布局）：2个NUMA节点，总共64个CPU。NUMA0 = CPU 0–31，NUMA1 = CPU 32–63，cpuset为0–63。对于4个逻辑NPU，全局切片每个NPU产生16个CPU (0–15, 16–31, 32–47, 48–63)，因此每个NPU的池保持在单个NUMA节点内。"
+msgstr ""
+"示例（对称布局）：2个NUMA节点，共64个CPU。NUMA0 = CPU 0–31，NUMA1 = CPU 32–63，cpuset为0–63。对于4个逻辑NPU，全局切片为每个NPU分配16个CPU (0–15, 16–31, 32–47, 48–63)，因此每个NPU的CPU池都保持在单个NUMA节点内。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:212
 msgid "**Runtime dependencies**:"
-msgstr "**运行时依赖**："
+msgstr "**运行时依赖项**："
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:213
 msgid "Requires npu‑smi and lscpu commands."
@@ -761,13 +764,13 @@ msgstr "IRQ绑定需要对 /proc/irq 的写访问权限。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:215
 msgid "Memory binding requires migratepages; otherwise it is skipped."
-msgstr "内存绑定需要 migratepages；否则将被跳过。"
+msgstr "内存绑定需要 migratepages；否则将跳过此步骤。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:216
 msgid ""
 "**IRQ side effects**: irqbalance may be stopped to avoid overriding "
 "bindings."
-msgstr "**IRQ副作用**：可能会停止 irqbalance 以避免覆盖绑定。"
+msgstr "**IRQ副作用**：可能会停止 irqbalance 服务以避免覆盖绑定。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:217
 msgid ""
@@ -788,13 +791,15 @@ msgstr "使用标准的 vLLM 日志配置来启用调试日志。当启用调试
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:223
 msgid "References"
-msgstr "参考"
+msgstr "参考资料"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:225
 msgid ""
 "CPU binding implementation: vllm_ascend/cpu_binding.py (`DeviceInfo`, "
 "`CpuAlloc`, `bind_cpus`)"
-msgstr "CPU 绑定实现：vllm_ascend/cpu_binding.py (`DeviceInfo`, `CpuAlloc`, `bind_cpus`)"
+msgstr ""
+"CPU 绑定实现：vllm_ascend/cpu_binding.py (`DeviceInfo`, `CpuAlloc`, "
+"`bind_cpus`)"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:226
 msgid ""
@@ -807,7 +812,9 @@ msgid ""
 "Additional config option: "
 "docs/source/user_guide/configuration/additional_config.md "
 "(`enable_cpu_binding`)"
-msgstr "附加配置选项：docs/source/user_guide/configuration/additional_config.md (`enable_cpu_binding`)"
+msgstr ""
+"附加配置选项：docs/source/user_guide/configuration/additional_config.md "
+"(`enable_cpu_binding`)"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:228
 msgid "Tests: tests/ut/device_allocator/test_cpu_binding.py"

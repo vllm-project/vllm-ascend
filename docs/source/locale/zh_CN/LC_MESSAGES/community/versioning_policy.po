@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-15 09:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -72,8 +72,9 @@ msgid ""
 "(`v[major].[minor].[micro]`). Any post version must be published as a "
 "patch version of the final release."
 msgstr ""
-"**后续版本**：通常**按需发布**，用于解决正式版本中的小错误。与 [PEP-440 后续版本说明](https://peps.python.org/pep-"
-"0440/#post-releases) 的惯例不同，这些版本包含实际的错误修复，因为正式发布版本必须严格与 vLLM 的正式发布格式 "
+"**后续版本**：通常**按需发布**，用于解决正式版本中的小错误。与 [PEP-440 "
+"后续版本说明](https://peps.python.org/pep-0440/#post-releases) "
+"的惯例不同，这些版本包含实际的错误修复，因为正式发布版本必须严格与 vLLM 的正式发布格式 "
 "(`v[major].[minor].[micro]`) 对齐。任何后续版本都必须作为正式版本的补丁版本发布。"
 
 #: ../../source/community/versioning_policy.md:14
@@ -379,14 +380,17 @@ msgstr "v0.7.3"
 msgid ""
 "If you're using v0.7.3, don't forget to install [mindie-"
 "turbo](https://pypi.org/project/mindie-turbo) as well."
-msgstr "如果您正在使用 v0.7.3，请别忘了同时安装 [mindie-turbo](https://pypi.org/project/mindie-turbo)。"
+msgstr ""
+"如果您正在使用 v0.7.3，请别忘了同时安装 [mindie-turbo](https://pypi.org/project/mindie-turbo)。"
 
 #: ../../source/community/versioning_policy.md:58
 msgid ""
 "For main branch of vLLM Ascend, we usually make it compatible with the "
 "latest vLLM release and a newer commit hash of vLLM. Please note that "
 "this table is usually updated. Please check it regularly."
-msgstr "对于 vLLM Ascend 的 main 分支，我们通常会使其与最新的 vLLM 发布版本以及更新的 vLLM 提交哈希兼容。请注意，此表格会经常更新，请定期查看。"
+msgstr ""
+"对于 vLLM Ascend 的 main 分支，我们通常会使其与最新的 vLLM 发布版本以及更新的 vLLM "
+"提交哈希兼容。请注意，此表格会经常更新，请定期查看。"
 
 #: ../../source/community/versioning_policy.md:54
 msgid "main"
@@ -683,7 +687,9 @@ msgid ""
 "**releases/vX.Y.Z**: development branch, created with part of new "
 "releases of vLLM. For example, `releases/v0.13.0` is the dev branch for "
 "vLLM `v0.13.0` version."
-msgstr "**releases/vX.Y.Z**：开发分支，随 vLLM 新版本的一部分创建。例如，`releases/v0.13.0` 是 vLLM `v0.13.0` 版本的开发分支。"
+msgstr ""
+"**releases/vX.Y.Z**：开发分支，随 vLLM 新版本的一部分创建。例如，`releases/v0.13.0` 是 vLLM "
+"`v0.13.0` 版本的开发分支。"
 
 #: ../../source/community/versioning_policy.md:109
 msgid ""
@@ -760,7 +766,10 @@ msgid ""
 "do not (e.g. `releases/v0.12.0`). The vLLM Ascend release branch now "
 "follows the `releases/vX.Y.Z` naming convention, replacing the previous "
 "`vX.Y.Z-dev` format to align with vLLM's branch naming standards."
-msgstr "请注意，vLLM Ascend 仅针对特定的 vLLM 发布版本进行发布，而非每个版本。因此，您可能会注意到某些版本有对应的开发分支（例如 `releases/v0.13.0`），而其他版本则没有（例如 `releases/v0.12.0`）。vLLM Ascend 的发布分支现在遵循 `releases/vX.Y.Z` 命名约定，取代了之前的 `vX.Y.Z-dev` 格式，以与 vLLM 的分支命名标准保持一致。"
+msgstr ""
+"请注意，vLLM Ascend 仅针对特定的 vLLM 发布版本进行发布，而非每个版本。因此，您可能会注意到某些版本有对应的开发分支（例如 "
+"`releases/v0.13.0`），而其他版本则没有（例如 `releases/v0.12.0`）。vLLM Ascend 的发布分支现在遵循"
+" `releases/vX.Y.Z` 命名约定，取代了之前的 `vX.Y.Z-dev` 格式，以与 vLLM 的分支命名标准保持一致。"
 
 #: ../../source/community/versioning_policy.md:125
 msgid ""
@@ -910,7 +919,10 @@ msgid ""
 " indicate that they have installed a dev or editable version of vLLM "
 "package. In this case, we provide the env variable `VLLM_VERSION` to let "
 "users specify the version of vLLM package to use."
-msgstr "为确保代码更改与最新的 1 或 2 个 vLLM 发布版本兼容，vLLM Ascend 在代码中引入了版本检查机制。它首先检查已安装的 vLLM 包的版本，以决定使用哪段代码逻辑。如果用户遇到 `InvalidVersion` 错误，可能表明他们安装了开发版或可编辑版本的 vLLM 包。在这种情况下，我们提供了环境变量 `VLLM_VERSION`，允许用户指定要使用的 vLLM 包版本。"
+msgstr ""
+"为确保代码更改与最新的 1 或 2 个 vLLM 发布版本兼容，vLLM Ascend 在代码中引入了版本检查机制。它首先检查已安装的 vLLM "
+"包的版本，以决定使用哪段代码逻辑。如果用户遇到 `InvalidVersion` 错误，可能表明他们安装了开发版或可编辑版本的 vLLM "
+"包。在这种情况下，我们提供了环境变量 `VLLM_VERSION`，允许用户指定要使用的 vLLM 包版本。"
 
 #: ../../source/community/versioning_policy.md:154
 msgid ""
@@ -929,7 +941,10 @@ msgid ""
 "variables in [docs/source/conf.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/docs/source/conf.py)**. While this is not a simple task,"
 " it is a principle we should strive to follow."
-msgstr "为降低维护成本，**所有分支的文档内容应保持一致，版本差异可通过 [docs/source/conf.py](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/conf.py) 中的变量进行控制**。虽然这并非易事，但这是我们应努力遵循的原则。"
+msgstr ""
+"为降低维护成本，**所有分支的文档内容应保持一致，版本差异可通过 [docs/source/conf.py](https://github.com"
+"/vllm-project/vllm-ascend/blob/main/docs/source/conf.py) "
+"中的变量进行控制**。虽然这并非易事，但这是我们应努力遵循的原则。"
 
 #: ../../source/community/versioning_policy.md:54
 msgid "Version"
@@ -945,7 +960,7 @@ msgstr "代码分支"
 
 #: ../../source/community/versioning_policy.md:54
 msgid "latest"
-msgstr "最新"
+msgstr "latest"
 
 #: ../../source/community/versioning_policy.md:54
 msgid "Doc for the latest rc release of main branch"
@@ -957,7 +972,7 @@ msgstr "`main` 分支"
 
 #: ../../source/community/versioning_policy.md:54
 msgid "rc version"
-msgstr "候选版本"
+msgstr "rc version"
 
 #: ../../source/community/versioning_policy.md:54
 msgid "Doc for RC released versions"
@@ -969,7 +984,7 @@ msgstr "`vX.Y.ZrcN` --> `vX.Y.ZrcN` 标签"
 
 #: ../../source/community/versioning_policy.md:54
 msgid "version"
-msgstr "版本"
+msgstr "version"
 
 #: ../../source/community/versioning_policy.md:54
 msgid "Doc for historical released versions"
@@ -1004,77 +1019,14 @@ msgstr "软件依赖管理"
 #: ../../source/community/versioning_policy.md:174
 msgid ""
 "`torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable "
-"version to [PyPi](https://pypi.org/project/torch-npu) every 3 months, a "
+"version to [PyPI](https://pypi.org/project/torch-npu) every 3 months, a "
 "development version (aka the POC version) every month, and a nightly "
-"version every day. The PyPi stable version **CAN** be used in vLLM Ascend"
+"version every day. The PyPI stable version **CAN** be used in vLLM Ascend"
 " final version, the monthly dev version **ONLY CAN** be used in vLLM "
 "Ascend RC version for rapid iteration, and the nightly version **CANNOT**"
 " be used in vLLM Ascend any version or branch."
 msgstr ""
 "`torch-npu`：Ascend Extension for PyTorch（torch-npu）每 3 个月在 "
-"[PyPi](https://pypi.org/project/torch-npu) 发布一个稳定版本，每月发布一个开发版本（亦称 POC 版本），每日发布一个 "
-"nightly 版本。PyPi 稳定版本**可以**用于 vLLM Ascend 正式版，月度开发版本**仅能**用于 vLLM Ascend RC "
-"版本以进行快速迭代，nightly 版本**不能**用于 vLLM Ascend 的任何版本或分支。"
-
-#~ msgid "MindIE Turbo"
-#~ msgstr "MindIE Turbo"
-
-#~ msgid "2.0rc1"
-#~ msgstr "2.0候选版本1"
-
-#~ msgid "The branch status will be in one of the following states:"
-#~ msgstr "分支状态将处于以下几种状态之一："
-
-#~ msgid ""
-#~ "Note that vLLM Ascend will only be"
-#~ " released for a certain vLLM release"
-#~ " version rather than all versions. "
-#~ "Hence, You might see only part of"
-#~ " versions have dev branches (such as"
-#~ " only `0.7.1-dev` / `0.7.3-dev` but "
-#~ "no `0.7.2-dev`), this is as expected."
-#~ msgstr ""
-#~ "请注意，vLLM Ascend 仅会针对特定的 vLLM "
-#~ "发布版本进行发布，而非所有版本。因此，您可能只会看到部分版本拥有开发分支（例如仅有 `0.7.1-dev` / `0.7.3-dev`，而没有 "
-#~ "`0.7.2-dev`），这是正常现象。"
-
-#~ msgid "Doc for the latest dev branch"
-#~ msgstr "最新开发分支的文档"
-
-#~ msgid "vX.Y.Z-dev (Will be `main` after the first final release)"
-#~ msgstr "vX.Y.Z-dev（在首次正式发布后将成为 `main`）"
-
-#~ msgid "Git tags, like vX.Y.Z[rcN]"
-#~ msgstr "Git 标签，如 vX.Y.Z[rcN]"
-
-#~ msgid "stable（not yet released）"
-#~ msgstr "稳定版（尚未发布）"
-
-#~ msgid "Will be `vX.Y.Z-dev` after the first official release"
-#~ msgstr "首次正式发布后将会是 `vX.Y.Z-dev`"
-
-#~ msgid "As shown above:"
-#~ msgstr "如上所示："
-
-#~ msgid ""
-#~ "`latest` documentation: Matches the current"
-#~ " maintenance branch `vX.Y.Z-dev` (Will be"
-#~ " `main` after the first final "
-#~ "release). Continuously updated to ensure "
-#~ "usability for the latest release."
-#~ msgstr "`latest` 文档：匹配当前维护分支 `vX.Y.Z-dev`（在首次正式发布后将成为 `main`）。持续更新以确保适用于最新发布版本。"
-
-#~ msgid ""
-#~ "`stable` documentation (**not yet released**):"
-#~ " Official release documentation. Updates "
-#~ "are allowed in real-time after "
-#~ "release, typically based on vX.Y.Z-dev. "
-#~ "Once stable documentation is available, "
-#~ "non-stable versions should display a "
-#~ "header warning: `You are viewing the "
-#~ "latest developer preview docs. Click "
-#~ "here to view docs for the latest"
-#~ " stable release.`."
-#~ msgstr ""
-#~ "`stable` 文档（**尚未发布**）：官方发布版文档。发布后允许实时更新，通常基于 "
-#~ "vX.Y.Z-dev。一旦稳定版文档可用，非稳定版本应显示一个顶部警告：`您正在查看最新的开发预览文档。点击此处查看最新稳定版本文档。`"
+"[PyPI](https://pypi.org/project/torch-npu) 发布一个稳定版本，每月发布一个开发版本（亦称 POC "
+"版本），每日发布一个 nightly 版本。PyPI 稳定版本**可以**用于 vLLM Ascend 正式版，月度开发版本**仅能**用于 "
+"vLLM Ascend RC 版本以进行快速迭代，nightly 版本**不能**用于 vLLM Ascend 的任何版本或分支。"

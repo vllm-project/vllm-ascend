@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-15 09:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -41,7 +41,10 @@ msgid ""
 "prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and "
 "the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). "
 "On each server, use 8 NPUs 16 chips to deploy one service instance."
-msgstr "以 Deepseek-r1-w8a8 模型为例，使用 4 台 Atlas 800T A3 服务器部署 \"2P1D\" 架构。假设预填充服务器 IP 为 192.0.0.1（预填充节点 1）和 192.0.0.2（预填充节点 2），解码服务器 IP 为 192.0.0.3（解码节点 1）和 192.0.0.4（解码节点 2）。每台服务器使用 8 个 NPU（16 个芯片）部署一个服务实例。"
+msgstr ""
+"以 Deepseek-r1-w8a8 模型为例，使用 4 台 Atlas 800T A3 服务器部署 \"2P1D\" 架构。假设预填充服务器 "
+"IP 为 192.0.0.1（预填充节点 1）和 192.0.0.2（预填充节点 2），解码服务器 IP 为 192.0.0.3（解码节点 1）和"
+" 192.0.0.4（解码节点 2）。每台服务器使用 8 个 NPU（16 个芯片）部署一个服务实例。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:9
 msgid "Verify Multi-Node Communication Environment"
@@ -137,7 +140,10 @@ msgid ""
 " by Moonshot AI.Installation and Compilation Guide: <https://github.com"
 "/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries> First, we"
 " need to obtain the Mooncake project. Refer to the following command:"
-msgstr "Mooncake 是月之暗面（Moonshot AI）提供的领先 LLM 服务 Kimi 的推理平台。安装与编译指南：<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries> 首先，我们需要获取 Mooncake 项目。参考以下命令："
+msgstr ""
+"Mooncake 是月之暗面（Moonshot AI）提供的领先 LLM 服务 Kimi "
+"的推理平台。安装与编译指南：<https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file"
+"#build-and-use-binaries> 首先，我们需要获取 Mooncake 项目。参考以下命令："
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:183
 msgid "(Optional) Replace go install url if the network is poor"
@@ -185,7 +191,10 @@ msgid ""
 "socket listeners. To avoid any issues, port conflicts should be "
 "prevented. Additionally, ensure that each node's engine_id is uniquely "
 "assigned to avoid conflicts."
-msgstr "我们可以分别运行以下脚本来在预填充器/解码器节点上启动服务器。请注意，每个 P/D 节点将占用从 kv_port 到 kv_port + num_chips 的端口范围来初始化 socket 监听器。为避免问题，应防止端口冲突。此外，请确保每个节点的 engine_id 被唯一分配，以避免冲突。"
+msgstr ""
+"我们可以分别运行以下脚本来在预填充器/解码器节点上启动服务器。请注意，每个 P/D 节点将占用从 kv_port 到 kv_port + "
+"num_chips 的端口范围来初始化 socket 监听器。为避免问题，应防止端口冲突。此外，请确保每个节点的 engine_id "
+"被唯一分配，以避免冲突。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:227
 msgid "kv_port Configuration Guide"
@@ -198,7 +207,10 @@ msgid ""
 "npu_per_node × 1000)`. If `kv_port` overlaps with this range, "
 "intermittent port conflicts may occur. To avoid this, configure `kv_port`"
 " according to the table below:"
-msgstr "在 Ascend NPU 上，Mooncake 使用 AscendDirectTransport 进行 RDMA 数据传输，它会在 `[20000, 20000 + npu_per_node × 1000)` 范围内随机分配端口。如果 `kv_port` 与此范围重叠，可能会发生间歇性端口冲突。为避免此问题，请根据下表配置 `kv_port`："
+msgstr ""
+"在 Ascend NPU 上，Mooncake 使用 AscendDirectTransport 进行 RDMA 数据传输，它会在 "
+"`[20000, 20000 + npu_per_node × 1000)` 范围内随机分配端口。如果 `kv_port` "
+"与此范围重叠，可能会发生间歇性端口冲突。为避免此问题，请根据下表配置 `kv_port`："
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:132
 msgid "NPUs per Node"
@@ -242,7 +254,9 @@ msgid ""
 "during startup, it may be caused by kv_port conflicting with randomly "
 "allocated AscendDirectTransport ports. Increase your kv_port value to "
 "avoid the reserved range."
-msgstr "如果在启动时偶尔看到 `zmq.error.ZMQError: Address already in use`，可能是由于 kv_port 与随机分配的 AscendDirectTransport 端口冲突所致。请增加您的 kv_port 值以避开保留范围。"
+msgstr ""
+"如果在启动时偶尔看到 `zmq.error.ZMQError: Address already in use`，可能是由于 kv_port "
+"与随机分配的 AscendDirectTransport 端口冲突所致。请增加您的 kv_port 值以避开保留范围。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:240
 msgid "launch_online_dp.py"
@@ -251,9 +265,12 @@ msgstr "launch_online_dp.py"
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:242
 msgid ""
 "Use `launch_online_dp.py` to launch external dp vllm servers. "
-"[launch\\_online\\_dp.py](https://github.com/vllm-project/vllm-"
+"[launch_online_dp.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
-msgstr "使用 `launch_online_dp.py` 启动外部解耦 vllm 服务器。[launch\\_online\\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
+msgstr ""
+"使用 `launch_online_dp.py` 启动外部解耦 vllm "
+"服务器。[launch_online_dp.py](https://github.com/vllm-project/vllm-"
+"ascend/blob/main/examples/external_online_dp/launch_online_dp.py)"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:245
 msgid "run_dp_template.sh"
@@ -262,9 +279,12 @@ msgstr "run_dp_template.sh"
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:247
 msgid ""
 "Modify `run_dp_template.sh` on each node. "
-"[run\\_dp\\_template.sh](https://github.com/vllm-project/vllm-"
+"[run_dp_template.sh](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/examples/external_online_dp/run_dp_template.sh)"
-msgstr "在每个节点上修改 `run_dp_template.sh`。[run\\_dp\\_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)"
+msgstr ""
+"在每个节点上修改 `run_dp_template.sh`。[run_dp_template.sh](https://github.com"
+"/vllm-project/vllm-"
+"ascend/blob/main/examples/external_online_dp/run_dp_template.sh)"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:250
@@ -321,7 +341,12 @@ msgid ""
 "MooncakeLayerwiseConnector.[load\\_balance\\_proxy\\_layerwise\\_server\\_example.py](https://github.com"
 "/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
-msgstr "**`load_balance_proxy_layerwise_server_example.py`**：请求首先被路由到 D 节点，然后根据需要转发到 P 节点。此代理设计用于与 MooncakeLayerwiseConnector 配合使用。[load\\_balance\\_proxy\\_layerwise\\_server\\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
+msgstr ""
+"**`load_balance_proxy_layerwise_server_example.py`**：请求首先被路由到 D "
+"节点，然后根据需要转发到 P 节点。此代理设计用于与 MooncakeLayerwiseConnector "
+"配合使用。[load_balance_proxy_layerwise_server_example.py](https://github.com"
+"/vllm-project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:756
 msgid ""
@@ -331,7 +356,12 @@ msgid ""
 "MooncakeConnector.[load\\_balance\\_proxy\\_server\\_example.py](https://github.com"
 "/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
-msgstr "**`load_balance_proxy_server_example.py`**：请求首先被路由到 P 节点，然后转发到 D 节点进行后续处理。此代理设计用于与 MooncakeConnector 配合使用。[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+"**`load_balance_proxy_server_example.py`**：请求首先被路由到 P 节点，然后转发到 D "
+"节点进行后续处理。此代理设计用于与 MooncakeConnector "
+"配合使用。[load\\_balance\\_proxy\\_server\\_example.py](https://github.com"
+"/vllm-project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:814
 msgid "Parameter"
@@ -371,7 +401,7 @@ msgstr "--prefiller-ports"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:814
 msgid "Ports of prefiller nodes"
-msgstr "预填充节点的端口"
+msgstr "预填充节点端口"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:814
 msgid "--decoder-hosts"
@@ -379,7 +409,7 @@ msgstr "--decoder-hosts"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:814
 msgid "Hosts of decoder nodes"
-msgstr "解码器节点的主机地址"
+msgstr "解码器节点主机地址"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:814
 msgid "--decoder-ports"
@@ -387,7 +417,7 @@ msgstr "--decoder-ports"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:814
 msgid "Ports of decoder nodes"
-msgstr "解码器节点的端口"
+msgstr "解码器节点端口"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:877
 msgid ""
@@ -396,9 +426,8 @@ msgid ""
 "project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 msgstr ""
-"您可以在代码仓库的示例中找到代理程序，"
-"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
-"project/vllm-"
+"您可以在代码仓库的示例中找到代理程序，[load\\_balance\\_proxy\\_server\\_example.py](https://github.com"
+"/vllm-project/vllm-"
 "ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:879
@@ -411,8 +440,8 @@ msgid ""
 "[aisbench](https://gitee.com/aisbench/benchmark) Execute the following "
 "commands to install aisbench"
 msgstr ""
-"我们推荐使用 aisbench 工具进行性能评估。"
-"[aisbench](https://gitee.com/aisbench/benchmark) 执行以下命令安装 aisbench"
+"我们推荐使用 aisbench 工具进行性能评估。[aisbench](https://gitee.com/aisbench/benchmark)"
+" 执行以下命令安装 aisbench"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:889
 msgid ""
@@ -443,7 +472,9 @@ msgstr "以 gsm8k 数据集为例，执行以下命令来评估性能。"
 msgid ""
 "For more details for commands and parameters for aisbench, refer to  "
 "[aisbench](https://gitee.com/aisbench/benchmark)"
-msgstr "有关 aisbench 命令和参数的更多详细信息，请参考 [aisbench](https://gitee.com/aisbench/benchmark)"
+msgstr ""
+"有关 aisbench 命令和参数的更多详细信息，请参考 "
+"[aisbench](https://gitee.com/aisbench/benchmark)"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:932
 msgid "FAQ"
@@ -459,8 +490,7 @@ msgid ""
 "warm-up to achieve best performance, we recommend preheating the service "
 "with some requests before conducting performance tests to achieve the "
 "best end-to-end throughput."
-msgstr ""
-"由于部分 NPU 算子的计算需要经过多轮预热才能达到最佳性能，我们建议在进行性能测试前，先用一些请求预热服务，以获得最佳的端到端吞吐量。"
+msgstr "由于部分 NPU 算子的计算需要经过多轮预热才能达到最佳性能，我们建议在进行性能测试前，先用一些请求预热服务，以获得最佳的端到端吞吐量。"
 
 #: ../../source/tutorials/features/pd_disaggregation_mooncake_multi_node.md:938
 msgid "Verification"
