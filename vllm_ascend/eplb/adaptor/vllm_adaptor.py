@@ -19,8 +19,6 @@ import json
 from typing import Any
 
 import torch
-import torch.distributed as dist
-from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
@@ -37,13 +35,8 @@ class VllmEplbAdaptor:
         else:
             self.model = model
             self.config = model.config
-        is_stateless = isinstance(get_dynamic_eplb_group(), StatelessGroupCoordinator)
-        if is_stateless:
-            self.rank_id = get_dynamic_eplb_group().rank_in_group
-            self.world_size = get_dynamic_eplb_group().world_size
-        else:
-            self.rank_id = dist.get_rank()
-            self.world_size = dist.get_world_size()
+        self.rank_id = get_dynamic_eplb_group().rank_in_group
+        self.world_size = get_dynamic_eplb_group().world_size
         self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
         self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
 

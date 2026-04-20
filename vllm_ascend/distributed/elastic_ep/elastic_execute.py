@@ -82,7 +82,7 @@ from vllm_ascend.distributed.parallel_state import (
     get_dynamic_eplb_group,
     get_mc2_group,
 )
-from vllm_ascend.distributed.utils import use_stateless_pg_init_and_destroy_with_world
+from vllm_ascend.distributed.utils import use_stateless_pg_with_world_registration
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 
@@ -210,7 +210,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         updated_config = copy.copy(self.worker.vllm_config)
         updated_config.parallel_config = copy.deepcopy(self.worker.vllm_config.parallel_config)
         updated_config.parallel_config.data_parallel_size = new_dp_size
-        with set_current_vllm_config(updated_config), use_stateless_pg_init_and_destroy_with_world():
+        with set_current_vllm_config(updated_config), use_stateless_pg_with_world_registration():
             create_standby_groups(
                 new_dp_size=new_dp_size,
                 new_world_size_across_dp=new_world_size_across_dp,
@@ -257,7 +257,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
 
     def switch_and_remove(self) -> None:
         self._release_acl_graphs()
-        with use_stateless_pg_init_and_destroy_with_world():
+        with use_stateless_pg_with_world_registration():
             _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
             _replace_ascend_active_groups(mc2=None, dynamic_eplb=None, fc3_quant_x=None)
 
@@ -266,7 +266,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
         self.worker.model_runner.shared_dict["old_ep_size"] = old_ep_size
 
         self._release_acl_graphs()
-        with use_stateless_pg_init_and_destroy_with_world():
+        with use_stateless_pg_with_world_registration():
             _replace_active_groups(**pop_standby_groups())
             _replace_ascend_active_groups(**pop_ascend_standby_groups())
 

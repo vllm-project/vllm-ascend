@@ -19,8 +19,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.distributed as dist
-from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
@@ -35,11 +33,7 @@ class EplbWorker:
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
-        is_stateless = isinstance(get_dynamic_eplb_group(), StatelessGroupCoordinator)
-        if is_stateless:
-            self.rank_id = get_dynamic_eplb_group().rank_in_group
-        else:
-            self.rank_id = dist.get_rank()
+        self.rank_id = get_dynamic_eplb_group().rank_in_group
         self.multi_stage = policy_type == 3
 
     def do_update(self):
