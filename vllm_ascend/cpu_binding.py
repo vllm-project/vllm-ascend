@@ -101,27 +101,27 @@ class DeviceInfo:
 
     def get_running_npus(self) -> list[int]:
         npu_message, _ = execute_command(["npu-smi", "info"])
-        in_proc_section = False
         running_npu_set = set()
         for line in npu_message.splitlines():
             line = line.strip()
-            if line.startswith("| NPU") and "Process id" in line:
-                in_proc_section = True
+            if not line.startswith("|"):
                 continue
-            if not in_proc_section:
+            parts = [p.strip() for p in line.strip("|").split("|")]
+            if len(parts) < 2:
                 continue
-            if line.startswith("| "):
-                parts = [p.strip() for p in line.strip("|").split("|")]
-                if len(parts) < 2:
-                    continue
-                npu_id = parts[0].split()[0]
-                chip_id = parts[0].split()[1]
-                if not npu_id.isdigit() or not chip_id.isdigit():
-                    continue
-                chip_logic_id = self.npu_map_info.get(npu_id, {}).get(chip_id)
-                if not chip_logic_id or not chip_logic_id.isdigit():
-                    raise RuntimeError("Failed to get correct chip_logic_id from command 'npu-smi info -m'.")
-                running_npu_set.add(int(chip_logic_id))
+            # Process section headers can be localized (e.g. Chinese), but the process
+            # table rows are stable: "| <npu_id> <chip_id> | <pid> | ... |".
+            npu_chip = parts[0].split()
+            if len(npu_chip) < 2:
+                continue
+            npu_id, chip_id = npu_chip[0], npu_chip[1]
+            pid = parts[1].split()[0] if parts[1] else ""
+            if not (npu_id.isdigit() and chip_id.isdigit() and pid.isdigit()):
+                continue
+            chip_logic_id = self.npu_map_info.get(npu_id, {}).get(chip_id)
+            if not chip_logic_id or not chip_logic_id.isdigit():
+                raise RuntimeError("Failed to get correct chip_logic_id from command 'npu-smi info -m'.")
+            running_npu_set.add(int(chip_logic_id))
         if ASCEND_RT_VISIBLE_DEVICES:
             devices_str = ASCEND_RT_VISIBLE_DEVICES
             devices_list = [int(x) for x in devices_str.split(",")]
