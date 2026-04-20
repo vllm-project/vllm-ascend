@@ -50,6 +50,23 @@ class AscendConfig:
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
 
+        profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
+        self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
+        if self.profiling_chunk_config.enabled and vllm_config.parallel_config.pipeline_parallel_size <= 1:
+            raise ValueError(
+                "profiling_chunk_config requires pipeline parallelism (pp > 1). "
+                "Please set --pipeline-parallel-size to a value greater than 1, "
+                "or disable profiling_chunk_config."
+            )
+
+        from vllm_ascend import envs as ascend_envs
+
+        if self.profiling_chunk_config.enabled and ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING:
+            raise ValueError(
+                "profiling_chunk_config and balance scheduling (VLLM_ASCEND_BALANCE_SCHEDULING) "
+                "cannot be enabled at the same time. Please disable one of them."
+            )
+
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
         self.layer_sharding = additional_config.get("layer_sharding", None)
@@ -86,6 +103,7 @@ class AscendConfig:
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
+        # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
 
@@ -98,21 +116,18 @@ class AscendConfig:
             assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
             self.pd_tp_ratio = prefill_tp_size // decode_tp_size
             if self.pd_tp_ratio > 1:
-                try:
-                    # only support Qwen model now
-                    # TODO: use a more robust method to get kv_head_num
-                    num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
-                    self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
-                    prefill_tp_size = min(prefill_tp_size, num_kv_head)
-                    decode_tp_size = min(decode_tp_size, num_kv_head)
-                    self.pd_head_ratio = prefill_tp_size // decode_tp_size
-                except Exception:
+                # Total KV heads from vLLM's resolved architecture (ModelArchConfigConvertor).
+                num_kv_head = vllm_config.model_config.get_total_num_kv_heads()
+                if not num_kv_head or num_kv_head < 1:
                     raise ValueError(
-                        "The text_config extracted from the model config does not have "
-                        "`num_key_value_heads` attribute. This indicates a mismatch "
-                        "between the model config and vLLM's expectations. Please "
-                        "ensure that the model config is compatible with vLLM."
+                        "Could not determine a positive total KV head count for PD "
+                        "disaggregation (pd_tp_ratio > 1). Check that the model config "
+                        "is compatible with vLLM."
                     )
+                self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
+                prefill_tp_size = min(prefill_tp_size, num_kv_head)
+                decode_tp_size = min(decode_tp_size, num_kv_head)
+                self.pd_head_ratio = prefill_tp_size // decode_tp_size
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
@@ -425,6 +440,36 @@ class WeightPrefetchConfig:
         self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
 
 
+class ProfilingChunkConfig:
+    """Configuration for profiling-based dynamic chunk sizing.
+
+    When enabled, the scheduler profiles prefill latency during initialization
+    and uses a quadratic model to predict optimal chunk sizes at runtime.
+
+    Usage (online)::
+
+        vllm serve <model> --additional-config '{"profiling_chunk_config": {"enabled": true}}'
+
+    Usage (offline)::
+
+        llm = LLM(model, additional_config={"profiling_chunk_config": {"enabled": true}})
+    """
+
+    def __init__(self, config: dict | None = None):
+        if config is None:
+            config = {}
+        self.enabled: bool = config.get("enabled", False)
+        self.smooth_factor: float = float(config.get("smooth_factor", 0.8))
+        self.min_chunk: int = int(config.get("min_chunk", 4096))
+        self._validate()
+
+    def _validate(self):
+        if not (0 < self.smooth_factor <= 1.0):
+            raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
+        if self.min_chunk <= 0:
+            raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
+
+
 class EplbConfig:
     """
     Configuration Object for xlite_graph_config from additional_config
@@ -491,14 +536,31 @@ class EplbConfig:
 _ASCEND_CONFIG: AscendConfig | None = None
 
 
+def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
+    """Check whether a config object has essential initialized fields.
+
+    Some unit tests monkeypatch ``AscendConfig.__init__`` to bypass heavy
+    initialization. In that case, the singleton cache can be polluted with a
+    partially initialized instance. This guard prevents reusing such instances
+    across tests.
+    """
+    if config is None:
+        return False
+    return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
+
+
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is not None and not refresh:
+    if _ASCEND_CONFIG is not None and not refresh and _is_ascend_config_initialized(_ASCEND_CONFIG):
         return _ASCEND_CONFIG
-    _ASCEND_CONFIG = AscendConfig(vllm_config)
-    return _ASCEND_CONFIG
+    new_config = AscendConfig(vllm_config)
+    if _is_ascend_config_initialized(new_config):
+        _ASCEND_CONFIG = new_config
+    else:
+        logger.warning("Ascend config instance is not fully initialized; skip singleton cache update.")
+    return new_config
 
 
 def clear_ascend_config():
@@ -508,6 +570,6 @@ def clear_ascend_config():
 
 def get_ascend_config():
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is None:
+    if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
