@@ -10,7 +10,12 @@ from vllm.distributed.kv_events import (
     KVConnectorKVEvents,
     KVEventAggregator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    SupportsHMA,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -63,7 +68,7 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
         return f"<AscendStoreKVEvents events={self.get_all_events()}>"
 
 
-class AscendStoreConnector(KVConnectorBase_V1):
+class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
@@ -73,7 +78,6 @@ class AscendStoreConnector(KVConnectorBase_V1):
         graphs.
         """
         return extra_config.get("use_layerwise", False)
-
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
@@ -96,11 +100,12 @@ class AscendStoreConnector(KVConnectorBase_V1):
         self.sended_but_unfinished_reqs: set[str] = set()
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise)
+            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
                 self.use_layerwise,
+                kv_cache_config,
             )
 
             assert self.connector_worker is not None
@@ -133,6 +138,15 @@ class AscendStoreConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        flattened_block_ids = [block_id for group_block_ids in block_ids for block_id in group_block_ids]
+        return self.connector_scheduler.request_finished(request, flattened_block_ids)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
@@ -251,9 +265,15 @@ class LookupKeyServer:
             while self.running:
                 all_frames = self.socket.recv_multipart(copy=False)
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
-                hash_frames = all_frames[1:]
+                group_ids = self.decoder.decode([all_frames[1]])
+                hash_frames = all_frames[2:]
                 hashes_str = self.decoder.decode(hash_frames)
-                result = self.pool_worker.lookup_scheduler(token_len, hashes_str, self.use_layerwise)
+                result = self.pool_worker.lookup_scheduler(
+                    token_len,
+                    hashes_str,
+                    group_ids,
+                    self.use_layerwise,
+                )
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 

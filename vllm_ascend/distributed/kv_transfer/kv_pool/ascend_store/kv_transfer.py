@@ -113,6 +113,15 @@ class KVTransferThread(threading.Thread):
             self.kv_events.clear()
         return events
 
+    def _skip_null_blocks(self, req_meta: ReqMeta, group_id: int) -> bool:
+        return bool(
+            req_meta.kv_cache_group_ids
+            and hasattr(req_meta, "skip_null_blocks_by_group")
+            and req_meta.skip_null_blocks_by_group is not None
+            and group_id < len(req_meta.skip_null_blocks_by_group)
+            and req_meta.skip_null_blocks_by_group[group_id]
+        )
+
 
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
@@ -151,54 +160,61 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.token_len_chunk
-        block_ids = req_meta.block_ids
         req_id = req_meta.req_id
         current_event = req_meta.current_event
-        starts = []
-        ends = []
-        keys = []
-        block_hashes = []
         if req_id not in self.stored_requests:
             self.request_queue.task_done()
             return
 
-        for index, (start, end, key) in enumerate(self.token_database.process_tokens(token_len, req_meta.block_hashes)):
-            starts.append(start)
-            ends.append(end)
-            keys.append(key.to_string())
-            block_hashes.append(req_meta.block_hashes[index])
+        kv_cache_group_ids = req_meta.kv_cache_group_ids or [0]
+        for group_id in kv_cache_group_ids:
+            starts = []
+            ends = []
+            keys = []
+            block_hashes = []
+            block_ids = req_meta.block_ids_by_group[group_id]
 
-        if not self.dcp_size > 1:
-            starts = starts[self.tp_rank % self.put_step :: self.put_step]
-            ends = ends[self.tp_rank % self.put_step :: self.put_step]
-            keys = keys[self.tp_rank % self.put_step :: self.put_step]
-            block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
+            for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
+                token_len,
+                req_meta.block_hashes,
+                block_ids,
+                kv_cache_group_id=group_id,
+                skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+            ):
+                starts.append(start)
+                ends.append(end)
+                keys.append(key.to_string())
+                block_hashes.append(req_meta.block_hashes[start // self.block_size])
 
-        if not keys:
-            self.dec_stored_request(req_id)
-            return
+            if not self.dcp_size > 1:
+                starts = starts[self.tp_rank % self.put_step :: self.put_step]
+                ends = ends[self.tp_rank % self.put_step :: self.put_step]
+                keys = keys[self.tp_rank % self.put_step :: self.put_step]
+                block_hashes = block_hashes[self.tp_rank % self.put_step :: self.put_step]
 
-        exists_states = self.lookup(keys)
-        missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
+            if not keys:
+                continue
 
-        if not missing_indices:
-            self.dec_stored_request(req_id)
-            return
+            exists_states = self.lookup(keys)
+            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
 
-        starts = [starts[index] for index in missing_indices]
-        ends = [ends[index] for index in missing_indices]
-        keys = [keys[index] for index in missing_indices]
-        block_hashes = [block_hashes[index] for index in missing_indices]
+            if not missing_indices:
+                continue
 
-        logger.debug(
-            "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s",
-            len(keys),
-            token_len // self.block_size,
-            len(missing_indices),
-            req_id,
-        )
+            starts = [starts[index] for index in missing_indices]
+            ends = [ends[index] for index in missing_indices]
+            keys = [keys[index] for index in missing_indices]
+            block_hashes = [block_hashes[index] for index in missing_indices]
 
-        if keys:
+            logger.debug(
+                "Storing KV cache for %d out of %d blocks (missing_count=%d) for request %s in group %d",
+                len(keys),
+                token_len // self.block_size,
+                len(missing_indices),
+                req_id,
+                group_id,
+            )
+
             """
             Note: Due to a bug in ADXL, calling current_event.synchronize() may occasionally hang.
             This issue will be fixed in CANN version 8.5.rc1.
@@ -211,7 +227,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
             prev_key = None
             new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
             for index, start in enumerate(starts):
-                addr, size, _ = self.token_database.prepare_value(start, ends[index], block_ids)
+                addr, size, _ = self.token_database.prepare_value(
+                    start,
+                    ends[index],
+                    block_ids,
+                    kv_cache_group_id=group_id,
+                )
                 addrs.append(addr)
                 sizes.append(size)
 
@@ -271,11 +292,26 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
-        for start, end, key in self.token_database.process_tokens(token_len, req_meta.block_hashes, mask_num):
-            addr, size, _ = self.token_database.prepare_value(start, end, req_meta.block_ids)
-            key_list.append(key.to_string())
-            addr_list.append(addr)
-            size_list.append(size)
+        kv_cache_group_ids = req_meta.kv_cache_group_ids or [0]
+        for group_id in kv_cache_group_ids:
+            block_ids = req_meta.block_ids_by_group[group_id]
+            for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
+                token_len,
+                req_meta.block_hashes,
+                block_ids,
+                mask_num,
+                kv_cache_group_id=group_id,
+                skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+            ):
+                addr, size, _ = self.token_database.prepare_value(
+                    start,
+                    end,
+                    block_ids,
+                    kv_cache_group_id=group_id,
+                )
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
         key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
         addr_list_c = addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
         size_list_c = size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
@@ -347,10 +383,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
         addr_list = []
         size_list = []
+        block_ids = req_meta.block_ids_by_group[0]
         for index, key in enumerate(key_list):
-            addr, size = self.token_database.prepare_value_layer(
-                starts[index], ends[index], req_meta.block_ids, layer_id
-            )
+            addr, size = self.token_database.prepare_value_layer(starts[index], ends[index], block_ids, layer_id)
             addr_list.append(addr)
             size_list.append(size)
 
@@ -398,9 +433,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
+        block_ids = req_meta.block_ids_by_group[0]
         for index, key in enumerate(req_meta.keys):
             addr, size = self.token_database.prepare_value_layer(
-                req_meta.starts[index], req_meta.ends[index], req_meta.block_ids, req_meta.layer_id
+                req_meta.starts[index], req_meta.ends[index], block_ids, req_meta.layer_id
             )
             key_list.append(key.to_string())
             addr_list.append(addr)
