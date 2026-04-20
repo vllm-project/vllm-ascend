@@ -36,6 +36,10 @@ from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
 
 
+def _get_num_logical_experts(layer: torch.nn.Module, fallback: int) -> int:
+    return getattr(layer, "logical_num_experts", fallback)
+
+
 def scale_from_float_to_int64(scale):
     """Convert float32 scale to int64 representation."""
     import numpy as np
@@ -228,7 +232,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=global_num_experts,
+                num_experts=_get_num_logical_experts(layer, global_num_experts),
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
