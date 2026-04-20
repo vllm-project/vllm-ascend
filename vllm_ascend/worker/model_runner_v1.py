@@ -427,6 +427,8 @@ class NPUModelRunner(GPUModelRunner):
         self.long_seq_metadata = None
         self.query_lens: torch.Tensor | None = None
         self.cpu_slot_mapping = None
+        self.routed_experts_attn_gid = 0
+        self.routed_experts_initialized = False
         self.sampling_done_event: torch.npu.Event | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -1236,7 +1238,7 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if self.vllm_config.model_config.enable_return_routed_experts:
+        if self.routed_experts_initialized:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.clear_buffer()
@@ -1716,7 +1718,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-        if self.model_config.enable_return_routed_experts:
+        if self.routed_experts_initialized:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
                 capturer.save_captured_experts(indices=self.cpu_slot_mapping)
@@ -2274,7 +2276,7 @@ class NPUModelRunner(GPUModelRunner):
                     slot_mapping,
                     kv_cache_gid,
                 )
-            if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
+            if self.routed_experts_initialized and kv_cache_gid == self.routed_experts_attn_gid:
                 self.cpu_slot_mapping = slot_mapping.cpu().numpy()
             return blk_table_tensor, slot_mapping
 
@@ -2830,9 +2832,6 @@ class NPUModelRunner(GPUModelRunner):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-
-        if self.model_config.enable_return_routed_experts:
-            self.init_routed_experts_capturer()
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
