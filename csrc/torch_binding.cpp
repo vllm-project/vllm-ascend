@@ -210,11 +210,7 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
     }
 
     // =========================================================================
-    // 路径 1: aclrtMemcpyBatchAsync (CANN 8.5+)
-    //
-    // 单次驱动调用提交所有拷贝，摊薄逐条提交的开销。
-    // 约束：仅支持 H2D / D2H，不支持 D2D。
-    // 通过宏 CANN_MEMCPY_BATCH_ASYNC 在编译期控制是否启用。
+    // path 1: aclrtMemcpyBatchAsync (CANN 8.5+)
     // =========================================================================
 #if defined(CANN_MEMCPY_BATCH_ASYNC)
     if (memcpy_kind != ACL_MEMCPY_DEVICE_TO_DEVICE) {
@@ -270,9 +266,7 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 #endif
 
     // =========================================================================
-    // 路径 2: 逐条 aclrtMemcpyAsync（兼容所有 CANN 版本和所有拷贝方向）
-    //
-    // 与 GPU 版本 CUDA < 12.8 的回退路径等价。
+    // path 2: aclrtMemcpyAsync
     // =========================================================================
     for (int64_t i = 0; i < n; i++) {
         void* dst = reinterpret_cast<void*>(dst_data[i]);
