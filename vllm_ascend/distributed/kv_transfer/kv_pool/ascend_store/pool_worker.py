@@ -241,6 +241,7 @@ class KVPoolWorker:
                     self.token_database,
                     self.block_size,
                     self.tp_rank,
+                    self.tp_size,
                     self.dcp_size,
                     self.put_step,
                     ready_event_sending,
@@ -257,6 +258,7 @@ class KVPoolWorker:
                 self.token_database,
                 self.block_size,
                 self.tp_rank,
+                self.tp_size,
                 self.dcp_size,
                 ready_event,
                 self.get_event,
@@ -273,6 +275,7 @@ class KVPoolWorker:
                     self.token_database,
                     self.block_size,
                     self.tp_rank,
+                    self.tp_size,
                     self.dcp_size,
                     self.put_step,
                     self.kv_role,
@@ -283,7 +286,7 @@ class KVPoolWorker:
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.dcp_size, ready_event
+                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.tp_size, self.dcp_size, ready_event
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()

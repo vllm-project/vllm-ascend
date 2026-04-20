@@ -32,6 +32,7 @@ class KVTransferThread(threading.Thread):
         token_database: ChunkedTokenDatabase,
         block_size: int,
         tp_rank: int,
+        tp_size: int,
         dcp_size: int,
         ready_event: threading.Event,
         name: str,
@@ -41,6 +42,7 @@ class KVTransferThread(threading.Thread):
         self.ready_event = ready_event
         self.block_size = block_size
         self.tp_rank = tp_rank
+        self.tp_size = tp_size
         self.dcp_size = dcp_size
         self.token_database = token_database
         self.done_task_lock = threading.Lock()
@@ -128,6 +130,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_database: ChunkedTokenDatabase,
         block_size: int,
         tp_rank: int,
+        tp_size: int,
         dcp_size: int,
         put_step: int,
         kv_role: str,
@@ -135,7 +138,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_kv_event: bool = False,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheSendingThread"
+            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
         )
         self.put_step = put_step
         self.kv_role = kv_role
@@ -264,11 +267,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         token_database: ChunkedTokenDatabase,
         block_size: int,
         tp_rank: int,
+        tp_size: int,
         dcp_size: int,
         ready_event: threading.Event,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
+            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
         )
 
     def _handle_request(self, req_meta: ReqMeta):
@@ -287,9 +291,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-        key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
-        addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
-        size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
+        key_list_c = _circular_shift(key_list, (self.tp_rank * len(key_list)) // self.tp_size)
+        addr_list_c = _circular_shift(addr_list, (self.tp_rank * len(addr_list)) // self.tp_size)
+        size_list_c = _circular_shift(size_list, (self.tp_rank * len(size_list)) // self.tp_size)
         self.m_store.get(key_list_c, addr_list_c, size_list_c)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -302,6 +306,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         token_database: ChunkedTokenDatabase,
         block_size: int,
         tp_rank: int,
+        tp_size: int,
         dcp_size: int,
         put_step: int,
         ready_event: threading.Event,
@@ -312,7 +317,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         layer_transfer_finished_events = None,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreLayerSendingThread"
+            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheStoreLayerSendingThread"
         )
         self.final_layer_id = num_layers - 1
         self.put_step = put_step
@@ -392,6 +397,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         token_database: ChunkedTokenDatabase,
         block_size: int,
         tp_rank: int,
+        tp_size: int,
         dcp_size: int,
         ready_event: threading.Event,
         get_event: threading.Event,
@@ -399,7 +405,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         layer_save_finished_events: List[threading.Event],
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, dcp_size, ready_event, name="KVCacheStoreLayerRecvingThread"
+            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheStoreLayerRecvingThread"
         )
         self.get_event = get_event
         self.layer_load_finished_events = layer_load_finished_events
@@ -438,9 +444,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if req_meta.gvas_list is not None:
                 gvas_list.extend(req_meta.gvas_list)
 
-        gvas_list_c = _circular_shift(gvas_list, self.tp_rank % len(gvas_list))
-        addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
-        size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
+        gvas_list_c = _circular_shift(gvas_list, (self.tp_rank * len(gvas_list)) // self.tp_size)
+        addr_list_c = _circular_shift(addr_list, (self.tp_rank * len(addr_list)) // self.tp_size)
+        size_list_c = _circular_shift(size_list, (self.tp_rank * len(size_list)) // self.tp_size)
         res = self.m_store.store.batch_copy(gvas_list_c, addr_list_c, size_list_c, 1)
         if res != 0:
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
