@@ -17,6 +17,7 @@ from transformers.models.qwen2.modeling_qwen2 import (
 )
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
+from vllm import ir
 from vllm.model_executor.models.deepencoder2 import CustomQwen2Decoder
 
 
@@ -353,4 +354,4 @@ class AscendQwen2RMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return torch_npu.npu_rms_norm(hidden_states, self.weight, epsilon=self.variance_epsilon)[0]
+        return ir.ops.rms_norm(hidden_states, self.weight, epsilon=self.variance_epsilon)[0]

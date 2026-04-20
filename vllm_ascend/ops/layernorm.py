@@ -18,6 +18,7 @@
 
 import torch
 from torch import nn
+from vllm import ir
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
@@ -79,7 +80,7 @@ class AscendRMSNorm(RMSNorm):
                     x.add_(self.bias)
             return x, residual
 
-        x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
+        x, residual = ir.ops.rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias_loaded:
             x.add_(self.bias)
 

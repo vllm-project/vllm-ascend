@@ -52,10 +52,12 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.utils import FlexibleArgumentParser
 else:
     ModelConfig = None
     VllmConfig = None
+    IrOpPriorityConfig = None
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
@@ -129,6 +131,19 @@ class NPUPlatform(Platform):
         To use graph fusion operations, we defined our own backend compiler.
         """
         return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
+
+    @classmethod
+    def import_ir_kernels(cls) -> None:
+        """Import vllm_ascend.kernels to trigger NPU custom op registration."""
+        import vllm_ascend.kernels  # noqa: F401
+
+    @classmethod
+    def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
+        """Return the default IR op priority for NPU, preferring npu_kernels over native."""
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        default = ["npu_kernels", "native"]
+        return IrOpPriorityConfig.with_default(default)
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
