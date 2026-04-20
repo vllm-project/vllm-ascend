@@ -1,7 +1,6 @@
 import importlib
 import math
 import threading
-from collections.abc import Generator
 
 import torch
 from vllm.config import VllmConfig
@@ -30,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
+    _circular_shift,
 )
 
 backend_map = {
@@ -165,6 +165,7 @@ class KVPoolWorker:
         self.layer_save_tasks = [[] for i in range(self.num_layers)]
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
+        self.layer_transfer_finished_events = None
         # req_id, layer_id, block info
         self._request_addr_tracker: dict[str, dict[int, dict]] = {}
 
@@ -322,13 +323,9 @@ class KVPoolWorker:
                         key_list.append(key.to_string())
                         addr_list.append(addr)
                         size_list.append(size)
-                    key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
-                    addr_list_c = (
-                        addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
-                    )
-                    size_list_c = (
-                        size_list[self.tp_rank % len(size_list) :] + size_list[: self.tp_rank % len(size_list)]
-                    )
+                    key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
+                    addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
+                    size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
                     self.m_store.get(key_list_c, addr_list_c, size_list_c)
         # TODO 这里的请求释放可能有问题
         # logger.info(f">>>>>>>>>>>> metadata.requests {len(metadata.requests)} metadata.unfinished_request_ids {metadata.unfinished_request_ids}")
@@ -535,9 +532,9 @@ class KVPoolWorker:
     def wait_for_layer_load(self) -> None:
         if self.current_layer in self.independent_layers:
             return
-        is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)  #try---cache
+        is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)
         if not is_finish:
-            logger.info(f"Layerwise {self.current_layer} load failed")
+            logger.info("Layerwise %d load wait timed out", self.current_layer)
         self.layer_load_finished_events[self.current_layer].clear()
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
@@ -555,6 +552,7 @@ class KVPoolWorker:
             # 1. wait for save, and clear save event
             # 2. start load, for prefill layer_load_tasks is None, skip load in the recv thread.
             # 3. set layer_load_finished_events (both prefill & decode)
+            self.layer_save_tasks[self.current_layer] = []
             if self.current_layer in self.layer_next_map:
                 next_layer = self.layer_next_map[self.current_layer]
                 self.kv_recv_thread.add_request(
@@ -564,7 +562,7 @@ class KVPoolWorker:
             self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
             is_finish = self.layer_save_finished_events[self.current_layer].wait(timeout=10)
             if not is_finish:
-                logger.info(f"Layerwise {self.current_layer} save failed")
+                logger.info("Layerwise %d save wait timed out", self.current_layer)
             self.layer_save_finished_events[self.current_layer].clear()
             for layer_id in range(self.num_layers):
                 self.layer_save_finished_events[layer_id].clear()
@@ -620,47 +618,36 @@ class KVPoolWorker:
         )
         return done_sending, done_recving
 
+    def _cleanup_request_tracker(self, req_id: str):
+        if req_id in self._request_addr_tracker:
+            del self._request_addr_tracker[req_id]
+        load_tracker_key = f"{req_id}_load"
+        if load_tracker_key in self._request_addr_tracker:
+            del self._request_addr_tracker[load_tracker_key]
+
     def get_and_clear_finished_requests(self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
         finished_sending = set()
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
                 req_id
             )
-        for req_id in self.kv_send_thread.stored_requests.copy(  # type: ignore[union-attr]
-        ):
-            if (
-                self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
-                    req_id
-                ]
-                == 0
-                and req_id in self.finished_store_req
+        for req_id in list(self.kv_send_thread.stored_requests):  # type: ignore[union-attr]
+            if req_id in self.finished_store_req and self.kv_send_thread.try_finish_and_delete_stored_request(  # type: ignore[union-attr]
+                req_id
             ):
                 self.finished_store_req.remove(req_id)
                 finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
-                    req_id
-                )
-                if req_id in self._request_addr_tracker:
-                    del self._request_addr_tracker[req_id]
-                load_tracker_key = f"{req_id}_load"
-                if load_tracker_key in self._request_addr_tracker:
-                    del self._request_addr_tracker[load_tracker_key]
+                self._cleanup_request_tracker(req_id)
 
         for req_id in finished_req_ids:
-            req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
+            if self.kv_send_thread.try_finish_and_delete_stored_request(  # type: ignore[union-attr]
                 req_id
-            )
-            if req_remain_jobs == 0:
+            ):
                 finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
-                    req_id
-                )
-                if req_id in self._request_addr_tracker:
-                    del self._request_addr_tracker[req_id]
-                load_tracker_key = f"{req_id}_load"
-                if load_tracker_key in self._request_addr_tracker:
-                    del self._request_addr_tracker[load_tracker_key]
-            elif req_remain_jobs is not None:
+                self._cleanup_request_tracker(req_id)
+            elif self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
+                req_id
+            ) is not None:
                 self.finished_store_req.add(req_id)
 
         return finished_sending
