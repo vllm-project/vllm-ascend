@@ -339,7 +339,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        with_quant = token_dispatch_input.quant.is_int_quant
+        with_quant = token_dispatch_input.quant.dispatch_with_quant
+        is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
@@ -347,6 +348,10 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         pertoken_scale = token_dispatch_input.routing.pertoken_scale
         global_redundant_expert_num = token_dispatch_input.routing.global_redundant_expert_num
         restore_shape = hidden_states.shape
+        if with_quant and pertoken_scale is None:
+            quant_mode = 3 if is_mxfp else 1
+        else:
+            quant_mode = -1
 
         num_tokens = hidden_states.shape[:-1].numel()
         apply_router_weight_on_input = token_dispatch_input.routing.apply_router_weight_on_input
@@ -374,7 +379,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             expert_tokens_num_type=1,
             expert_tokens_num_flag=True,
             active_expert_range=[first_expert_idx, last_expert_idx],
-            quant_mode=1 if with_quant and pertoken_scale is None else -1,
+            quant_mode=quant_mode,
         )
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
