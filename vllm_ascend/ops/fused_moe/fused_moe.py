@@ -281,7 +281,14 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
 
         if self.quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe_config)
+            if self.moe_config.is_lora_enabled:
+                # LoRA requires Triton-based expert computation for adapter injection.
+                # Ascend's custom fused experts do not support LoRA weight injection.
+                # Fall back to vLLM's base UnquantizedFusedMoEMethod.
+                # Mirrors vllm PR #40273.
+                self.quant_method = UnquantizedFusedMoEMethod(self.moe_config)
+            else:
+                self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe_config)
         else:
             self.quant_method = self.quant_config.get_quant_method(self, self.layer_name)
 
