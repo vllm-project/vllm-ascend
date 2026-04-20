@@ -21,10 +21,8 @@ DEFAULT_RTOL = 5e-3
 
 
 def _build_rope(num_tokens, rotary_dim, dtype, device):
-    cos = torch.from_numpy(
-        np.random.uniform(0, 1, [num_tokens, rotary_dim // 2])).to(dtype).to(device)
-    sin = torch.from_numpy(
-        np.random.uniform(0, 1, [num_tokens, rotary_dim // 2])).to(dtype).to(device)
+    cos = torch.from_numpy(np.random.uniform(0, 1, [num_tokens, rotary_dim // 2])).to(dtype).to(device)
+    sin = torch.from_numpy(np.random.uniform(0, 1, [num_tokens, rotary_dim // 2])).to(dtype).to(device)
     return cos.contiguous(), sin.contiguous()
 
 
@@ -97,15 +95,12 @@ def _reference_impl(
     q_var = q_f32.pow(2).mean(dim=-1, keepdim=True)
     k_var = k_f32.pow(2).mean(dim=-1, keepdim=True)
 
-    q_out = (q_f32 * torch.rsqrt(q_var + eps) * q_weight.to(torch.float32)).to(
-        orig_dtype)
-    k_out = (k_f32 * torch.rsqrt(k_var + eps) * k_weight.to(torch.float32)).to(
-        orig_dtype)
+    q_out = (q_f32 * torch.rsqrt(q_var + eps) * q_weight.to(torch.float32)).to(orig_dtype)
+    k_out = (k_f32 * torch.rsqrt(k_var + eps) * k_weight.to(torch.float32)).to(orig_dtype)
 
     q_3d = q_out.view(q.shape[0], -1, head_dim).contiguous()
     k_3d = k_out.view(k.shape[0], -1, head_dim).contiguous()
-    q_3d, k_3d = _apply_rope_neox(q_3d, k_3d, cos.contiguous(), sin.contiguous(),
-                                  rotary_dim)
+    q_3d, k_3d = _apply_rope_neox(q_3d, k_3d, cos.contiguous(), sin.contiguous(), rotary_dim)
 
     return (
         q_3d.view(q.shape[0], q_hidden_size).contiguous(),
@@ -124,8 +119,9 @@ def _reference_impl(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_split_qkv_tp_rmsnorm_rope(num_tokens, num_q_heads, num_kv_heads, head_dim,
-                             rotary_dim, tp_world, eps, dtype, seed, device):
+def test_split_qkv_tp_rmsnorm_rope(
+    num_tokens, num_q_heads, num_kv_heads, head_dim, rotary_dim, tp_world, eps, dtype, seed, device
+):
     torch.manual_seed(seed)
     np.random.seed(seed)
     torch.set_default_device(device)
@@ -134,14 +130,9 @@ def test_split_qkv_tp_rmsnorm_rope(num_tokens, num_q_heads, num_kv_heads, head_d
     q_hidden_size = num_q_heads * head_dim
     kv_hidden_size = num_kv_heads * head_dim
 
-    qkv = torch.randn(num_tokens,
-                      q_hidden_size + kv_hidden_size * 2,
-                      dtype=dtype,
-                      device=device)
-    q_weight = torch.randn(q_hidden_size, dtype=torch.float32,
-                           device=device) * 0.1 + 1.0
-    k_weight = torch.randn(kv_hidden_size, dtype=torch.float32,
-                           device=device) * 0.1 + 1.0
+    qkv = torch.randn(num_tokens, q_hidden_size + kv_hidden_size * 2, dtype=dtype, device=device)
+    q_weight = torch.randn(q_hidden_size, dtype=torch.float32, device=device) * 0.1 + 1.0
+    k_weight = torch.randn(kv_hidden_size, dtype=torch.float32, device=device) * 0.1 + 1.0
     cos, sin = _build_rope(num_tokens, rotary_dim, dtype, device)
 
     q_fused, k_fused, v_fused = _fused_impl(
@@ -171,18 +162,9 @@ def test_split_qkv_tp_rmsnorm_rope(num_tokens, num_q_heads, num_kv_heads, head_d
         sin=sin,
     )
 
-    torch.testing.assert_close(q_fused.to(torch.float32),
-                               q_ref.to(torch.float32),
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(k_fused.to(torch.float32),
-                               k_ref.to(torch.float32),
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(v_fused.to(torch.float32),
-                               v_ref.to(torch.float32),
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(q_fused.to(torch.float32), q_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(k_fused.to(torch.float32), k_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(v_fused.to(torch.float32), v_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
     gc.collect()
     torch.npu.empty_cache()

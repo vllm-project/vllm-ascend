@@ -1,8 +1,10 @@
 import random
-import torch
+
 import pytest
-from vllm.triton_utils import tl, triton
+import torch
+
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs
+
 
 def torch_compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
     """Pure PyTorch reference implementation of topk log softmax.
@@ -27,11 +29,12 @@ def torch_compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) 
 
     return result.to(torch.float32)
 
+
 # Common vocab sizes from mainstream models
 VOCAB_SIZES = [
-    32000,   # LLaMA / LLaMA2 / Mistral
-    50257,   # GPT-2
-    65024,   # ChatGLM
+    32000,  # LLaMA / LLaMA2 / Mistral
+    50257,  # GPT-2
+    65024,  # ChatGLM
     128256,  # LLaMA3
     151936,  # Qwen2
 ]
@@ -42,11 +45,7 @@ TOPK_VALUES = [1, 2, 5, 10, 32, 64]
 
 @pytest.mark.parametrize(
     "batch_size, vocab_size, topk",
-    [
-        (random.randint(1, 64), vocab_size, topk)
-        for vocab_size in VOCAB_SIZES
-        for topk in TOPK_VALUES
-    ],
+    [(random.randint(1, 64), vocab_size, topk) for vocab_size in VOCAB_SIZES for topk in TOPK_VALUES],
 )
 def test_topk_log_softmax_kernel(batch_size, vocab_size, topk):
     """
@@ -79,11 +78,12 @@ def test_topk_log_softmax_kernel(batch_size, vocab_size, topk):
     max_diff = torch.max(torch.abs(logprobs_triton - logprobs_ref)).item()
     mean_diff = torch.mean(torch.abs(logprobs_triton - logprobs_ref)).item()
 
-    assert torch.allclose(logprobs_triton, logprobs_ref, atol=1e-4, rtol=1e-5), \
-        f"Triton topk_log_softmax kernel output differs from torch reference.\n" \
-        f"batch_size={batch_size}, vocab_size={vocab_size}, topk={topk}\n" \
-        f"Max diff: {max_diff}\n" \
+    assert torch.allclose(logprobs_triton, logprobs_ref, atol=1e-4, rtol=1e-5), (
+        f"Triton topk_log_softmax kernel output differs from torch reference.\n"
+        f"batch_size={batch_size}, vocab_size={vocab_size}, topk={topk}\n"
+        f"Max diff: {max_diff}\n"
         f"Mean diff: {mean_diff}"
+    )
 
 
 @pytest.mark.parametrize("vocab_size", VOCAB_SIZES)
@@ -105,15 +105,16 @@ def test_topk_log_softmax_edge_cases(vocab_size):
     logprobs_triton = compute_token_logprobs(logits, token_ids)
     logprobs_ref = torch_compute_token_logprobs(logits, token_ids)
 
-    assert torch.allclose(logprobs_triton, logprobs_ref, atol=1e-4, rtol=1e-5), \
+    assert torch.allclose(logprobs_triton, logprobs_ref, atol=1e-4, rtol=1e-5), (
         f"Edge case (1,1) failed for vocab_size={vocab_size}"
+    )
 
     # Test case 2: Logits with extreme values
     logits_extreme = torch.randn((4, vocab_size), dtype=torch.float32, device=device)
-    logits_extreme[0, 0] = 100.0   # Very large positive
+    logits_extreme[0, 0] = 100.0  # Very large positive
     logits_extreme[1, 0] = -100.0  # Very large negative
-    logits_extreme[2, :] = 0.0     # All zeros
-    logits_extreme[3, :] = 1.0     # All ones
+    logits_extreme[2, :] = 0.0  # All zeros
+    logits_extreme[3, :] = 1.0  # All ones
 
     token_ids = torch.zeros((4, 5), dtype=torch.int64, device=device)
     token_ids[:, 0] = 0  # Include the extreme value position
@@ -123,8 +124,9 @@ def test_topk_log_softmax_edge_cases(vocab_size):
     logprobs_triton = compute_token_logprobs(logits_extreme, token_ids)
     logprobs_ref = torch_compute_token_logprobs(logits_extreme, token_ids)
 
-    assert torch.allclose(logprobs_triton, logprobs_ref, atol=1e-4, rtol=1e-5), \
+    assert torch.allclose(logprobs_triton, logprobs_ref, atol=1e-4, rtol=1e-5), (
         f"Extreme values test failed for vocab_size={vocab_size}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -158,8 +160,7 @@ def test_topk_log_softmax_deterministic(batch_size, vocab_size, topk):
         results.append(result.clone())
 
     for i in range(1, len(results)):
-        assert torch.equal(results[0], results[i]), \
-            f"Non-deterministic results detected in run {i}"
+        assert torch.equal(results[0], results[i]), f"Non-deterministic results detected in run {i}"
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
@@ -187,8 +188,8 @@ def test_topk_log_softmax_dtypes(dtype):
     # Use slightly larger tolerance for float16 due to precision loss
     atol = 1e-3 if dtype == torch.float16 else 1e-4
 
-    assert torch.allclose(logprobs_triton, logprobs_ref, atol=atol, rtol=1e-4), \
-        f"dtype {dtype} test failed"
+    assert torch.allclose(logprobs_triton, logprobs_ref, atol=atol, rtol=1e-4), f"dtype {dtype} test failed"
+
 
 if __name__ == "__main__":
     # Run a quick sanity check

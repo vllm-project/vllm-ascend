@@ -8,9 +8,8 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
-@pytest.mark.skip(
-    reason="Failure of an individual operator use case causes failures of other operators."
-)
+
+@pytest.mark.skip(reason="Failure of an individual operator use case causes failures of other operators.")
 @torch.inference_mode()
 def test_mla_preprocess_kernel():
     token_num = 1
@@ -35,14 +34,10 @@ def test_mla_preprocess_kernel():
 
     wuk = torch.randn((head_num, 128, 512), dtype=dtype).npu()
     # wuk = torch_npu.npu_format_cast(wuk, 29)
-    kv_cache = torch.randint(0,
-                             7,
-                             (block_num, head_num * 512 // 32, block_size, 32),
-                             dtype=dtype).npu()
-    kv_cache_rope = torch.randn(
-        (block_num, head_num * 64 // 16, block_size, 16), dtype=dtype).npu()
+    kv_cache = torch.randint(0, 7, (block_num, head_num * 512 // 32, block_size, 32), dtype=dtype).npu()
+    kv_cache_rope = torch.randn((block_num, head_num * 64 // 16, block_size, 16), dtype=dtype).npu()
 
-    slotmapping = torch.randint(0, 7, (token_num, ), dtype=torch.int32).npu()
+    slotmapping = torch.randint(0, 7, (token_num,), dtype=torch.int32).npu()
 
     q_nope_out = torch.empty(
         (hidden_states.shape[0], wuk.shape[0], kv_cache.shape[-1]),

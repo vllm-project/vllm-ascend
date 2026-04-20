@@ -19,6 +19,7 @@ SEED = 42
 # Golden reference (CPU, pure Python/NumPy)
 # ---------------------------------------------------------------------------
 
+
 def golden_copy_and_expand(
     target_token_ids: np.ndarray,
     target_positions: np.ndarray,
@@ -137,11 +138,18 @@ def golden_copy_and_expand(
 # NPU operator wrapper
 # ---------------------------------------------------------------------------
 
+
 def npu_op_exec(
-    target_token_ids, target_positions, next_token_ids,
-    query_start_loc, query_end_loc,
-    padding_token_id, parallel_drafting_token_id,
-    num_padding_slots, shift_input_ids, total_draft_tokens,
+    target_token_ids,
+    target_positions,
+    next_token_ids,
+    query_start_loc,
+    query_end_loc,
+    padding_token_id,
+    parallel_drafting_token_id,
+    num_padding_slots,
+    shift_input_ids,
+    total_draft_tokens,
 ):
     """Execute the custom Ascend NPU operator."""
     result = torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs(
@@ -163,9 +171,16 @@ def npu_op_exec(
 # Test case generator
 # ---------------------------------------------------------------------------
 
-def generate_test_case(rng, num_reqs, num_padding_slots, shift_input_ids,
-                       min_tokens_per_req=2, max_tokens_per_req=64,
-                       max_rejected_per_req=5):
+
+def generate_test_case(
+    rng,
+    num_reqs,
+    num_padding_slots,
+    shift_input_ids,
+    min_tokens_per_req=2,
+    max_tokens_per_req=64,
+    max_rejected_per_req=5,
+):
     """Generate a random test case.
 
     Returns dict with all input arrays and expected parameters.
@@ -174,8 +189,7 @@ def generate_test_case(rng, num_reqs, num_padding_slots, shift_input_ids,
     parallel_drafting_token_id = 100
 
     # Generate per-request token counts
-    tokens_per_req = rng.integers(min_tokens_per_req, max_tokens_per_req + 1,
-                                  size=num_reqs)
+    tokens_per_req = rng.integers(min_tokens_per_req, max_tokens_per_req + 1, size=num_reqs)
     rejected_per_req = rng.integers(0, max_rejected_per_req + 1, size=num_reqs)
 
     # Build query_start_loc (cumulative)
@@ -238,17 +252,16 @@ def generate_test_case(rng, num_reqs, num_padding_slots, shift_input_ids,
 # Parametrized tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("num_reqs", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("num_padding_slots", [1, 2, 3, 5])
 @pytest.mark.parametrize("shift_input_ids", [False, True])
 @pytest.mark.parametrize("seed_offset", [0, 1])
-def test_copy_and_expand_eagle_inputs(num_reqs, num_padding_slots,
-                                       shift_input_ids, seed_offset):
+def test_copy_and_expand_eagle_inputs(num_reqs, num_padding_slots, shift_input_ids, seed_offset):
     """Test CopyAndExpandEagleInputs with parametrized configurations."""
     rng = np.random.default_rng(SEED + seed_offset)
 
-    case = generate_test_case(rng, num_reqs, num_padding_slots,
-                              shift_input_ids)
+    case = generate_test_case(rng, num_reqs, num_padding_slots, shift_input_ids)
 
     # Golden reference
     g_ids, g_pos, g_rej, g_msk, g_nti, g_hsm = golden_copy_and_expand(
@@ -286,20 +299,14 @@ def test_copy_and_expand_eagle_inputs(num_reqs, num_padding_slots,
     g_hsm_t = torch.from_numpy(g_hsm)
 
     # Compare outputs
-    torch.testing.assert_close(n_ids, g_ids_t, atol=0, rtol=0,
-                               msg="out_input_ids mismatch")
-    torch.testing.assert_close(n_pos, g_pos_t, atol=0, rtol=0,
-                               msg="out_positions mismatch")
-    torch.testing.assert_close(n_rej, g_rej_t, atol=0, rtol=0,
-                               msg="out_is_rejected_token_mask mismatch")
-    torch.testing.assert_close(n_msk, g_msk_t, atol=0, rtol=0,
-                               msg="out_is_masked_token_mask mismatch")
-    torch.testing.assert_close(n_nti, g_nti_t, atol=0, rtol=0,
-                               msg="out_new_token_indices mismatch")
+    torch.testing.assert_close(n_ids, g_ids_t, atol=0, rtol=0, msg="out_input_ids mismatch")
+    torch.testing.assert_close(n_pos, g_pos_t, atol=0, rtol=0, msg="out_positions mismatch")
+    torch.testing.assert_close(n_rej, g_rej_t, atol=0, rtol=0, msg="out_is_rejected_token_mask mismatch")
+    torch.testing.assert_close(n_msk, g_msk_t, atol=0, rtol=0, msg="out_is_masked_token_mask mismatch")
+    torch.testing.assert_close(n_nti, g_nti_t, atol=0, rtol=0, msg="out_new_token_indices mismatch")
 
     if shift_input_ids:
-        torch.testing.assert_close(n_hsm, g_hsm_t, atol=0, rtol=0,
-                                   msg="out_hidden_state_mapping mismatch")
+        torch.testing.assert_close(n_hsm, g_hsm_t, atol=0, rtol=0, msg="out_hidden_state_mapping mismatch")
 
 
 @pytest.mark.parametrize("num_reqs", [1])
@@ -308,9 +315,15 @@ def test_copy_and_expand_eagle_inputs(num_reqs, num_padding_slots,
 def test_minimal_case(num_reqs, num_padding_slots, shift_input_ids):
     """Test with minimal input (1 request, 1 padding slot)."""
     rng = np.random.default_rng(SEED + 100)
-    case = generate_test_case(rng, num_reqs, num_padding_slots,
-                              shift_input_ids, min_tokens_per_req=2,
-                              max_tokens_per_req=3, max_rejected_per_req=1)
+    case = generate_test_case(
+        rng,
+        num_reqs,
+        num_padding_slots,
+        shift_input_ids,
+        min_tokens_per_req=2,
+        max_tokens_per_req=3,
+        max_rejected_per_req=1,
+    )
 
     g_ids, g_pos, g_rej, g_msk, g_nti, g_hsm = golden_copy_and_expand(
         case["target_token_ids"],
@@ -348,11 +361,15 @@ def test_minimal_case(num_reqs, num_padding_slots, shift_input_ids):
 def test_large_tokens_per_request(num_reqs):
     """Test with larger token counts per request."""
     rng = np.random.default_rng(SEED + 200)
-    case = generate_test_case(rng, num_reqs, num_padding_slots=3,
-                              shift_input_ids=False,
-                              min_tokens_per_req=100,
-                              max_tokens_per_req=512,
-                              max_rejected_per_req=10)
+    case = generate_test_case(
+        rng,
+        num_reqs,
+        num_padding_slots=3,
+        shift_input_ids=False,
+        min_tokens_per_req=100,
+        max_tokens_per_req=512,
+        max_rejected_per_req=10,
+    )
 
     g_ids, g_pos, g_rej, g_msk, g_nti, g_hsm = golden_copy_and_expand(
         case["target_token_ids"],
@@ -390,11 +407,15 @@ def test_large_tokens_per_request(num_reqs):
 def test_large_tokens_shift_true(num_reqs):
     """Test with larger token counts and shift_input_ids=True."""
     rng = np.random.default_rng(SEED + 300)
-    case = generate_test_case(rng, num_reqs, num_padding_slots=4,
-                              shift_input_ids=True,
-                              min_tokens_per_req=50,
-                              max_tokens_per_req=256,
-                              max_rejected_per_req=8)
+    case = generate_test_case(
+        rng,
+        num_reqs,
+        num_padding_slots=4,
+        shift_input_ids=True,
+        min_tokens_per_req=50,
+        max_tokens_per_req=256,
+        max_rejected_per_req=8,
+    )
 
     g_ids, g_pos, g_rej, g_msk, g_nti, g_hsm = golden_copy_and_expand(
         case["target_token_ids"],
@@ -433,11 +454,15 @@ def test_large_tokens_shift_true(num_reqs):
 def test_no_rejected_tokens(num_reqs):
     """Test cases with zero rejected tokens."""
     rng = np.random.default_rng(SEED + 400)
-    case = generate_test_case(rng, num_reqs, num_padding_slots=2,
-                              shift_input_ids=False,
-                              min_tokens_per_req=5,
-                              max_tokens_per_req=20,
-                              max_rejected_per_req=0)
+    case = generate_test_case(
+        rng,
+        num_reqs,
+        num_padding_slots=2,
+        shift_input_ids=False,
+        min_tokens_per_req=5,
+        max_tokens_per_req=20,
+        max_rejected_per_req=0,
+    )
 
     g_ids, g_pos, g_rej, g_msk, g_nti, g_hsm = golden_copy_and_expand(
         case["target_token_ids"],
