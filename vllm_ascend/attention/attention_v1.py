@@ -200,9 +200,6 @@ class AscendMetadata:
     # prefill reshape_and_cache event
     reshape_cache_event: torch.npu.Event = None
 
-    # sliding window attention mask
-    swa_mask: torch.Tensor | None = None
-
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
