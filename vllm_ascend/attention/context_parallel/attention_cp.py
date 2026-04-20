@@ -541,9 +541,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         return attn_out, attn_lse
 
     def _forward_decode_pcp_dcp(self, query: torch.Tensor, attn_metadata: AscendMetadata) -> torch.Tensor:
-        num_decodes = len(attn_metadata.decode_meta.actual_seq_lengths_q)
-        lst = attn_metadata.decode_meta.actual_seq_lengths_q[:num_decodes]
-        lst = list(np.diff([0] + lst))
         assert self.key_cache is not None
         assert self.value_cache is not None
 
@@ -552,10 +549,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
-        query = query.view(num_decodes, int(query.shape[0] / num_decodes), query.shape[1], -1)
-        k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
-        value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
 
+        sparse_mode = None
         # Get MTP attention mask and expand to target length
         spec_attn_mask = None
         if (
@@ -563,7 +558,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             and attn_metadata.decode_meta.mtp_attn_mask is not None
             and self.vllm_config.speculative_config is not None
         ):
-            new_mask = torch.ones(num_decodes, 16384, target_length, dtype=torch.bool, device=query.device)
+            num_decodes = len(attn_metadata.decode_meta.actual_seq_lengths_q)
+            lst = attn_metadata.decode_meta.actual_seq_lengths_q[:num_decodes]
+            lst = list(np.diff([0] + lst))
+            query_len = self.vllm_config.speculative_config.num_speculative_tokens + 1
+            new_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool, device=query.device)
             mtp_mask = attn_metadata.decode_meta.mtp_attn_mask[:num_decodes]
             for i, mask in enumerate(mtp_mask):
                 B = mask.shape[0]
@@ -571,6 +570,11 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 new_mask[i, : B, : L] = ~mask
             
             spec_attn_mask = new_mask
+
+            query = query.view(num_decodes, query_len, query.shape[1], -1)
+            k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
+            value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
+            sparse_mode = 0
 
         common_kwargs = {
             "num_heads": num_heads,
@@ -580,7 +584,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "scale": self.scale,
             "antiquant_mode": 0,
             "antiquant_scale": None,
-            "sparse_mode":0,
+            "sparse_mode":sparse_mode,
             "softmax_lse_flag": True,
             "block_table": attn_metadata.decode_meta.block_tables,
             "block_size": self.key_cache.shape[1],
