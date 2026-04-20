@@ -85,7 +85,7 @@ class BlockTable:
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
         self.slot_mapping = self._make_buffer(
-            self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32
+            (self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs) * self.dycp_world_size, dtype=torch.int32
         )
 
         self.kernel_sizes = kernel_sizes

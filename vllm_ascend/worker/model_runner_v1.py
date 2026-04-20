@@ -333,7 +333,7 @@ class NPUModelRunner(GPUModelRunner):
             self.model_config.max_model_len += 2 * self.common_pcp_size * self.max_num_reqs
         max_buffer_num_tokens = self.max_num_tokens
         if self.common_pcp_size * self.dcp_size * self.dycp_size > 1:
-            max_buffer_num_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.common_pcp_size
+            max_buffer_num_tokens = (self.max_num_tokens + self.max_num_reqs * 2 * self.common_pcp_size) * self.dycp_size
             self.pcp_manager = PCPManager(
                 self.common_pcp_size,
                 self.common_pcp_rank,
@@ -2732,7 +2732,7 @@ class NPUModelRunner(GPUModelRunner):
         # in the pcp scenario, the split sequence needs to be used for profile run
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
         if self.use_prefill_cp:
-            self.max_num_tokens = math.ceil(self.max_num_tokens / (self.common_pcp_size * 2)) * 2
+            self.max_num_tokens = math.ceil(self.max_num_tokens / (self.common_pcp_size * 2)) * 2 * self.dycp_size
         super().profile_run()
         self.max_num_tokens = origin_max_num_tokens
 
