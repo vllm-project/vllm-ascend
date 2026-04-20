@@ -388,7 +388,7 @@ Reference test results:
 
 Note:
 
-1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community. and please **note** that this environment variable can only be enabled on decode nodes.
+1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community. **Note** that this environment variable can only be enabled on decode nodes.
 2. Here we disable prefix cache because of random datasets. You can enable prefix cache if requests have long common prefix.
 
 ### Three Node A3 -- PD disaggregation
@@ -616,4 +616,4 @@ Reference test results:
 
 Note:
 
-1. We recommend to set `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` on this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator. and please **note** that this environment variable can only be enabled on decode nodes.
+1. We recommend to set `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` on this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator. **Note** that this environment variable can only be enabled on decode nodes.
