@@ -803,7 +803,7 @@ class TestEagleProposerPropose():
             if model_type == 'qwen_moe':
                 assert captured_common_attn_metadata._seq_lens_cpu == torch.tensor([15])
             if model_type == 'qwen_dense':
-                assert captured_common_attn_metadata._seq_lens_cpu == None
+                assert captured_common_attn_metadata._seq_lens_cpu is None
             if model_type == 'deepseek':
                 assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([11]))
                 assert captured_common_attn_metadata.max_seq_len == 9
@@ -829,7 +829,7 @@ class TestEagleProposerPropose():
             assert captured_common_attn_metadata.max_query_len == 1
             assert captured_common_attn_metadata.max_seq_len == 0
             assert torch.equal(captured_common_attn_metadata.block_table_tensor, torch.cat([torch.eye(256, device="cpu", dtype=torch.int32)[0].unsqueeze(0)*i for i in [1,2,3]], dim=0))
-            assert captured_common_attn_metadata._seq_lens_cpu == None
+            assert captured_common_attn_metadata._seq_lens_cpu is None
             if model_type == 'qwen_dense':
                 assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([148, 274, 402]), torch.full((8701,), -1)]))
@@ -849,14 +849,14 @@ class TestEagleProposerPropose():
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([12, 11, 12]))
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 12, 12, 13, 9, 10, 11, 12, 10, 11, 12, 13, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9] + [0]*(8704-23), dtype=torch.int64))
         assert captured_common_attn_metadata.causal == True
-        assert captured_common_attn_metadata.logits_indices_padded == None
-        assert captured_common_attn_metadata.num_logits_indices == None
-        assert captured_common_attn_metadata.encoder_seq_lens == None
-        assert captured_common_attn_metadata.encoder_seq_lens_cpu == None
-        assert captured_common_attn_metadata.dcp_local_seq_lens == None
-        assert captured_common_attn_metadata.dcp_local_seq_lens_cpu == None
-        assert captured_common_attn_metadata._num_computed_tokens_cpu == None
-        assert captured_common_attn_metadata._num_computed_tokens_cache == None
+        assert captured_common_attn_metadata.logits_indices_padded is None
+        assert captured_common_attn_metadata.num_logits_indices is None
+        assert captured_common_attn_metadata.encoder_seq_lens is None
+        assert captured_common_attn_metadata.encoder_seq_lens_cpu is None
+        assert captured_common_attn_metadata.dcp_local_seq_lens is None
+        assert captured_common_attn_metadata.dcp_local_seq_lens_cpu is None
+        assert captured_common_attn_metadata._num_computed_tokens_cpu is None
+        assert captured_common_attn_metadata._num_computed_tokens_cache is None
         assert captured_common_attn_metadata.decode_token_per_req == 1
         assert captured_common_attn_metadata.actual_seq_lengths_q == []
         if model_type == 'deepseek':
@@ -864,7 +864,7 @@ class TestEagleProposerPropose():
         else:
             assert captured_common_attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         assert captured_common_attn_metadata.graph_pad_size == -1
-        assert captured_common_attn_metadata.prefill_context_parallel_metadata == None
+        assert captured_common_attn_metadata.prefill_context_parallel_metadata is None
 
     # prefill or decode
     def is_decode(self, flag_prefill_decode):
