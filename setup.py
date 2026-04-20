@@ -505,7 +505,7 @@ setup(
     # Follow:
     # https://packaging.python.org/en/latest/specifications/version-specifiers
     version=VERSION,
-    author="vLLM-Ascend team",
+    author="vLLM-Ascend Team",
     license="Apache 2.0",
     description="vLLM Ascend backend plugin",
     long_description=read_readme(),
