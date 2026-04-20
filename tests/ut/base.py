@@ -21,14 +21,13 @@ from vllm_ascend.utils import adapt_patch, register_ascend_customop
 
 
 class TestBase(unittest.TestCase):
-
     def __init__(self, *args, **kwargs):
         # adapt patch by default.
         adapt_patch(True)
         adapt_patch()
         register_ascend_customop()
         super().setUp()
-        super(TestBase, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
 
 class PytestBase:

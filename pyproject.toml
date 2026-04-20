@@ -65,10 +65,14 @@ exclude = [
     "tests/e2e/vllm_interface/",
     "tests/e2e/weekly/",
     "tests/e2e/nightly/single_node/",
-
-    "tests/ut/_310p/",
-    "tests/ut/attention/",
-    "tests/ut/base.py",
+    
+    "tests/ut/batch_invariant/",
+    "tests/ut/compilation/",
+    "tests/ut/conftest.py",
+    "tests/ut/core/",
+    "tests/ut/device_allocator/",
+    "tests/ut/distributed/",
+    "tests/ut/eplb/",
     
     "tests/ut/batch_invariant/",
     "tests/ut/compilation/",
