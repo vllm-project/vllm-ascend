@@ -10,6 +10,17 @@
 
 ### KV Pool Parameter Description
 
+#### `kv_load_failure_policy`: KV Load Failure Handling Policy
+
+`kv_load_failure_policy` is a top-level field in `kv-transfer-config`.
+
+* `recompute`: When KV loading fails, vLLM rolls the request back to the last valid prefix and reschedules it to recompute the failed KV blocks.
+* `fail`: When KV loading fails, the affected request is terminated directly with an error.
+
+The default value in vLLM is `fail`. If you want the request to fall back to recomputation after a KV load failure, set it to `recompute`.
+
+When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiConnector` top-level `kv-transfer-config` instead of the child connectors.
+
 #### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
 
 | Parameter | Description |
@@ -191,6 +202,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
             {
@@ -259,6 +271,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
         {
@@ -295,6 +308,7 @@ Currently, the key-value pool in PD Disaggregate only stores the kv cache genera
 {
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_consumer",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "0",
         "backend": "mooncake",
@@ -374,6 +388,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port":"1",
         "backend": "mooncake"
@@ -656,6 +671,7 @@ vllm serve xxxxxxx/Qwen3-32B \
     '{
             "kv_connector": "MultiConnector",
             "kv_role": "kv_producer",
+            "kv_load_failure_policy": "recompute",
             "engine_id": "2",
             "kv_connector_extra_config": {
                 "connectors": [
@@ -735,6 +751,7 @@ vllm serve xxxxxxx/Qwen3-32B \
   '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
+        "kv_load_failure_policy": "recompute",
         "kv_connector_extra_config": {
                 "connectors": [
                 {
@@ -807,6 +824,7 @@ python -m vllm.entrypoints.openai.api_server \
  '{
   "kv_connector": "MultiConnector",
   "kv_role": "kv_producer",
+  "kv_load_failure_policy": "recompute",
   "engine_id": "2",
   "kv_connector_extra_config": {
    "connectors": [
@@ -877,6 +895,7 @@ python -m vllm.entrypoints.openai.api_server \
   '{
  "kv_connector": "MultiConnector",
  "kv_role": "kv_consumer",
+ "kv_load_failure_policy": "recompute",
  "kv_connector_extra_config": {
   "connectors": [
   {
@@ -974,6 +993,7 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   '{
         "kv_connector": "AscendStoreConnector",
         "kv_role": "kv_both",
+        "kv_load_failure_policy": "recompute",
         "kv_connector_extra_config": {
                 "backend": "memcache",
                 "lookup_rpc_port":"0"
@@ -1039,6 +1059,7 @@ vllm serve xxxxxxx/DeepSeek-R1 \
    '{
         "kv_connector": "AscendStoreConnector",
         "kv_role": "kv_both",
+        "kv_load_failure_policy": "recompute",
         "kv_connector_extra_config": {
                 "backend": "memcache",
                 "lookup_rpc_port":"0"
@@ -1094,6 +1115,7 @@ python -m vllm.entrypoints.openai.api_server \
   '{
       "kv_connector": "AscendStoreConnector",
       "kv_role": "kv_both",
+      "kv_load_failure_policy": "recompute",
       "kv_connector_extra_config": {
         "backend": "memcache",
         "lookup_rpc_port":"0"
@@ -1211,6 +1233,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
+    "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "lookup_rpc_port": "1",
         "backend": "yuanrong"
