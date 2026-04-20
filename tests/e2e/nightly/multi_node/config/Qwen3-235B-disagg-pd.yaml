@@ -21,6 +21,9 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      # should disable this in the prefiller node
+      VLLM_ASCEND_ENABLE_FUSED_MC2: 0
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
