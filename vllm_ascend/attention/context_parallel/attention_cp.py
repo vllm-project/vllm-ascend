@@ -550,7 +550,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         else:
             num_heads = self.num_heads
 
-        sparse_mode = None
+        sparse_mode = 0
         input_layerout= "TND"
         # Get MTP attention mask and expand to target length
         attn_mask = None
