@@ -33,6 +33,10 @@ from vllm_ascend.utils import maybe_trans_nz
 from .registry import register_scheme
 
 
+def _get_num_logical_experts(layer: torch.nn.Module, fallback: int) -> int:
+    return getattr(layer, "logical_num_experts", fallback)
+
+
 @register_scheme("W8A8_DYNAMIC", "moe")
 class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
     """310P-only FusedMoE method for Ascend W8A8_DYNAMIC.
@@ -123,7 +127,7 @@ class AscendW8A8DynamicFusedMoEMethod310(AscendMoEScheme):
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=global_num_experts,
+                num_experts=_get_num_logical_experts(layer, global_num_experts),
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
