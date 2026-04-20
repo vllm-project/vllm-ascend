@@ -78,11 +78,11 @@ class ModelQKNormRopeWithoutBias(nn.Module):
 
         # Q RMSNorm (per-head)
         q_by_head = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        q_norm_out, _ = ir.ops.rms_norm(q_by_head, self.q_weight, self.eps)
+        q_norm_out = ir.ops.rms_norm(q_by_head, self.q_weight, self.eps)
 
         # K RMSNorm (per-head)
         k_by_head = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-        k_norm_out, _ = ir.ops.rms_norm(k_by_head, self.k_weight, self.eps)
+        k_norm_out = ir.ops.rms_norm(k_by_head, self.k_weight, self.eps)
 
         # Reshape for RoPE: [T, num_heads, head_dim] -> [1, T, num_heads, head_dim]
         q_flat = q_norm_out.view(q.shape)
@@ -125,12 +125,12 @@ class ModelQKNormRopeWithBias(nn.Module):
 
         # Q RMSNorm + Bias
         q_by_head = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        q_norm_out, _ = ir.ops.rms_norm(q_by_head, self.q_weight, self.eps)
+        q_norm_out = ir.ops.rms_norm(q_by_head, self.q_weight, self.eps)
         q_normed = q_norm_out + self.q_bias
 
         # K RMSNorm + Bias
         k_by_head = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-        k_norm_out, _ = ir.ops.rms_norm(k_by_head, self.k_weight, self.eps)
+        k_norm_out = ir.ops.rms_norm(k_by_head, self.k_weight, self.eps)
         k_normed = k_norm_out + self.k_bias
 
         # Reshape for RoPE

@@ -60,10 +60,10 @@ class QKNormRopeFusionPattern(BasePattern):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
             q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-            q_norm_out, _ = ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+            q_norm_out = ir.ops.rms_norm(q_by_head, q_weight, self.eps)
 
             k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-            k_norm_out, _ = ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+            k_norm_out = ir.ops.rms_norm(k_by_head, k_weight, self.eps)
 
             q_flat = q_norm_out.view(q.shape)
             k_flat = k_norm_out.view(k.shape)
@@ -139,11 +139,11 @@ class QKNormRopeFusionPatternWithBias(BasePattern):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
             q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-            q_norm_out, _ = ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+            q_norm_out = ir.ops.rms_norm(q_by_head, q_weight, self.eps)
             q_normed = q_norm_out + q_bias
 
             k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-            k_norm_out, _ = ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+            k_norm_out = ir.ops.rms_norm(k_by_head, k_weight, self.eps)
             k_normed = k_norm_out + k_bias
 
             q_flat = q_normed.view(q.shape)

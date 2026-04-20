@@ -80,7 +80,7 @@ class AscendRMSNorm(RMSNorm):
                     x.add_(self.bias)
             return x, residual
 
-        x, residual = ir.ops.rms_norm(x, self.weight, self.variance_epsilon)
+        x = ir.ops.rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias_loaded:
             x.add_(self.bias)
 

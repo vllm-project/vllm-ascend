@@ -31,11 +31,11 @@ def rms_norm(
     weight: Tensor | None,
     epsilon: float,
     variance_size: int | None = None,
-) -> tuple[Tensor, Tensor]:
+) -> Tensor:
     import torch_npu
 
     if weight is None:
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
     x, _ = torch_npu.npu_rms_norm(x, weight, epsilon)
-    return x, _
+    return x
