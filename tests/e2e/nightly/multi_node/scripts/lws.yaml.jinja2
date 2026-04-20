@@ -13,6 +13,11 @@ spec:
         labels:
           role: leader
       spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "night"
+            effect: "NoSchedule"
         containers:
           - name: vllm-leader
             imagePullPolicy: Always
@@ -79,6 +84,11 @@ spec:
             path: /usr/local/Ascend/driver/tools
     workerTemplate:
       spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "night"
+            effect: "NoSchedule"
         containers:
           - name: vllm-worker
             imagePullPolicy: Always
