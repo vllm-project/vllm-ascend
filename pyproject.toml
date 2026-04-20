@@ -77,18 +77,6 @@ exclude = [
     "tests/ut/device_allocator/",
     "tests/ut/distributed/",
     "tests/ut/eplb/",
-
-    "tests/ut/ops/",
-    "tests/ut/patch/",
-    "tests/ut/quantization/",
-    "tests/ut/sample/",
-
-    "tests/ut/spec_decode/",
-    "tests/ut/test_ascend_config.py",
-    "tests/ut/test_envs.py",
-    "tests/ut/test_platform.py",
-    "tests/ut/test_utils.py",
-    "tests/ut/worker/",
 ]
 
 [tool.ruff.lint]
