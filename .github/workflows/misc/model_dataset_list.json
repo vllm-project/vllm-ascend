@@ -263,6 +263,7 @@
       "vllm-ascend/prefix0-in3500-bs210",
       "vllm-ascend/prefix75-in3500-bs210",
       "vllm-ascend/textvqa-lite",
-      "vllm-ascend/textvqa-perf-1080p"
+      "vllm-ascend/textvqa-perf-1080p",
+      "vllm-ascend/math"
     ]
   }

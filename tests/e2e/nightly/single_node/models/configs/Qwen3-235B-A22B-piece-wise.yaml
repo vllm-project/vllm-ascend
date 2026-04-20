@@ -32,7 +32,7 @@ test_cases:
     benchmarks: &benchmarks
       acc:
         case_type: accuracy
-        dataset_path_local: vllm-ascend/math
+        dataset_path: vllm-ascend/math
         request_conf: vllm_api_general_chat
         dataset_conf: math/math500_gen_0_shot_cot_chat_prompt
         max_out_len: 20480
