@@ -37,6 +37,14 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.attention import op_constraint
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import (
+    MoECommType,
+    get_mc2_tokens_capacity,
+    override_mrv2_in_profile_run,
+    select_moe_comm_method,
+    set_mc2_mask,
+    set_mc2_tokens_capacity,
+)
 from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -50,6 +58,18 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Ascend-specific configurations
+        self.ascend_config = get_ascend_config()
+        # The following features are not yet supported in Ascend NPU model runner v2:
+        # - Context parallelism (prefill or decode)
+        # - Dynamic EPLB
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
+
+        if self.ascend_config.eplb_config.dynamic_eplb:
+            raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
+
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
@@ -107,10 +127,11 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # Ascend-specific configurations
-        self.ascend_config = get_ascend_config()
-        # set this just the same as model runner v1, or it will raise error.
+        # set _WEIGHT_PREFETCH_METHOD, _mc2_tokens_capacity and _reserved_mc2_mask which
+        # is necessary for weight_prfetching function, and MoE communication optimization.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
+        set_mc2_mask(vllm_config, self.device)
 
         # we need to update full graph params in run_fullgraph,
         # so create a stream to update full graph params.
@@ -126,20 +147,23 @@ class NPUModelRunner(GPUModelRunner):
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        super().initialize_kv_cache(kv_cache_config)
-        for backend in self.attn_backends:
-            impl_cls = backend.get_impl_cls()
-            if not hasattr(impl_cls, "get_op_prefix"):
-                continue
-            op_prefix = impl_cls.get_op_prefix()
-            self.op_prefix.add(op_prefix)
-            gpu_key, _, _ = op_constraint.op_constraint_extra_kw_keys(op_prefix)
-            self.input_buffers.extra_kwargs[gpu_key] = torch.zeros(
-                self.max_num_reqs + 2,
-                dtype=torch.int32,
-                device=self.device,
-            )
+    @torch.inference_mode()
+    def profile_run(self) -> None:
+        """Override GPUModelRunner.profile_run for Ascend NPUs.
+        When running moe models, we need an extra dummy run with mc2_tokens_capacity tokens to reserve
+        necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
+        override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
+        """
+        mc2_tokens_capacity = get_mc2_tokens_capacity()
+        with override_mrv2_in_profile_run(True):
+            if (
+                mc2_tokens_capacity is not None
+                and self.max_num_tokens > mc2_tokens_capacity
+                and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
+                in {MoECommType.MC2, MoECommType.FUSED_MC2}
+            ):
+                self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
+            super().profile_run()
 
     def prepare_inputs(
         self,
