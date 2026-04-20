@@ -560,6 +560,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             and attn_metadata.decode_meta.mtp_attn_mask is not None
             and self.vllm_config.speculative_config is not None
         ):
+            input_layerout = "BSND"
             num_decodes = len(actual_seq_lengths_q)
             lst = actual_seq_lengths_q[:num_decodes]
             actual_seq_lengths_q = list(np.diff([0] + lst))
