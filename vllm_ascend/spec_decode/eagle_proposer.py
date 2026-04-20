@@ -503,6 +503,16 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         if self.method in ("eagle3", "dflash"):
             assert isinstance(self.get_model(), (Eagle3LlamaForCausalLM, DFlashQwen3ForCausalLM))
+            if self.method == "eagle3":
+                expected_input_dim = self.hidden_size * 3
+                if target_hidden_states.shape[-1] != expected_input_dim:
+                    logger.warning(
+                        "Eagle3 combine_hidden_states input dim mismatch: "
+                        "expected %d (3 * hidden_size), got %d. "
+                        "aux_hidden_states may not be captured correctly.",
+                        expected_input_dim,
+                        target_hidden_states.shape[-1],
+                    )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 

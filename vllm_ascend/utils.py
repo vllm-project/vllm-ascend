@@ -944,9 +944,9 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(t) for t in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
+        return tuple(weak_ref_tensors(t) for t in tensors)
     # For IntermediateTensors used in pipeline parallelism
     if isinstance(tensors, IntermediateTensors):
         ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
