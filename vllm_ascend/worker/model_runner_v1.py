@@ -1065,13 +1065,10 @@ class NPUModelRunner(GPUModelRunner):
 
         total_num_scheduled_tokens = int(np.sum(local_num_scheduled_tokens))
         positions_np = self.positions.np if hasattr(self.positions, "np") else self._positions_np_buf
-
-        # Swap to the other buffer to avoid race condition with previous
-        # iteration's async copy that may still be reading from CPU.
-        self.is_mm_embed_idx = 1 - self.is_mm_embed_idx  # type: ignore
-        is_mm_embed_buf = self.is_mm_embed_buffers[self.is_mm_embed_idx]
-        is_mm_embed = is_mm_embed_buf.cpu
-        is_mm_embed[:total_num_scheduled_tokens] = False
+        mm_embeds = list[torch.Tensor]()
+        is_mm_embed = torch.zeros(
+            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+        )
 
         (
             mm_embeds,
@@ -1091,7 +1088,6 @@ class NPUModelRunner(GPUModelRunner):
             warning_once=logger.warning_once,
         )
 
-        is_mm_embed_gpu = is_mm_embed_buf.copy_to_gpu(total_num_scheduled_tokens)
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
@@ -1100,7 +1096,7 @@ class NPUModelRunner(GPUModelRunner):
             self._calc_xdrope_positions(scheduler_output)
             self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
-        return mm_embeds, is_mm_embed_gpu
+        return mm_embeds, is_mm_embed
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
