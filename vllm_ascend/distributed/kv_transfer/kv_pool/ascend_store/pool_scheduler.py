@@ -1,16 +1,12 @@
 from typing import Any
 
 import vllm.envs as envs
-import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
-from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
-from vllm.v1.serial_utils import MsgpackEncoder
 from memcache_hybrid import DistributedObjectStore  # type: ignore
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -35,7 +31,6 @@ class KVPoolScheduler:
             "consumer_is_to_put", False
         )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
-        self.client = LookupKeyClient(vllm_config)
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
@@ -60,18 +55,11 @@ class KVPoolScheduler:
 
         self.page_size_bytes = page_size_bytes
         logger.info(f"==============> page_size_bytes {page_size_bytes}")
-        use_memfabric = True
-        if use_memfabric:
-            self.store_scheduler = DistributedObjectStore()
-            self.store_scheduler.init(device_id=0, init_bm=False)
-        else:
-            self.store_scheduler = None
-        if self.store_scheduler is not None:
-            lru_capacity = 1000000
-            self.key_lru_cache = KeyLRUCache(lru_capacity, self.store_scheduler)
-            logger.info("KV pool LRU cache enabled with capacity %d", lru_capacity)
-        else:
-            self.key_lru_cache = None
+        self.store_scheduler = DistributedObjectStore()
+        self.store_scheduler.init(device_id=0, init_bm=False)
+        lru_capacity = 1000000
+        self.key_lru_cache = KeyLRUCache(lru_capacity, self.store_scheduler)
+        logger.info("KV pool LRU cache enabled with capacity %d", lru_capacity)
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
@@ -90,22 +78,15 @@ class KVPoolScheduler:
         self.model_name = model_config.model.split('/')[-1]
         self._req_last_block_gvas: dict[str, dict[str, int | None]] = {}
 
-    def _generate_keys_and_alloc(self, block_hashes, req_id='') -> tuple[list[list[str]], list[list[str]], dict[str, int | None]]:
-        has_last_block = req_id != ''
-        block_keys_by_layer, last_block_keys_by_layer, block_hash_groups = self.generate_keys(block_hashes, req_id=req_id)
+    def _generate_keys_and_alloc(self, block_hashes, req_id='', has_last_block=False) -> tuple[list[list[str]], list[list[str]], dict[str, int | None]]:
+        block_keys_by_layer, last_block_keys_by_layer, block_hash_groups = self.generate_keys(block_hashes, req_id=req_id, has_last_block=has_last_block)
         need_alloc_last_block = has_last_block and req_id not in self._req_last_block_gvas
 
         if need_alloc_last_block:
             all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
             all_keys.extend([key for layer_keys in last_block_keys_by_layer for key in layer_keys])
-            if self.key_lru_cache is not None:
-                gvas = self.key_lru_cache.batch_get_and_alloc(
-                    all_keys, self.page_size_bytes, block_hash_groups)
-            elif self.store_scheduler is not None:
-                gvas = self.store_scheduler.batch_alloc(all_keys,
-                                                        [self.page_size_bytes for _ in range(len(all_keys))])
-            else:
-                gvas = [None] * len(all_keys)
+            gvas = self.key_lru_cache.batch_get_and_alloc(
+                all_keys, self.page_size_bytes, block_hash_groups)
             key_gva_mapping: dict[str, Any] = dict(zip(all_keys, gvas))
             last_block_keys_flat = [key for layer_keys in last_block_keys_by_layer for key in layer_keys]
             self._req_last_block_gvas[req_id] = {
@@ -117,23 +98,16 @@ class KVPoolScheduler:
                 k: v for k, v in block_hash_groups.items()
                 if not k.endswith(b'_lastblock')
             }
-            if self.key_lru_cache is not None:
-                gvas = self.key_lru_cache.batch_get_and_alloc(
-                    chunk_keys, self.page_size_bytes,
-                    chunk_block_hash_groups if chunk_block_hash_groups else None)
-            elif self.store_scheduler is not None:
-                gvas = self.store_scheduler.batch_alloc(chunk_keys,
-                                                        [self.page_size_bytes for _ in range(len(chunk_keys))])
-            else:
-                gvas = [None] * len(chunk_keys)
+            gvas = self.key_lru_cache.batch_get_and_alloc(
+                chunk_keys, self.page_size_bytes,
+                chunk_block_hash_groups if chunk_block_hash_groups else None)
             key_gva_mapping: dict[str, Any] = dict(zip(chunk_keys, gvas))
             if has_last_block and req_id in self._req_last_block_gvas:
                 key_gva_mapping.update(self._req_last_block_gvas[req_id])
 
         return block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping
 
-    def generate_keys(self, chunk_hashes, req_id=''):
-        has_last_block = req_id != ''
+    def generate_keys(self, chunk_hashes, req_id='', has_last_block=False):
         block_hash_groups: dict[bytes, list[str]] = {}
 
         def _build_layer_keys(layer_id: int) -> tuple[list[str], list[str]]:
@@ -199,16 +173,13 @@ class KVPoolScheduler:
             return 0, False
 
         num_blocks = token_len // self._block_size
-        if self.key_lru_cache is not None:
-            num_hit_blocks = 0
-            for bh in request.block_hashes[:num_blocks]:
-                if self.key_lru_cache.has_block(bh):
-                    num_hit_blocks += 1
-                else:
-                    break
-            num_external_hit_tokens = num_hit_blocks * self._block_size
-        else:
-            num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
+        num_hit_blocks = 0
+        for bh in request.block_hashes[:num_blocks]:
+            if self.key_lru_cache.has_block(bh):
+                num_hit_blocks += 1
+            else:
+                break
+        num_external_hit_tokens = num_hit_blocks * self._block_size
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
@@ -324,9 +295,10 @@ class KVPoolScheduler:
             )
 
             num_blocks = len(unfolded_block_ids)
+            has_last_block = num_tokens_to_compute % self._block_size != 0
 
             block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
-                request_real.block_hashes[:num_blocks], req_id=request.req_id)
+                request_real.block_hashes[:num_blocks], req_id=request.req_id, has_last_block=has_last_block)
             request_tracker.key_gva_mapping = key_gva_mapping
             request_tracker.block_keys_by_layer = block_keys_by_layer
             request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
@@ -383,8 +355,9 @@ class KVPoolScheduler:
                     self._request_trackers[req_id] = request_tracker
 
                     num_blocks = len(new_block_ids)
+                    has_last_block = num_tokens_to_compute % self._block_size != 0
                     block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
-                        request_real.block_hashes[:num_blocks], req_id=req_id)
+                        request_real.block_hashes[:num_blocks], req_id=req_id, has_last_block=has_last_block)
 
                     request_tracker.block_keys_by_layer = block_keys_by_layer
                     request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
@@ -491,7 +464,7 @@ class KVPoolScheduler:
                 has_last_block = num_tokens_to_compute % self._block_size != 0
                 block_hashes_for_keys = request.block_hashes[:num_blocks]
                 block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
-                    block_hashes_for_keys, req_id=request_id if has_last_block else '')
+                    block_hashes_for_keys, req_id=request_id, has_last_block=has_last_block)
                 request_tracker.key_gva_mapping = key_gva_mapping
                 request_tracker.block_keys_by_layer = block_keys_by_layer
                 request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
@@ -534,32 +507,6 @@ class KVPoolScheduler:
         if delay_free_blocks:
             logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
-
-
-class LookupKeyClient:
-    def __init__(self, vllm_config: "VllmConfig"):
-        self.encoder = MsgpackEncoder()
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        socket_path = get_zmq_rpc_path_lookup(vllm_config)
-        self.socket = make_zmq_socket(
-            self.ctx,
-            socket_path,
-            zmq.REQ,  # type: ignore[attr-defined]
-            bind=False,
-        )
-
-    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
-        hash_strs = [h.hex() for h in block_hashes]
-        hash_frames = self.encoder.encode(hash_strs)
-        token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        all_frames = [token_len_bytes] + list(hash_frames)
-        self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
-        result = int.from_bytes(resp, "big")
-        return result
-
-    def close(self):
-        self.socket.close(linger=0)
 
 
 def get_zmq_rpc_path_lookup(vllm_config: "VllmConfig") -> str:
