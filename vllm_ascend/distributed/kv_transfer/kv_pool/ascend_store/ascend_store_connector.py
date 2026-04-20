@@ -212,6 +212,11 @@ class AscendStoreConnector(KVConnectorBase_V1):
         )
         return done_sending, done_recving
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return KV block IDs that failed to load on the worker."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
+
     def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
         """
         Get the KV connector kv cache events collected during the last interval.
