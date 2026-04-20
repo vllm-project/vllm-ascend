@@ -555,6 +555,8 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         # Get MTP attention mask and expand to target length
         attn_mask = None
         actual_seq_lengths_q = attn_metadata.decode_meta.actual_seq_lengths_q
+        k_nope = self.key_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
+        value = self.value_cache.view(self.value_cache.shape[0], self.value_cache.shape[1], -1)
         if (
             attn_metadata.decode_meta
             and attn_metadata.decode_meta.mtp_attn_mask is not None
