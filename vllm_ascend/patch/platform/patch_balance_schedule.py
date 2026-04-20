@@ -496,9 +496,6 @@ class BalanceScheduler(Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prefix cached tokens.
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
