@@ -563,12 +563,14 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             and attn_metadata.decode_meta.mtp_attn_mask is not None
             and self.vllm_config.speculative_config is not None
         ):
-            mtp_mask = torch.stack(attn_metadata.decode_meta.mtp_attn_mask, dim=0)
-            B = mtp_mask.shape[0]
-            L = mtp_mask.shape[1]
-            target_length = 16384
             new_mask = torch.ones(num_decodes, target_length, target_length, dtype=torch.bool, device=query.device)
-            new_mask[:, : B, : L] = ~mtp_mask
+            mtp_mask = attn_metadata.decode_meta.mtp_attn_mask[:num_decodes]
+            for i, mask in enumerate(mtp_mask):
+                B = mask.shape[0]
+                L = mask.shape[1]
+                target_length = 16384
+                new_mask[i, : B, : L] = ~mask
+            
             spec_attn_mask = new_mask
 
         common_kwargs = {
