@@ -69,6 +69,7 @@ DEFAULT_CONDA_PATTERNS = {
     "pynvml",
     "triton-ascend",
 }
+
 DEFAULT_PIP_PATTERNS = {
     "torch",
     "numpy",
