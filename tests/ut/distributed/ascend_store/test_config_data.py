@@ -324,16 +324,16 @@ class TestReqMeta(unittest.TestCase):
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16)
 
-    # num_saved_tokens=32, chunk_boundary=ceil(33/16)*16=48 > 32
-    # so skip_save, and no load_spec => None
-    self.assertIsNone(meta)
+        # num_saved_tokens=32, chunk_boundary=ceil(33/16)*16=48 > 32
+        # so skip_save, and no load_spec => None
+        self.assertIsNone(meta)
 
 
-def test_from_request_tracker_with_original_block_size(self):
-    tracker = RequestTracker(
-        req_id="r1",
-        token_len=32,
-        allocated_block_ids=[0, 1],
+    def test_from_request_tracker_with_original_block_size(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16, original_block_size=8)
