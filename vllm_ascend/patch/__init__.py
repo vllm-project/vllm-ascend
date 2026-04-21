@@ -378,6 +378,21 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the operator as customop.
 #
+# ** 11a. File: worker/patch_token_bin_counts.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.utils.get_token_bin_counts_and_mask`
+#    Why:
+#       On NPU, torch.long (int64) dtype in scatter_add_ falls back to AICPU,
+#       because AIVector and AICore do not support int64. Using torch.int32
+#       keeps the operation on AICore for better performance.
+#    How：
+#       Replace dtype from torch.long to torch.int32 for bin_counts tensor and
+#       cast tokens to torch.int32 before scatter_add_.
+#    Related PR (if no, explain why):
+#       No, this is an NPU-specific dtype limitation and optimization.
+#    Future Plan:
+#       Remove this patch when NPU AIVector supports scatter_add_ with torch.long dtype.
+#
 # ** 12. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torchair.core._concrete_graph.ValuePack`,
