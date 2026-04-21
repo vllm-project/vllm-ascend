@@ -882,6 +882,16 @@ class NPUPlatform(Platform):
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
 
+        # ==================== 9. Parallel Config ====================
+        if vllm_config.parallel_config:
+            if getattr(vllm_config.parallel_config, "dcp_comm_backend", "ag_rs") == "a2a":
+                logger.warning(
+                    "Parameter '--dcp-comm-backend a2a' requires a Triton "
+                    "kernel which is not available on Ascend NPU. "
+                    "Resetting to 'ag_rs'."
+                )
+                vllm_config.parallel_config.dcp_comm_backend = "ag_rs"
+
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
