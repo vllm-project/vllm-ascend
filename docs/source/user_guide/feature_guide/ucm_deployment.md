@@ -28,29 +28,34 @@ A minimal configuration looks like this:
 
 ```yaml
 ucm_connectors:
-  - ucm_connector_name: "UcmNfsStore"
+  - ucm_connector_name: "UcmPipelineStore"
     ucm_connector_config:
+      store_pipeline: "Cache|Posix"
       storage_backends: "/mnt/test"
-      use_direct: false
-
-load_only_first_rank: false
+      io_direct: false
 ```
 
 Explanation:
 
-* ucm_connector_name: "UcmNfsStore":
-  Specifies `UcmNfsStore` as the UCM connector.
+* ucm_connector_name: "UcmPipelineStore":
+  Specifies `UcmPipelineStore` as the UCM connector.
+
+* store_pipeline: "Cache|Posix"
+  Specifies a pipeline built by **chaining the Cache Store and the Posix Store**.  
+  In this chained pipeline, the Cache Store handles data transfer between the **Device and Host**,  
+  and once the data reaches the Host, the Posix Store transfers it between the **Host and POSIX-compliant persistent storage**.
+
+  The pipeline must be registered in advance in  
+  `unified-cache-management/ucm/store/pipeline/connector.py` under `PIPELINE_REGISTRY`.
+
+  Currently, **only this Store chain is supported**.
 
 * storage_backends:
   Specify the directory used for storing KV blocks. It can be a local directory or an NFS-mounted path. UCM will store KV blocks here.
-   **⚠️ Make sure to replace `"/mnt/test"` with your actual storage directory.**
+   **⚠️ Make sure to replace `"/mnt/test"` with your actual storage directory. When deploying MLA models like DeepSeek in multi nodes, you need to specify a shared storage directory across nodes, to make sure the stored KV Cache reachable for all nodes.**
 
-* use_direct:
+* io_direct:
   Whether to enable direct I/O (optional). Default is `false`.
-
-* load_only_first_rank:
-  Controls whether only rank 0 loads KV cache and broadcasts it to other ranks.  
-  This feature is currently not supported on Ascend, so it must be set to `false` (all ranks load/dump independently).
 
 ## Launching Inference
 
