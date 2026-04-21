@@ -68,7 +68,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     container:
       image: ${{ inputs.image }}
     env:
@@ -242,7 +242,7 @@ jobs:
       - name: Upload benchmark results (GitHub Artifacts)
         if: ${{ always() && inputs.config_file_path != '' }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-test-benchmark-results-${{ steps.bench_ts.outputs.effective_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
