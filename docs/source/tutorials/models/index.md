@@ -32,4 +32,5 @@ Kimi-K2-Thinking.md
 Kimi-K2.5.md
 PaddleOCR-VL.md
 MiniMax-M2.5.md
+Mixtral-8x7B-Instruct-v0.1
 :::
