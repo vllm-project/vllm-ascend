@@ -93,12 +93,14 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
         @contextmanager
         def combined():
-            with patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling):
-                with patch(
+            with (
+                patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling),
+                patch(
                     "torch.npu.memory_stats",
                     return_value={"allocated_bytes.all.peak": 0},
-                ):
-                    yield
+                ),
+            ):
+                yield
 
         return combined()
 
