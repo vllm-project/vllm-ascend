@@ -49,30 +49,58 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
 
+        mock_cache_config = MagicMock()
+        mock_cache_config.kv_cache_memory_bytes = None
+        worker.cache_config = mock_cache_config
+
         mock_snapshot = MagicMock()
         mock_snapshot.free_memory = init_free_memory
         mock_snapshot.total_memory = init_total_memory
         worker.init_snapshot = mock_snapshot
 
         worker.requested_memory = requested_memory
+        worker.device = "npu:0"
         return worker
 
     @staticmethod
     def _make_profile_result(free_memory_after: int, non_kv_cache_memory: int):
-        """Return a mock profile_result compatible with memory_profiling output."""
+        """Return a mock profile_result compatible with memory_profiling output.
+
+        The worker code recomputes non_kv_cache_memory as:
+            non_torch_increase + torch_peak_increase + weights_memory
+        We set non_torch_increase=0, before_profile.torch_peak=0 (so
+        torch_peak_increase = peak - 0 = 0 since memory_stats is mocked to
+        return peak=0), and weights_memory=non_kv_cache_memory, ensuring the
+        recomputed value equals the requested non_kv_cache_memory.
+        """
         profile_result = MagicMock()
         profile_result.after_profile.free_memory = free_memory_after
         profile_result.non_kv_cache_memory = non_kv_cache_memory
+        profile_result.non_torch_increase = 0
+        profile_result.before_profile.torch_peak = 0
+        profile_result.weights_memory = non_kv_cache_memory
         return profile_result
 
     @staticmethod
     def _patch_memory_profiling(profile_result):
-        """Return a mock for `memory_profiling` that yields *profile_result*."""
+        """Return a context manager mocking `memory_profiling` and `torch.npu.memory_stats`."""
+        from contextlib import contextmanager
+
         mock_ctx = MagicMock()
         mock_ctx.__enter__ = MagicMock(return_value=profile_result)
         mock_ctx.__exit__ = MagicMock(return_value=False)
         mock_profiling = MagicMock(return_value=mock_ctx)
-        return patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling)
+
+        @contextmanager
+        def combined():
+            with patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling):
+                with patch(
+                    "torch.npu.memory_stats",
+                    return_value={"allocated_bytes.all.peak": 0},
+                ):
+                    yield
+
+        return combined()
 
     # ------------------------------------------------------------------ #
     # Tests
