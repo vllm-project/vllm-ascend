@@ -4,7 +4,7 @@ tasks:
 - name: "ceval-valid"
   metrics:
   - name: "acc,none"
-    value: 0.42
+    value: 0.8232
 num_fewshot: 5
 max_model_len: 2048
 trust_remote_code: True
