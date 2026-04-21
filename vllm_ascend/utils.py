@@ -685,6 +685,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
+        from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
         from vllm_ascend._310p.ops.layernorm import (
             AscendGemmaRMSNorm310,
@@ -710,6 +711,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
+                "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
             }
         )
@@ -1282,9 +1284,12 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    # if is PD mix stage, using original TP o_proj weight, and also need to
-    # full gather for o_proj weight for prefill stage.
-    return vllm_config.kv_transfer_config is None
+    kv_transfer_config = vllm_config.kv_transfer_config
+
+    # In PD-mixed mode, keep the original TP o_proj weight when:
+    # 1) KV pooling is disabled, or
+    # 2) KV pooling is enabled with kv_role == "kv_both".
+    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
 
 
 def check_gdn_layer(vllm_config) -> bool:
