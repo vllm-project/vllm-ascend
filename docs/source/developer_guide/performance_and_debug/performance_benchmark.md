@@ -50,7 +50,7 @@ This section introduces how to perform performance testing using the benchmark s
 
 ### 3.1 Dataset
 
-VLLM supports a variety of [datasets](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets.py).
+VLLM supports a variety of [datasets](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets/datasets.py).
 
 <style>
 th {
