@@ -514,6 +514,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
 
+                        # NOTE:
+                        # For models with sliding-window attention on the FIA full-graph replay path,
+                        # rebinding `block_tables` to the latest metadata tensor causes corrupted /
+                        # repeated outputs in our repro on Ascend NPU.
+                        #
+                        # Keep the captured block_tables tensor on this affected path.
+                        # Non-SWA models preserve the original behavior and continue to refresh
+                        # block_tables from attn_metadata.
+                        if hasattr(vllm_config.model_config.hf_text_config,
+                                   "sliding_window"):
+                            block_tables = block_tables
+                        else:
+                            block_tables = attn_metadata[key].block_tables
+                        
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
@@ -808,7 +822,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                actual_seq_qlen = torch.arange(1, attn_metadata.seq_lens.shape[0] + 1, dtype=torch.int32, device=query.device)
+                actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
             if self.sliding_window is not None:
                 atten_mask = attn_metadata.swa_mask
                 sparse_mode = 4
