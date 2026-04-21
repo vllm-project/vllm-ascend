@@ -674,9 +674,14 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
     )
     proxy_state.release_prefiller(prefiller_idx, prefiller_score)
     if response.status_code >= 400:
+        try:
+            # Try to parse as JSON to preserve structured error info
+            detail = response.json()
+        except Exception:
+            detail = response.text
         raise HTTPException(
             status_code=response.status_code,
-            detail=response.text
+            detail=detail
         )
     response_json = response.json()
     kv_transfer_params = response_json.get("kv_transfer_params", {})
@@ -824,7 +829,7 @@ async def _handle_completions(api: str, request: Request):
     except HTTPException as e:
         return JSONResponse(
             status_code=e.status_code,
-            content={"detail": e.detail}
+            content=e.detail
         )
     except Exception as e:
         import traceback
