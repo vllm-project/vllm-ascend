@@ -145,7 +145,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --data-parallel-size 2 \
@@ -197,7 +196,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --host 0.0.0.0 \
@@ -248,7 +246,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --host 0.0.0.0 \
@@ -409,7 +406,6 @@ Before you start, please
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -473,7 +469,6 @@ Before you start, please
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
