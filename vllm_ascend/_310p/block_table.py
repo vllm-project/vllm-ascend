@@ -60,7 +60,7 @@ class BlockTable(AscendBlockTable):
             req_indices_np = np.repeat(np.arange(num_reqs, dtype=np.int64), counts)
             if req_indices_np.shape[0] != positions_np.shape[0]:
                 raise ValueError(
-                    "query_start_loc and positions describe different token counts: "
+                    "query_start_loc and positions describe different token counts1: "
                     f"{req_indices_np.shape[0]} != {positions_np.shape[0]}"
                 )
             return req_indices_np, positions_np
