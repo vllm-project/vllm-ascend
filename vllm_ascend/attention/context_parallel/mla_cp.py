@@ -726,7 +726,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                     self.scale,
                     weak_ref_tensors(decode_meta.block_table),
                     block_size,
-                    actual_seq_lengths,
+                    actual_seq_lengths_q,
                     decode_meta.cp_seq_len,
                     weak_ref_tensors(attn_output),
                     weak_ref_tensors(softmax_lse),
@@ -748,8 +748,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
         if input_layout == "BSND":
             attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
-            softmax_lse = softmax_lse.view(-1, softmax_lse.shape[2], softmax_lse.shape[3])
-            softmax_lse = softmax_lse.transpose(0, 1)
+            softmax_lse = softmax_lse.transpose(1,2).reshape(-1, softmax_lse.shape[1], 1)
 
         if input_layout == "BNSD":
             B_attn, N_attn, S, D = attn_output.shape
