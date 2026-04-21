@@ -22,7 +22,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.6`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6).
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
-- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm do not support GLM4.6 mtp in October, so we do not provide mtp version. And last month, it supported, you can use the following quantization scheme to add mtp weights to Quantized weights.
+- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Last month, it was supported; you can use the following quantization scheme to add mtp weights to the quantized weights.
 - `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
 - `Method of Quantify`: [quantization scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209). You can use these methods to quantify the model.
 
@@ -38,7 +38,7 @@ You can use our official docker image to run `GLM-4.x` directly.
 ::::{tab-item} A3 series
 :sync: A3
 
-Start the docker image on your each node.
+Start the docker image on each node.
 
 ```{code-block} bash
    :substitutions:
@@ -668,31 +668,31 @@ Once the preparation is done, you can start the server with the following comman
 
 1. Prefill node 0
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 12880 --vllm-start-port 9300
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 12880 --vllm-start-port 9300
+    ```
 
 2. Prefill node 1
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p1_ip --dp-rpc-port 12880 --vllm-start-port 9300
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p1_ip --dp-rpc-port 12880 --vllm-start-port 9300
+    ```
 
 3. Decode node 0
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
+    ```
 
 4. Decode node 1
 
-```shell
-# change ip to your own
-python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
-```
+    ```shell
+    # change ip to your own
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
+    ```
 
 ### Request Forwarding
 
@@ -722,7 +722,7 @@ python load_balance_proxy_server_example.py \
       $node_d1_ip \
     --decoder-ports \
       9300 9301 9302 9303 \
-      9300 9301 9302 9303 \
+      9300 9301 9302 9303
 ```
 
 ## Functional Verification
@@ -763,7 +763,7 @@ Here are two accuracy evaluation methods.
 
 ### Using Language Model Evaluation Harness
 
-Not test yet.
+Not tested yet.
 
 ## Performance
 
@@ -775,7 +775,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `GLM-4.x` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -802,7 +802,7 @@ vllm bench serve \
   --port 8000 \
   --endpoint /v1/completions \
   --max-concurrency 1 \
-  --request-rate 1 \
+  --request-rate 1
 ```
 
 After about several minutes, you can get the performance evaluation result.

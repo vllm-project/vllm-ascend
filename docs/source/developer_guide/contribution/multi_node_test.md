@@ -20,7 +20,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 2. Add config yaml
 
-    As the entrypoint script [run.sh](https://github.com/vllm-project/vllm-ascend/blob/0bf3f21a987aede366ec4629ad0ffec8e32fe90d/tests/e2e/nightly/multi_node/scripts/run.sh#L106) shows, A k8s pod startup means traversing all *.yaml files in the [directory](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/config/), reading and executing according to different configurations, so what we need to do is just add "yamls" like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml).
+    As the entrypoint script [run.sh](https://github.com/vllm-project/vllm-ascend/blob/0bf3f21a987aede366ec4629ad0ffec8e32fe90d/tests/e2e/nightly/multi_node/scripts/run.sh#L106) shows, a k8s pod startup means traversing all *.yaml files in the [directory](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/config/), reading and executing according to different configurations, so what we need to do is just add "yamls" like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml).
 
     Suppose you have **2 nodes** running a 1P1D setup (1 Prefillers + 1 Decoder):
 
@@ -55,14 +55,14 @@ From the workflow perspective, we can see how the final test script is executed,
     deployment:
     -
         envs:
-            # fill with envs like: <key>:<value>
+        # fill with envs like: <key>:<value>
         server_cmd: >
-            vllm serve ...
+        vllm serve ...
     -
         envs:
-            # fill with envs like: <key>:<value>
+        # fill with envs like: <key>:<value>
         server_cmd: >
-            vllm serve ...
+        vllm serve ...
     benchmarks:
     perf:
         # fill with performance test kwargs
@@ -72,38 +72,38 @@ From the workflow perspective, we can see how the final test script is executed,
 
 3. Add the case to nightly workflow
 
-Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/nightly_test_a3.yaml)
+Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)
 
    ```yaml
     multi-node-tests:
-        name: multi-node
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-        strategy:
+    name: multi-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
         fail-fast: false
         max-parallel: 1
         matrix:
-            test_config:
+        test_config:
             - name: multi-node-deepseek-pd
-                config_file_path: DeepSeek-V3.yaml
-                size: 2
+            config_file_path: DeepSeek-V3.yaml
+            size: 2
             - name: multi-node-qwen3-dp
-                config_file_path: Qwen3-235B-A22B.yaml
-                size: 2
+            config_file_path: Qwen3-235B-A22B.yaml
+            size: 2
             - name: multi-node-qwenw8a8-2node
-                config_file_path: Qwen3-235B-W8A8.yaml
-                size: 2
+            config_file_path: Qwen3-235B-W8A8.yaml
+            size: 2
             - name: multi-node-qwenw8a8-2node-eplb
-                config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-                size: 2
-        uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-        with:
+            config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
         soc_version: a3
         runner: linux-aarch64-a3-0
         image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
         replicas: 1
         size: ${{ matrix.test_config.size }}
         config_file_path: ${{ matrix.test_config.config_file_path }}
-        secrets:
+    secrets:
         KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
    ```
   
@@ -113,13 +113,13 @@ The matrix above defines all the parameters required to add a multi-machine use 
 
 ### 1. Use kubernetes
 
-This section assumes that you already have a [Kubernetes](https://kubernetes.io/docs/setup/) NPU cluster environment locally. then you can easily start our test with one click.
+This section assumes that you already have a [Kubernetes](https://kubernetes.io/docs/setup/) NPU cluster environment locally. Then you can easily start our test with one click.
 
 - Step 1. Install LWS CRD resources
 
     See <https://lws.sigs.k8s.io/docs/installation/> Which can be used as a reference
 
-- Step 2. Deploy the following yaml file `lws.yaml` as what you want
+- Step 2. Deploy the following yaml file `lws.yaml` as needed
 
     ```yaml
     apiVersion: leaderworkerset.x-k8s.io/v1
@@ -179,14 +179,14 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                     name: dshm
             volumes:
             - name: dshm
-            emptyDir:
+                emptyDir:
                 medium: Memory
                 sizeLimit: 15Gi
             - name: shared-volume
-            persistentVolumeClaim:
+                persistentVolumeClaim:
                 claimName: nv-action-vllm-benchmarks-v2
             - name: driver-tools
-            hostPath:
+                hostPath:
                 path: /usr/local/Ascend/driver/tools
         workerTemplate:
         spec:
@@ -224,14 +224,14 @@ This section assumes that you already have a [Kubernetes](https://kubernetes.io/
                     name: dshm
             volumes:
             - name: dshm
-            emptyDir:
+                emptyDir:
                 medium: Memory
                 sizeLimit: 15Gi
             - name: shared-volume
-            persistentVolumeClaim:
+                persistentVolumeClaim:
                 claimName: nv-action-vllm-benchmarks-v2
             - name: driver-tools
-            hostPath:
+                hostPath:
                 path: /usr/local/Ascend/driver/tools
     ---
     apiVersion: v1
@@ -329,8 +329,8 @@ Since our script is Kubernetes-friendly, we need to actively pass in some cluste
     - Install AISBench on the first host(leader node) in cluster_hosts
 
       ``` bash
-      export AIS_BENCH_TAG="v3.0-20250930-master"
-      export AIS_BENCH_URL="https://gitee.com/aisbench/benchmark.git"
+      export AIS_BENCH_TAG="v3.1-20260330-master"
+      export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
       export BENCHMARK_HOME=/vllm-workspace/benchmark
 
       git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME

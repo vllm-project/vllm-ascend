@@ -100,6 +100,11 @@ class TestBackend:
         """Helper to find all FX nodes that call a specific operator."""
         return [node for node in graph.graph.nodes if hasattr(node, "target") and node.target == target]
 
+    def op_count(self, op: OpOverload, before: bool = False) -> int:
+        """Return the number of nodes that call the given operator."""
+        graph = self.graph_pre_pass if before else self.graph_post_pass
+        return len(self.find_nodes_by_target(graph, op))
+
     def check_before_ops(self, ops: Sequence[OpOverload], fully_replaced: bool = True):
         """
         Verify that the original (unfused) operators exist before the pass

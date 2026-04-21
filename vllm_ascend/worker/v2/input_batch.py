@@ -24,6 +24,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
@@ -79,14 +80,12 @@ class AscendInputBatch(InputBatch):
         num_reqs: int,
         num_tokens: int,
         input_buffers: AscendInputBuffers,
-        device: torch.device,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
         input_batch = InputBatch.make_dummy(
             num_reqs,
             num_tokens,
             input_buffers,
-            device,
         )
         # seq_len equals to query_len
         input_buffers.seq_lens_np[:num_reqs] = num_tokens // num_reqs
@@ -102,6 +101,8 @@ class AscendInputBatch(InputBatch):
         # attention metadata isn't needed,
         # we can also set attn_state to AscendAttentionState.DecodeOnly.
         input_batch.attn_state = AscendAttentionState.DecodeOnly
+        # For mla/sfa, update cos/sin. Here is for _dummy_run.
+        update_cos_sin(input_batch.positions)
         return cls(**asdict(input_batch), seq_lens_np=seq_lens_np)
 
 

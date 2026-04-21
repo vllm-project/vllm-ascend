@@ -128,7 +128,9 @@ def quant_apply_mlp(
         quantized_hidden_states = None
     else:
         unquantized_hidden_states = None
-        pertoken_scale = dynamic_scale
+        pertoken_scale = (
+            DeviceOperator.maybe_normalize_mxfp_scale_layout(dynamic_scale) if use_mxfp_quant else dynamic_scale
+        )
         quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
@@ -158,6 +160,8 @@ def quant_apply_mlp(
                 x_scale=pertoken_scale,
                 bias=None,
                 use_mxfp_quant=use_mxfp_quant,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
@@ -263,6 +267,8 @@ def quant_apply_mlp(
                 x_scale=pertoken_scale,
                 bias=bias1,
                 use_mxfp_quant=use_mxfp_quant,
+                act_quant_type=act_quant_type,
+                weight_quant_type=weight_quant_type,
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
@@ -330,6 +336,8 @@ def unquant_apply_mlp(
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
 
+    act_name = getattr(activation, "value", activation)
+
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
@@ -340,7 +348,7 @@ def unquant_apply_mlp(
         group_list=group_list,
     )[0]
 
-    if activation == "swigluoai":
+    if act_name == "swigluoai":
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
     else:
@@ -410,7 +418,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
 
     if use_mxfp_quant:
         mxfp = mlp_compute_input.quant.mxfp
-        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required when quant_type is MXFP8."
+        assert mxfp is not None, "mlp_compute_input.quant.mxfp is required for MXFP quant types."
         act_quant_type = mxfp.act_quant_type or act_quant_type
         weight_quant_type = mxfp.weight_quant_type or weight_quant_type
         scale_type = mxfp.scale_dtype

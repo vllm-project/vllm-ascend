@@ -16,7 +16,7 @@
 | :--- | :--- |
 | `lookup_rpc_port` | Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration. |
 | `load_async` | Whether to Enable Asynchronous Loading. The default value is false. |
-| `backend` | Set the storage backend for kvpool, with the default being mooncake. |
+| `backend` | Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`. |
 | `consumer_is_to_put` | Whether Decode node put KV Cache into KV Pool. The default value is false. |
 | `consumer_is_to_load` | Whether Decode node load KV cache from KV Pool. The default value is false. |
 | `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
@@ -97,7 +97,12 @@ export PYTHONHASHSEED=0
 | :--- | :--- | :--- | :--- |
 | 800 I/T A3 series | HDK >= 26.0.0<br>CANN >= 9.0.0 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
 | 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
-| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission cheme on 800 I/T A2 series|
+| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
+
+### FAQ for HIXL (ascend_direct) backend
+
+For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
+<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>
 
 ### Run Mooncake Master
 
@@ -126,10 +131,11 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 Under the mooncake folder:
 
 ```shell
-mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1
+mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000
 ```
 
 `eviction_high_watermark_ratio` determines the watermark where Mooncake Store will perform eviction，and `eviction_ratio` determines the portion of stored objects that would be evicted.
+`default_kv_lease_ttl` controls the default lease TTL for KV objects (milliseconds); configure it via `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 
 ### PD Disaggregation Scenario
 
@@ -156,6 +162,11 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
+
+#Minimum retransmission timeout of the RDMA, equals 4.096 μs * 2 ^ timeout.
+#Needs to satisfy the equation: ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
+#HCCL_RDMA_TIMEOUT also affects collective communication behavior and should be configured carefully.
+export HCCL_RDMA_TIMEOUT=17
 
 # Unit: ms. The timeout for one-sided communication connection establishment is set to 10 seconds by default (see PR: https://github.com/kvcache-ai/Mooncake/pull/1039). Users can adjust this value based on their specific setup.
 # The recommended formula is: ASCEND_CONNECT_TIMEOUT = connection_time_per_card (typically within 500ms) × total_number_of_Decode_cards.
@@ -229,6 +240,7 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_RDMA_TIMEOUT=17
 export ASCEND_CONNECT_TIMEOUT=10000
 export ASCEND_TRANSFER_TIMEOUT=10000
 
@@ -343,6 +355,7 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
+export HCCL_RDMA_TIMEOUT=17
 export ASCEND_CONNECT_TIMEOUT=10000
 export ASCEND_TRANSFER_TIMEOUT=10000
 
@@ -1088,3 +1101,132 @@ python -m vllm.entrypoints.openai.api_server \
   }' > log_pd_mix.log 2>&1 
 
 ```
+
+#### [2.Run Inference](#2run-inference)
+
+## Example of using Yuanrong as a KV Pool backend
+
+* Software:
+    * Install `openyuanrong-datasystem` on all nodes (`yr.datasystem` must be importable).
+
+### Install Yuanrong Datasystem
+
+```bash
+pip install openyuanrong-datasystem
+```
+
+### Start etcd
+
+Yuanrong Datasystem uses etcd for service discovery. The following example
+starts a single-node etcd cluster:
+
+```bash
+ETCD_VERSION="v3.5.12"
+ETCD_IP="127.0.0.1"
+if [ "$(uname -m)" = "aarch64" ]; then
+  ETCD_ARCH="linux-arm64"
+else
+  ETCD_ARCH="linux-amd64"
+fi
+wget https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-${ETCD_ARCH}.tar.gz
+tar -xvf etcd-${ETCD_VERSION}-${ETCD_ARCH}.tar.gz
+cd etcd-${ETCD_VERSION}-${ETCD_ARCH}
+sudo cp etcd etcdctl /usr/local/bin/
+
+etcd \
+  --name etcd-single \
+  --data-dir /tmp/etcd-data \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://${ETCD_IP}:2379 \
+  --listen-peer-urls http://0.0.0.0:2380 \
+  --initial-advertise-peer-urls http://${ETCD_IP}:2380 \
+  --initial-cluster etcd-single=http://${ETCD_IP}:2380 &
+
+etcdctl --endpoints "${ETCD_IP}:2379" put key "value"
+etcdctl --endpoints "${ETCD_IP}:2379" get key
+```
+
+For production environments, refer to the official etcd clustering
+documentation: <https://etcd.io/docs/current/op-guide/clustering/>
+
+### Start Datasystem Worker
+
+Start a Datasystem worker on each node by using `dscli`:
+
+```bash
+dscli start -w \
+  --worker_address "${WORKER_IP}:31501" \
+  --etcd_address "${ETCD_IP}:2379" \
+  --shared_memory_size_mb 20480
+```
+
+The `--worker_address` value is consumed later by `DS_WORKER_ADDR`, so keep
+the host and port identical on the same node.
+
+For more parameters, refer to the `dscli` usage documentation on the Yuanrong
+Datasystem official site:
+<https://atomgit.com/openeuler/yuanrong-datasystem>
+
+To stop the worker:
+
+```bash
+dscli stop --worker_address "${WORKER_IP}:31501"
+```
+
+### Environment Variable Configuration
+
+Set the following environment variables on each node before starting vLLM:
+
+| Variable | Required | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `PYTHONHASHSEED` | Yes | `0` | Must be consistent across all nodes to guarantee uniform hash generation. |
+| `DS_WORKER_ADDR` | Yes | N/A | Datasystem worker address in `<host>:<port>` format. This must match the local `dscli start --worker_address` value. |
+| `DS_ENABLE_EXCLUSIVE_CONNECTION` | No | `0` | Passed to Yuanrong `HeteroClient.enable_exclusive_connection`. Use `1` to enable the exclusive connection mode when required by your deployment. |
+| `DS_ENABLE_REMOTE_H2D` | No | `0` | Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only when remote host-to-device transfer is enabled in your Datasystem deployment. |
+
+```bash
+export PYTHONHASHSEED=0
+export DS_WORKER_ADDR="${WORKER_IP}:31501"
+export DS_ENABLE_EXCLUSIVE_CONNECTION=0
+export DS_ENABLE_REMOTE_H2D=0
+```
+
+### Run AscendStoreConnector with Yuanrong backend
+
+Use `AscendStoreConnector` with `backend: "yuanrong"`:
+
+```bash
+python3 -m vllm.entrypoints.openai.api_server \
+    --model /xxxxx/Qwen2.5-7B-Instruct \
+    --port 8100 \
+    --trust-remote-code \
+    --enforce-eager \
+    --no-enable-prefix-caching \
+    --tensor-parallel-size 1 \
+    --data-parallel-size 1 \
+    --max-model-len 10000 \
+    --block-size 128 \
+    --max-num-batched-tokens 4096 \
+    --kv-transfer-config \
+    '{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port": "1",
+        "backend": "yuanrong"
+    }
+}'
+```
+
+`lookup_rpc_port` is the RPC port used between the pooling scheduler process
+and the worker process. Each instance must use a unique port value.
+
+### Notes
+
+* The Yuanrong backend normalizes KV keys before calling Datasystem. Keys longer
+  than 255 characters or containing unsupported characters are rewritten, so do
+  not rely on the raw key string when debugging backend storage.
+* No extra buffer pre-registration step is required for Yuanrong. The backend
+  uses device pointers directly when building blob lists.
+
+#### [2.Run Inference](#2run-inference)
