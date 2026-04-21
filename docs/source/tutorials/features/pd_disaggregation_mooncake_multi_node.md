@@ -4,7 +4,7 @@
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs 16 chips to deploy one service instance.
+Take the Deepseek-r1-w8a8 model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs and 16 chips to deploy one service instance.
 
 ## Verify Multi-Node Communication Environment
 
@@ -22,55 +22,55 @@ Execute the following commands on each node in sequence. The results must all be
 
 1. Single Node Verification:
 
-Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+    Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
-```bash
-# Check the remote switch ports
-for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
-# Get the link status of the Ethernet ports (UP or DOWN)
-for i in {0..15}; do hccn_tool -i $i -link -g ; done
-# Check the network health status
-for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
-# View the network detected IP configuration
-for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
-# View gateway configuration
-for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
-```
+    ```bash
+    # Check the remote switch ports
+    for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+    # Get the link status of the Ethernet ports (UP or DOWN)
+    for i in {0..15}; do hccn_tool -i $i -link -g ; done
+    # Check the network health status
+    for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
+    # View the network detected IP configuration
+    for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
+    # View gateway configuration
+    for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
+    ```
 
 2. Check NPU HCCN Configuration:
 
-Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+    Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
-```bash
-cat /etc/hccn.conf
-```
+    ```bash
+    cat /etc/hccn.conf
+    ```
 
 3. Get NPU IP Addresses
 
-```bash
-# Get virtual NPU IP.
-for i in {0..15}; do hccn_tool -i $i -vnic -g;done
-```
+    ```bash
+    # Get virtual NPU IP.
+    for i in {0..15}; do hccn_tool -i $i -vnic -g;done
+    ```
 
 4. Get superpodid and SDID
 
-```bash
-for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
-```
+    ```bash
+    for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
+    ```
 
 5. Cross-Node PING Test
 
-```bash
-# Execute on the target node (replace 'x.x.x.x' with virtual NPU IP address).
-for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
-```
+    ```bash
+    # Execute on the target node (replace 'x.x.x.x' with virtual NPU IP address).
+    for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
+    ```
 
 6. Check NPU TLS Configuration
 
-```bash
-# The TLS settings should be consistent across all nodes
-for i in {0..15}; do hccn_tool -i $i -tls -g ; done | grep switch
-```
+    ```bash
+    # The TLS settings should be consistent across all nodes
+    for i in {0..15}; do hccn_tool -i $i -tls -g ; done | grep switch
+    ```
 
 ::::
 
@@ -78,48 +78,48 @@ for i in {0..15}; do hccn_tool -i $i -tls -g ; done | grep switch
 
 1. Single Node Verification:
 
-Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+    Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
-```bash
-# Check the remote switch ports
-for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
-# Get the link status of the Ethernet ports (UP or DOWN)
-for i in {0..7}; do hccn_tool -i $i -link -g ; done
-# Check the network health status
-for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
-# View the network detected IP configuration
-for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
-# View gateway configuration
-for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
-```
+    ```bash
+    # Check the remote switch ports
+    for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+    # Get the link status of the Ethernet ports (UP or DOWN)
+    for i in {0..7}; do hccn_tool -i $i -link -g ; done
+    # Check the network health status
+    for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
+    # View the network detected IP configuration
+    for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
+    # View gateway configuration
+    for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+    ```
 
 2. Check NPU HCCN Configuration:
 
-Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+    Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
-```bash
-cat /etc/hccn.conf
-```
+    ```bash
+    cat /etc/hccn.conf
+    ```
 
 3. Get NPU IP Addresses
 
-```bash
-for i in {0..7}; do hccn_tool -i $i -ip -g;done
-```
+    ```bash
+    for i in {0..7}; do hccn_tool -i $i -ip -g;done
+    ```
 
 4. Cross-Node PING Test
 
-```bash
-# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
-for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
-```
+    ```bash
+    # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
+    for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+    ```
 
 5. Check NPU TLS Configuration
 
-```bash
-# The TLS settings should be consistent across all nodes
-for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
-```
+    ```bash
+    # The TLS settings should be consistent across all nodes
+    for i in {0..7}; do hccn_tool -i $i -tls -g ; done | grep switch
+    ```
 
 ::::
 
@@ -240,12 +240,12 @@ If you occasionally see `zmq.error.ZMQError: Address already in use` during star
 ### launch_online_dp.py
 
 Use `launch_online_dp.py` to launch external dp vllm servers.
-[launch\_online\_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
+[launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
 ### run_dp_template.sh
 
 Modify `run_dp_template.sh` on each node.
-[run\_dp\_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
+[run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)
 
 #### Layerwise
 
@@ -735,14 +735,14 @@ vllm serve /path_to_weight/DeepSeek-r1_w8a8_mtp \
 ### Start the service
 
 ```bash
-# on 190.0.0.1
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 190.0.0.1 --dp-rpc-port 12321 --vllm-start-port 7100
-# on 190.0.0.2
-python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 190.0.0.2 --dp-rpc-port 12321 --vllm-start-port 7100
-# on 190.0.0.3
-python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 190.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
-# on 190.0.0.4
-python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 190.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
+# on 192.0.0.1
+python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.0.0.1 --dp-rpc-port 12321 --vllm-start-port 7100
+# on 192.0.0.2
+python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.0.0.2 --dp-rpc-port 12321 --vllm-start-port 7100
+# on 192.0.0.3
+python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
+# on 192.0.0.4
+python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.0.0.3 --dp-rpc-port 12321 --vllm-start-port 7100
 ```
 
 ## Example Proxy for Deployment
@@ -881,7 +881,7 @@ You can get the proxy program in the repository's examples, [load\_balance\_prox
 We recommend use aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark) Execute the following commands to install aisbench
 
 ```shell
-git clone https://gitee.com/aisbench/benchmark.git
+git clone https://github.com/AISBench/benchmark.git
 cd benchmark/
 pip3 install -e ./
 ```

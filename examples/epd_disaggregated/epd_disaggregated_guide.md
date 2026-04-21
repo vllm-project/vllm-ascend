@@ -11,7 +11,7 @@
 
 ## run
 
-The EPD disaggregated technology accelerates model inference by decoupling the visual encoding computation and LLM computation stages. Currently, the EPD separation feature can achieve different data transmissions between E and P/PD nodes by configuring different connector backends. Vllm-ascend currently supports the ECexample-connector backend implemented on vllm, and will support Mooncake as well as shared memory(SHM) backend transmission methods in the future.
+The EPD disaggregated technology accelerates model inference by decoupling the visual encoding computation and LLM computation stages. Currently, the EPD separation feature can achieve different data transmissions between E and P/PD nodes by configuring different connector backends. Vllm-ascend currently supports the ECExampleConnector backend implemented on vllm, and will support Mooncake as well as shared memory(SHM) backend transmission methods in the future.
 
 ### ECexample-connector deployment guide
 
@@ -114,7 +114,7 @@ python3 epd_load_balance_proxy_layerwise_server_example.py \
     --port 8001
 ```
 
-TODO: explain the param.<br>
+The parameters are explained as follows:<br>
 `--encoder-hosts`: E node IP address.<br>
 `--encoder-ports`: The E node port number. It needs to be consistent with the --port in the E node's startup script.<br>
 `--pd-hosts`: PD node IP address.<br>

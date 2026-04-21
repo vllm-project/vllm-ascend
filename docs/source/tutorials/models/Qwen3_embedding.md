@@ -95,7 +95,7 @@ Processed prompts: 100%|██████████████████�
 
 ## Performance
 
-Run performance of `Qwen3-Reranker-8B` as an example.
+Run performance of `Qwen3-Embedding-8B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
 Take the `serve` as an example. Run the code as follows.
