@@ -26,7 +26,7 @@ check_command() {
         echo "pip install -r requirements-lint.txt"
         echo "# (optional) Enable git commit pre check"
         echo "pre-commit install"
-        echo ""
+        echo "hello world"
         echo "See step by step contribution guide:"
         echo "https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution"
         exit 1
