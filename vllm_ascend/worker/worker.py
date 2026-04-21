@@ -65,9 +65,7 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if not vllm_version_is("0.19.0"):
-    from vllm.v1.worker.worker_base import CompilationTimes
-else:
-    CompilationTimes = None
+    from vllm.v1.worker.worker_base import CompilationTimes  # noqa: E402
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -556,13 +554,12 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        compilation_config = self.vllm_config.compilation_config
         if vllm_version_is("0.19.0"):
-            return compilation_config.compilation_time
+            return self.vllm_config.compilation_config.compilation_time
 
         return CompilationTimes(
-            language_model=compilation_config.compilation_time,
-            encoder=compilation_config.encoder_compilation_time,
+            language_model=self.vllm_config.compilation_config.compilation_time,
+            encoder=self.compilation_config.encoder_compilation_time,
         )
 
         return CompilationTimes(
