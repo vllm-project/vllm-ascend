@@ -645,9 +645,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_nope = q_nope.view(-1, num_tokens, num_heads, q_nope.shape[-1]).contiguous()
             q_pe = q_pe.view(-1, num_tokens, num_heads, q_pe.shape[-1])
             sparse_mode = 0
-            spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             query_len = self.vllm_config.speculative_config.num_speculative_tokens + 1
             new_mask = torch.ones(q_nope.shape[0], query_len, 16384, dtype=torch.bool, device=q_nope.device)
+            actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            num_decodes = len(actual_seq_lengths)
+            spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes]  # type:ignore
             for i, mask in enumerate(spec_attn_mask):
                 B = mask.shape[0]  # seq_len
                 L = mask.shape[1]  # length
@@ -655,7 +657,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 new_mask[i, :B, :L] = ~mask
             spec_attn_mask = new_mask
 
-            actual_seq_lengths = decode_meta.actual_seq_lengths_q
+
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
