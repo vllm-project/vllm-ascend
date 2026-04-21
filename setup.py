@@ -72,14 +72,31 @@ def get_value_from_lines(lines: list[str], key: str) -> str:
 
 def get_chip_type() -> str:
     try:
+        # Get NPU ID
         npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
         npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
-        chip_info_lines = (
-            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
-            .decode()
-            .strip()
-            .split("\n")
+
+        # Stage 1: query board info without -c flag
+        board_info_lines = (
+            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id)]).decode().strip().split("\n")
         )
+
+        # Check if Chip Name exists (Ascend950 includes it directly)
+        chip_name = get_value_from_lines(board_info_lines, "Chip Name")
+
+        # Stage 2: query with -c flag only if Chip Name not found (A2/A3/310P)
+        if not chip_name:
+            chip_info_lines = (
+                subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
+                .decode()
+                .strip()
+                .split("\n")
+            )
+        else:
+            # Ascend950 already has complete info
+            chip_info_lines = board_info_lines
+
+        # Extract required fields
         chip_name = get_value_from_lines(chip_info_lines, "Chip Name")
         chip_type = get_value_from_lines(chip_info_lines, "Chip Type")
         npu_name = get_value_from_lines(chip_info_lines, "NPU Name")
@@ -113,9 +130,8 @@ def get_chip_type() -> str:
 
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
 
-soc_version = get_chip_type()
-
 if not envs.SOC_VERSION:
+    soc_version = get_chip_type()
     if not soc_version:
         raise RuntimeError(
             "Could not determine chip type automatically via 'npu-smi'. "
@@ -128,9 +144,6 @@ if not envs.SOC_VERSION:
             "You can also refer to the SOC_VERSION defaults in Dockerfile*."
         )
     envs.SOC_VERSION = soc_version
-else:
-    if soc_version and soc_version != envs.SOC_VERSION:
-        logging.warning(f"env SOC_VERSION: {envs.SOC_VERSION} is not equal to soc_version from npu-smi: {soc_version}")
 
 
 def gen_build_info():

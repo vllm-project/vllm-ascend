@@ -12,8 +12,8 @@ This document provides step-by-step guidance on how to deploy and benchmark the 
 | Common Sense Reasoning         | ARC              |
 | Mathematical Reasoning         | gsm8k            |
 | Natural Language Understanding | SuperGLUE_BoolQ  |
-| Comprehensive Examination      | agieval          |
-| Multi-turn Dialogue            | sharegpt         |
+| Comprehensive Examination      | AGIEval          |
+| Multi-turn Dialogue            | ShareGPT         |
 
 The benchmarking tool used in this tutorial is AISBench, which supports performance testing for all the datasets listed above. The final section of this tutorial presents a performance comparison between enabling and disabling Suffix Decoding under the condition of satisfying an SLO TPOT < 50ms across different datasets and concurrency levels. Validations demonstrate that the Qwen3-32B model achieves a throughput improvement of approximately 20% to 80% on various real-world datasets when Suffix Decoding is enabled.
 
@@ -133,7 +133,7 @@ models = [
 
 ```bash
 # Example command to test gsm8k dataset performance using the first 100 prompts. Commands for other datasets are similar.
-ais_bench --models vllm_api_stream_chat \
+ais_bench --models vllm-api-stream-chat \
   --datasets gsm8k_gen_0_shot_cot_str_perf \
   --debug --summarizer default_perf --mode perf --num-prompts 100
 ```
@@ -171,7 +171,7 @@ Below is the raw detailed test results:
 | 1                   | 207       | 314        | 100      | 54.1          | 18.4                 | 36.1            | 26.8                   | 33.4%       | 49.8%     | 45.6%    |
 | 16                  | 207       | 314        | 100      | 60.0          | 229.7                | 43.5            | 303.9                  | 33.4%       | 38.0%     | 32.3%    |
 | 32                  | 207       | 314        | 100      | 62.7          | 396.4                | 47.8            | 507.5                  | 33.4%       | 31.3%     | 28.0%    |
-| **Agieval**         |           |            |          |               |                      |                 |                        |             |           |          |
+| **AGIEval**         |           |            |          |               |                      |                 |                        |             |           |          |
 | 1                   | 735       | 1880       | 100      | 53.1          | 18.7                 | 31.8            | 34.1                   | 50.3%       | 66.8%     | 81.9%    |
 | 24                  | 735       | 1880       | 100      | 64.0          | 381.2                | 43.3            | 629.0                  | 50.3%       | 47.8%     | 65.0%    |
 | 34                  | 735       | 1880       | 100      | 70.0          | 494.6                | 50.2            | 768.4                  | 50.3%       | 39.4%     | 55.3%    |

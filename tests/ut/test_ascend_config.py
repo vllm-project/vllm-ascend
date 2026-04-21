@@ -80,14 +80,10 @@ class TestAscendConfig(TestBase):
     def test_init_ascend_config_enable_npugraph_ex(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
-            "ascend_compilation_config": {
-                "enable_npugraph_ex": True,
-                "enable_static_kernel": True
-            },
-            "refresh": True
+            "ascend_compilation_config": {"enable_npugraph_ex": True, "enable_static_kernel": True},
+            "refresh": True,
         }
-        ascend_compilation_config = init_ascend_config(
-            test_vllm_config).ascend_compilation_config
+        ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
 

@@ -398,7 +398,7 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 
 
 @dataclass
-class LasyerMultiBlockReqMeta:
+class LayerMultiBlockReqMeta:
     req_id: str
     keys: list[LayerPoolKey]
     starts: list[int]
