@@ -41,7 +41,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.backend import BaseAscendAttentionBackend, FiaExtraInputPreparer
+from vllm_ascend.attention.attn_extra_metadata import FiaMetadataPreparer, ProvidesExtraMetadataPreparer
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -64,7 +64,7 @@ SWA_INT_MAX = 2147483647
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
-class AscendAttentionBackend(BaseAscendAttentionBackend):
+class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -89,10 +89,6 @@ class AscendAttentionBackend(BaseAscendAttentionBackend):
 
             return AscendAttentionCPMetadataBuilder
         return AscendAttentionMetadataBuilder
-    
-    @staticmethod
-    def get_extra_input_preparer() -> FiaExtraInputPreparer:
-        raise FiaExtraInputPreparer()
 
     @staticmethod
     def get_kv_cache_shape(
@@ -221,6 +217,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int = 1
+    extra_metadata_preparer = FiaMetadataPreparer()
 
     def __init__(
         self,
@@ -265,6 +262,10 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.ALWAYS
 
+    @classmethod
+    def get_extra_metadata_preparer(cls) -> FiaMetadataPreparer:
+        return cls.extra_metadata_preparer
+
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
 
@@ -274,9 +275,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMetadata:
+        extra = type(self).extra_metadata_preparer.get_metadata()
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+        query_start_loc_cpu = (
+            common_attn_metadata.query_start_loc_cpu
+            if extra is None
+            else extra.query_start_loc_cpu
+        )[: num_reqs + 1]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
             common_attn_metadata, decode_threshold=self.decode_threshold

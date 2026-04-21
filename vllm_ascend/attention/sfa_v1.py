@@ -24,7 +24,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.backend import BaseAscendAttentionBackend, FiaExtraInputPreparer
+from vllm_ascend.attention.attn_extra_metadata import FiaMetadataPreparer
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 
-class AscendSFABackend(BaseAscendAttentionBackend):
+class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -101,10 +101,6 @@ class AscendSFABackend(BaseAscendAttentionBackend):
 
             return AscendSFACPImpl
         return AscendSFAImpl
-    
-    @staticmethod
-    def get_extra_input_preparer() -> FiaExtraInputPreparer:
-        raise FiaExtraInputPreparer()
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
@@ -171,6 +167,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     understand this class
     """
 
+    extra_metadada_preparer = FiaMetadataPreparer()
+
     def __init__(
         self,
         kv_cache_spec,
@@ -224,6 +222,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_extra_input_preparer(cls) -> FiaMetadataPreparer:
+        return cls.extra_metadada_preparer
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
         # No need to reorder for Ascend SFA

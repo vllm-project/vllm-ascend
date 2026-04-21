@@ -143,7 +143,7 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
-        self.backend_extra_input_preparer = None
+        self.backend_extra_metadata_preparer = None
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -173,22 +173,22 @@ class NPUModelRunner(GPUModelRunner):
         if self.backend_extra_input_preparer is None:
             self.backend_extra_input_preparer = set()
             for backend in self._attn_backends:
-                if hasattr(backend, "get_extra_input_preparer"):
-                    self.backend_extra_input_preparer.add(backend.get_extra_input_preparer())
+                if hasattr(backend.get_builder_cls(), "get_extra_metadata_preparer"):
+                    self.backend_extra_metadata_preparer.add(backend.get_extra_metadata_preparer())
         
         max_num_reqs_padded = 0
         max_query_start_loc_np = None
-        for preparer in self.backend_extra_input_preparer:
-            extra_input = preparer.prepare(
+        for preparer in self.backend_extra_metadata_preparer:
+            extra_metadata = preparer.prepare(
                 num_reqs,
                 query_start_loc_np,
                 self.decode_query_len,
                 batch_desc,
             )
-            if extra_input.num_reqs_padded > max_num_reqs_padded:
-                max_num_reqs_padded = extra_input.num_reqs_padded
-                assert extra_input.query_start_loc_np is not None
-                max_query_start_loc_np = extra_input.query_start_loc_np
+            if extra_metadata.num_reqs_padded > max_num_reqs_padded:
+                max_num_reqs_padded = extra_metadata.num_reqs_padded
+                assert extra_metadata.query_start_loc_np is not None
+                max_query_start_loc_np = extra_metadata.query_start_loc_np
 
         return max_num_reqs_padded, max_query_start_loc_np
 

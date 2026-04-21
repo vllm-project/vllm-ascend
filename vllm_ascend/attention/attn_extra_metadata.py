@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from vllm.config import get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -28,14 +29,19 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm_ascend.utils import singleton
 
 @dataclass
-class BackendExtraInput:
+class AttnExtraMetadata:
     """Lazily filled by ``prepare_extra_input``; constructed empty then populated."""
 
     num_reqs_padded: int = 0
     query_start_loc_np: np.ndarray | None = None
+    query_start_loc_cpu: torch.Tensor | None = None
     query_start_loc: torch.Tensor | None = None
 
-class BackendExtraInputPreparer(ABC):
+class AttnExtraMetadataPreparer(ABC):
+    def __init__(self):
+        self.graph_mode = None
+        self.extra_metadata = None
+
     @abstractmethod
     def prepare(self,
                 num_reqs: int,
@@ -43,14 +49,21 @@ class BackendExtraInputPreparer(ABC):
                 decode_query_len: int,
                 batch_desc: BatchExecutionDescriptor):
         raise NotImplementedError
+    
+    def get_metadata(self):
+        if self.graph_mode == CUDAGraphMode.NONE:
+            return self.extra_metadata
+        return None
 
 @singleton
-class FiaExtraInputPreparer(BackendExtraInputPreparer):
+class FiaMetadataPreparer(AttnExtraMetadataPreparer):
     def __init__(self):
+        super.__init__()
         vllm_config = get_current_vllm_config()
         max_num_reqs = vllm_config.scheduler_config.max_num_reqs
 
-        self.extra_input = BackendExtraInput(
+        self.graph_mode = CUDAGraphMode.NONE
+        self.extra_metadata = AttnExtraMetadata(
             query_start_loc_np=np.empty(max_num_reqs + 2, dtype=np.int32),
             query_start_loc=torch.zeros(
                 max_num_reqs + 2, dtype=torch.int32, device="npu"
@@ -66,6 +79,10 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
         """
+        if batch_desc != CUDAGraphMode.FULL:
+            self.graph_mode = batch_desc.cg_mode
+            return None
+
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
         if num_tokens_padded == num_reqs_padded * decode_query_len:
@@ -84,14 +101,10 @@ class FiaExtraInputPreparer(BackendExtraInputPreparer):
             query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
-        self.extra_input.num_reqs_padded = num_reqs_padded
-        self.extra_input.query_start_loc_np[:num_reqs_padded + 1] = query_start_loc_np[:num_reqs_padded + 1]
-        async_copy_to_gpu(self.extra_input.query_start_loc_np, out=self.extra_input.query_start_loc)
+        self.extra_metadata.num_reqs_padded = num_reqs_padded
+        self.extra_metadata.query_start_loc_np[:num_reqs_padded + 1] = query_start_loc_np[:num_reqs_padded + 1]
+        self.extra_metadata.query_start_loc_cpu = torch.from_numpy(
+            self.extra_metadata.query_start_loc_np[:num_reqs_padded + 1])
+        async_copy_to_gpu(self.extra_metadata.query_start_loc_np, out=self.extra_metadata.query_start_loc)
 
-        return self.extra_input
-    
-class BaseAscendAttentionBackend(AttentionBackend):
-    @staticmethod
-    @abstractmethod
-    def get_extra_input_preparer() -> BackendExtraInputPreparer:
-        raise NotImplementedError
+        return self.extra_metadata
