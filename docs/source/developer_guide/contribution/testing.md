@@ -203,22 +203,6 @@ pytest -sv tests/ut/test_ascend_config.py
 
 :::::
 
-### Documentation link check
-
-You can validate external links in the Sphinx docs locally with:
-
-```bash
-make -C docs linkcheck SPHINXOPTS="-W --keep-going"
-```
-
-The detailed report will be written to:
-
-- `docs/_build/linkcheck/output.txt`
-- `docs/_build/linkcheck/output.json`
-
-This check is also scheduled in GitHub Actions so broken links and unexpected
-redirects can be caught regularly.
-
 ### E2E test
 
 Although vllm-ascend CI provides E2E tests on Ascend CI (for example,
@@ -381,3 +365,16 @@ The doctest is a good way to make sure docs stay current and examples remain exe
 ```
 
 This will reproduce the same environment as the CI. See [labeled_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml).
+
+### Run docs link check
+
+You can validate external links in the Sphinx docs locally with:
+
+```bash
+make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+```
+
+The detailed report will be written to:
+
+- `docs/_build/linkcheck/output.txt`
+- `docs/_build/linkcheck/output.json`
