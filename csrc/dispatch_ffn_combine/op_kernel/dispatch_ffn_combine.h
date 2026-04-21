@@ -255,9 +255,11 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
 
     GemmCoord problemShape{static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k)};
 
-    uint32_t epilogueCoreNum = aivNum / 2;
-    uint32_t epilogueGranularity = expertPerRank - 1;
-
+    uint32_t epilogueCoreNum = aivNum;
+    uint32_t epilogueGranularity = expertPerRank - 3;
+    if (expertPerRank <= 4) {
+        epilogueGranularity = expertPerRank - 1;
+    }
     typename MatmulKernel::Params params{
         problemShape, static_cast<uint32_t>(EP), static_cast<uint32_t>(listLen), static_cast<uint32_t>(expertPerRank), static_cast<uint32_t>(maxOutputSize),
         static_cast<uint32_t>(rank), static_cast<uint32_t>(rankSize),
