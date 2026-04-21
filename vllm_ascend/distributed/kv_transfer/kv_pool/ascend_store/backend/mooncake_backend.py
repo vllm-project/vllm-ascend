@@ -61,10 +61,10 @@ class MooncakeBackend(Backend):
                     self.config.master_server_address,
                 )
 
-        if ret != 0:
-            msg = "Initialize mooncake failed."
-            logger.error(msg)
-            raise RuntimeError(msg)
+            if ret != 0:
+                msg = "Initialize mooncake failed."
+                logger.error(msg)
+                raise RuntimeError(msg)
 
     def set_device(self):
         local_rank = get_world_group().local_rank
