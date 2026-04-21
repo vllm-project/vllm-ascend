@@ -36,7 +36,6 @@ from .base import AscendLinearScheme, AscendMoEScheme, QuantType
 from .registry import register_scheme
 
 
-
 def scale_from_float_to_int64(scale):
     """Convert float32 scale to int64 representation."""
     import numpy as np
