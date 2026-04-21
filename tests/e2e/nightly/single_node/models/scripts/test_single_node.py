@@ -355,7 +355,7 @@ def _all_passed(case_configs: list[dict[str, Any]], results: list[Any]) -> bool:
     return all(_task_passed(cfg, res) for cfg, res in zip(case_configs, results))
 
 
-def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[str], results: list[Any]) -> None:
+def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[str], results: list[Any], name_suffix: str = "") -> None:
     """Serialize acc & perf benchmark results to a JSON file under benchmark_results/."""
     runner = os.environ.get("VLLM_CI_RUNNER", "")
     case_configs = [config.benchmarks[k] for k in benchmark_keys]
@@ -383,6 +383,8 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     os.makedirs("benchmark_results", exist_ok=True)
     job_name = os.environ.get("BENCHMARK_JOB_NAME") or config.name
     safe_name = job_name.replace("/", "_").replace(" ", "_")
+    if name_suffix:
+        safe_name = f"{safe_name}_{name_suffix}"
     output_path = os.path.join("benchmark_results", f"{safe_name}.json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
@@ -390,7 +392,7 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     print(f"Benchmark results saved to {output_path}")
 
 
-def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
+def _run_benchmarks(config: SingleNodeConfig, port: int, name_suffix: str = "") -> None:
     """Run Aisbench benchmarks and process benchmark-dependent custom assertions."""
     benchmark_keys = [k for k, v in config.benchmarks.items() if v]
     aisbench_cases = [config.benchmarks[k] for k in benchmark_keys]
@@ -403,7 +405,7 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
         aisbench_cases=aisbench_cases,
     )
 
-    _save_benchmark_results_json(config, benchmark_keys, result)
+    _save_benchmark_results_json(config, benchmark_keys, result, name_suffix=name_suffix)
 
     if "benchmark_comparisons" in config.test_content:
         run_benchmark_comparisons(config, result)
@@ -445,10 +447,12 @@ async def test_single_node(config: SingleNodeConfig) -> None:
                 env_dict=config.envs,
                 auto_port=False,
             ) as server2:
-                await _dispatch_tests(config, server2)
-                _run_benchmarks(config, config.server_port2)
-            await _dispatch_tests(config, server1)
-            _run_benchmarks(config, config.server_port)
+                await asyncio.gather(
+                    _dispatch_tests(config, server1),
+                    _dispatch_tests(config, server2),
+                )
+                _run_benchmarks(config, config.server_port, name_suffix=f"instance1_{config.server_port}")
+                _run_benchmarks(config, config.server_port2, name_suffix=f"instance2_{config.server_port2}")
         return
 
     # Standard OpenAI service mode
