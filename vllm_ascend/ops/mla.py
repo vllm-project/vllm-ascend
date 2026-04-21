@@ -33,7 +33,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.utils import is_vl_model, vllm_version_is
+from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 
 class IndexerWrapper(nn.Module):
@@ -139,11 +139,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # the vision encoder as full [N, H] — it has NOT been reduce-scattered.
         # We detect this statically at init time (not at runtime via shape checks,
         # which break graph-mode compilation) so the branch is a constant to dynamo.
-        from vllm.model_executor.models.utils import extract_layer_index
-
         vllm_config = get_current_vllm_config()
         _is_vl = is_vl_model(vllm_config)
-        _layer_idx = extract_layer_index(prefix)
+        _layer_idx = parse_layer_idx(prefix)
         self.is_vl_first_layer = bool(_is_vl and _layer_idx == 0)
 
         compilation_config = vllm_config.compilation_config
@@ -185,7 +183,7 @@ def mla_forward(
         attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
     else:
         attn_metadata = forward_context.attn_metadata
-    kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine if vllm_version_is("0.18.0") else 0]
+    kv_cache = self.mla_attn.kv_cache
     self.mla_attn.impl.forward(
         self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
     )

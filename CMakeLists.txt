@@ -61,25 +61,10 @@ set(VLLM_ASCEND_CUSTOM_OP
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_310P
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bgmv_expand.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/bgmv_shrink.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sgmv_expand.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sgmv_shrink.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
-)
-
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
-
-if(SOC_VERSION MATCHES "ascend310p.*")
-    message(STATUS "310P hardware detected: disabling MLAPO operators")
-    message(STATUS "310P hardware detected: excluding batch_matmul_transpose operators")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_310P})
-endif()
 
 if(SOC_VERSION MATCHES "ascend950")
     message(STATUS "A5 hardware detected: disabling MLAPO operators")
@@ -87,9 +72,13 @@ if(SOC_VERSION MATCHES "ascend950")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
 endif()
 
-ascendc_library(vllm_ascend_kernels SHARED
-    ${VLLM_ASCEND_CUSTOM_OP}
-)
+if(SOC_VERSION MATCHES "ascend310p.*")
+    message(STATUS "310P hardware detected: skip vllm_ascend_kernels compile")
+else()
+    ascendc_library(vllm_ascend_kernels SHARED
+        ${VLLM_ASCEND_CUSTOM_OP}
+    )
+endif()
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
@@ -110,8 +99,6 @@ include_directories(
   ${TORCH_INCLUDE_DIRS}
   ${TORCH_NPU_PATH}/include
   ${ASCEND_HOME_PATH}/include
-  ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
-  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
   ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host
 )
 
@@ -120,11 +107,61 @@ set(
   ${TORCH_INCLUDE_DIRS}
   ${TORCH_NPU_INCLUDE_DIRS}
   ${ASCEND_HOME_PATH}/include
-  ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
-  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+
+# Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
+# Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered
+# in vllm_ascend/envs.py, forwarded by setup.py as a CMake variable):
+#   VLLM_ASCEND_ENABLE_BATCH_MEMCPY=1  -> force enable
+#   VLLM_ASCEND_ENABLE_BATCH_MEMCPY=0  -> force disable
+#   unset                               -> auto-detect from CANN headers
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES ${ASCEND_HOME_PATH}/include)
+set(CMAKE_REQUIRED_LIBRARIES ascendcl)
+set(CMAKE_REQUIRED_LINK_OPTIONS "-L${ASCEND_HOME_PATH}/lib64")
+
+if(DEFINED VLLM_ASCEND_ENABLE_BATCH_MEMCPY)
+  if("${VLLM_ASCEND_ENABLE_BATCH_MEMCPY}" STREQUAL "1")
+    message(STATUS "aclrtMemcpyBatchAsync: force enabled via VLLM_ASCEND_ENABLE_BATCH_MEMCPY=1")
+    target_compile_definitions(vllm_ascend_C PRIVATE CANN_MEMCPY_BATCH_ASYNC)
+  else()
+    message(STATUS "aclrtMemcpyBatchAsync: force disabled via VLLM_ASCEND_ENABLE_BATCH_MEMCPY=0")
+  endif()
+else()
+  # Test the full code pattern we actually use, including struct member access.
+  # This ensures the macro is only defined when the API is fully compatible.
+  check_cxx_source_compiles("
+    #include <acl/acl_rt.h>
+    int main() {
+      aclrtMemLocation loc = {};
+      loc.type = ACL_MEM_LOCATION_TYPE_HOST;
+      loc.id = 0;
+      aclrtMemcpyBatchAttr attr = {};
+      attr.srcLoc = loc;
+      attr.dstLoc = loc;
+      (void)aclrtMemcpyBatchAsync;
+      return 0;
+    }
+  " HAVE_ACLRT_MEMCPY_BATCH_ASYNC)
+  if(HAVE_ACLRT_MEMCPY_BATCH_ASYNC)
+    message(STATUS "aclrtMemcpyBatchAsync: detected in CANN headers, enabling batch memcpy path")
+    target_compile_definitions(vllm_ascend_C PRIVATE CANN_MEMCPY_BATCH_ASYNC)
+  else()
+    message(STATUS "aclrtMemcpyBatchAsync: not found in CANN headers, using fallback aclrtMemcpyAsync loop")
+  endif()
+endif()
+# Prefer the CANN ACL headers over torch_npu's bundled third_party ACL copy.
+# torch_npu 2.9.0 ships an older acl_rt.h that does not declare
+# aclrtLaunchHostFunc, which breaks host-print compilation.
+target_include_directories(vllm_ascend_C BEFORE PRIVATE
+  ${ASCEND_HOME_PATH}/include
+)
+
+if(SOC_VERSION MATCHES "ascend310p.*")
+    target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
+endif()
 
 target_link_directories(
   vllm_ascend_C
@@ -134,12 +171,9 @@ target_link_directories(
   ${ASCEND_HOME_PATH}/lib64
 )
 
-target_link_libraries(
-  vllm_ascend_C
-  PUBLIC
+set(VLLM_ASCEND_C_COMMON_LIBS
   ${TORCH_LIBRARIES}
   torch_npu
-  vllm_ascend_kernels
   ascendcl
   tiling_api
   register
@@ -149,6 +183,25 @@ target_link_libraries(
   opapi
 )
 
+if(SOC_VERSION MATCHES "ascend310p.*")
+  target_link_libraries(
+    vllm_ascend_C
+    PUBLIC
+    ${VLLM_ASCEND_C_COMMON_LIBS}
+  )
+else()
+  target_link_libraries(
+    vllm_ascend_C
+    PUBLIC
+    vllm_ascend_kernels
+    ${VLLM_ASCEND_C_COMMON_LIBS}
+  )
+endif()
+
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/vllm-ascend/op_api/lib")
 
-install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+if(SOC_VERSION MATCHES "ascend310p.*")
+  install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+else()
+  install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+endif()

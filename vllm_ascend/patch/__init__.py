@@ -94,20 +94,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 6. File: platform/patch_fusion_matcher_compat_ops.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `torch.ops._C.rms_norm`, `torch.ops._C.fused_add_rms_norm`,
-#    Why:
-#       upstream vLLM initializes fusion matcher global operators at import time.
-#       On Ascend environment these symbols may be absent and cause import failure.
-#    How：
-#       inject placeholders only when the symbols are missing so import can continue.
-#    Related PR (if no, explain why):
-#       temporary compatibility patch before upstream adjustment is merged.
-#    Future Plan:
-#       remove this patch once upstream no longer requires these global symbols or
-#       provides a backend-safe initialization path.
-#
 # ** 7. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
@@ -137,6 +123,38 @@
 #       Remove this patch if upstream provides an official NPU graph-capture
 #       guidance / auto-configuration path for HCCL.
 #
+#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
+#    Why:
+#       Upstream vLLM's eagle3/extract_hidden_states restricts target model types
+#       via a whitelist. MiniMax-M2 should be allowed once the worker-side model
+#       can emit auxiliary hidden states.
+#    How：
+#       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
+#       MiniMax model_type when method is eagle3/extract_hidden_states.
+#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
+#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
+#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
+#       then `rebuild_dataclass(SpeculativeConfig, force=True)`.
+#       If `VllmConfig` was imported earlier, also `rebuild_dataclass(VllmConfig, ...)`
+#       so nested `speculative_config` validation does not use a stale schema.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream whitelist includes MiniMax.
+#
+#   4. `vllm.model_executor.models.registry` (spec decode aliases)
+#    Why:
+#       Some Eagle3 draft checkpoints may declare a MiniMax-specific architecture
+#       string while reusing the shared Eagle3 implementation.
+#    How：
+#       Register `Eagle3MiniMaxM2ForCausalLM` as an alias pointing to the
+#       existing Eagle3 implementation in the speculative decoding registry.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Drop the alias once upstream registry includes it or the checkpoint
+#       standardizes architecture strings.
+#
 # ** 8. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
@@ -158,6 +176,34 @@
 #       https://github.com/vllm-project/vllm/pull/25896
 #    Future Plan:
 #       Remove this patch after the upcoming KV cache spec refactor.
+#
+# ** 9. File: platform/patch_profiling_chunk.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.__init__`
+#   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
+#   3. `Scheduler.update_from_output` (scheduler class, wrapped when profiling chunk is enabled)
+#    Why:
+#       Profiling-based dynamic chunk sizing needs to run a one-shot profiling pass
+#       after `model_executor` is ready, and to feed per-step execution latency back
+#       into `ProfilingChunkManager` so the history-aware chunk predictor can refine
+#       online. In multiprocessing `spawn` mode the child process starts a fresh
+#       interpreter, so monkey-patches applied in the parent are lost unless the
+#       subprocess entry point re-applies them before any `EngineCore` is created.
+#    How：
+#       Replace `EngineCore.__init__` to call `scheduler.run_profiling_chunk_init`
+#       when present, then wrap `scheduler.update_from_output` once per process to
+#       read `model_output.execution_time_ms` and `scheduler_output` token/chunk
+#       metadata and call `ProfilingChunkManager.record_batch_execution_time` (and
+#       bootstrap target latency for the first chunk when needed). Replace
+#       `EngineCoreProc.run_engine_core` so importing this module in the child
+#       re-runs the idempotent patch helper before delegating to the original
+#       implementation.
+#    Related PR (if no, explain why):
+#       No, vllm-ascend-specific profiling / scheduling integration.
+#    Future Plan:
+#       Remove or narrow this patch if upstream exposes stable hooks for backend
+#       profiling startup and per-step timing callbacks without monkey-patching
+#       `EngineCore` and the multiprocess entry point.
 #
 # * Worker Patch:
 # ===============
@@ -312,17 +358,15 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest processor implementation.
 #
-# ** 10. File: worker/patch_v2/patch_eagle.py**
+# ** 10. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
 #    Why:
-#       `propose` method use torch.gather, but the gather operator will
-#       pollute the arguments passed to it. the bug is reported to huawei
-#       CANN team, but not fixed yet.
+#       support flash comm v1 for qwen3vl.
 #    How：
-#       clone the out attribute ahead of gather to avoid the bug.
+#       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
 #    Future Plan:
-#       Remove this patch when cann fix the gather bug.
+#       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
 #
 # ** 11. File: worker/patch_unquantized_gemm.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -432,6 +476,31 @@
 #       No, fp8 load format and backend constraints are model/backend specific.
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
+#
+#   4. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.forward`
+#    Why:
+#       Eagle3 speculative decoding needs auxiliary hidden states from specific
+#       transformer layers of the target model.
+#    How：
+#       Extend `MiniMaxM2Model.forward` to optionally collect and return
+#       `(final_hidden_states, aux_hidden_states)` when `aux_hidden_state_layers`
+#       is set by the runtime.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream MiniMax-M2 integrates Eagle3 support.
+#
+#   5. `vllm.model_executor.models.minimax_m2.MiniMaxM2ForCausalLM`
+#    Why:
+#       vLLM core uses SupportsEagle3-style methods to configure which layers
+#       should emit auxiliary hidden states.
+#    How：
+#       Inject `set_aux_hidden_state_layers` and default-layer getters onto
+#       `MiniMaxM2ForCausalLM` so vLLM can configure the target model.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream provides these methods on the model.
 #
 # ** 18. File: worker/patch_minimax_m2_linear_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -621,3 +690,24 @@
 #       for loading extra KV cache quantisation parameters in model load_weights,
 #       or when the Qwen3 model's weight names are aligned with the parameter
 #       names expected by the quantisation backend.
+# ** 28. File: worker/patch_qwen3vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3.Qwen3Attention.forward` and
+#      `vllm.model_executor.models.qwen3_moe.Qwen3MoeAttention.forward`
+#    Why:
+#       support triton_split_qkv_rmsnorm_mrope fused kernel for Qwen3Attention and Qwen3MoeAttention.
+#    How：
+#       override forward method with the triton_split_qkv_rmsnorm_mrope fused kernel,
+#       when using mrope.
+#    Future Plan:
+#       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
+# ** 29. File: worker/patch_qwen3_dflash.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
+#    Why:
+#       The function directly calls the ops.rms_norm and ops.rotary_imbedding operators,
+#       but NPU does not have a corresponding implementation.
+#    How：
+#       Replace ops.* with the internal implementation of vllm-ascend.
+#    Future Plan:
+#       Remove this patch when vllm-ascend supports pattern matching for ops.*.

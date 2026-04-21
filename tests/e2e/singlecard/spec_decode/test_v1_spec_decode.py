@@ -10,6 +10,7 @@ import pytest
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
+from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
@@ -34,12 +35,20 @@ DRAFT_PARALLEL_MODELS = {
     },
 }
 
+DFLASH = {
+    "dflash": {
+        "main": "Qwen/Qwen3-8B",
+        "spec": "z-lab/Qwen3-8B-DFlash-b16",
+    }
+}
+
 # NOTE: golden may change (eagle_proposer only runs in eager mode currently),
 # thus please update it if ci fails but you have better acceptance
 BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
     "draft_parallel": [0.83, 0.50, 0.33, 0.17, 0.17, 0.17, 0.17, 0.00],
+    "dflash": [0.67, 0.67, 0.44, 0.33, 0.11, 0.00, 0.00, 0.00],
 }
 
 
@@ -329,6 +338,49 @@ def test_eagle_logprobs(
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 
+def test_suffix_logprobs(
+    model_name: str,
+):
+    """
+    Verify that suffix speculative decoding with logprobs enabled
+    does not crash and returns correct logprobs.
+    """
+    prompt = {"role": "user", "content": "Hello world " * 10}
+    sampling_params = SamplingParams(temperature=0, logprobs=1, max_tokens=10, ignore_eos=False)
+
+    ref_llm = LLM(model=model_name, max_model_len=2048)
+    ref_outputs = ref_llm.chat([prompt], sampling_params)
+    ref_logprobs = []
+    for output in ref_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                ref_logprobs.append(logprobs[token_id])
+    del ref_llm
+
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 8,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as runner:
+        spec_outputs = runner.model.chat([prompt], sampling_params)
+
+    spec_logprobs = []
+    for output in spec_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                spec_logprobs.append(logprobs[token_id])
+
+    assert len(spec_logprobs) > 0, "No logprobs returned from suffix spec decode"
+    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
+        assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1)
+        assert ref_logprob.rank == spec_logprob.rank
+        assert ref_logprob.decoded_token == spec_logprob.decoded_token
+
+
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
@@ -349,8 +401,9 @@ def test_llama_qwen_eagle_acceptance(
     main_model_name = MODELS[method]["main"]
     spec_model_name = MODELS[method]["spec"]
 
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
     tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
+        tokenizer_path,
         trust_remote_code=True,
     )
     sampling_params = SamplingParams(
@@ -456,8 +509,9 @@ def test_parallel_drafting_acceptance(
     main_model_name = DRAFT_PARALLEL_MODELS[method]["main"]
     spec_model_name = DRAFT_PARALLEL_MODELS[method]["spec"]
 
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
     tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
+        tokenizer_path,
         trust_remote_code=True,
     )
     sampling_params = SamplingParams(
@@ -490,6 +544,129 @@ def test_parallel_drafting_acceptance(
     }
 
     compilation_config = CompilationConfig(cudagraph_capture_sizes=[12])
+
+    with VllmRunner(
+        main_model_name,
+        max_model_len=4096,
+        disable_log_stats=False,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.8,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        enable_prefix_caching=False,
+    ) as llm:
+        outputs = llm.model.generate(prompts, sampling_params)
+        metrics = llm.model.get_metrics()
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        output_tokens = output.outputs[0].token_ids
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Output tokens: {output_tokens}")
+
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+
+    acceptance_per_pos = [num_accepted_tokens / num_drafts for num_accepted_tokens in num_accepted_tokens_per_pos]
+
+    golden = BASELINES[method]
+
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match
+
+
+@pytest.mark.parametrize("method", MODELS.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [3])
+def test_eagle3_fia_pad_under_max_concurrency(
+    method: str,
+    num_speculative_tokens: int,
+):
+    main_model_name = MODELS[method]["main"]
+    spec_model_name = MODELS[method]["spec"]
+    prompts = [
+        "Hello, I am",
+    ]
+    speculative_config = {
+        "method": method,
+        "num_speculative_tokens": num_speculative_tokens,
+        "model": spec_model_name,
+    }
+    max_num_tokens = 1 + num_speculative_tokens
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[max_num_tokens])
+    with VllmRunner(
+        main_model_name,
+        max_model_len=2048,
+        tensor_parallel_size=1,
+        speculative_config=speculative_config,
+        max_num_batched_tokens=max_num_tokens,
+        compilation_config=compilation_config,
+    ) as llm:
+        _ = llm.generate_greedy(prompts, max_tokens=10)
+
+
+@pytest.mark.parametrize("method", DFLASH.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [8])
+def test_dflash_acceptance(
+    method: str,
+    num_speculative_tokens: int,
+):
+    from vllm_ascend.utils import vllm_version_is
+
+    if vllm_version_is("0.19.0"):
+        pytest.skip("Dflash tests are not supported on vLLM version 0.19.0")
+
+    main_model_name = DFLASH[method]["main"]
+    spec_model_name = DFLASH[method]["spec"]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        main_model_name,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=256,
+    )
+
+    prompts = [
+        {
+            "role": "user",
+            "content": "Hello, your name is",
+        },
+    ]
+    prompts = [
+        tokenizer.apply_chat_template(
+            [prompt],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        for prompt in prompts
+    ]
+
+    speculative_config = {
+        "method": "draft_model",
+        "model": spec_model_name,
+        "num_speculative_tokens": num_speculative_tokens,
+        "enforce_eager": True,
+    }
+
+    compilation_config = CompilationConfig(cudagraph_capture_sizes=[9])
 
     with VllmRunner(
         main_model_name,
