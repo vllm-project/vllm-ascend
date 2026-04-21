@@ -557,6 +557,27 @@ class KVCacheRecvingLayerThread(threading.Thread):
             finished_requests = self.done_requests
             self.done_requests = set()
         return finished_requests
+    
+    def get_and_clear_failed_requests(self) -> set[str]:
+        """
+        Get and clear the requests that have failed.
+        Returns:
+            A set of request IDs that have failed.
+        """
+        with self.lock:
+            failed_requests = self.failed_requests
+            self.failed_requests = set()
+        return failed_requests
+    
+    def handle_failed_request(self, req_id: str) -> None:
+        """
+        Handle a failed request by adding it to the failed_requests set and removing it from the task tracker.
+        Args:
+            req_id: The ID of the request that has failed.
+        """
+        with self.lock:
+            self.task_tracker.pop(req_id, None)
+            self.failed_requests.add(req_id)
 
     def update_task(self, req_id, trans_count):
         with self.lock:
@@ -1094,6 +1115,8 @@ class MooncakeLayerwiseConnectorWorker:
         self.k_quant_buffer: torch.Tensor | None = None
         self.v_quant_buffer: torch.Tensor | None = None
         self.virtual_request: set[str] = set()
+        self._invalid_block_ids: set[int] = set()
+        self. _recving_metadata: dict[str, ReqMeta] = {}
 
     def create_kv_buffer(self, first_kv_cache_tuple):
         alignment = 2 * 1024 * 1024
@@ -1293,14 +1316,39 @@ class MooncakeLayerwiseConnectorWorker:
         done_recving = {self.request_map[s] for s in done_recving if s in self.request_map}
         done_recving.update(self.virtual_request)
         self.virtual_request = set()
+        failed_recving = (
+            self.kv_recv_layer_thread.get_and_clear_failed_requests()
+            if self.self.vllm_config.kv_transfer_config.is_kv_consumer and self.kv_recv_layer_thread is not None
+            else set()
+        )
+        failed_recving = {self.request_map[s] for s in failed_recving if s in self.request_map}
         for req_id in done_recving:
             req_id = req_id[:-9]
             self.request_map.pop(req_id, None)
+
+        for req_id in failed_recving:
+            if meta := self._recving_metadata.get(req_id):
+                for group_block in meta.local_block_ids:
+                    self._invalid_block_ids.update(group_block)
+                logger.warning(f"Request {req_id} failed during Layerwise transfer.Blocks marked as invalid: {meta.local_block_ids}")
+        for req_id in done_recving.union(failed_recving):
+            original_req_id = req_id[:-9]
+            self.request_map.pop(original_req_id, None)
+            self._recving_metadata.pop(req_id, None)
         if len(done_recving) > 0:
             logger.info(
                 f"Number of completed KV cache recv requests: {len(done_recving)}, receive requests: {done_recving}"
             )
         return set(), done_recving
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Return and clear the set of block IDs that failed to load.
+        This is called by the scheduler to identify blocks that need
+        to be retried after a transfer failure.
+        """
+        result = self._invalid_block_ids
+        self._invalid_block_ids = set()
+        return result
 
     # {(ip, port)]: {local_block_ids: [], remote_block_ids: {}}}
     def _get_kv_split_metadata(self, req_meta: ReqMeta, req_idx: int, req_id: str, group_idx: int):
@@ -1474,6 +1522,7 @@ class MooncakeLayerwiseConnectorWorker:
                 external_req_id = get_external_request_id(req_id)
                 assert self.kv_recv_layer_thread is not None
                 self.request_map[external_req_id] = req_id
+                self._recving_metadata[req_id] = meta
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
             # update trans info
             update_metadata = {}
