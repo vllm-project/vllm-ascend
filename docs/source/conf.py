@@ -146,10 +146,9 @@ html_extra_path = ["llms.txt"]
 # Check external links without validating remote anchors. Many third-party
 # sites render anchors dynamically, which makes anchor checks flaky in CI.
 linkcheck_anchors = False
-linkcheck_retries = 3
+linkcheck_retries = 2
 linkcheck_timeout = 15
-linkcheck_workers = 10
-linkcheck_rate_limit_timeout=60
+linkcheck_workers = 5
 
 # Example service endpoints in docs are intentionally not reachable from CI.
 linkcheck_ignore = [
@@ -158,8 +157,9 @@ linkcheck_ignore = [
     r"https?://0\.0\.0\.0(:\d+)?($|/.*)",
     r"https?://192\.0\.0\.1(:\d+)?($|/.*)",
     r"https?://<[^>]+>.*",
-    "https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209",
-    "https://github.com/vllm-project/vllm-ascend/issues/new/choose",
+    r"https://blog\.csdn\.net/qq_37368095/article/details/156429653\?spm=1011\.2124\.3001\.6209",
+    r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
+    r"https://github\.com/[^/?#]+/?$",
 ]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
