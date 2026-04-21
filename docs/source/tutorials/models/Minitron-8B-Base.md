@@ -6,25 +6,6 @@ The released `Minitron-8B-Base` is a lightweight, efficient large language model
 
 This document describes the main verification steps of the model, including supported features, environment preparation, single-node deployment, functional verification, and accuracy evaluation on the GSM8K benchmark.
 
-## Description
-
-| Feature | Description |
-|---------|-------------|
-| **Model Type** | Large Language Model (LLM) |
-| **Parameter Scale** | 8B |
-| **Input Modality** | Text |
-| **Output Modality** | Text generation |
-| **Serving Interface** | OpenAI-compatible API |
-| **Deployment** | vLLM-based online serving |
-| **Typical Use Cases** | Text generation, reasoning, benchmark evaluation |
-
-## Highlights
-
-- Minitron: NVIDIA's efficient model
-- 8B parameters optimized for deployment
-- Strong performance for size
-- Part of NVIDIA's model family
-
 ## Environment Preparation
 
 ### Model Weight
