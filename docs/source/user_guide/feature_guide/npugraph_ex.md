@@ -4,7 +4,7 @@
 
 As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/4715), this is a simple ACLGraph graph mode acceleration solution based on Fx graphs.
 
-## Using npugraph_ex
+## Using Npugraph_ex
 
 Npugraph_ex will be enabled by default in the future, Take Qwen series models as an example to show how to configure it.
 

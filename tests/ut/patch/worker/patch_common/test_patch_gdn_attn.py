@@ -6,13 +6,13 @@ from typing import cast
 
 import pytest
 import torch
-
-import vllm_ascend.patch.worker.patch_gdn_attn as patch_gdn_attn
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.fla.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import MambaSpec
+
+import vllm_ascend.patch.worker.patch_gdn_attn as patch_gdn_attn
 from vllm_ascend.ops.gdn import (
     get_non_spec_causal_conv1d_host_args,
     get_non_spec_chunked_prefill_meta,
@@ -21,8 +21,14 @@ from vllm_ascend.ops.gdn import (
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,
+)
+from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_offsets as runtime_prepare_chunk_offsets,
+)
+from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices as runtime_prepare_final_chunk_indices,
+)
+from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets as runtime_prepare_update_chunk_offsets,
 )
 
@@ -70,10 +76,7 @@ def create_common_attn_metadata(
     seq_lens = torch.tensor(batch_spec.seq_lens, dtype=torch.int32, device=device)
     seq_lens_cpu = seq_lens.cpu()
     max_seq_len = int(seq_lens_cpu.max())
-    context_lens = [
-        batch_spec.seq_lens[i] - batch_spec.query_lens[i]
-        for i in range(batch_spec.batch_size)
-    ]
+    context_lens = [batch_spec.seq_lens[i] - batch_spec.query_lens[i] for i in range(batch_spec.batch_size)]
     num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     block_table_tensor = torch.arange(
@@ -300,6 +303,7 @@ def test_non_spec_prefill_fallback_meta_matches_original_inputs_and_runtime_help
         fallback_meta.chunk,
         attn_metadata.non_spec_query_start_loc,
     )
+
 
 def test_build_non_spec_causal_conv1d_host_meta_avoids_seq_lens_cpu_fallback():
     class GuardSeqLens:
