@@ -78,6 +78,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         graphs.
         """
         return extra_config.get("use_layerwise", False)
+
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
@@ -145,8 +146,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        flattened_block_ids = [block_id for group_block_ids in block_ids for block_id in group_block_ids]
-        return self.connector_scheduler.request_finished(request, flattened_block_ids)
+        return self.connector_scheduler.request_finished_all_groups(request, block_ids)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """

@@ -357,6 +357,32 @@ class KVPoolScheduler:
             logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
 
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """
+        HMA path for hybrid KV cache groups.
+
+        Keep the grouped shape at the connector boundary instead of
+        flattening eagerly, so future per-group cleanup semantics can be
+        added without changing the API contract.
+        """
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+            return False, None
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is not None and tracker.num_saved_tokens <= 0:
+            return False, None
+        delay_free_blocks = any(len(group_block_ids) > 0 for group_block_ids in block_ids)
+        if delay_free_blocks:
+            logger.debug(
+                "Delaying free of %d KV cache groups for request %s",
+                sum(1 for group_block_ids in block_ids if group_block_ids),
+                request.request_id,
+            )
+        return delay_free_blocks, None
+
 
 class LookupKeyClient:
     def __init__(self, vllm_config: "VllmConfig"):

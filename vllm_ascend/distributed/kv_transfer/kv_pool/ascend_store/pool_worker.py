@@ -638,10 +638,10 @@ class KVPoolWorker:
                     res = self.check_all_layers_exists(res, self.num_layers)
                 if self.group_uses_align_state[group_id]:
                     hit_end = 0
-                    for index in range(len(res) - 1, -1, -1):  # type: ignore[arg-type]
-                        if res[index] == 1:  # type: ignore[index]
-                            hit_end = ends[index]
+                    for index, value in enumerate(res):  # type: ignore[arg-type]
+                        if value != 1:
                             break
+                        hit_end = ends[index]
                 else:
                     hit_end = end
                     for index, value in enumerate(res):  # type: ignore[arg-type]
@@ -719,10 +719,10 @@ class KVPoolWorker:
                 if self.group_uses_align_state[group_id]:
                     exists_by_block = [all(values[idx] == 1 for values in multi_tp_values) for idx in range(num_block)]
                     hit_end = 0
-                    for index in range(num_block - 1, -1, -1):
-                        if exists_by_block[index]:
-                            hit_end = ends[index]
+                    for index, exists in enumerate(exists_by_block):
+                        if not exists:
                             break
+                        hit_end = ends[index]
                     hits.append(hit_end)
                 else:
                     index = self.find_min_first_non_one_index(multi_tp_values)

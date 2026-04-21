@@ -10,7 +10,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 
 
 class TestAscendStoreGroupAwareConfig(unittest.TestCase):
-
     def test_normalize_block_ids_by_group(self):
         self.assertEqual(normalize_block_ids_by_group([1, 2]), [[1, 2]])
         self.assertEqual(
@@ -31,12 +30,8 @@ class TestAscendStoreGroupAwareConfig(unittest.TestCase):
             pp_rank=0,
         )
         token_db = ChunkedTokenDatabase(metadata, block_size=16, partitions=None)
-        key_group0 = next(
-            token_db.process_tokens(16, ["hash0"], kv_cache_group_id=0)
-        )[2]
-        key_group1 = next(
-            token_db.process_tokens(16, ["hash0"], kv_cache_group_id=1)
-        )[2]
+        key_group0 = next(token_db.process_tokens(16, ["hash0"], kv_cache_group_id=0))[2]
+        key_group1 = next(token_db.process_tokens(16, ["hash0"], kv_cache_group_id=1))[2]
 
         self.assertNotEqual(key_group0.to_string(), key_group1.to_string())
         self.assertIn("@group:0@", key_group0.to_string())

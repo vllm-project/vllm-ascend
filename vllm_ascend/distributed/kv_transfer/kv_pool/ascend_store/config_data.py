@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -266,8 +266,10 @@ def normalize_block_ids_by_group(block_ids: tuple[list[int], ...] | list[int] | 
         if not block_ids:
             return [[]]
         if isinstance(block_ids[0], list):
-            return [group.copy() for group in block_ids]
-        return [block_ids.copy()]
+            grouped_block_ids = cast(list[list[int]], block_ids)
+            return [group.copy() for group in grouped_block_ids]
+        flat_block_ids = cast(list[int], block_ids)
+        return [flat_block_ids.copy()]
     raise ValueError(f"Unsupported block_ids type {type(block_ids)}")
 
 
