@@ -788,13 +788,17 @@ private:
                     GM_ADDR otherRankPtr = shmem(0, dstEpIdx);
                     AscendC::GlobalTensor<ElementA> gmRemoteA;
                     gmRemoteA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peermemInfo.offsetA));
-
+                    AscendC::GlobalTensor<ElementPerTokenScale> gmRemotePerTokenScale;
+                    gmRemotePerTokenScale.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale*>(otherRankPtr + peermemInfo.offsetPeerPerTokenScale));
                     MatrixCoord offsetA{rowStart, 0};
                     MatrixCoord offsetPeer{rowSrc, 0};
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
-                    int64_t gmOffsetPeer = rowSrc * (params.problemShape.k() + ALIGN_512);
+                    int64_t gmOffsetPeer = params.layoutA.GetOffset(offsetPeer);
+
                     // Communication data
-                    CopyGMToGMPerToken(gmA[gmOffsetA], gmPerTokenScale1[rowStart], gmRemoteA[gmOffsetPeer],  rows, params.problemShape.k());
+                    CopyGMToGM(gmA[gmOffsetA], gmRemoteA[gmOffsetPeer], rows * params.problemShape.k(), params.ubMoveNum);
+                    // Communication scale
+                    CopyGMToGM(gmPerTokenScale1[rowStart], gmRemotePerTokenScale[rowSrc], rows, rows);
                 }
 
             }
