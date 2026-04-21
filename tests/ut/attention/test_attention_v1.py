@@ -336,3 +336,171 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score.assert_called_once()
 
         assert output.shape == (10, 8, 64)
+
+    def test_get_kvcomp_params_early_exit(self):
+        """
+        Test that _get_kvcomp_params returns original values
+        when kvcomp is disabled or hashk_cache is missing.
+        """
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        block_table = torch.zeros(1, 5, dtype=torch.long)
+        actual_seq_lengths_kv = [10]
+
+        metadata = MagicMock()
+        # Mocking the case where hashk_caches is not properly initialized
+        kvcomp_metadata = MagicMock()
+        kvcomp_metadata.hashk_caches = [None]
+        metadata.kvcomp_metadata = kvcomp_metadata
+
+        self.impl.enable_kvcomp = True
+        self.impl.layerIndex = 0
+
+        res_bt, res_sl = self.impl._get_kvcomp_params(query, key, metadata, block_table, actual_seq_lengths_kv)
+
+        self.assertIs(res_bt, block_table)
+        self.assertEqual(res_sl, actual_seq_lengths_kv)
+
+    def test_get_kvcomp_params_reuse(self):
+        """
+        Test that in DecodeOnly state, if the current layer is a skip layer,
+        it correctly reuses the Hamming results from a previous layer.
+        """
+        query = torch.randn(10, 8, 64)
+        key = torch.randn(10, 8, 64)
+        block_table = torch.zeros(1, 5, dtype=torch.long)
+        actual_seq_lengths_kv = [10]
+
+        self.impl.enable_kvcomp = True
+        self.impl.layerIndex = 1
+
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        expected_bt = torch.ones(1, 5)
+        expected_sl = torch.tensor([5])
+
+        # Construct kvcomp_metadata
+        kvcomp_metadata = MagicMock()
+        kvcomp_metadata.hashk_caches = [MagicMock(), MagicMock()]
+        kvcomp_metadata.hamming_output = expected_bt
+        kvcomp_metadata.seq_lens_from_hamming = expected_sl
+
+        kvcomp_config = MagicMock()
+        kvcomp_config.vllm_hash_attention_skip_layers = [False, True]
+        kvcomp_config.top_k_index_reuse = [0, 0]
+        kvcomp_metadata.kvcomp_config = kvcomp_config
+        metadata.kvcomp_metadata = kvcomp_metadata
+
+        metadata.hamming_output_records = [{"new_block_table": expected_bt, "new_seq_lens_list": expected_sl}, None]
+
+        res_bt, res_sl = self.impl._get_kvcomp_params(query, key, metadata, block_table, actual_seq_lengths_kv)
+
+        self.assertTrue(torch.equal(res_bt, expected_bt))
+        self.assertTrue(torch.equal(res_sl, expected_sl))
+
+    @patch("torch.ops._C_ascend.npu_reshape_and_cache_bnsd", create=True)
+    def test_get_kvcomp_params_prefill(self, mock_reshape_and_cache):
+        """
+        Test that in non-DecodeOnly state (e.g., Prefill), only Hash compute
+        and Cache update are performed, and original params are returned.
+        """
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        block_table = torch.zeros(2, 5, dtype=torch.long)
+        actual_seq_lengths_kv = [10, 10]
+
+        self.impl.enable_kvcomp = True
+        self.impl.layerIndex = 0
+
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.PrefillCacheHit
+        metadata.slot_mapping = torch.zeros(2)
+        metadata.actual_seq_lengths_q_device = torch.tensor([1, 1])
+        metadata.num_actual_tokens = 2
+        metadata.actual_query_lens = torch.tensor([1, 1], dtype=torch.int32)
+        metadata.query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+
+        kvcomp_metadata = MagicMock()
+        kvcomp_metadata.hashk_caches = [MagicMock()]
+        kvcomp_config = MagicMock()
+        kvcomp_config.vllm_hash_attention_skip_layers = [False]
+        kvcomp_metadata.kvcomp_config = kvcomp_config
+
+        # Mock HashEncoder
+        hash_encoder = MagicMock()
+        hash_encoder.compute_hash.return_value = torch.ones(2, 8, 8)
+        kvcomp_metadata.hash_encoder = hash_encoder
+
+        metadata.kvcomp_metadata = kvcomp_metadata
+
+        res_bt, res_sl = self.impl._get_kvcomp_params(query, key, metadata, block_table, actual_seq_lengths_kv)
+
+        # Ensure cache update was called but Hamming was bypassed
+        self.assertTrue(mock_reshape_and_cache.called)
+        self.assertIs(res_bt, block_table)
+        self.assertEqual(res_sl, actual_seq_lengths_kv)
+
+    @patch("torch.ops._C_ascend.npu_reshape_and_cache_bnsd", create=True)
+    @patch("torch.ops._C_ascend.npu_hamming_dist_top_k", create=True)
+    def test_get_kvcomp_params_decode_hamming(self, mock_hamming, mock_reshape):
+        """
+        Test that in DecodeOnly state, the full flow including Hash computation
+        and Hamming Distance Top-K operation is executed.
+        """
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        block_table = torch.zeros(2, 5, dtype=torch.long)
+        actual_seq_lengths_kv = [10, 10]
+
+        self.impl.enable_kvcomp = True
+        self.impl.layerIndex = 0
+
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.seq_lens = torch.tensor([10, 10])
+        metadata.actual_seq_lengths_q_device = torch.tensor([1, 1])
+        metadata.slot_mapping = torch.zeros(2)
+        metadata.block_tables = block_table
+        metadata.hamming_output_records = [None]
+        metadata.num_actual_tokens = 2
+        metadata.actual_query_lens = torch.tensor([1, 1], dtype=torch.int32)
+        metadata.query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+        metadata.chunk_sizes_for_hamming = torch.tensor([64, 64], dtype=torch.int32)
+        metadata.max_seq_len_for_hamming = 1024
+        metadata.block_tables_for_hamming = torch.zeros(2, 10, dtype=torch.int32)
+        metadata.new_seq_lens_list = torch.tensor([5, 5], dtype=torch.int32)
+
+        kvcomp_metadata = MagicMock()
+        kvcomp_metadata.hashk_caches = [MagicMock()]
+
+        kvcomp_config = MagicMock()
+        kvcomp_config.vllm_hash_attention_skip_layers = [False]
+        kvcomp_config.chunk_size = 64
+        kvcomp_metadata.kvcomp_config = kvcomp_config
+
+        # Mock necessary Hamming parameters
+        kvcomp_metadata.chunk_sizes_for_hamming_full = torch.tensor([1, 1])
+        kvcomp_metadata.topk_for_hamming_full = torch.tensor([1, 1])
+        kvcomp_metadata.topk_for_hamming_full_cpu = torch.tensor([1, 1])
+        kvcomp_metadata.hamming_output = torch.zeros(2, 1)
+
+        # Mock HashEncoder
+        hash_encoder = MagicMock()
+        hash_encoder.compute_hash.return_value = torch.ones(2, 8, 8)
+        kvcomp_metadata.hash_encoder = hash_encoder
+
+        metadata.kvcomp_metadata = kvcomp_metadata
+
+        # Mock npu_hamming_dist_top_k output; note the squeeze(1) in implementation
+        mock_hamming.return_value = torch.ones(2, 1, 5)
+
+        res_bt, res_sl = self.impl._get_kvcomp_params(query, key, metadata, block_table, actual_seq_lengths_kv)
+
+        self.assertTrue(mock_reshape.called)
+        self.assertTrue(mock_hamming.called)
+        # Verify shape after squeeze(1) becomes (2, 5)
+        self.assertEqual(res_bt.shape, (2, 5))
+        self.assertTrue(torch.equal(res_bt, torch.ones(2, 5)))
+        # Verify the result is recorded in hamming_output_records
+        self.assertTrue(torch.equal(kvcomp_metadata.hamming_output, torch.ones(2, 5)))
+        self.assertIsNotNone(kvcomp_metadata.seq_lens_for_hamming)
