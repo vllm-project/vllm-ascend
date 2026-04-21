@@ -640,10 +640,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             ]
             and self.speculative_config is not None
         ):
-            input_layout = "TND"
+            input_layout = "BSND"
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
-            q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
-            q_pe = q_pe.view(num_tokens, num_heads, -1)
+            q_nope = q_nope.view(-1, num_tokens, num_heads, q_nope.shape[-1]).contiguous()
+            q_pe = q_pe.view(-1, num_tokens, num_heads, q_pe.shape[-1])
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             B = spec_attn_mask.shape[0]  # seq_len
@@ -653,10 +653,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             target_length = 16384
 
             # 创建目标 shape 的 mask，初始为 False
-            new_mask = torch.zeros(1, B, target_length, dtype=torch.bool, device=spec_attn_mask.device)
+            new_mask = torch.ones(1, B, target_length, dtype=torch.bool, device=spec_attn_mask.device)
 
             # 填充原始数据到新 mask 的前 L 个位置
-            new_mask[:, :, :L] = spec_attn_mask
+            new_mask[:, :B, :L] = ~spec_attn_mask
             spec_attn_mask = new_mask
 
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
@@ -742,6 +742,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 k_nope,
                 **common_kwargs,
             )
+
+        if input_layout == "BSND":
+            attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
+            softmax_lse = softmax_lse.view(-1, softmax_lse.shape[2], softmax_lse.shape[3])
+            softmax_lse = softmax_lse.transpose(0, 1)
+
         if input_layout == "BNSD":
             B_attn, N_attn, S, D = attn_output.shape
             B_lse, N_lse, Q_S, _ = softmax_lse.shape
