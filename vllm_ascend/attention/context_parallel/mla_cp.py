@@ -646,17 +646,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_pe = q_pe.view(-1, num_tokens, num_heads, q_pe.shape[-1])
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
-            B = spec_attn_mask.shape[0]  # seq_len
-            L = spec_attn_mask.shape[1]  # length
-
-            # 获取目标 length
-            target_length = 16384
-
-            # 创建目标 shape 的 mask，初始为 False
-            new_mask = torch.ones(1, B, target_length, dtype=torch.bool, device=spec_attn_mask.device)
-
-            # 填充原始数据到新 mask 的前 L 个位置
-            new_mask[:, :B, :L] = ~spec_attn_mask
+            new_mask = torch.ones(q_nope.shape[0], B, 16384, dtype=torch.bool, device=spec_attn_mask.device)
+            for i, mask in enumerate(spec_attn_mask):
+                B = mask.shape[0]  # seq_len
+                L = mask.shape[1]  # length
+                # 填充原始数据到新 mask 的前 L 个位置
+                new_mask[i, :B, :L] = ~mask
             spec_attn_mask = new_mask
 
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
