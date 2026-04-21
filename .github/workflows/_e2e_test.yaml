@@ -2,11 +2,6 @@ name: 'e2e test'
 
 on:
   workflow_call:
-    secrets:
-      HW_OBS_AK:
-        required: false
-      HW_OBS_SK:
-        required: false
     inputs:
       vllm:
         required: true
@@ -14,14 +9,10 @@ on:
       image:
         required: true
         type: string
-      image_a3_2:
+      image_a3:
         required: false
         type: string
         default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
-      image_a3_4:
-        required: false
-        type: string
-        default: m.daocloud.io/quay.io/ascend/cann:8.5.1-a3-ubuntu22.04-py3.11
       image_310p:
         required: false
         type: string
@@ -66,11 +57,6 @@ env:
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
-  AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
-  AWS_REGION: ap-southeast-1
-  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
 
 jobs:
   e2e-light:
@@ -192,7 +178,7 @@ jobs:
 
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-singlecard-light-part${{ matrix.part }}
@@ -322,7 +308,7 @@ jobs:
             --output "$GITHUB_STEP_SUMMARY"
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-singlecard-full-part${{ matrix.part }}
@@ -347,7 +333,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: ${{ inputs.image_a3_2 }}
+      image: ${{ inputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -408,9 +394,9 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -456,7 +442,7 @@ jobs:
 
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-2card-light-part${{ matrix.part }}
@@ -473,7 +459,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: ${{ inputs.image_a3_2 }}
+      image: ${{ inputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -536,9 +522,9 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_2 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -585,7 +571,7 @@ jobs:
 
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-2card-full-part${{ matrix.part }}
@@ -629,7 +615,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: ${{ inputs.image_a3_4 }}
+      image: ${{ inputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -691,9 +677,9 @@ jobs:
             vllm_ascend/*.so
             vllm_ascend/lib
             vllm_ascend/include
-          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_4 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           restore-keys: |
-            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3_4 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
@@ -741,7 +727,7 @@ jobs:
 
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-4card-full-part${{ matrix.part }}
