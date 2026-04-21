@@ -24,7 +24,7 @@ import vllm
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, gumbel_sample, update_eagle_inputs
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
@@ -66,6 +66,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: Any = None,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
         because npu attention metadata needs more information,
@@ -92,6 +93,7 @@ class AscendEagleSpeculator(EagleSpeculator):
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
+                is_profile=is_profile,
             )
 
     def generate_draft(
@@ -107,16 +109,52 @@ class AscendEagleSpeculator(EagleSpeculator):
         attn_metadata is created in super propose method, it does not have some
         attribute that Ascend attention backend needs, so we update it.
         """
-        self._update_decode_attn_metadata(attn_metadata)
+        self._update_decode_attn_metadata(attn_metadata, num_reqs)
 
-        return super().generate_draft(
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-        )
+        # NOTE(drslark): following lines (from 145 to 184) come from raw gpu's generate_draft logic
+        pos = self.input_buffers.positions[:num_reqs]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        idx_mapping = self.idx_mapping[:num_reqs]
+        for step in range(1, self.num_speculative_steps):
+            # Run the eagle model.
+            last_hidden_states, hidden_states = self.run_model(
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+            )
+            last_hidden_states = last_hidden_states[:num_reqs]
+            hidden_states = hidden_states[:num_reqs]
+            logits = self.model.compute_logits(last_hidden_states)
+
+            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+            # used for draft and target sampling.
+            draft_tokens = gumbel_sample(
+                logits,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                pos + 1,
+                apply_temperature=True,
+                processed_logits_out=self.draft_logits[:, step] if self.draft_logits is not None else None,
+            )
+            self.draft_tokens[:num_reqs, step] = draft_tokens
+
+            if step < self.num_speculative_steps - 1:
+                # Update the inputs for the next step.
+                update_eagle_inputs(
+                    draft_tokens,
+                    hidden_states,
+                    self.input_buffers,
+                    self.hidden_states,
+                    self.max_model_len,
+                )
+                if attn_metadata is not None:
+                    self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, pos, num_tokens_padded)
+
+                    # npu's own update logic
+                    self._update_decode_attn_metadata(attn_metadata, num_reqs)
 
     @torch.inference_mode()
     def run_model(
@@ -149,16 +187,21 @@ class AscendEagleSpeculator(EagleSpeculator):
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
         return last_hidden_states, hidden_states
 
-    def _update_decode_attn_metadata(
-        self,
-        attn_metadata: dict[str, Any],
-    ):
+    def _update_decode_attn_metadata(self, attn_metadata: dict[str, Any], num_reqs: int):
         """Update attention metadata for decode phase on Ascend NPUs."""
         if attn_metadata is None:
             return
 
         attn_state = AscendAttentionState.DecodeOnly
         seq_lens_cpu = self._get_seq_lens_cpu()
+
+        # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`
+        # to avoid extra sync overhead, `v2` is currently aligned with NPU `v1` only
+
+        # follows the logic in `prepare_eagle_decode` and `update_eagle_inputs`
+        seq_lens_cpu[:num_reqs] = torch.clamp(seq_lens_cpu[:num_reqs] + 1, max=self.max_model_len)
+        seq_lens_cpu[num_reqs:].fill_(0)
+
         seq_lens_list = seq_lens_cpu.tolist()
         # attn_metadata is build in vllm's super class.
         # We need to update attn_state for each layer's metadata.
