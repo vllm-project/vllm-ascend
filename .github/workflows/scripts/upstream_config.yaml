@@ -459,13 +459,9 @@ e2e-upstream-singlecard:
 #    estimated_time: 20
 #  - name: tests/v1/kv_connector/unit/test_kv_connector_lifecycle.py
 #    estimated_time: 20
-  - name: tests/entrypoints/openai/correctness/test_lmeval.py
-    estimated_time: 20
   - name: tests/entrypoints/openai/parser/test_harmony_utils.py
     estimated_time: 20
   - name: tests/entrypoints/openai/responses/test_harmony_utils.py
-    estimated_time: 20
-  - name: tests/entrypoints/rpc/test_collective_rpc.py
     estimated_time: 20
   - name: tests/entrypoints/test_context.py
     estimated_time: 20
@@ -479,13 +475,9 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/model_executor/test_model_load_with_params.py
     estimated_time: 20
-  - name: tests/models/language/pooling/test_reward.py
-    estimated_time: 20
   - name: tests/models/language/pooling_mteb_test/test_jina.py
     estimated_time: 20
   - name: tests/models/language/pooling_mteb_test/test_nemotron.py
-    estimated_time: 20
-  - name: tests/models/multimodal/generation/test_keye.py
     estimated_time: 20
   - name: tests/models/multimodal/pooling/test_siglip.py
     estimated_time: 20
@@ -505,11 +497,9 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/tool_parsers/test_openai_tool_parser.py
     estimated_time: 20
-  - name: tests/v1/e2e/general/test_min_tokens.py
-    estimated_time: 20
   - name: tests/v1/ec_connector/unit/test_ec_example_connector.py
     estimated_time: 20
   - name: tests/v1/worker/test_late_interaction_runner.py
     estimated_time: 20
-  - name: tests/entrypoints/openai/responses/test_simple.py
+  - name: tests/entrypoints/pooling/classify/test_online_vision.py
     estimated_time: 20
