@@ -70,7 +70,6 @@ class AscendModelState(DefaultModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             # extra attributes for ascend npus.
             seq_lens_np=input_batch.seq_lens_np,
-            positions=input_batch.positions,
             attn_state=input_batch.attn_state,
         )
         return self.attn_metadata

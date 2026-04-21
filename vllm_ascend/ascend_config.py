@@ -51,21 +51,7 @@ class AscendConfig:
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
 
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
-        self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
-        if self.profiling_chunk_config.enabled and vllm_config.parallel_config.pipeline_parallel_size <= 1:
-            raise ValueError(
-                "profiling_chunk_config requires pipeline parallelism (pp > 1). "
-                "Please set --pipeline-parallel-size to a value greater than 1, "
-                "or disable profiling_chunk_config."
-            )
-
-        from vllm_ascend import envs as ascend_envs
-
-        if self.profiling_chunk_config.enabled and ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING:
-            raise ValueError(
-                "profiling_chunk_config and balance scheduling (VLLM_ASCEND_BALANCE_SCHEDULING) "
-                "cannot be enabled at the same time. Please disable one of them."
-            )
+        self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config, vllm_config)
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)
@@ -326,6 +312,32 @@ class FinegrainedTPConfig:
             logger.info(f"finegrained_tp_config enabled: {', '.join(enabled_configs)}")
 
 
+class ProfilingChunkConfig:
+    """
+    Configuration object for profiling-based dynamic chunk scheduling.
+    """
+
+    def __init__(self, profiling_chunk_config: dict | None = None, vllm_config: "VllmConfig" = None):
+        if profiling_chunk_config is None:
+            profiling_chunk_config = {}
+
+        if not isinstance(profiling_chunk_config, dict):
+            raise TypeError("profiling_chunk_config must be a dict")
+
+        self.enabled = profiling_chunk_config.get("enabled", False)
+        self.smooth_factor = profiling_chunk_config.get("smooth_factor", 0.8)
+        self.min_chunk = profiling_chunk_config.get("min_chunk", 4096)
+
+        if not 0.0 < self.smooth_factor <= 1.0:
+            raise ValueError("profiling_chunk_config.smooth_factor must be in (0, 1]")
+
+        if not isinstance(self.min_chunk, int) or self.min_chunk <= 0:
+            raise ValueError("profiling_chunk_config.min_chunk must be a positive integer")
+
+        if self.enabled and vllm_config is not None and vllm_config.parallel_config.pipeline_parallel_size <= 1:
+            raise ValueError("profiling_chunk_config requires pipeline parallelism to be enabled")
+
+
 class AscendCompilationConfig:
     """
     Configuration for controlling the behavior of Ascend graph optimization.
@@ -440,36 +452,6 @@ class WeightPrefetchConfig:
         self.prefetch_ratio = weight_prefetch_config.get("prefetch_ratio", self.prefetch_ratio)
 
 
-class ProfilingChunkConfig:
-    """Configuration for profiling-based dynamic chunk sizing.
-
-    When enabled, the scheduler profiles prefill latency during initialization
-    and uses a quadratic model to predict optimal chunk sizes at runtime.
-
-    Usage (online)::
-
-        vllm serve <model> --additional-config '{"profiling_chunk_config": {"enabled": true}}'
-
-    Usage (offline)::
-
-        llm = LLM(model, additional_config={"profiling_chunk_config": {"enabled": true}})
-    """
-
-    def __init__(self, config: dict | None = None):
-        if config is None:
-            config = {}
-        self.enabled: bool = config.get("enabled", False)
-        self.smooth_factor: float = float(config.get("smooth_factor", 0.8))
-        self.min_chunk: int = int(config.get("min_chunk", 4096))
-        self._validate()
-
-    def _validate(self):
-        if not (0 < self.smooth_factor <= 1.0):
-            raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
-        if self.min_chunk <= 0:
-            raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
-
-
 class EplbConfig:
     """
     Configuration Object for xlite_graph_config from additional_config
@@ -536,31 +518,21 @@ class EplbConfig:
 _ASCEND_CONFIG: AscendConfig | None = None
 
 
-def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
-    """Check whether a config object has essential initialized fields.
-
-    Some unit tests monkeypatch ``AscendConfig.__init__`` to bypass heavy
-    initialization. In that case, the singleton cache can be polluted with a
-    partially initialized instance. This guard prevents reusing such instances
-    across tests.
-    """
-    if config is None:
-        return False
-    return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
-
-
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is not None and not refresh and _is_ascend_config_initialized(_ASCEND_CONFIG):
+    if _ASCEND_CONFIG is not None and not refresh:
         return _ASCEND_CONFIG
-    new_config = AscendConfig(vllm_config)
-    if _is_ascend_config_initialized(new_config):
-        _ASCEND_CONFIG = new_config
+    ascend_config = AscendConfig(vllm_config)
+    # Some unit tests mock ``AscendConfig.__init__`` and only stub
+    # ``get_ascend_config``. Avoid caching a half-initialized object across
+    # tests, otherwise later callers may observe missing attributes.
+    if hasattr(ascend_config, "ascend_compilation_config"):
+        _ASCEND_CONFIG = ascend_config
     else:
-        logger.warning("Ascend config instance is not fully initialized; skip singleton cache update.")
-    return new_config
+        _ASCEND_CONFIG = None
+    return ascend_config
 
 
 def clear_ascend_config():
@@ -570,6 +542,6 @@ def clear_ascend_config():
 
 def get_ascend_config():
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
+    if _ASCEND_CONFIG is None:
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG

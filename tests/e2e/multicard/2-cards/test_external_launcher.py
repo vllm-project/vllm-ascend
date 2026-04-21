@@ -123,12 +123,16 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
 def test_qwen3_external_launcher_with_sleepmode():
     script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
+    model_path = snapshot_download(
+        "Qwen/Qwen3-8B",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
         sys.executable,
         str(script),
         "--model",
-        "Qwen/Qwen3-8B",
+        model_path,
         "--tp-size",
         "1",
         "--node-size",
