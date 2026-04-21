@@ -2323,7 +2323,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
         # Ensure the async GPU→CPU copy of corrected seq_lens (launched in
         # _prepare_inputs) has completed before we read optimistic_seq_lens_cpu.
-        if self._seq_lens_cpu_event_pending:
+        if self._seq_lens_cpu_event_pending and self._seq_lens_cpu_event is not None:
             self._seq_lens_cpu_event.synchronize()
             self._seq_lens_cpu_event_pending = False
 
