@@ -628,7 +628,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
         k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
-        actual_seq_lengths = None
+        actual_seq_lengths_q = None
         input_layout = "BNSD"
 
         if (
@@ -642,13 +642,16 @@ class AscendMlaCPImpl(AscendMLAImpl):
         ):
             input_layout = "BSND"
             query_len = self.vllm_config.speculative_config.num_speculative_tokens + 1
+            actual_seq_lengths_q = decode_meta.actual_seq_lengths_q
+            lst = actual_seq_lengths_q[:num_decodes]
+            actual_seq_lengths_q = list(np.diff([0] + lst))
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
             q_nope = q_nope.view(-1, query_len, num_heads, q_nope.shape[-1]).contiguous()
             q_pe = q_pe.view(-1, query_len, num_heads, q_pe.shape[-1])
             sparse_mode = 0
             
             new_mask = torch.ones(q_nope.shape[0], query_len, 16384, dtype=torch.bool, device=q_nope.device)
-            actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            
             num_decodes = len(actual_seq_lengths)
             spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes]  # type:ignore
             for i, mask in enumerate(spec_attn_mask):
@@ -678,7 +681,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             "antiquant_scale": None,
             "block_table": decode_meta.block_table,
             "block_size": block_size,
-            "actual_seq_lengths": actual_seq_lengths,
+            "actual_seq_lengths": actual_seq_lengths_q,
             "actual_seq_lengths_kv": decode_meta.cp_seq_len,
             "softmax_lse_flag": True,
         }
