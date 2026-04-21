@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.nn as nn
-from vllm.config import VllmConfig, KVTransferConfig
+from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 
