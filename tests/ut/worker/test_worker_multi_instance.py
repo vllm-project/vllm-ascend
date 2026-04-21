@@ -83,9 +83,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         """Baseline: single instance on an empty card yields positive KV cache."""
         total = int(64 * GiB_bytes)
         gpu_util = 0.9
-        requested_memory = int(total * gpu_util)   # 57.6 GiB
-        init_free = int(62 * GiB_bytes)            # almost all free
-        non_kv_cache = int(0.5 * GiB_bytes)        # Qwen3-0.6B weights
+        requested_memory = int(total * gpu_util)  # 57.6 GiB
+        init_free = int(62 * GiB_bytes)  # almost all free
+        non_kv_cache = int(0.5 * GiB_bytes)  # Qwen3-0.6B weights
 
         worker = self._make_worker(requested_memory, init_free, total)
         profile_result = self._make_profile_result(
@@ -122,15 +122,15 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         """
         total = int(64 * GiB_bytes)
         gpu_util = 0.4
-        requested_memory = int(total * gpu_util)          # 25.6 GiB
+        requested_memory = int(total * gpu_util)  # 25.6 GiB
 
         # First instance already occupies its full requested_memory slice
-        first_instance_used = requested_memory            # 25.6 GiB
-        init_free = total - first_instance_used           # ~38.4 GiB
+        first_instance_used = requested_memory  # 25.6 GiB
+        init_free = total - first_instance_used  # ~38.4 GiB
 
         # After the fix: profiling correctly reports only the second
         # instance's own model weights, not the first instance's memory.
-        non_kv_cache = int(0.5 * GiB_bytes)              # Qwen3-0.6B weights
+        non_kv_cache = int(0.5 * GiB_bytes)  # Qwen3-0.6B weights
 
         worker = self._make_worker(requested_memory, init_free, total)
         profile_result = self._make_profile_result(
@@ -142,7 +142,8 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             result = worker.determine_available_memory()
 
         self.assertGreater(
-            result, 0,
+            result,
+            0,
             "Second instance must have positive KV cache memory. "
             "A non-positive value means the multi-instance OOM bug "
             "(PR #7427) has regressed.",
@@ -167,10 +168,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         """
         total = int(64 * GiB_bytes)
         gpu_util = 0.4
-        requested_memory = int(total * gpu_util)   # 25.6 GiB
+        requested_memory = int(total * gpu_util)  # 25.6 GiB
 
-        first_instance_used = requested_memory     # 25.6 GiB
-        init_free = total - first_instance_used    # ~38.4 GiB
+        first_instance_used = requested_memory  # 25.6 GiB
+        init_free = total - first_instance_used  # ~38.4 GiB
 
         # Buggy: non_kv_cache_memory = first-instance memory + second-instance weights
         buggy_non_kv_cache = int((25.6 + 0.5) * GiB_bytes)  # ~26.1 GiB
@@ -187,7 +188,8 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
         # Pre-fix: 25.6 GiB - 26.1 GiB = -0.5 GiB  (negative → OOM)
         self.assertLess(
-            result, 0,
+            result,
+            0,
             "With the pre-fix (buggy) non_kv_cache_memory the result must be "
             "negative; this documents the OOM regression that PR #7427 fixed.",
         )
@@ -210,9 +212,8 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             non_kv_cache_memory=int(0.5 * GiB_bytes),
         )
 
-        with self._patch_memory_profiling(profile_result):
-            with self.assertRaises(AssertionError) as ctx:
-                worker.determine_available_memory()
+        with self._patch_memory_profiling(profile_result), self.assertRaises(AssertionError) as ctx:
+            worker.determine_available_memory()
 
         self.assertIn("Error in memory profiling", str(ctx.exception))
 
@@ -225,13 +226,13 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         non_kv_cache_memory (i.e. there is room for at least some KV blocks),
         the result must be positive.
         """
-        total = int(32 * GiB_bytes)       # smaller card (e.g. 910B1)
+        total = int(32 * GiB_bytes)  # smaller card (e.g. 910B1)
         gpu_util = 0.3
-        requested_memory = int(total * gpu_util)   # 9.6 GiB
+        requested_memory = int(total * gpu_util)  # 9.6 GiB
 
         # First instance has consumed most of its requested slice
-        first_instance_used = requested_memory     # 9.6 GiB
-        init_free = total - first_instance_used    # 22.4 GiB
+        first_instance_used = requested_memory  # 9.6 GiB
+        init_free = total - first_instance_used  # 22.4 GiB
 
         non_kv_cache = int(0.5 * GiB_bytes)  # Qwen3-0.6B
 

@@ -176,9 +176,7 @@ def test_chunk_gated_delta_rule_fwd_threads_prebuilt_chunk_offsets(
             {
                 "world_size": world_size,
                 "rank_in_group": 0,
-                "all_gather": lambda self, value, dim: _GatherResult(
-                    [_DummyTensor("g0"), _DummyTensor("g1")]
-                ),
+                "all_gather": lambda self, value, dim: _GatherResult([_DummyTensor("g0"), _DummyTensor("g1")]),
             },
         )()
 
