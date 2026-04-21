@@ -88,7 +88,6 @@ class AttentionMaskBuilder310:
         splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
         return splitfuse_mask_nz
 
-
     def get_attention_mask(self, model_config) -> torch.Tensor:
         """
         Retrieves the appropriate attention mask based on the model configuration.
