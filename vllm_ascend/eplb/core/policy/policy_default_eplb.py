@@ -1,7 +1,7 @@
 # Copyright Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this policy.
 from collections import defaultdict
-from typing import cast, ClassVar
+from typing import ClassVar, cast
 
 import numpy as np
 
@@ -28,7 +28,7 @@ class DefaultEplb(EplbPolicy):
     _new_ep_size: ClassVar[int | None] = None
 
     @classmethod
-    def set_new_ep_size(cls, new_ep_size:int):
+    def set_new_ep_size(cls, new_ep_size: int):
         cls._new_ep_size = new_ep_size
 
     @staticmethod
