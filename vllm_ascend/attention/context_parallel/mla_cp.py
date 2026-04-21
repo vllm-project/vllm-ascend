@@ -646,7 +646,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_pe = q_pe.view(-1, num_tokens, num_heads, q_pe.shape[-1])
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
-            new_mask = torch.ones(q_nope.shape[0], num_tokens, 16384, dtype=torch.bool, device=spec_attn_mask.device)
+            new_mask = torch.ones(q_nope.shape[0], num_tokens, 16384, dtype=torch.bool, device=q_nope.device)
             for i, mask in enumerate(spec_attn_mask):
                 B = mask.shape[0]  # seq_len
                 L = mask.shape[1]  # length
