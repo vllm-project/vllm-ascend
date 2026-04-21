@@ -128,8 +128,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 try:
     from vllm.logger import init_logger
@@ -679,10 +679,7 @@ async def _handle_select_instance(api: str, req_data: Any, request_length: int):
             detail = response.json()
         except Exception:
             detail = response.text
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=detail
-        )
+        raise HTTPException(status_code=response.status_code, detail=detail)
     response_json = response.json()
     kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
@@ -827,10 +824,7 @@ async def _handle_completions(api: str, request: Request):
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
     except HTTPException as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content=e.detail
-        )
+        return JSONResponse(status_code=e.status_code, content=e.detail)
     except Exception as e:
         import traceback
 
