@@ -555,7 +555,22 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 21. File: worker/patch_deepseek_mtp.py**
+# ** 21. File: worker/patch_deepseek.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `transformers.PreTrainedTokenizerFast.get_vocab`
+#    Why:
+#       DeepSeek-R1-Distill models (DeepSeek-R1-Distill-Qwen, DeepSeek-R1-Distill-Llama)
+#       use special tokens like <|begin▁of▁sentence|> and <|end▁of▁sentence|> that may
+#       not be properly handled by the default tokenizer processing, causing invalid
+#       output issues (e.g., '\n\n,\n\n ( (\n ( or').
+#    How：
+#       Patch get_vocab() to ensure special tokens are properly included in the vocabulary.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/issues/7191
+#    Future Plan:
+#       Remove this patch when vLLM properly handles DeepSeek-R1-Distill tokenizer.
+#
+# ** 22. File: worker/patch_deepseek_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name` and
 #      `vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name`

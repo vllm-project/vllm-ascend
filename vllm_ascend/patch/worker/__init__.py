@@ -50,6 +50,7 @@ import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
 import vllm_ascend.patch.worker.patch_draft_quarot  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
+import vllm_ascend.patch.worker.patch_deepseek  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
