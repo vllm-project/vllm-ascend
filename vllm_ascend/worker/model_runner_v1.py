@@ -1145,7 +1145,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 assert self.drafter is not None
                 next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
-                    self.optimistic_seq_lens_cpu,
                     sampled_token_ids,
                     self.requests,
                     self.input_batch,
