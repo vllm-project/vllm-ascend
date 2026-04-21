@@ -2,10 +2,12 @@ from typing import Any
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
 
@@ -157,37 +159,71 @@ class AscendDflashProposer(SpecDecodeBaseProposer):
         num_query_tokens = min(num_tokens, self.max_query_tokens)
 
         (
-            num_query_tokens,
+            num_input_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
 
-        num_input_tokens = num_query_tokens
+        num_query_per_req = 1 + self.num_speculative_tokens
+        num_query_total = num_reqs * num_query_per_req
 
-        num_context = num_tokens
-        context_positions = self._context_positions_buffer[:num_context]
-        context_states = self.hidden_states[:num_context]
+        context_positions = self._context_positions_buffer[:num_input_tokens]
+        context_states = self.hidden_states[:num_input_tokens]
 
-        input_ids = self.input_ids[:num_input_tokens]
-        positions = self.positions[:num_input_tokens]
+        multi_steps_attn_metadata = []
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
+            builder = self.draft_attn_groups[0].get_metadata_builder()
+            common_attn_metadata = AscendCommonAttentionMetadata(
+                query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
+                query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
+                seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                seq_lens=self.runner.seq_lens[:num_reqs],
+                num_reqs=num_reqs,
+                num_actual_tokens=num_query_tokens,
+                max_query_len=num_query_per_req,
+                max_seq_len=0,
+                slot_mapping=self._slot_mapping_buffer[:num_query_total],
+                attn_state=AscendAttentionState.ChunkedPrefill,
+                causal=False,
+                block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
+            )
+
+            attn_metadata_dflash = builder.build_for_graph_capture(
+                common_attn_metadata,
+                AscendAttentionState.ChunkedPrefill,
+            )
+
+            attn_metadata_dflash.attn_mask = None
+            attn_metadata_dflash.attn_state = AscendAttentionState.ChunkedPrefill
+
+            per_layer_attn_metadata = dict()
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata_dflash
+            multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         with set_ascend_forward_context(
-            None,
+            multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-            num_actual_tokens=0,
+            num_actual_tokens=num_input_tokens,
             in_profile_run=is_profile,
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
+            draft_attn_metadatas=multi_steps_attn_metadata,
         ):
             self.model.precompute_and_store_context_kv(context_states, context_positions)
+
             self.model(
-                input_ids=input_ids,
-                positions=positions,
+                input_ids=self.input_ids[:num_query_total],
+                positions=self._get_positions(num_query_total),
                 inputs_embeds=None,
             )
+
+            forward_context = get_forward_context()
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+                self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
 
     def build_model_inputs_first_pass(
         self,

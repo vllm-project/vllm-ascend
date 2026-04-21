@@ -339,7 +339,12 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             self.update_stream = torch.npu.Stream()
-            self._runnable = ACLGraphWrapper(self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+            if self.method == "dflash":
+                self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+            else:
+                self._runnable = ACLGraphWrapper(
+                    self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+                )
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -569,10 +574,13 @@ class SpecDecodeBaseProposer(EagleProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, num_reqs_padded
             )
-            common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
-            common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
-                self.runner.optimistic_seq_lens_cpu, num_reqs_padded
-            )
+            if self.method == "dflash":
+                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+            else:
+                common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
+                    self.runner.optimistic_seq_lens_cpu, num_reqs_padded
+                )
             if common_attn_metadata.num_computed_tokens_cpu is not None:
                 common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
@@ -619,6 +627,9 @@ class SpecDecodeBaseProposer(EagleProposer):
         assert len(self.draft_attn_groups) > 0
         builder = self.draft_attn_groups[0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model())
+
+        if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
+            attn_metadata.attn_mask = None
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -786,12 +797,12 @@ class SpecDecodeBaseProposer(EagleProposer):
                 "inputs_embeds": inputs_embeds,
             }
 
-        if self.pass_hidden_states_to_model and self.method != "dflash":
-            model_hidden_states = self.hidden_states[:num_input_tokens]
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
-            model_kwargs["hidden_states"] = model_hidden_states
-            if self.method == "mtp":
-                model_kwargs["positions"] = model_positions
+            if self.pass_hidden_states_to_model:
+                model_hidden_states = self.hidden_states[:num_input_tokens]
+                model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
+                model_kwargs["hidden_states"] = model_hidden_states
+                if self.method == "mtp":
+                    model_kwargs["positions"] = model_positions
 
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
