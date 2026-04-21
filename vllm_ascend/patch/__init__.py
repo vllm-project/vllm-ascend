@@ -94,20 +94,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 6. File: platform/patch_fusion_matcher_compat_ops.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `torch.ops._C.rms_norm`, `torch.ops._C.fused_add_rms_norm`,
-#    Why:
-#       upstream vLLM initializes fusion matcher global operators at import time.
-#       On Ascend environment these symbols may be absent and cause import failure.
-#    How：
-#       inject placeholders only when the symbols are missing so import can continue.
-#    Related PR (if no, explain why):
-#       temporary compatibility patch before upstream adjustment is merged.
-#    Future Plan:
-#       remove this patch once upstream no longer requires these global symbols or
-#       provides a backend-safe initialization path.
-#
 # ** 7. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
