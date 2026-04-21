@@ -1,0 +1,58 @@
+model_name: "Mixtral-8x7B-Instruct-v0.1"
+hardware: "Atlas A2 Series"
+
+# ===== 评测任务 =====
+tasks:
+  - name: "ceval-valid"
+    metrics:
+      - name: "acc,none"
+        value: 0.52
+
+# ===== few-shot =====
+num_fewshot: 5
+
+# ===== 推理参数 =====
+max_model_len: 4096
+trust_remote_code: True
+dtype: "bfloat16"
+
+# ===== chat 行为 =====
+apply_chat_template: True
+fewshot_as_multiturn: False
+
+# ===== Ascend / vLLM 关键参数 =====
+tensor_parallel_size: 4
+enforce_eager: True
+block_size: 128
+gpu_memory_utilization: 0.7
+
+# ===== 测试用例 =====
+test_cases:
+  - name: "Mixtral-8x7B-Instruct-v0.1-TP4-Case"
+    model: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      VLLM_USE_V1: "1"
+      HCCL_BUFFSIZE: "200"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--max-model-len"
+      - "4096"
+      - "--dtype"
+      - "float16"
+      - "--trust-remote-code"
+      - "--enforce-eager"
+      - "--block-size"
+      - "128"
+      - "--gpu-memory-utilization"
+      - "0.7"

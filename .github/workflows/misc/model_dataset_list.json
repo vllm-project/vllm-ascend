@@ -150,6 +150,7 @@
       "mistralai/Ministral-3-8B-Instruct-2512-BF16",
       "mistralai/Mistral-7B-Instruct-v0.1",
       "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+      "mistralai/Mixtral-8x7B-Instruct-v0.1",
       "mlx-community/DeepSeek-V3-3bit-bf16",
       "moonshotai/Kimi-K2-Thinking",
       "moonshotai/Kimi-Linear-48B-A3B-Instruct",
