@@ -1,9 +1,36 @@
+import sys
+import unittest
 from contextlib import nullcontext
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend._310p.sample import sampler as sampler_310p
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+if "vllm" not in sys.modules:
+    vllm_module = ModuleType("vllm")
+    vllm_module.envs = SimpleNamespace(VLLM_BATCH_INVARIANT=False)
+    sys.modules["vllm"] = vllm_module
+    sys.modules["vllm.envs"] = vllm_module.envs
+
+if "vllm_ascend.sample.sampler" not in sys.modules:
+    sample_sampler_module = ModuleType("vllm_ascend.sample.sampler")
+    sample_sampler_module.DEFAULT_LOGPROBS_MODE = "raw_logprobs"
+    sample_sampler_module.AscendSampler = type("AscendSampler", (), {})
+    sample_sampler_module.AscendTopKTopPSampler = type("AscendTopKTopPSampler", (), {})
+    sys.modules["vllm_ascend.sample.sampler"] = sample_sampler_module
+
+if "vllm_ascend.utils" not in sys.modules:
+    utils_module = ModuleType("vllm_ascend.utils")
+    utils_module.global_stream = lambda: MagicMock()
+    utils_module.npu_stream_switch = lambda _: nullcontext()
+    sys.modules["vllm_ascend.utils"] = utils_module
+
+from vllm_ascend._310p.sample import sampler as sampler_310p  # noqa: E402
 
 
 class _FakeRow:
@@ -48,74 +75,87 @@ class _FakeCPUGenerator:
         self.seed = seed
 
 
-def test_random_sample_310p_reuse_cpu_generator_cache():
-    sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
-    probs = MagicMock()
-    probs.div_.return_value = probs
-    probs.argmax.return_value = probs
-    probs.view.return_value = torch.tensor([0])
+class TestSampler310pStandalone(unittest.TestCase):
+    def tearDown(self):
+        sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
 
-    fake_q_first = _FakeQ(batch_size=2)
-    fake_q_second = _FakeQ(batch_size=2)
+    def test_random_sample_310p_reuse_cpu_generator_cache(self):
+        sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
+        probs = MagicMock()
+        probs.div_.return_value = probs
+        probs.argmax.return_value = probs
+        probs.view.return_value = torch.tensor([0])
 
-    npu_stream = MagicMock()
-    generator = MagicMock()
-    generator.get_state.return_value = b"state"
-    generator.initial_seed.return_value = 7
-    generators = {1: generator}
+        fake_q_first = _FakeQ(batch_size=2)
+        fake_q_second = _FakeQ(batch_size=2)
 
-    with (
-        patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
-        patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-        patch.object(sampler_310p.torch, "empty_like", side_effect=[fake_q_first, fake_q_second]),
-        patch.object(sampler_310p.torch, "Generator", side_effect=_FakeCPUGenerator) as gen_ctor,
-        patch.object(sampler_310p.torch.npu, "current_stream", return_value=npu_stream),
-    ):
-        sampler_310p._random_sample_310p(probs, generators)
-        sampler_310p._random_sample_310p(probs, generators)
+        npu_stream = MagicMock()
+        generator = MagicMock()
+        generator.get_state.return_value = b"state"
+        generator.initial_seed.return_value = 7
+        generators = {1: generator}
 
-    assert gen_ctor.call_count == 1
-    assert 1 in sampler_310p._CPU_GENERATOR_CACHE_310P
-    cached_cpu_generator = sampler_310p._CPU_GENERATOR_CACHE_310P[1]
-    assert fake_q_first.rows[1].generators[0] is cached_cpu_generator
-    assert fake_q_second.rows[1].generators[0] is cached_cpu_generator
-    assert cached_cpu_generator.state == b"state"
-    assert cached_cpu_generator.seed is None
-    assert npu_stream.wait_stream.call_count == 2
+        with (
+            patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
+            patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
+            patch.object(sampler_310p.torch, "empty_like", side_effect=[fake_q_first, fake_q_second]),
+            patch.object(sampler_310p.torch, "Generator", side_effect=_FakeCPUGenerator) as gen_ctor,
+            patch.object(
+                sampler_310p.torch,
+                "npu",
+                SimpleNamespace(current_stream=MagicMock(return_value=npu_stream)),
+                create=True,
+            ),
+        ):
+            sampler_310p._random_sample_310p(probs, generators)
+            sampler_310p._random_sample_310p(probs, generators)
 
-    sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
+        self.assertEqual(gen_ctor.call_count, 1)
+        self.assertIn(1, sampler_310p._CPU_GENERATOR_CACHE_310P)
+        cached_cpu_generator = sampler_310p._CPU_GENERATOR_CACHE_310P[1]
+        self.assertIs(fake_q_first.rows[1].generators[0], cached_cpu_generator)
+        self.assertIs(fake_q_second.rows[1].generators[0], cached_cpu_generator)
+        self.assertEqual(cached_cpu_generator.state, b"state")
+        self.assertIsNone(cached_cpu_generator.seed)
+        self.assertEqual(npu_stream.wait_stream.call_count, 2)
+
+    def test_random_sample_310p_fallback_to_initial_seed_when_set_state_failed(self):
+        sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
+        probs = MagicMock()
+        probs.div_.return_value = probs
+        probs.argmax.return_value = probs
+        probs.view.return_value = torch.tensor([1])
+
+        fake_q = _FakeQ(batch_size=1)
+        npu_stream = MagicMock()
+        generator = MagicMock()
+        generator.get_state.side_effect = RuntimeError("state read failed")
+        generator.initial_seed.return_value = 1234
+        generators = {0: generator}
+
+        class _FailSetStateCPUGenerator(_FakeCPUGenerator):
+            def set_state(self, state):
+                raise RuntimeError("state set failed")
+
+        with (
+            patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
+            patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
+            patch.object(sampler_310p.torch, "empty_like", return_value=fake_q),
+            patch.object(sampler_310p.torch, "Generator", side_effect=_FailSetStateCPUGenerator),
+            patch.object(
+                sampler_310p.torch,
+                "npu",
+                SimpleNamespace(current_stream=MagicMock(return_value=npu_stream)),
+                create=True,
+            ),
+        ):
+            sampler_310p._random_sample_310p(probs, generators)
+
+        cached_cpu_generator = sampler_310p._CPU_GENERATOR_CACHE_310P[0]
+        self.assertEqual(cached_cpu_generator.seed, 1234)
+        self.assertIs(fake_q.rows[0].generators[0], cached_cpu_generator)
+        self.assertEqual(npu_stream.wait_stream.call_count, 1)
 
 
-def test_random_sample_310p_fallback_to_initial_seed_when_set_state_failed():
-    sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
-    probs = MagicMock()
-    probs.div_.return_value = probs
-    probs.argmax.return_value = probs
-    probs.view.return_value = torch.tensor([1])
-
-    fake_q = _FakeQ(batch_size=1)
-    npu_stream = MagicMock()
-    generator = MagicMock()
-    generator.get_state.side_effect = RuntimeError("state read failed")
-    generator.initial_seed.return_value = 1234
-    generators = {0: generator}
-
-    class _FailSetStateCPUGenerator(_FakeCPUGenerator):
-        def set_state(self, state):
-            raise RuntimeError("state set failed")
-
-    with (
-        patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
-        patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-        patch.object(sampler_310p.torch, "empty_like", return_value=fake_q),
-        patch.object(sampler_310p.torch, "Generator", side_effect=_FailSetStateCPUGenerator),
-        patch.object(sampler_310p.torch.npu, "current_stream", return_value=npu_stream),
-    ):
-        sampler_310p._random_sample_310p(probs, generators)
-
-    cached_cpu_generator = sampler_310p._CPU_GENERATOR_CACHE_310P[0]
-    assert cached_cpu_generator.seed == 1234
-    assert fake_q.rows[0].generators[0] is cached_cpu_generator
-    assert npu_stream.wait_stream.call_count == 1
-
-    sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
+if __name__ == "__main__":
+    unittest.main()
