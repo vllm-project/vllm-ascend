@@ -1,0 +1,49 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "DeepSeek-V2-Lite-Chat"
+    model: "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    envs:
+      VLLM_VERSION: "0.19.1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      HCCL_BUFFSIZE: "256"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--enable-expert-parallel"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--pipeline-parallel-size"
+      - "2"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--gpu-memory-utilization"
+      - "0.7"
+      - "--trust-remote-code"
+      - "--max-model-len"
+      - "8192"
+      - "--block_size"
+      - "16"
+      - "--enable-chunked-prefill"
+      - "--disable-log-stats"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1, 2, 4]}'
+      - "--distributed-executor-backend"
+      - "mp"
+       
+    benchmarks:
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 4096
+        batch_size: 8
+        baseline: 95
+        threshold: 5
+

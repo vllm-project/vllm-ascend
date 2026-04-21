@@ -56,6 +56,7 @@ show_vllm_info() {
     cd "$WORKSPACE"
     echo "Installed vLLM-related Python packages:"
     pip list | grep vllm || echo "No vllm packages found."
+    pip show transformers
 
     echo ""
     echo "============================"
@@ -138,9 +139,21 @@ checkout_src() {
     echo "====> Checkout source code"
     mkdir -p "$WORKSPACE"
     cd "$WORKSPACE"
-    pip uninstall -y vllm-ascend || true
+    local vllm_remote_url="https://github.com/vllm-project/vllm.git"
+    local vllm_ref="v0.19.1"
+    pip uninstall -y vllm vllm-ascend|| true
     cp -r "$WORKSPACE/vllm-ascend/benchmark" /tmp/aisbench-backup || true
+    rm -rf "$WORKSPACE/vllm"
     rm -rf "$WORKSPACE/vllm-ascend"
+
+    if [ ! -d "$WORKSPACE/vllm" ]; then
+        echo "Cloning vllm from $vllm_remote_url (ref: $vllm_ref)"
+        git clone --depth 1 --branch "$vllm_ref" "$vllm_remote_url" "$WORKSPACE/vllm"
+    fi
+
+    local actual_vllm_sha
+    actual_vllm_sha=$(git -C "$WORKSPACE/vllm" rev-parse HEAD)
+    echo "Validated vllm checkout: $vllm_ref ($actual_vllm_sha)"
 
     if [ ! -d "$WORKSPACE/vllm-ascend" ]; then
         echo "Cloning vllm-ascend from $VLLM_ASCEND_REMOTE_URL"
@@ -159,6 +172,7 @@ checkout_src() {
 
 install_vllm_ascend() {
     echo "====> Install vllm-ascend"
+    VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
     pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
     pip install -e "$WORKSPACE/vllm-ascend"
 }
@@ -176,6 +190,7 @@ install_aisbench() {
         -r requirements/extra.txt
 
     python3 -m pip cache purge || echo "WARNING: pip cache purge failed, but proceeding..."
+    pip install transformers==5.5.3
 
 }
 
