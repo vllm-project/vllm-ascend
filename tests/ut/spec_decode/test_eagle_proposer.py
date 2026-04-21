@@ -142,6 +142,21 @@ class TestEagleProposerInitialization(TestBase):
             expected_max_num_tokens = proposer.max_num_tokens
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 2048))
 
+    def test_initialization_draft_model(self):
+        self.vllm_config.speculative_config.method = "draft_model"
+        self.vllm_config.speculative_config.parallel_drafting = False
+        # TODO(klyzhenko-vadim): remove when target_tp != draft_tp will be supported.
+        self.vllm_config.speculative_config.draft_parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.target_parallel_config.tensor_parallel_size = 1
+        init_ascend_config(self.vllm_config)
+
+        with set_current_vllm_config(self.vllm_config):
+            proposer = AscendDraftModelProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+
+            self.assertTrue(isinstance(proposer, DraftModelProposer))
+            self.assertFalse(proposer.pass_hidden_states_to_model)
+            self.assertTrue(proposer.needs_extra_input_slots)
+
 
 @unittest.skip("Skip due to the changes in #7153, fix me later")
 class TestEagleProposerLoadModel(TestBase):
