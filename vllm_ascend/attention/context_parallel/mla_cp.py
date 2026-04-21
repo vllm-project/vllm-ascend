@@ -647,11 +647,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
             lst = actual_seq_lengths_q[:num_decodes]
             actual_seq_lengths_q = list(np.diff([0] + lst))
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
-            q_nope = q_nope.view(-1, query_len, num_heads, q_nope.shape[-1]).contiguous()
-            q_pe = q_pe.view(-1, query_len, num_heads, q_pe.shape[-1])
+            q_nope = q_nope.view(num_decodes, -1, num_heads, q_nope.shape[-1]).contiguous()
+            q_pe = q_pe.view(num_decodes, -1, num_heads, q_pe.shape[-1])
             sparse_mode = 0
             
-            new_mask = torch.ones(q_nope.shape[0], query_len, 16384, dtype=torch.bool, device=q_nope.device)
+            new_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool, device=q_nope.device)
             
             
             spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes]  # type:ignore
