@@ -13,6 +13,10 @@ on:
       - 'docs/source/**/*.md'
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 permissions:
   contents: read
 
@@ -28,6 +32,10 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     timeout-minutes: 30
     steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update -y && apt-get install git -y
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -39,13 +47,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
           git diff --name-only --diff-filter=AMR \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}" \
+            "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
             -- docs/source > changed-docs-all.txt
 
           grep -E '\.md$' changed-docs-all.txt \
-            | sed 's#^docs/source/##' > changed-docs.txt || true
+            | sed 's#^docs/##' > changed-docs.txt || true
 
           if [ ! -s changed-docs.txt ]; then
             echo "has_linkcheck_files=false" >> "$GITHUB_OUTPUT"
@@ -73,9 +82,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t changed_docs < changed-docs.txt
-          sphinx-build -b linkcheck docs/source docs/_build/linkcheck \
-            -W --keep-going "${changed_docs[@]}"
+          changed_docs=()
+          while IFS= read -r changed_doc; do
+            [ -n "$changed_doc" ] || continue
+            changed_docs+=("$changed_doc")
+          done < changed-docs.txt
+
+          cd docs
+          sphinx-build -b linkcheck -W --keep-going \
+            source _build/linkcheck "${changed_docs[@]}"
 
       - name: Upload linkcheck reports
         if: ${{ always() && (github.event_name != 'pull_request' || steps.changed-docs.outputs.has_linkcheck_files == 'true') }}
