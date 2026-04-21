@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 
 
-from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.conftest import VllmRunner
 
 
 def test_qwen3_moe_tp4_fp16():
