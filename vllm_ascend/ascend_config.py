@@ -116,21 +116,18 @@ class AscendConfig:
             assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
             self.pd_tp_ratio = prefill_tp_size // decode_tp_size
             if self.pd_tp_ratio > 1:
-                try:
-                    # only support Qwen model now
-                    # TODO: use a more robust method to get kv_head_num
-                    num_kv_head = vllm_config.model_config.hf_text_config.num_key_value_heads
-                    self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
-                    prefill_tp_size = min(prefill_tp_size, num_kv_head)
-                    decode_tp_size = min(decode_tp_size, num_kv_head)
-                    self.pd_head_ratio = prefill_tp_size // decode_tp_size
-                except Exception:
+                # Total KV heads from vLLM's resolved architecture (ModelArchConfigConvertor).
+                num_kv_head = vllm_config.model_config.get_total_num_kv_heads()
+                if not num_kv_head or num_kv_head < 1:
                     raise ValueError(
-                        "The text_config extracted from the model config does not have "
-                        "`num_key_value_heads` attribute. This indicates a mismatch "
-                        "between the model config and vLLM's expectations. Please "
-                        "ensure that the model config is compatible with vLLM."
+                        "Could not determine a positive total KV head count for PD "
+                        "disaggregation (pd_tp_ratio > 1). Check that the model config "
+                        "is compatible with vLLM."
                     )
+                self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
+                prefill_tp_size = min(prefill_tp_size, num_kv_head)
+                decode_tp_size = min(decode_tp_size, num_kv_head)
+                self.pd_head_ratio = prefill_tp_size // decode_tp_size
 
             if self.pd_tp_ratio == 0:
                 raise AssertionError("Only support P node tp size lagger then D node tp size")
