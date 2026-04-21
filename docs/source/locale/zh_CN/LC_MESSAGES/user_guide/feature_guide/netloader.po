@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-01-22 16:18+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -160,6 +160,7 @@ msgid "List"
 msgstr "列表"
 
 #: ../../source/user_guide/feature_guide/netloader.md
+#, python-brace-format
 msgid ""
 "Weight data sources. Each item is a map with `device_id` and `sources`, "
 "specifying the rank and its endpoints (IP:port). <br>Example: "
@@ -254,6 +255,7 @@ msgid "Prefix for writing per-rank listener address/port files in server mode."
 msgstr "在服务器模式下，写入每个 rank 监听地址/端口文件的前缀。"
 
 #: ../../source/user_guide/feature_guide/netloader.md
+#, python-brace-format
 msgid ""
 "If set, each rank writes to `{OUTPUT_PREFIX}{RANK}.txt` (text), content ="
 " `IP:Port`."
@@ -336,16 +338,15 @@ msgid ""
 "If Netloader is used, **each worker process** must bind a listening port."
 " That port may be user-specified or assigned randomly. If user-specified,"
 " ensure it is available."
-msgstr ""
-"如果使用 Netloader，**每个工作进程**都必须绑定一个监听端口。该端口可以由用户指定或随机分配。如果是用户指定的，请确保其可用。"
+msgstr "如果使用 Netloader，**每个工作进程**都必须绑定一个监听端口。该端口可以由用户指定或随机分配。如果是用户指定的，请确保其可用。"
 
 #: ../../source/user_guide/feature_guide/netloader.md:96
 msgid ""
-"Netloader requires extra HBM memory to establish HCCL connections (i.e. "
-"`HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve sufficient "
-"capacity (e.g. via `--gpu-memory-utilization`)."
+"Netloader requires extra on-chip memory memory to establish HCCL "
+"connections (i.e. `HCCL_BUFFERSIZE`, default ~200 MB). Users should "
+"reserve sufficient capacity (e.g. via `--gpu-memory-utilization`)."
 msgstr ""
-"Netloader 需要额外的 HBM 内存来建立 HCCL 连接（即 `HCCL_BUFFERSIZE`，默认约为 200 "
+"Netloader 需要额外的片上内存来建立 HCCL 连接（即 `HCCL_BUFFERSIZE`，默认约为 200 "
 "MB）。用户应预留足够的容量（例如通过 `--gpu-memory-utilization`）。"
 
 #: ../../source/user_guide/feature_guide/netloader.md:97

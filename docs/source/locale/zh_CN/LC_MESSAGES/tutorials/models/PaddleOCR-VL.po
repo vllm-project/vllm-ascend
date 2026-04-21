@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -35,9 +35,9 @@ msgid ""
 "resolution visual encoder with the ERNIE-4.5-0.3B language model to "
 "enable accurate element recognition."
 msgstr ""
-"PaddleOCR-VL 是一个针对文档解析的 SOTA 级且资源高效的模型。其核心组件是 PaddleOCR-VL-0.9B，"
-"这是一个紧凑而强大的视觉语言模型（VLM），它将 NaViT 风格的动态分辨率视觉编码器与 ERNIE-4.5-0.3B 语言模型集成，"
-"以实现精确的元素识别。"
+"PaddleOCR-VL 是一个针对文档解析的 SOTA 级且资源高效的模型。其核心组件是 PaddleOCR-"
+"VL-0.9B，这是一个紧凑而强大的视觉语言模型（VLM），它将 NaViT 风格的动态分辨率视觉编码器与 ERNIE-4.5-0.3B "
+"语言模型集成，以实现精确的元素识别。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:7
 msgid ""
@@ -46,9 +46,7 @@ msgid ""
 "preparation, single-node deployment, and functional verification. It is "
 "designed to help users quickly complete model deployment and "
 "verification."
-msgstr ""
-"本文档提供了模型的完整部署和验证的详细工作流程，包括支持的特性、环境准备、单节点部署和功能验证。"
-"旨在帮助用户快速完成模型的部署和验证。"
+msgstr "本文档提供了模型的完整部署和验证的详细工作流程，包括支持的特性、环境准备、单节点部署和功能验证。旨在帮助用户快速完成模型的部署和验证。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:9
 msgid "Supported Features"
@@ -59,15 +57,13 @@ msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the"
 " model's supported feature matrix."
-msgstr ""
-"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+msgstr "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:13
 msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
 "the feature's configuration."
-msgstr ""
-"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:15
 msgid "Environment Preparation"
@@ -81,7 +77,9 @@ msgstr "模型权重"
 msgid ""
 "`PaddleOCR-VL-0.9B`: [PaddleOCR-"
 "VL-0.9B](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL)"
-msgstr "`PaddleOCR-VL-0.9B`：[PaddleOCR-VL-0.9B](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL)"
+msgstr ""
+"`PaddleOCR-VL-0.9B`：[PaddleOCR-"
+"VL-0.9B](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL)"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:21
 msgid ""
@@ -103,13 +101,14 @@ msgid ""
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md"
+"#set-up-using-docker)。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:51
 msgid ""
-"The 310P device is supported from version 0.15.0rc1. You need to select "
-"the corresponding image for installation."
-msgstr "310P 设备从 0.15.0rc1 版本开始支持。您需要选择相应的镜像进行安装。"
+"The Atlas 300 inference products are supported from version 0.15.0rc1. "
+"You need to select the corresponding image for installation."
+msgstr "Atlas 300 推理产品从 0.15.0rc1 版本开始支持。您需要选择相应的镜像进行安装。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:54
 msgid "Deployment"
@@ -126,8 +125,9 @@ msgstr "单 NPU（PaddleOCR-VL）"
 #: ../../source/tutorials/models/PaddleOCR-VL.md:60
 msgid ""
 "PaddleOCR-VL supports single-node single-card deployment on the 910B4 and"
-" 310P platform. Follow these steps to start the inference service:"
-msgstr "PaddleOCR-VL 支持在 910B4 和 310P 平台上进行单节点单卡部署。按照以下步骤启动推理服务："
+" Atlas 300 inference products platform. Follow these steps to start the "
+"inference service:"
+msgstr "PaddleOCR-VL 支持在 910B4 和 Atlas 300 推理产品平台上进行单节点单卡部署。按照以下步骤启动推理服务："
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:62
 msgid ""
@@ -148,18 +148,20 @@ msgid "Run the following script to start the vLLM server on single 910B4:"
 msgstr "运行以下脚本在单张 910B4 上启动 vLLM 服务器："
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md
-msgid "310P"
-msgstr "310P"
+msgid "Atlas 300 inference products"
+msgstr "Atlas 300 推理产品"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:97
-msgid "Run the following script to start the vLLM server on single 310P:"
-msgstr "运行以下脚本在单张 310P 上启动 vLLM 服务器："
+msgid ""
+"Run the following script to start the vLLM server on single Atlas 300 "
+"inference products:"
+msgstr "运行以下脚本在单张 Atlas 300 推理产品上启动 vLLM 服务器："
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:116
 msgid ""
 "The `--max_model_len` option is added to prevent errors when generating "
-"the attention operator mask on the 310P device."
-msgstr "添加 `--max_model_len` 选项是为了防止在 310P 设备上生成注意力算子掩码时出错。"
+"the attention operator mask on the Atlas 300 inference products."
+msgstr "添加 `--max_model_len` 选项是为了防止在 Atlas 300 推理产品上生成注意力算子掩码时出错。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:121
 msgid "Multiple NPU (PaddleOCR-VL)"
@@ -209,9 +211,8 @@ msgid ""
 "model, making it more consistent with the examples provided by the "
 "official PaddlePaddle documentation."
 msgstr ""
-"在上面的示例中，我们演示了如何使用 vLLM 推理 PaddleOCR-VL-0.9B 模型。"
-"通常，我们还需要集成 PP-DocLayoutV2 模型，以充分发挥 PaddleOCR-VL 模型的能力，"
-"使其更符合 PaddlePaddle 官方文档提供的示例。"
+"在上面的示例中，我们演示了如何使用 vLLM 推理 PaddleOCR-VL-0.9B 模型。通常，我们还需要集成 PP-DocLayoutV2 "
+"模型，以充分发挥 PaddleOCR-VL 模型的能力，使其更符合 PaddlePaddle 官方文档提供的示例。"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:205
 msgid ""
@@ -261,17 +262,11 @@ msgstr "OM 推理"
 
 #: ../../source/tutorials/models/PaddleOCR-VL.md:264
 msgid ""
-"The 310P device supports only the OM model inference. For details about "
-"the process, see the guide provided in "
+"The Atlas 300 inference products support only the OM model inference. For"
+" details about the process, see the guide provided in "
 "[ModelZoo](https://gitcode.com/Ascend/ModelZoo-"
 "PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2)."
 msgstr ""
-"310P 设备仅支持 OM 模型推理。有关过程的详细信息，请参阅 "
-"[ModelZoo](https://gitcode.com/Ascend/ModelZoo-"
-"PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2) 中提供的指南。"
-
-#: ../../source/tutorials/models/PaddleOCR-VL.md:268
-msgid ""
-"Using vLLM as the backend, combined with PP-DocLayoutV2 for offline "
-"inference"
-msgstr "使用 vLLM 作为后端，结合 PP-DocLayoutV2 进行离线推理"
+"Atlas 300 推理产品仅支持 OM 模型推理。有关过程的详细信息，请参阅 [ModelZoo](https://gitcode.com/Ascend"
+"/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2) "
+"中提供的指南。"
