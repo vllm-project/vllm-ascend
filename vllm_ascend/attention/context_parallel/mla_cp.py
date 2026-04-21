@@ -652,7 +652,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             
             new_mask = torch.ones(q_nope.shape[0], query_len, 16384, dtype=torch.bool, device=q_nope.device)
             
-            num_decodes = len(actual_seq_lengths)
+            num_decodes = len(actual_seq_lengths_q)
             spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes]  # type:ignore
             for i, mask in enumerate(spec_attn_mask):
                 B = mask.shape[0]  # seq_len
