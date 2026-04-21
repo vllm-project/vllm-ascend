@@ -112,8 +112,12 @@ class TestAscendModelSlimConfig(TestBase):
         mock_config.model_config.hf_config.model_type = None
         mock_scheme = MagicMock()
         with (
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=mock_config
+            ),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendKVCacheMethod", return_value=MagicMock()
             ) as mock_ascend_kvcache,

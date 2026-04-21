@@ -3,10 +3,9 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.nn as nn
+from vllm.config import VllmConfig, KVTransferConfig
 
 from tests.ut.base import TestBase
-
-from vllm.config import VllmConfig, KVTransferConfig
 
 
 class TestWeightLoader(unittest.TestCase):
@@ -663,9 +662,13 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         layer = nn.Module()
         scale_val = torch.full((num_kv_heads * head_size,), 2.0, dtype=self.original_dtype)
         layer.k_cache_scale = nn.Parameter(scale_val.clone(), requires_grad=False)
-        layer.k_cache_offset = nn.Parameter(torch.zeros(num_kv_heads * head_size, dtype=self.original_dtype), requires_grad=False)
+        layer.k_cache_offset = nn.Parameter(
+            torch.zeros(num_kv_heads * head_size, dtype=self.original_dtype), requires_grad=False
+        )
         layer.v_cache_scale = nn.Parameter(scale_val.clone(), requires_grad=False)
-        layer.v_cache_offset = nn.Parameter(torch.zeros(num_kv_heads * head_size, dtype=self.original_dtype), requires_grad=False)
+        layer.v_cache_offset = nn.Parameter(
+            torch.zeros(num_kv_heads * head_size, dtype=self.original_dtype), requires_grad=False
+        )
         impl._prepare_c8_scales(layer, torch.device("cpu"))
         key = torch.full((1, num_kv_heads, head_size), 4.0, dtype=self.original_dtype)
         value = torch.full((1, num_kv_heads, head_size), 4.0, dtype=self.original_dtype)
