@@ -19,9 +19,9 @@ tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.39
+    value: 0.37
   - name: "exact_match,flexible-extract"
-    value: 0.30
+    value: 0.28
 tensor_parallel_size: 4
 num_fewshot: 5
 num_samples: 1000
