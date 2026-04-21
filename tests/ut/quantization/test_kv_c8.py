@@ -619,14 +619,31 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
 
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
-    def test_prepare_c8_scales_creates_bnsd_shape(self, mock_tp_size, mock_tp_rank):
+    def test_prepare_c8_scales_creates_nz_shape(self, mock_tp_size, mock_tp_rank):
+        """NZ perchannel requires scale shape (KV_N, 1, D), not (1, KV_N, 1, D)."""
         num_kv_heads, head_size = 4, 8
         impl = self._make_impl(num_kv_heads, head_size)
         layer = self._make_layer(num_kv_heads, head_size)
         impl._prepare_c8_scales(layer, torch.device("cpu"))
-        self.assertEqual(layer._c8_k_aq_scale.shape, (1, num_kv_heads, 1, head_size))
-        self.assertEqual(layer._c8_v_aq_scale.shape, (1, num_kv_heads, 1, head_size))
+        self.assertEqual(layer._c8_k_aq_scale.shape, (num_kv_heads, 1, head_size))
+        self.assertEqual(layer._c8_v_aq_scale.shape, (num_kv_heads, 1, head_size))
         self.assertEqual(layer._c8_k_aq_scale.dtype, torch.bfloat16)
+        # offset tensors must NOT be built for FIA (NZ format does not accept them)
+        self.assertFalse(hasattr(layer, "_c8_k_aq_offset"))
+        self.assertFalse(hasattr(layer, "_c8_v_aq_offset"))
+
+    @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
+    @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
+    def test_prepare_c8_scales_rejects_nonzero_offset(self, mock_tp_size, mock_tp_rank):
+        """Non-zero offset means asymmetric quant; NZ format cannot dequant it correctly."""
+        num_kv_heads, head_size = 2, 8
+        impl = self._make_impl(num_kv_heads, head_size)
+        layer = self._make_layer(num_kv_heads, head_size)
+        # Inject a non-zero k_cache_offset to simulate asymmetric quantization
+        layer.k_cache_offset.data.fill_(1.0)
+        with self.assertRaises(ValueError) as ctx:
+            impl._prepare_c8_scales(layer, torch.device("cpu"))
+        self.assertIn("offset", str(ctx.exception).lower())
 
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
@@ -667,27 +684,36 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
 
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
-    def test_dequant_paged_kv_to_dense_round_trip(self, mock_tp_size, mock_tp_rank):
-        """With scale=1, offset=0: dequant(int8) == float(int8)."""
-        num_kv_heads, head_size = 2, 4
-        block_size = 32
-        num_blocks = 2
-        H = num_kv_heads * head_size
+    def test_get_kv_cache_nz_layout(self, mock_tp_size, mock_tp_rank):
+        """_get_kv_cache_nz converts [nb, bs, kv_n, D] to [nb, kv_n, D//32, bs, 32]."""
+        # NZ constraints: block_size in {128, 512}, head_size % 32 == 0
+        num_kv_heads, head_size = 2, 64
+        block_size, num_blocks = 128, 3
         impl = self._make_impl(num_kv_heads, head_size)
-        layer = self._make_layer(num_kv_heads, head_size)
-        impl._prepare_c8_scales(layer, torch.device("cpu"))
 
-        key_int8 = torch.randint(-10, 10, (num_blocks, block_size, H), dtype=torch.int8)
-        value_int8 = torch.randint(-10, 10, (num_blocks, block_size, H), dtype=torch.int8)
-        seq_lens = [32, 32]
-        block_table = torch.tensor([[0], [1]], dtype=torch.long)
+        # Simulate the vLLM-native paged cache layout [num_block, block_size, kv_n, D]
+        cache_k = torch.arange(
+            num_blocks * block_size * num_kv_heads * head_size, dtype=torch.int8
+        ).view(num_blocks, block_size, num_kv_heads, head_size)
+        cache_v = cache_k.clone()
+        impl.key_cache = cache_k
+        impl.value_cache = cache_v
 
-        dense_k, dense_v = impl._dequant_paged_kv_to_dense(
-            key_int8, value_int8, block_table, seq_lens, torch.float32, layer
+        key_nz, value_nz, bs = impl._get_kv_cache_nz()
+
+        # Shape check: [num_block, KV_N, D//32, block_size, 32]
+        expected_shape = (num_blocks, num_kv_heads, head_size // 32, block_size, 32)
+        self.assertEqual(key_nz.shape, expected_shape)
+        self.assertEqual(value_nz.shape, expected_shape)
+        self.assertEqual(bs, block_size)
+
+        # Data round-trip: permute NZ back to ND and compare with original
+        key_back = (
+            key_nz.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(num_blocks, block_size, num_kv_heads, head_size)
         )
-        expected_k = key_int8.view(-1, num_kv_heads, head_size).float()
-        self.assertEqual(dense_k.shape, (64, num_kv_heads, head_size))
-        self.assertTrue(torch.allclose(dense_k, expected_k))
+        self.assertTrue(torch.equal(key_back, cache_k))
 
 
 if __name__ == "__main__":
