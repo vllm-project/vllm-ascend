@@ -286,7 +286,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.runner.pcp_size = 1
         self.runner.dcp_size = 1
         self.runner.pin_memory = False
-        self.runner._sync_metadata_across_dp.return_value = (8, torch.tensor([8]), False)
+        self.runner._sync_metadata_across_dp.return_value = (8, torch.tensor([8]), CUDAGraphMode.NONE)
 
         self.vllm_config.cache_config.block_size = 16
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -734,7 +734,7 @@ class TestEagleProposerPropose:
             self.proposer.method = "mtp"
             if not self.is_decode(flag_prefill_decode):
                 num_actual_tokens = 9
-        self.runner._sync_metadata_across_dp.return_value = (num_actual_tokens, None, False)
+        self.runner._sync_metadata_across_dp.return_value = (num_actual_tokens, None, CUDAGraphMode.NONE)
         self.proposer.model = MagicMock(spec=Eagle3LlamaForCausalLM)
         custom_combined_hidden_states = torch.zeros(num_actual_tokens, 4096, device=self.device, dtype=torch.bfloat16)
         self.proposer.model.combine_hidden_states.return_value = custom_combined_hidden_states
