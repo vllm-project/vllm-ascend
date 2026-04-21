@@ -621,7 +621,7 @@ class PCPManager:
                 )
             req_indices_mtp = np.concatenate(req_indices_split)
             positions_mtp = np.concatenate(positions_split)
-            input_batch.block_table.compute_slot_mapping(req_indices_mtp, positions_mtp)
+            input_batch.block_table.compute_slot_mapping_draft(req_indices_mtp, positions_mtp)
             mtp_slot_ori = input_batch.block_table.block_tables[0].slot_mapping.cpu[:num_tokens_mtp]
             unpad_mask = np.repeat(False, num_tokens_mtp_pad)
             unpad_mask[:: self.pcp_world_size] = True
