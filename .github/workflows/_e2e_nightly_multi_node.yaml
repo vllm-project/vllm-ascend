@@ -419,7 +419,7 @@ jobs:
       - name: Upload benchmark results (GitHub Artifacts)
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-test-benchmark-results-${{ steps.vars.outputs.benchmark_job_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /tmp/benchmark_results/
