@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import io
 import json
 import logging
 import os
@@ -201,7 +203,8 @@ _PERF_METRIC_RENAME: dict[str, str] = {
 def _extract_dtype(config: SingleNodeConfig) -> str:
     """Determine weight dtype: w8a8 if model name contains 'w8a8' and --quantization ascend is set, else bf16."""
     has_w8a8 = "w8a8" in config.model.lower()
-    has_quant_ascend = _extract_server_cmd_value(config.server_cmd, "--quantization") == "ascend"
+    cmd = config.server_cmds[0] if config.server_cmds else config.server_cmd
+    has_quant_ascend = _extract_server_cmd_value(cmd, "--quantization") == "ascend"
     return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
 
 
@@ -269,9 +272,11 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
     return features
 
 
-def _build_serve_cmd(config: SingleNodeConfig) -> dict[str, str]:
+def _build_serve_cmd(config: SingleNodeConfig, instance_idx: int = 0) -> dict[str, str]:
     """Build serve_cmd dict with mix key for single-node deployments."""
-    args = " ".join(config.server_cmd)
+    cmds = config.server_cmds
+    cmd = cmds[instance_idx] if cmds and instance_idx < len(cmds) else config.server_cmd
+    args = " ".join(cmd)
     return {"mix": f"vllm serve {config.model} {args}".strip()}
 
 
@@ -355,7 +360,7 @@ def _all_passed(case_configs: list[dict[str, Any]], results: list[Any]) -> bool:
     return all(_task_passed(cfg, res) for cfg, res in zip(case_configs, results))
 
 
-def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[str], results: list[Any], name_suffix: str = "") -> None:
+def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[str], results: list[Any], name_suffix: str = "", instance_idx: int = 0) -> None:
     """Serialize acc & perf benchmark results to a JSON file under benchmark_results/."""
     runner = os.environ.get("VLLM_CI_RUNNER", "")
     case_configs = [config.benchmarks[k] for k in benchmark_keys]
@@ -371,11 +376,11 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         "model_name": config.model,
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
-        "feature": _extract_features(config.server_cmd, config.envs),
+        "feature": _extract_features(config.server_cmds[instance_idx] if config.server_cmds else config.server_cmd, config.envs),
         "vllm_version": vllm.__version__,
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
         "tasks": tasks,
-        "serve_cmd": _build_serve_cmd(config),
+        "serve_cmd": _build_serve_cmd(config, instance_idx),
         "environment": _filter_environment(config.envs),
         "pass_fail": "pass" if passed else "fail",
     }
@@ -392,7 +397,7 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     print(f"Benchmark results saved to {output_path}")
 
 
-def _run_benchmarks(config: SingleNodeConfig, port: int, name_suffix: str = "") -> None:
+def _run_benchmarks(config: SingleNodeConfig, port: int, name_suffix: str = "", instance_idx: int = 0) -> None:
     """Run Aisbench benchmarks and process benchmark-dependent custom assertions."""
     benchmark_keys = [k for k, v in config.benchmarks.items() if v]
     aisbench_cases = [config.benchmarks[k] for k in benchmark_keys]
@@ -405,7 +410,7 @@ def _run_benchmarks(config: SingleNodeConfig, port: int, name_suffix: str = "") 
         aisbench_cases=aisbench_cases,
     )
 
-    _save_benchmark_results_json(config, benchmark_keys, result, name_suffix=name_suffix)
+    _save_benchmark_results_json(config, benchmark_keys, result, name_suffix=name_suffix, instance_idx=instance_idx)
 
     if "benchmark_comparisons" in config.test_content:
         run_benchmark_comparisons(config, result)
@@ -433,16 +438,17 @@ async def test_single_node(config: SingleNodeConfig) -> None:
 
     # Multi-instance mode: two servers on the same card simultaneously
     if config.service_mode == "multi_instance":
+        cmds = config.server_cmds
         with RemoteOpenAIServer(
             model=config.model,
-            vllm_serve_args=config.server_cmd,
+            vllm_serve_args=cmds[0],
             server_port=config.server_port,
             env_dict=config.envs,
             auto_port=False,
         ) as server1:
             with RemoteOpenAIServer(
                 model=config.model,
-                vllm_serve_args=config.server_cmd2,
+                vllm_serve_args=cmds[1],
                 server_port=config.server_port2,
                 env_dict=config.envs,
                 auto_port=False,
@@ -451,8 +457,21 @@ async def test_single_node(config: SingleNodeConfig) -> None:
                     _dispatch_tests(config, server1),
                     _dispatch_tests(config, server2),
                 )
-                _run_benchmarks(config, config.server_port, name_suffix=f"instance1_{config.server_port}")
-                _run_benchmarks(config, config.server_port2, name_suffix=f"instance2_{config.server_port2}")
+                def _run_and_capture(port, name_suffix, instance_idx):
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        _run_benchmarks(config, port, name_suffix=name_suffix, instance_idx=instance_idx)
+                    return buf.getvalue()
+
+                loop = asyncio.get_event_loop()
+                out1, out2 = await asyncio.gather(
+                    loop.run_in_executor(None, lambda: _run_and_capture(config.server_port, f"instance1_{config.server_port}", 0)),
+                    loop.run_in_executor(None, lambda: _run_and_capture(config.server_port2, f"instance2_{config.server_port2}", 1)),
+                )
+                print(f"\n{'='*60}\nBenchmark - Instance 1 (port {config.server_port})\n{'='*60}")
+                print(out1)
+                print(f"\n{'='*60}\nBenchmark - Instance 2 (port {config.server_port2})\n{'='*60}")
+                print(out2)
         return
 
     # Standard OpenAI service mode
