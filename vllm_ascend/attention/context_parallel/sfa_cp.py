@@ -13,6 +13,7 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, Ascen
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import vllm_version_is
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -414,7 +415,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        if vllm_version_is("0.19.1"):
+        if vllm_version_is("0.19.0"):
             weights, _ = self.weights_proj(x)
         else:
             kw, _ = self.wk_weights_proj(x)

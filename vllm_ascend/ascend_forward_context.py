@@ -21,6 +21,7 @@ from vllm_ascend.utils import (
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
     vllm_version_is,
+    vllm_version_is,
 )
 
 
@@ -156,7 +157,7 @@ def set_ascend_forward_context(
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             dp_meta = forward_context.dp_metadata
-            if vllm_version_is("0.19.1"):
+            if vllm_version_is("0.19.0"):
                 max_tokens_across_dp = dp_meta.max_tokens_across_dp_cpu.item()
             else:
                 max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
