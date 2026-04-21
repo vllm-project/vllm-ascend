@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-01-22 18:20+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -48,8 +48,7 @@ msgid ""
 "and have quite different SLO (service level objectives), we need to "
 "implement context parallel separately for them. The major considerations "
 "are:"
-msgstr ""
-"上下文并行主要解决长上下文请求的服务问题。由于预填充（Prefill）和解码（Decode）具有显著不同的特性及服务水平目标（SLO），我们需要分别为它们实现上下文并行。主要考量点包括："
+msgstr "上下文并行主要解决长上下文请求的服务问题。由于预填充（Prefill）和解码（Decode）具有显著不同的特性及服务水平目标（SLO），我们需要分别为它们实现上下文并行。主要考量点包括："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:11
 msgid ""
@@ -70,7 +69,9 @@ msgid ""
 "To learn more about the theory and implementation details of context "
 "parallel, please refer to the [context parallel developer "
 "guide](../../developer_guide/Design_Documents/context_parallel.md)."
-msgstr "欲了解更多关于上下文并行的理论和实现细节，请参阅 [上下文并行开发者指南](../../developer_guide/Design_Documents/context_parallel.md)。"
+msgstr ""
+"欲了解更多关于上下文并行的理论和实现细节，请参阅 "
+"[上下文并行开发者指南](../../developer_guide/Design_Documents/context_parallel.md)。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:16
 msgid "Supported Scenarios"
@@ -130,7 +131,9 @@ msgstr "如何使用上下文并行"
 msgid ""
 "You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and "
 "`decode_context_parallel_size`, refer to the following example:"
-msgstr "您可以通过 `prefill_context_parallel_size` 和 `decode_context_parallel_size` 启用 `PCP` 和 `DCP`，请参考以下示例："
+msgstr ""
+"您可以通过 `prefill_context_parallel_size` 和 `decode_context_parallel_size` 启用"
+" `PCP` 和 `DCP`，请参考以下示例："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:29
 msgid "Offline example:"
@@ -145,7 +148,9 @@ msgid ""
 "The total world size is `tensor_parallel_size` * "
 "`prefill_context_parallel_size`, so the examples above need 4 NPUs for "
 "each."
-msgstr "总的世界大小为 `tensor_parallel_size` * `prefill_context_parallel_size`，因此上述每个示例都需要 4 个 NPU。"
+msgstr ""
+"总的世界大小为 `tensor_parallel_size` * "
+"`prefill_context_parallel_size`，因此上述每个示例都需要 4 个 NPU。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:59
 msgid "Constraints"
@@ -164,6 +169,7 @@ msgid "`tensor_parallel_size >= decode_context_parallel_size`"
 msgstr "`tensor_parallel_size >= decode_context_parallel_size`"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:64
+#, python-format
 msgid "`tensor_parallel_size % decode_context_parallel_size == 0`"
 msgstr "`tensor_parallel_size % decode_context_parallel_size == 0`"
 
@@ -175,13 +181,18 @@ msgstr "对于基于 GQA 的模型，例如 Qwen3-235B："
 msgid ""
 "`(tensor_parallel_size // num_key_value_heads) >= "
 "decode_context_parallel_size`"
-msgstr "`(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`"
+msgstr ""
+"`(tensor_parallel_size // num_key_value_heads) >= "
+"decode_context_parallel_size`"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:67
+#, python-format
 msgid ""
 "`(tensor_parallel_size // num_key_value_heads) % "
 "decode_context_parallel_size == 0`"
-msgstr "`(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`"
+msgstr ""
+"`(tensor_parallel_size // num_key_value_heads) % "
+"decode_context_parallel_size == 0`"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:69
 msgid ""
@@ -190,7 +201,10 @@ msgid ""
 "`cp_kv_cache_interleave_size` must be set to the same value of KV cache "
 "`block_size`(default: 128), which specifies CP to split KV cache in a "
 "block-interleave style. For example:"
-msgstr "在需要传输 KV 缓存的场景（例如 KV 池化、PD 分离）中使用上下文并行时，为简化 KV 缓存传输，必须将 `cp_kv_cache_interleave_size` 设置为与 KV 缓存 `block_size`（默认值：128）相同的值，这指定了上下文并行以块交错方式切分 KV 缓存。例如："
+msgstr ""
+"在需要传输 KV 缓存的场景（例如 KV 池化、PD 分离）中使用上下文并行时，为简化 KV 缓存传输，必须将 "
+"`cp_kv_cache_interleave_size` 设置为与 KV 缓存 "
+"`block_size`（默认值：128）相同的值，这指定了上下文并行以块交错方式切分 KV 缓存。例如："
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:80
 msgid "Experimental Results"
@@ -201,8 +215,11 @@ msgid ""
 "To evaluate the effectiveness of Context Parallel in long sequence LLM "
 "inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, "
 "deploy PD disaggregate instances in the environment of 64 cards Ascend "
-"910C*64G (A3), the configuration and performance data are as follows."
-msgstr "为评估上下文并行在长序列 LLM 推理场景中的有效性，我们使用 **DeepSeek-R1-W8A8** 和 **Qwen3-235B** 模型，在 64 卡 Ascend 910C*64G (A3) 环境下部署 PD 分离实例，配置和性能数据如下。"
+"Atlas A3 inference products*64G (A3), the configuration and performance "
+"data are as follows."
+msgstr ""
+"为评估上下文并行在长序列 LLM 推理场景中的有效性，我们使用 **DeepSeek-R1-W8A8** 和 **Qwen3-235B** "
+"模型，在 64 卡 Ascend Atlas A3 推理产品*64G (A3) 环境下部署 PD 分离实例，配置和性能数据如下。"
 
 #: ../../source/user_guide/feature_guide/context_parallel.md:84
 msgid "DeepSeek-R1-W8A8:"
