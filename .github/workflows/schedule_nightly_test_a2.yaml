@@ -330,7 +330,7 @@ jobs:
     steps:
       - name: Merge all benchmark result artifacts
         continue-on-error: true
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@v7
         with:
           name: nightly-a2
           pattern: nightly-test-benchmark-results-*
