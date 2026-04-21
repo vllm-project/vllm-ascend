@@ -930,7 +930,6 @@ jobs:
           fi
 
       - name: Run vllm-project/vllm-ascend test
-        if: ${{ inputs.contains_310 }}
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
