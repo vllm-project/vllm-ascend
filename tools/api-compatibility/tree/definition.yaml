@@ -1,0 +1,1244 @@
+version: "1.0"
+
+# Global defaults (can be overridden per root)
+defaults:
+    stress_concurrency: 10
+    stress_total_requests: 100
+    health_timeout: 900
+roots:
+    Options:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "Top-level options parameters"
+        children:
+            # #3
+            - param: "--headless"
+              value: true
+            - param: "--no-headless"
+              value: true
+            # #4
+            - param: "--api-server-count"
+              value: 1
+            # #5
+            - param: "--config"
+              value: "/tmp/vllm_config.yaml"
+            # #6
+            - param: "--grpc"
+              value: true
+            - param: "--no-grpc"
+              value: true
+            # #7
+            - param: "--disable-log-stats"
+              value: true
+            - param: "--no-disable-log-stats"
+              value: true
+            # #8
+            - param: "--aggregate-engine-logging"
+              value: true
+            - param: "--no-aggregate-engine-logging"
+              value: true
+            # #9
+            - param: "--fail-on-environ-validation"
+              value: true
+            - param: "--no-fail-on-environ-validation"
+              value: true
+            # #10
+            - param: "--shutdown-timeout"
+              value: 0
+            # #11
+            - param: "--gdn-prefill-backend"
+              value: "flashinfer"
+            # #12
+            - param: "--enable-log-requests"
+              value: true
+            - param: "--no-enable-log-requests"
+              value: true
+
+    ModelConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "Baseline LLM with minimal args"
+        children:
+            # --- ModelConfig params (spec #60-#96) ---
+            # #60 --model: in base_command, skipped
+            # #61
+            - param: "--runner"
+              value: "generate"
+            # #62
+            - param: "--convert"
+              value: "none"
+            # #63
+            - param: "--tokenizer"
+              value: "/home/weights/Qwen3.5-35B-A3B-w8a8-mtp/"
+            # #64
+            - param: "--tokenizer-mode"
+              value: "auto"
+            # #65 --trust-remote-code: in base_command, skipped; test --no variant
+            - param: "--no-trust-remote-code"
+              value: true
+            # #66
+            - param: "--dtype"
+              value: "bfloat16"
+            # #67 --seed: in base_command, skipped
+            # #68
+            - param: "--hf-config-path"
+              value: "/home/weights/Qwen3.5-35B-A3B-w8a8-mtp/"
+            # #69
+            - param: "--allowed-local-media-path"
+              value: "/tmp"
+            # #70
+            - param: "--allowed-media-domains"
+              value: "example.com"
+            # #71
+            - param: "--revision"
+              value: "main"
+            # #72
+            - param: "--code-revision"
+              value: "main"
+            # #73
+            - param: "--tokenizer-revision"
+              value: "main"
+            # #74 --max-model-len: in base_command, skipped
+            # #75 --quantization: in base_command, skipped
+            # #76
+            - param: "--allow-deprecated-quantization"
+              value: true
+            - param: "--no-allow-deprecated-quantization"
+              value: true
+            # #77
+            - param: "--enforce-eager"
+              value: true
+            - param: "--no-enforce-eager"
+              value: true
+            # #78
+            - param: "--enable-return-routed-experts"
+              value: true
+            - param: "--no-enable-return-routed-experts"
+              value: true
+            # #79
+            - param: "--max-logprobs"
+              value: 10
+            # #80
+            - param: "--logprobs-mode"
+              value: "processed_logprobs"
+            # #81
+            - param: "--disable-sliding-window"
+              value: true
+            - param: "--no-disable-sliding-window"
+              value: true
+            # #82
+            - param: "--disable-cascade-attn"
+              value: true
+            - param: "--no-disable-cascade-attn"
+              value: true
+            # #83
+            - param: "--skip-tokenizer-init"
+              value: true
+            - param: "--no-skip-tokenizer-init"
+              value: true
+            # #84
+            - param: "--enable-prompt-embeds"
+              value: true
+            - param: "--no-enable-prompt-embeds"
+              value: true
+            # #85 --served-model-name: in base_command, skipped
+            # #86
+            - param: "--config-format"
+              value: "hf"
+            # #87
+            - param: "--hf-token"
+              value: "test-token"
+            # #88
+            - param: "--hf-overrides"
+              value: "{}"
+            # #89
+            - param: "--generation-config"
+              value: "vllm"
+            # #90
+            - param: "--override-generation-config"
+              value: '{"temperature": 0.5}'
+            # #91
+            - param: "--enable-sleep-mode"
+              value: true
+            - param: "--no-enable-sleep-mode"
+              value: true
+            # #92
+            - param: "--model-impl"
+              value: "vllm"
+            # #93
+            - param: "--override-attention-dtype"
+              value: "bfloat16"
+            # #94
+            - param: "--logits-processors"
+              value: "vllm.model_executor.layers.logits_processor.LogitsProcessor"
+            # #95
+            - param: "--io-processor-plugin"
+              value: "default"
+            # #96
+            - param: "--renderer-num-workers"
+              value: 2
+
+    Frontend:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "Frontend configuration parameters"
+        children:
+            # #13
+            - param: "--lora-modules"
+              value: "name=/tmp/lora_path"
+            # #14
+            - param: "--chat-template"
+              value: "/tmp/chat_template.jinja"
+            # #15
+            - param: "--chat-template-content-format"
+              value: "auto"
+            # #16
+            - param: "--trust-request-chat-template"
+              value: true
+            - param: "--no-trust-request-chat-template"
+              value: true
+            # #17
+            - param: "--default-chat-template-kwargs"
+              value: '{}'
+            # #18
+            - param: "--response-role"
+              value: "assistant"
+            # #19
+            - param: "--return-tokens-as-token-ids"
+              value: true
+            - param: "--no-return-tokens-as-token-ids"
+              value: true
+            # #20
+            - param: "--enable-auto-tool-choice"
+              value: true
+            - param: "--no-enable-auto-tool-choice"
+              value: true
+            # #21
+            - param: "--exclude-tools-when-tool-choice-none"
+              value: true
+            - param: "--no-exclude-tools-when-tool-choice-none"
+              value: true
+            # #22
+            - param: "--tool-call-parser"
+              value: "hermes"
+            # #23
+            - param: "--tool-parser-plugin"
+              value: ""
+            # #24
+            - param: "--tool-server"
+              value: "demo"
+            # #25
+            - param: "--log-config-file"
+              value: "/tmp/log_config.json"
+            # #26
+            - param: "--max-log-len"
+              value: 100
+            # #27
+            - param: "--enable-prompt-tokens-details"
+              value: true
+            - param: "--no-enable-prompt-tokens-details"
+              value: true
+            # #28
+            - param: "--enable-server-load-tracking"
+              value: true
+            - param: "--no-enable-server-load-tracking"
+              value: true
+            # #29
+            - param: "--enable-force-include-usage"
+              value: true
+            - param: "--no-enable-force-include-usage"
+              value: true
+            # #30
+            - param: "--enable-tokenizer-info-endpoint"
+              value: true
+            - param: "--no-enable-tokenizer-info-endpoint"
+              value: true
+            # #31
+            - param: "--enable-log-outputs"
+              value: true
+            - param: "--no-enable-log-outputs"
+              value: true
+            # #32
+            - param: "--enable-log-deltas"
+              value: true
+            - param: "--no-enable-log-deltas"
+              value: true
+            # #33
+            - param: "--log-error-stack"
+              value: true
+            - param: "--no-log-error-stack"
+              value: true
+            # #34
+            - param: "--tokens-only"
+              value: true
+            - param: "--no-tokens-only"
+              value: true
+            # #35 --host: in base_command, skipped
+            # #36 --port: in base_command, skipped
+            # #37
+            - param: "--uds"
+              value: "/tmp/vllm.sock"
+            # #38
+            - param: "--uvicorn-log-level"
+              value: "info"
+            # #39
+            - param: "--disable-uvicorn-access-log"
+              value: true
+            - param: "--no-disable-uvicorn-access-log"
+              value: true
+            # #40
+            - param: "--disable-access-log-for-endpoints"
+              value: "/health,/metrics,/ping"
+            # #41
+            - param: "--allow-credentials"
+              value: true
+            - param: "--no-allow-credentials"
+              value: true
+            # #42
+            - param: "--allowed-origins"
+              value: "['*']"
+            # #43
+            - param: "--allowed-methods"
+              value: "['*']"
+            # #44
+            - param: "--allowed-headers"
+              value: "['*']"
+            # #45
+            - param: "--api-key"
+              value: "test-api-key"
+            # #46
+            - param: "--ssl-keyfile"
+              value: "/tmp/ssl.key"
+            # #47
+            - param: "--ssl-certfile"
+              value: "/tmp/ssl.cert"
+            # #48
+            - param: "--ssl-ca-certs"
+              value: "/tmp/ca.crt"
+            # #49
+            - param: "--enable-ssl-refresh"
+              value: true
+            - param: "--no-enable-ssl-refresh"
+              value: true
+            # #50
+            - param: "--ssl-cert-reqs"
+              value: 0
+            # #51
+            - param: "--ssl-ciphers"
+              value: "ECDHE-RSA-AES256-GCM-SHA384"
+            # #52
+            - param: "--root-path"
+              value: "/api"
+            # #53
+            - param: "--middleware"
+              value: "[]"
+            # #54
+            - param: "--enable-request-id-headers"
+              value: true
+            - param: "--no-enable-request-id-headers"
+              value: true
+            # #55
+            - param: "--disable-fastapi-docs"
+              value: true
+            - param: "--no-disable-fastapi-docs"
+              value: true
+            # #56
+            - param: "--h11-max-incomplete-event-size"
+              value: 4194304
+            # #57
+            - param: "--h11-max-header-count"
+              value: 256
+            # #58
+            - param: "--enable-offline-docs"
+              value: true
+            - param: "--no-enable-offline-docs"
+              value: true
+            # #59
+            - param: "--enable-flash-late-interaction"
+              value: true
+            - param: "--no-enable-flash-late-interaction"
+              value: true
+
+    LoadConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "LoadConfig parameters"
+        children:
+            # #97
+            - param: "--load-format"
+              value: "auto"
+            # #98
+            - param: "--download-dir"
+              value: "/tmp/vllm_download"
+            # #99
+            - param: "--safetensors-load-strategy"
+              value: "lazy"
+            # #100
+            - param: "--model-loader-extra-config"
+              value: '{}'
+            # #101
+            - param: "--ignore-patterns"
+              value: "['original/**/*']"
+            # #102
+            - param: "--use-tqdm-on-load"
+              value: true
+            - param: "--no-use-tqdm-on-load"
+              value: true
+            # #103
+            - param: "--pt-load-map-location"
+              value: "cpu"
+
+    AttentionConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "AttentionConfig parameters"
+        children:
+            # #104
+            - param: "--attention-backend"
+              value: "FLASH_ATTN"
+
+    StructuredOutputsConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "StructuredOutputsConfig parameters"
+        children:
+            # #105
+            - param: "--reasoning-parser"
+              value: ""
+            # #106
+            - param: "--reasoning-parser-plugin"
+              value: ""
+
+    ParallelConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "ParallelConfig parameters"
+        children:
+            # #107
+            - param: "--distributed-executor-backend"
+              value: "mp"
+            # #108
+            - param: "--pipeline-parallel-size"
+              value: 1
+            # #109
+            - param: "--master-addr"
+              value: "127.0.0.1"
+            # #110
+            - param: "--master-port"
+              value: 29501
+            # #111
+            - param: "--nnodes"
+              value: 1
+            # #112
+            - param: "--node-rank"
+              value: 0
+            # #113
+            - param: "--distributed-timeout-seconds"
+              value: 600
+            # #114 → parent of #115, #116
+            - param: "--numa-bind"
+              value: true
+              children:
+                  - param: "--numa-bind-nodes"
+                    value: "[0,0,1,1]"
+                  - param: "--numa-bind-cpus"
+                    value: '["0-3","4-7","8-11","12-15"]'
+            - param: "--no-numa-bind"
+              value: true
+            # #117 --tensor-parallel-size: in base_command, skipped
+            # #118
+            - param: "--decode-context-parallel-size"
+              value: 1
+              children:
+                  - param: "--dcp-comm-backend"
+                    value: "a2a"
+            # #119
+            - param: "--dcp-comm-backend"
+              value: "ag_rs"
+            # #120
+            - param: "--dcp-kv-cache-interleave-size"
+              value: 1
+            # #121
+            - param: "--cp-kv-cache-interleave-size"
+              value: 1
+            # #122
+            - param: "--prefill-context-parallel-size"
+              value: 1
+            # #123 --data-parallel-size: in base_command, skipped
+            # #124
+            - param: "--data-parallel-rank"
+              value: 0
+            # #125
+            - param: "--data-parallel-start-rank"
+              value: 0
+            # #126
+            - param: "--data-parallel-size-local"
+              value: 1
+            # #127
+            - param: "--data-parallel-address"
+              value: "127.0.0.1"
+            # #128
+            - param: "--data-parallel-rpc-port"
+              value: 29500
+            # #129
+            - param: "--data-parallel-backend"
+              value: "mp"
+            # #130
+            - param: "--data-parallel-hybrid-lb"
+              value: true
+            - param: "--no-data-parallel-hybrid-lb"
+              value: true
+            # #131
+            - param: "--data-parallel-external-lb"
+              value: true
+            - param: "--no-data-parallel-external-lb"
+              value: true
+            # #132 --enable-expert-parallel: in base_command, skipped
+            - param: "--no-enable-expert-parallel"
+              value: true
+            # #133
+            - param: "--enable-ep-weight-filter"
+              value: true
+            - param: "--no-enable-ep-weight-filter"
+              value: true
+            # #134
+            - param: "--all2all-backend"
+              value: "allgather_reducescatter"
+            # #135
+            - param: "--enable-dbo"
+              value: true
+            - param: "--no-enable-dbo"
+              value: true
+            # #137
+            - param: "--enable-elastic-ep"
+              value: true
+            - param: "--no-enable-elastic-ep"
+              value: true
+            # #140
+            - param: "--disable-nccl-for-dp-synchronization"
+              value: true
+            - param: "--no-disable-nccl-for-dp-synchronization"
+              value: true
+            # #141
+            - param: "--enable-eplb"
+              value: true
+            - param: "--no-enable-eplb"
+              value: true
+            # #142
+            - param: "--expert-placement-strategy"
+              value: "linear"
+            # #143
+            - param: "--max-parallel-loading-workers"
+              value: 2
+            # #144
+            - param: "--ray-workers-use-nsight"
+              value: true
+            - param: "--no-ray-workers-use-nsight"
+              value: true
+            # #145
+            - param: "--disable-custom-all-reduce"
+              value: true
+            - param: "--no-disable-custom-all-reduce"
+              value: true
+            # #146
+            - param: "--worker-cls"
+              value: "auto"
+            # #147
+            - param: "--worker-extension-cls"
+              value: ""
+
+    CacheConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "CacheConfig parameters"
+        children:
+            # #148
+            - param: "--block-size"
+              value: 32
+            # #149 --gpu-memory-utilization: in base_command, skipped
+            # #150
+            - param: "--kv-cache-memory-bytes"
+              value: 1073741824
+            # #151
+            - param: "--kv-cache-dtype"
+              value: "auto"
+            # #152
+            - param: "--num-gpu-blocks-override"
+              value: 100
+            # #153 --enable-prefix-caching: in base_command, skipped
+            - param: "--no-enable-prefix-caching"
+              value: true
+            # #154
+            - param: "--prefix-caching-hash-algo"
+              value: "sha256"
+            # #155
+            - param: "--calculate-kv-scales"
+              value: true
+            - param: "--no-calculate-kv-scales"
+              value: true
+            # #156
+            - param: "--kv-cache-dtype-skip-layers"
+              value: "[]"
+            # #157
+            - param: "--kv-sharing-fast-prefill"
+              value: true
+            - param: "--no-kv-sharing-fast-prefill"
+              value: true
+            # #158
+            - param: "--mamba-cache-dtype"
+              value: "auto"
+            # #159
+            - param: "--mamba-ssm-cache-dtype"
+              value: "auto"
+            # #160
+            - param: "--mamba-block-size"
+              value: 8
+            # #161
+            - param: "--mamba-cache-mode"
+              value: "none"
+            # #162
+            - param: "--enable-mamba-cache-stochastic-rounding"
+              value: true
+            - param: "--no-enable-mamba-cache-stochastic-rounding"
+              value: true
+            # #163
+            - param: "--mamba-cache-philox-rounds"
+              value: 0
+            # #164
+            - param: "--kv-offloading-size"
+              value: 1.0
+            # #165
+            - param: "--kv-offloading-backend"
+              value: "native"
+
+    OffloadConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "OffloadConfig parameters"
+        children:
+            # #166
+            - param: "--offload-backend"
+              value: "auto"
+            # #167
+            - param: "--cpu-offload-gb"
+              value: 0
+            # #168
+            - param: "--cpu-offload-params"
+              value: "[]"
+            # #169 → parent of #170
+            - param: "--offload-group-size"
+              value: 0
+              children:
+                  - param: "--offload-num-in-group"
+                    value: 1
+            # #171
+            - param: "--offload-prefetch-step"
+              value: 1
+            # #172
+            - param: "--offload-params"
+              value: "[]"
+
+    MultiModalConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "MultiModalConfig parameters"
+        children:
+            - param: "--language-model-only"
+              value: true
+            # #173
+            - param: "--no-language-model-only"
+              value: true
+            # #174
+            - param: "--limit-mm-per-prompt"
+              value: "{}"
+            # #175
+            - param: "--enable-mm-embeds"
+              value: true
+            - param: "--no-enable-mm-embeds"
+              value: true
+            # #176
+            - param: "--media-io-kwargs"
+              value: "{}"
+            # #177
+            - param: "--mm-processor-kwargs"
+              value: '{}'
+            # #178
+            - param: "--mm-processor-cache-gb"
+              value: 4
+            # #179
+            - param: "--mm-processor-cache-type"
+              value: "lru"
+            # #180
+            - param: "--mm-shm-cache-max-object-size-mb"
+              value: 128
+            # #181
+            - param: "--mm-encoder-only"
+              value: true
+            - param: "--no-mm-encoder-only"
+              value: true
+            # #182
+            - param: "--mm-encoder-tp-mode"
+              value: "weights"
+            # #183
+            - param: "--mm-encoder-attn-backend"
+              value: "FLASH_ATTN"
+            # #184
+            - param: "--interleave-mm-strings"
+              value: true
+            - param: "--no-interleave-mm-strings"
+              value: true
+            # #185
+            - param: "--skip-mm-profiling"
+              value: true
+            - param: "--no-skip-mm-profiling"
+              value: true
+            # #186
+            - param: "--video-pruning-rate"
+              value: 0.5
+            # #187
+            - param: "--mm-tensor-ipc"
+              value: "direct_rpc"
+
+    LoRAConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "LoRAConfig parameters"
+        children:
+            # #188 → parent of #189-#197
+            - param: "--enable-lora"
+              value: true
+              children:
+                  # #189
+                  - param: "--max-loras"
+                    value: 1
+                  # #190
+                  - param: "--max-lora-rank"
+                    value: 16
+                  # #191
+                  - param: "--lora-dtype"
+                    value: "auto"
+                  # #192
+                  - param: "--enable-tower-connector-lora"
+                    value: true
+                  - param: "--no-enable-tower-connector-lora"
+                    value: true
+                  # #193
+                  - param: "--max-cpu-loras"
+                    value: 2
+                  # #194
+                  - param: "--fully-sharded-loras"
+                    value: true
+                  - param: "--no-fully-sharded-loras"
+                    value: true
+                  # #195
+                  - param: "--lora-target-modules"
+                    value: "qkv_proj"
+                  # #196
+                  - param: "--default-mm-loras"
+                    value: '{}'
+                  # #197
+                  - param: "--specialize-active-lora"
+                    value: true
+                  - param: "--no-specialize-active-lora"
+                    value: true
+            - param: "--no-enable-lora"
+              value: true
+
+    ObservabilityConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "ObservabilityConfig parameters"
+        children:
+            # #198
+            - param: "--show-hidden-metrics-for-version"
+              value: "0.7"
+            # #199 → parent of #200
+            - param: "--otlp-traces-endpoint"
+              value: "http://localhost:4318/v1/traces"
+              children:
+                  - param: "--collect-detailed-traces"
+                    value: "all"
+            # #201 → parent of #202
+            - param: "--kv-cache-metrics"
+              value: true
+              children:
+                  - param: "--kv-cache-metrics-sample"
+                    value: 0.01
+            - param: "--no-kv-cache-metrics"
+              value: true
+            # #203
+            - param: "--cudagraph-metrics"
+              value: true
+            - param: "--no-cudagraph-metrics"
+              value: true
+            # #204
+            - param: "--enable-layerwise-nvtx-tracing"
+              value: true
+            - param: "--no-enable-layerwise-nvtx-tracing"
+              value: true
+            # #205
+            - param: "--enable-mfu-metrics"
+              value: true
+            - param: "--no-enable-mfu-metrics"
+              value: true
+            # #206
+            - param: "--enable-logging-iteration-details"
+              value: true
+            - param: "--no-enable-logging-iteration-details"
+              value: true
+
+    SchedulerConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "SchedulerConfig parameters"
+        children:
+            # #207 --max-num-batched-tokens: in base_command, skipped
+            # #208 --max-num-seqs: in base_command, skipped
+            # #209
+            - param: "--max-num-partial-prefills"
+              value: 1
+            # #210
+            - param: "--max-long-partial-prefills"
+              value: 1
+            # #211
+            - param: "--long-prefill-token-threshold"
+              value: 0
+            # #212
+            - param: "--scheduling-policy"
+              value: "fcfs"
+            # #213 → parent of #214
+            - param: "--enable-chunked-prefill"
+              value: true
+              children:
+                  - param: "--disable-chunked-mm-input"
+                    value: true
+                  - param: "--no-disable-chunked-mm-input"
+                    value: true
+            - param: "--no-enable-chunked-prefill"
+              value: true
+            # #215
+            - param: "--scheduler-cls"
+              value: "vllm.v1.core.sched.scheduler.Scheduler"
+            # #216
+            - param: "--scheduler-reserve-full-isl"
+              value: true
+            - param: "--no-scheduler-reserve-full-isl"
+              value: true
+            # #217
+            - param: "--disable-hybrid-kv-cache-manager"
+              value: true
+            - param: "--no-disable-hybrid-kv-cache-manager"
+              value: true
+            # #218 --async-scheduling: in base_command, skipped
+            - param: "--no-async-scheduling"
+              value: true
+            # #219
+            - param: "--stream-interval"
+              value: 1
+
+    CompilationConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "CompilationConfig parameters"
+        children:
+            # #220
+            - param: "--cudagraph-capture-sizes"
+              value: "[1,2,4,8]"
+            # #221
+            - param: "--max-cudagraph-capture-size"
+              value: 512
+
+    KernelConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "KernelConfig parameters"
+        children:
+            # #222
+            - param: "--ir-op-priority"
+              value: '{\"rms_norm\": []}'
+            # #223
+            - param: "--enable-flashinfer-autotune"
+              value: true
+            - param: "--no-enable-flashinfer-autotune"
+              value: true
+            # #224
+            - param: "--moe-backend"
+              value: "auto"
+
+    VllmConfig:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "VllmConfig parameters"
+        children:
+            # #225
+            - param: "--optimization-level"
+              value: 2
+            # #226
+            - param: "--performance-mode"
+              value: "balanced"
+
+    CompilationConfig_nested:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "Nested --compilation-config sub-parameters"
+        children:
+            # compilation-config sub #1
+            - param: "--compilation-config"
+              value: '{\"mode\": 3}'
+            # compilation-config sub #2
+            - param: "--compilation-config"
+              value: '{\"debug_dump_path\": \"/tmp/debug_dump\"}'
+            # compilation-config sub #3
+            - param: "--compilation-config"
+              value: '{\"cache_dir\": \"\"}'
+            # compilation-config sub #4
+            - param: "--compilation-config"
+              value: '{\"compile_cache_save_format\": \"binary\"}'
+            # compilation-config sub #5
+            - param: "--compilation-config"
+              value: '{\"backend\": \"\"}'
+            # compilation-config sub #6
+            - param: "--compilation-config"
+              value: '{\"custom_ops\": []}'
+            # compilation-config sub #7
+            - param: "--compilation-config"
+              value: '{\"ir_enable_torch_wrap\": true}'
+            - param: "--compilation-config"
+              value: '{\"ir_enable_torch_wrap\": false}'
+            # compilation-config sub #8
+            - param: "--compilation-config"
+              value: '{\"splitting_ops\": []}'
+            # compilation-config sub #9
+            - param: "--compilation-config"
+              value: '{\"compile_mm_encoder\": false}'
+            - param: "--compilation-config"
+              value: '{\"compile_mm_encoder\": true}'
+            # compilation-config sub #10
+            - param: "--compilation-config"
+              value: '{\"cudagraph_mm_encoder\": false}'
+            - param: "--compilation-config"
+              value: '{\"cudagraph_mm_encoder\": true}'
+            # compilation-config sub #11
+            - param: "--compilation-config"
+              value: '{\"encoder_cudagraph_token_budgets\": []}'
+            # compilation-config sub #12
+            - param: "--compilation-config"
+              value: '{\"encoder_cudagraph_max_images_per_batch\": 0}'
+            # compilation-config sub #13
+            - param: "--compilation-config"
+              value: '{\"compile_sizes\": null}'
+            # compilation-config sub #14
+            - param: "--compilation-config"
+              value: '{\"compile_ranges_endpoints\": null}'
+            # compilation-config sub #15
+            - param: "--compilation-config"
+              value: '{\"inductor_compile_config\": {}}'
+            # compilation-config sub #16
+            - param: "--compilation-config"
+              value: '{\"inductor_passes\": {}}'
+            # compilation-config sub #17
+            - param: "--compilation-config"
+              value: '{\"cudagraph_mode\": null}'
+            # compilation-config sub #18
+            - param: "--compilation-config"
+              value: '{\"cudagraph_num_of_warmups\": 0}'
+            # compilation-config sub #19
+            - param: "--compilation-config"
+              value: '{\"cudagraph_capture_sizes\": null}'
+            # compilation-config sub #20
+            - param: "--compilation-config"
+              value: '{\"cudagraph_copy_inputs\": false}'
+            - param: "--compilation-config"
+              value: '{\"cudagraph_copy_inputs\": true}'
+            # compilation-config sub #21
+            - param: "--compilation-config"
+              value: '{\"cudagraph_specialize_lora\": true}'
+            - param: "--compilation-config"
+              value: '{\"cudagraph_specialize_lora\": false}'
+            # compilation-config sub #22
+            - param: "--compilation-config"
+              value: '{\"use_inductor_graph_partition\": true}'
+            - param: "--compilation-config"
+              value: '{\"use_inductor_graph_partition\": false}'
+            # compilation-config sub #23 pass_config.fuse_norm_quant
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_norm_quant\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_norm_quant\": false}}'
+            # compilation-config sub #24 pass_config.fuse_act_quant
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_act_quant\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_act_quant\": false}}'
+            # compilation-config sub #25 pass_config.fuse_attn_quant
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_attn_quant\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_attn_quant\": false}}'
+            # compilation-config sub #26 pass_config.eliminate_noops
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"eliminate_noops\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"eliminate_noops\": false}}'
+            # compilation-config sub #27 pass_config.enable_sp
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"enable_sp\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"enable_sp\": false}}'
+            # compilation-config sub #28 pass_config.fuse_gemm_comms
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_gemm_comms\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_gemm_comms\": false}}'
+            # compilation-config sub #29 pass_config.fuse_allreduce_rms
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_allreduce_rms\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_allreduce_rms\": false}}'
+            # compilation-config sub #30 pass_config.fuse_minimax_qk_norm
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_minimax_qk_norm\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_minimax_qk_norm\": false}}'
+            # compilation-config sub #31 pass_config.enable_qk_norm_rope_fusion
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"enable_qk_norm_rope_fusion\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"enable_qk_norm_rope_fusion\": false}}'
+            # compilation-config sub #32 pass_config.fuse_act_padding
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_act_padding\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_act_padding\": false}}'
+            # compilation-config sub #33 pass_config.fuse_rope_kvcache
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_rope_kvcache\": true}}'
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fuse_rope_kvcache\": false}}'
+            # compilation-config sub #34 pass_config.rope_kvcache_fusion_max_token_num
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"rope_kvcache_fusion_max_token_num\": 256}}'
+            # compilation-config sub #35 pass_config.fi_allreduce_fusion_max_size_mb
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"fi_allreduce_fusion_max_size_mb\": null}}'
+            # compilation-config sub #36 pass_config.sp_min_token_num
+            - param: "--compilation-config"
+              value: '{\"pass_config\": {\"sp_min_token_num\": null}}'
+            # compilation-config sub #37 max_cudagraph_capture_size
+            - param: "--compilation-config"
+              value: '{\"max_cudagraph_capture_size\": 512}'
+            # compilation-config sub #38 dynamic_shapes_config.type
+            - param: "--compilation-config"
+              value: '{\"dynamic_shapes_config\": {\"type\": \"backed\"}}'
+            # compilation-config sub #39 dynamic_shapes_config.evaluate_guards
+            - param: "--compilation-config"
+              value: '{\"dynamic_shapes_config\": {\"evaluate_guards\": false}}'
+            - param: "--compilation-config"
+              value: '{\"dynamic_shapes_config\": {\"evaluate_guards\": true}}'
+            # compilation-config sub #40 dynamic_shapes_config.assume_32_bit_indexing
+            - param: "--compilation-config"
+              value: '{\"dynamic_shapes_config\": {\"assume_32_bit_indexing\": false}}'
+            - param: "--compilation-config"
+              value: '{\"dynamic_shapes_config\": {\"assume_32_bit_indexing\": true}}'
+            # compilation-config sub #42 fast_moe_cold_start
+            - param: "--compilation-config"
+              value: '{\"fast_moe_cold_start\": null}'
+
+    SpeculativeConfig_nested:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "Nested --speculative-config sub-parameters"
+        children:
+            # speculative-config sub #1 enforce_eager
+            - param: "--speculative-config"
+              value: '{\"enforce_eager\": true}'
+            - param: "--speculative-config"
+              value: '{\"enforce_eager\": false}'
+            # speculative-config sub #2 num_speculative_tokens
+            - param: "--speculative-config"
+              value: '{\"num_speculative_tokens\": 5}'
+            # speculative-config sub #3 model
+            - param: "--speculative-config"
+              value: '{\"model\": null}'
+            # speculative-config sub #4 method
+            - param: "--speculative-config"
+              value: '{\"method\": null}'
+            # speculative-config sub #5 draft_tensor_parallel_size
+            - param: "--speculative-config"
+              value: '{\"draft_tensor_parallel_size\": 1}'
+            # speculative-config sub #6 tensor_parallel_size
+            - param: "--speculative-config"
+              value: '{\"tensor_parallel_size\": null}'
+            # speculative-config sub #7 quantization
+            - param: "--speculative-config"
+              value: '{\"quantization\": null}'
+            # speculative-config sub #8 moe_backend
+            - param: "--speculative-config"
+              value: '{\"moe_backend\": null}'
+            # speculative-config sub #9 max_model_len
+            - param: "--speculative-config"
+              value: '{\"max_model_len\": null}'
+            # speculative-config sub #10 revision
+            - param: "--speculative-config"
+              value: '{\"revision\": null}'
+            # speculative-config sub #11 code_revision
+            - param: "--speculative-config"
+              value: '{\"code_revision\": null}'
+            # speculative-config sub #12 disable_padded_drafter_batch
+            - param: "--speculative-config"
+              value: '{\"disable_padded_drafter_batch\": false}'
+            - param: "--speculative-config"
+              value: '{\"disable_padded_drafter_batch\": true}'
+            # speculative-config sub #13 use_local_argmax_reduction
+            - param: "--speculative-config"
+              value: '{\"use_local_argmax_reduction\": false}'
+            - param: "--speculative-config"
+              value: '{\"use_local_argmax_reduction\": true}'
+            # speculative-config sub #14 prompt_lookup_max
+            - param: "--speculative-config"
+              value: '{\"prompt_lookup_max\": null}'
+            # speculative-config sub #15 prompt_lookup_min
+            - param: "--speculative-config"
+              value: '{\"prompt_lookup_min\": null}'
+            # speculative-config sub #16 speculative_token_tree
+            - param: "--speculative-config"
+              value: '{\"speculative_token_tree\": null}'
+            # speculative-config sub #17 parallel_drafting
+            - param: "--speculative-config"
+              value: '{\"parallel_drafting\": false}'
+            - param: "--speculative-config"
+              value: '{\"parallel_drafting\": true}'
+            # speculative-config sub #22 suffix_decoding_max_tree_depth
+            - param: "--speculative-config"
+              value: '{\"suffix_decoding_max_tree_depth\": 24}'
+            # speculative-config sub #23 suffix_decoding_max_cached_requests
+            - param: "--speculative-config"
+              value: '{\"suffix_decoding_max_cached_requests\": 10000}'
+            # speculative-config sub #24 suffix_decoding_max_spec_factor
+            - param: "--speculative-config"
+              value: '{\"suffix_decoding_max_spec_factor\": 1.0}'
+            # speculative-config sub #25 suffix_decoding_min_token_prob
+            - param: "--speculative-config"
+              value: '{\"suffix_decoding_min_token_prob\": 0.1}'
+            # speculative-config sub #27 rejection_sample_method
+            - param: "--speculative-config"
+              value: '{\"rejection_sample_method\": \"strict\"}'
+            # speculative-config sub #28 synthetic_acceptance_rate
+            - param: "--speculative-config"
+              value: '{\"synthetic_acceptance_rate\": null}'
+
+    KVTransferConfig_nested:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "Nested --kv-transfer-config sub-parameters"
+        children:
+            # kv-transfer-config sub #1 kv_connector
+            - param: "--kv-transfer-config"
+              value: '{\"kv_connector\": null}'
+            # kv-transfer-config sub #2 engine_id
+            - param: "--kv-transfer-config"
+              value: '{\"engine_id\": null}'
+            # kv-transfer-config sub #3 kv_buffer_device
+            - param: "--kv-transfer-config"
+              value: '{\"kv_buffer_device\": \"npu\"}'
+            # kv-transfer-config sub #4 kv_buffer_size
+            - param: "--kv-transfer-config"
+              value: '{\"kv_buffer_size\": 1000000000.0}'
+            # kv-transfer-config sub #5 kv_role
+            - param: "--kv-transfer-config"
+              value: '{\"kv_role\": null}'
+            # kv-transfer-config sub #6 kv_rank
+            - param: "--kv-transfer-config"
+              value: '{\"kv_rank\": null}'
+            # kv-transfer-config sub #7 kv_parallel_size
+            - param: "--kv-transfer-config"
+              value: '{\"kv_parallel_size\": 1}'
+            # kv-transfer-config sub #8 kv_ip
+            - param: "--kv-transfer-config"
+              value: '{\"kv_ip\": \"127.0.0.1\"}'
+            # kv-transfer-config sub #9 kv_port
+            - param: "--kv-transfer-config"
+              value: '{\"kv_port\": 14579}'
+            # kv-transfer-config sub #10 kv_connector_extra_config
+            - param: "--kv-transfer-config"
+              value: '{\"kv_connector_extra_config\": {}}'
+            # kv-transfer-config sub #11 kv_connector_module_path
+            - param: "--kv-transfer-config"
+              value: '{\"kv_connector_module_path\": null}'
+            # kv-transfer-config sub #12 enable_permute_local_kv
+            - param: "--kv-transfer-config"
+              value: '{\"enable_permute_local_kv\": false}'
+            - param: "--kv-transfer-config"
+              value: '{\"enable_permute_local_kv\": true}'
+            # kv-transfer-config sub #13 kv_load_failure_policy
+            - param: "--kv-transfer-config"
+              value: '{\"kv_load_failure_policy\": \"fail\"}'
+
+    KVEventsConfig_nested:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "Nested --kv-events-config sub-parameters"
+        children:
+            # kv-events-config sub #1 enable_kv_cache_events
+            - param: "--kv-events-config"
+              value: '{\"enable_kv_cache_events\": false}'
+            - param: "--kv-events-config"
+              value: '{\"enable_kv_cache_events\": true}'
+            # kv-events-config sub #2 publisher
+            - param: "--kv-events-config"
+              value: '{\"publisher\": null}'
+            # kv-events-config sub #3 endpoint
+            - param: "--kv-events-config"
+              value: '{\"endpoint\": \"tcp://*:5557\"}'
+            # kv-events-config sub #4 replay_endpoint
+            - param: "--kv-events-config"
+              value: '{\"replay_endpoint\": null}'
+            # kv-events-config sub #5 buffer_steps
+            - param: "--kv-events-config"
+              value: '{\"buffer_steps\": 10000}'
+            # kv-events-config sub #6 hwm
+            - param: "--kv-events-config"
+              value: '{\"hwm\": 100000}'
+            # kv-events-config sub #7 max_queue_size
+            - param: "--kv-events-config"
+              value: '{\"max_queue_size\": 100000}'
+            # kv-events-config sub #8 topic
+            - param: "--kv-events-config"
+              value: '{\"topic\": \"\"}'
+
+    ECTransferConfig_nested:
+        base_command: "vllm serve /home/weights/Qwen3.5-35B-A3B-w8a8-mtp/ --host 0.0.0.0 --port 8000 --tensor-parallel-size 4 --enable-expert-parallel --seed 1024 --quantization ascend --served-model-name qwen3.5 --max-num-seqs 128 --max-model-len 16384 --max-num-batched-tokens 16384 --trust-remote-code --gpu-memory-utilization 0.90 --enable-prefix-caching --async-scheduling"
+        model_type: llm
+        cards: "0,1,2,3"
+        description: "Nested --ec-transfer-config sub-parameters"
+        children:
+            # ec-transfer-config sub #1 ec_connector
+            - param: "--ec-transfer-config"
+              value: '{\"ec_connector\": null}'
+            # ec-transfer-config sub #2 engine_id
+            - param: "--ec-transfer-config"
+              value: '{\"engine_id\": null}'
+            # ec-transfer-config sub #3 ec_buffer_device
+            - param: "--ec-transfer-config"
+              value: '{\"ec_buffer_device\": \"cuda\"}'
+
