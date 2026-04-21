@@ -50,7 +50,7 @@ def test_qwen3_moe_tp2_w8a8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_qwen3_5_moe_tp4_fp16():
+def test_qwen3_5_moe_tp4_w8a8():
     example_prompts = [
         "Hello, my name is",
     ]
