@@ -304,9 +304,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         swa_mask = None
         is_swa = hasattr(self.model_config.hf_text_config, "sliding_window")
         if self.model_config is not None and is_swa:
-            swa_mask = self.attn_mask_builder.get_swa_mask(
-                torch.bool, self.model_config.hf_text_config.sliding_window
-            )
+            swa_mask = self.attn_mask_builder.get_swa_mask(torch.bool, self.model_config.hf_text_config.sliding_window)
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -522,12 +520,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Keep the captured block_tables tensor on this affected path.
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
-                        if hasattr(vllm_config.model_config.hf_text_config,
-                                   "sliding_window"):
+                        if hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
                             block_tables = block_tables
                         else:
                             block_tables = attn_metadata[key].block_tables
-                        
+
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
