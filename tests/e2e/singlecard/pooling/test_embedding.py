@@ -16,36 +16,39 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
+import huggingface_hub
 import pytest
 from modelscope import snapshot_download  # type: ignore[import-untyped]
-import huggingface_hub
 
 from tests.e2e.conftest import HfRunner, VllmRunner
 from tests.e2e.utils import check_embeddings_close
 
 MODELS = [
     "Qwen/Qwen3-Embedding-0.6B",  # lasttoken
-    "intfloat/multilingual-e5-small"  # mean_tokens
+    "intfloat/multilingual-e5-small",  # mean_tokens
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
 def test_embed_models_correctness(model: str):
-    queries = ['What is the capital of China?', 'Explain gravity']
+    queries = ["What is the capital of China?", "Explain gravity"]
 
-    model_name = snapshot_download(model, local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
+    model_name = snapshot_download(
+        model,
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
     with VllmRunner(
-            model_name,
-            runner="pooling",
-            max_model_len=None,
-            cudagraph_capture_sizes=[4],
+        model_name,
+        runner="pooling",
+        max_model_len=None,
+        cudagraph_capture_sizes=[4],
     ) as vllm_runner:
         vllm_outputs = vllm_runner.embed(queries)
 
     with HfRunner(
-            model_name,
-            dtype="float32",
-            is_sentence_transformer=True,
+        model_name,
+        dtype="float32",
+        is_sentence_transformer=True,
     ) as hf_runner:
         hf_outputs = hf_runner.encode(queries)
 
@@ -57,23 +60,26 @@ def test_embed_models_correctness(model: str):
         tol=1e-2,
     )
 
+
 def test_causal_embed_models_using_prefix_caching_correctness():
-    # This test is to verify the correctness of prefix caching for embedding models. 
+    # This test is to verify the correctness of prefix caching for embedding models.
     # We compare the outputs of vLLM with and without prefix caching enabled, and check if they are close enough.
     # We set the input query to be very long to make sure prefix caching is triggered.
-    queries = ['What is the capital of China?' * 256, 'Explain gravity']
+    queries = ["What is the capital of China?" * 256, "Explain gravity"]
 
-    model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
+    model_name = snapshot_download(
+        "Qwen/Qwen3-Embedding-0.6B",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
     with VllmRunner(
-            model_name,
-            runner="pooling",
-            max_model_len=None,
-            cudagraph_capture_sizes=[4],
-            enable_prefix_caching=True,
+        model_name,
+        runner="pooling",
+        max_model_len=None,
+        cudagraph_capture_sizes=[4],
+        enable_prefix_caching=True,
     ) as vllm_runner_using_caching:
         vllm_outputs_without_caching = vllm_runner_using_caching.embed(queries)
         vllm_outputs_with_caching = vllm_runner_using_caching.embed(queries)
-
 
     check_embeddings_close(
         embeddings_0_lst=vllm_outputs_without_caching,
@@ -85,27 +91,30 @@ def test_causal_embed_models_using_prefix_caching_correctness():
 
 
 def test_bge_m3_correctness():
-    queries = ['What is the capital of China?', 'Explain gravity']
+    queries = ["What is the capital of China?", "Explain gravity"]
 
-    model_name = snapshot_download("BAAI/bge-m3", local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,)
+    model_name = snapshot_download(
+        "BAAI/bge-m3",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
     with VllmRunner(
-            model_name,
-            runner="pooling",
-            cudagraph_capture_sizes=[4],
+        model_name,
+        runner="pooling",
+        cudagraph_capture_sizes=[4],
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
 
     with VllmRunner(
-            model_name,
-            runner="pooling",
-            enforce_eager=True,
+        model_name,
+        runner="pooling",
+        enforce_eager=True,
     ) as vllm_runner:
         vllm_eager_outputs = vllm_runner.embed(queries)
 
     with HfRunner(
-            model_name,
-            dtype="float32",
-            is_sentence_transformer=True,
+        model_name,
+        dtype="float32",
+        is_sentence_transformer=True,
     ) as hf_runner:
         hf_outputs = hf_runner.encode(queries)
 
