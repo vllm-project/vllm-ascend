@@ -12,7 +12,6 @@ _envs: &envs
   VLLM_ASCEND_BALANCE_SCHEDULING: "1"
   VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE: "1"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
 
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"

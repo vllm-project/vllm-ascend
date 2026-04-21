@@ -106,7 +106,6 @@ sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
@@ -303,7 +302,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        export VLLM_TORCH_PROFILER_WITH_STACK=0
        export TASK_QUEUE_ENABLE=1
 
-       export VLLM_ASCEND_ENABLE_FUSED_MC2=1
        export HCCL_OP_EXPANSION_MODE="AIV"
 
        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
