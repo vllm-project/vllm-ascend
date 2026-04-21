@@ -278,7 +278,17 @@ class AscendFusedMoE(FusedMoE):
     gate_stream: torch.npu.Stream | None = None
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        """
+        Set `enable_eplb` to False for skipping the assertion requiring total experts to be divisible by EP size in
+        initialization of `FusedMoE`, as the number of redundant expert differs between `AscendFusedMoE and `FusedMoE`.
+        """
+        if get_current_vllm_config().parallel_config.enable_elastic_ep:
+            enable_eplb = kwargs.pop("enable_eplb", False)
+            super().__init__(*args, **kwargs, enable_eplb=False)
+            if enable_eplb:
+                kwargs["enable_eplb"] = enable_eplb
+        else:
+            super().__init__(*args, **kwargs)
 
         num_experts = kwargs["num_experts"]
         intermediate_size = kwargs["intermediate_size"]
