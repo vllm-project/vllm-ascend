@@ -458,4 +458,3 @@ def test_qwen3_5_4b_multimodal_single_and_multi_image():
         assert len(outputs) == len(inputs)
         for output in outputs:
             assert output.outputs and output.outputs[0].text.strip()
-
