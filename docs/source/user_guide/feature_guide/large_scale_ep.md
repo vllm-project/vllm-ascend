@@ -1,6 +1,6 @@
 # Distributed DP Server With Large-Scale Expert Parallelism
 
-## Getting Start
+## Getting Started
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large-scale **Expert Parallelism (EP)** scenario. To achieve better performance, the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment. \
 Taking the DeepSeek model as an example, using 8 Atlas 800T A3 servers to deploy the model. Assume the IP of the servers starts from 192.0.0.1 and ends by 192.0.0.8. Use the first 4 servers as prefiller nodes and the last 4 servers as decoder nodes. And the prefiller nodes are deployed as master nodes independently, while the decoder nodes use the 192.0.0.5 node as the master node.
@@ -19,41 +19,41 @@ Taking the DeepSeek model as an example, using 8 Atlas 800T A3 servers to deploy
 
 1. Single Node Verification:
 
-Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+    Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
-```bash
- # Check the remote switch ports
- for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
- # Get the link status of the Ethernet ports (UP or DOWN)
- for i in {0..15}; do hccn_tool -i $i -link -g ; done
- # Check the network health status
- for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
- # View the network detected IP configuration
- for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
- # View gateway configuration
- for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
- # View NPU network configuration
- cat /etc/hccn.conf
-```
+    ```bash
+    # Check the remote switch ports
+    for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+    # Get the link status of the Ethernet ports (UP or DOWN)
+    for i in {0..15}; do hccn_tool -i $i -link -g ; done
+    # Check the network health status
+    for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
+    # View the network detected IP configuration
+    for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
+    # View gateway configuration
+    for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
+    # View NPU network configuration
+    cat /etc/hccn.conf
+    ```
 
 2. Get NPU IP Addresses
 
-```bash
-for i in {0..15}; do hccn_tool -i $i -vnic -g;done
-```
+    ```bash
+    for i in {0..15}; do hccn_tool -i $i -vnic -g;done
+    ```
 
 3. Get superpodid and SDID
 
-```bash
-for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
-```
+    ```bash
+    for i in {0..15}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
+    ```
 
 4. Cross-Node PING Test
 
-```bash
-# Execute on the target node (replace 'x.x.x.x' with actual NPU IP address)
-for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
-```
+    ```bash
+    # Execute on the target node (replace 'x.x.x.x' with actual NPU IP address)
+    for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
+    ```
 
 ::::
 
@@ -61,35 +61,35 @@ for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
 
 1. Single Node Verification:
 
-Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+    Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
-```bash
-# Check the remote switch ports
-for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
-# Get the link status of the Ethernet ports (UP or DOWN)
-for i in {0..7}; do hccn_tool -i $i -link -g ; done
-# Check the network health status
-for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
-# View the network detected IP configuration
-for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
-# View gateway configuration
-for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
-# View NPU network configuration
-cat /etc/hccn.conf
-```
+    ```bash
+    # Check the remote switch ports
+    for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+    # Get the link status of the Ethernet ports (UP or DOWN)
+    for i in {0..7}; do hccn_tool -i $i -link -g ; done
+    # Check the network health status
+    for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
+    # View the network detected IP configuration
+    for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
+    # View gateway configuration
+    for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+    # View NPU network configuration
+    cat /etc/hccn.conf
+    ```
 
 2. Get NPU IP Addresses
 
-```bash
-for i in {0..7}; do hccn_tool -i $i -ip -g;done
-```
+    ```bash
+    for i in {0..7}; do hccn_tool -i $i -ip -g;done
+    ```
 
 3. Cross-Node PING Test
 
-```bash
-# Execute on the target node (replace 'x.x.x.x' with actual NPU IP address)
-for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
-```
+    ```bash
+    # Execute on the target node (replace 'x.x.x.x' with actual NPU IP address)
+    for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
+    ```
 
 ::::
 
@@ -368,7 +368,7 @@ You can get the proxy program in the repository's examples, [load\_balance\_prox
 We recommend using aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark). Execute the following commands to install aisbench
 
 ```shell
-git clone https://gitee.com/aisbench/benchmark.git
+git clone https://github.com/AISBench/benchmark.git
 cd benchmark/
 pip3 install -e ./
 ```
@@ -426,59 +426,59 @@ In the PD separation scenario, we provide an optimized configuration.
 2. add '--enforce-eager' command to 'vllm serve'
 3. Take '--kv-transfer-config' as follows:
 
-```shell
---kv-transfer-config \
-    '{"kv_connector": "MooncakeConnectorV1",
-      "kv_buffer_device": "npu",
-      "kv_role": "kv_producer",
-      "kv_parallel_size": "1",
-      "kv_port": "20001",
-      "engine_id": "0"
-    }'
-```
+    ```shell
+    --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
+          "kv_buffer_device": "npu",
+          "kv_role": "kv_producer",
+          "kv_parallel_size": "1",
+          "kv_port": "20001",
+          "engine_id": "0"
+        }'
+    ```
 
 4. Take '--additional-config' as follows:
 
-```shell
---additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
-```
+    ```shell
+    --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
+    ```
 
 - **decoder node**
 
 1. set HCCL_BUFFSIZE=1024
 2. Take '--kv-transfer-config' as follows:
 
-```shell
---kv-transfer-config
-    '{"kv_connector": "MooncakeConnectorV1",
-      "kv_buffer_device": "npu",
-      "kv_role": "kv_consumer",
-      "kv_parallel_size": "1",
-      "kv_port": "20001",
-      "engine_id": "0"
-    }'
-```
+    ```shell
+    --kv-transfer-config
+        '{"kv_connector": "MooncakeConnectorV1",
+          "kv_buffer_device": "npu",
+          "kv_role": "kv_consumer",
+          "kv_parallel_size": "1",
+          "kv_port": "20001",
+          "engine_id": "0"
+        }'
+    ```
 
 3. Take '--additional-config' as follows:
 
-```shell
---additional-config '{"enable_weight_nz_layout":true}'
-```
+    ```shell
+    --additional-config '{"enable_weight_nz_layout":true}'
+    ```
 
 ### Parameters Description
 
 1. '--additional-config' Parameter Introduction:
 
-- **"enable_weight_nz_layout"**: Whether to convert quantized weights to NZ format to accelerate matrix multiplication.
-- **"enable_prefill_optimizations"**: Whether to enable DeepSeek models' prefill optimizations.
-  <br>
+   - **"enable_weight_nz_layout"**: Whether to convert quantized weights to NZ format to accelerate matrix multiplication.
+   - **"enable_prefill_optimizations"**: Whether to enable DeepSeek models' prefill optimizations.
+     <br>
 
 2. Enable MTP
 Add the following command to your configurations.
 
-```shell
---speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
-```
+    ```shell
+    --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+    ```
 
 ### Recommended Configuration Example
 

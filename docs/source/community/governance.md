@@ -14,7 +14,7 @@ vLLM Ascend is an open-source project under the vLLM community, where the author
 
 - Contributor:
 
-    **Responsibility:** Help new contributors on boarding, handle and respond to community questions, review RFCs and code.
+    **Responsibility:** Help new contributors onboarding, handle and respond to community questions, review RFCs and code.
 
     **Requirements:** Complete at least 1 contribution. A contributor is someone who consistently and actively participates in a project, including but not limited to issue/review/commits/community involvement.
 
@@ -37,7 +37,7 @@ Maintainers will be granted write access to the [vllm-project/vllm-ascend](https
 
 ### The Principles
 
-- Membership in vLLM Ascend is given to individuals on merit basis after they demonstrate their strong expertise in vLLM/vLLM Ascend through contributions, reviews, and discussions.
+- Membership in vLLM Ascend is given to individuals on a merit basis after they demonstrate their strong expertise in vLLM/vLLM Ascend through contributions, reviews, and discussions.
 
 - For membership in the maintainer group, individuals have to demonstrate strong and continued alignment with the overall vLLM/vLLM Ascend principles.
 

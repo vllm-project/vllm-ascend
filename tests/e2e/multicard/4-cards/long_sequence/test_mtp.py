@@ -18,15 +18,16 @@
 #
 
 import os
-import pytest
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 os.environ["HCCL_BUFFSIZE"] = "512"
 
 prompts = [
-    "The capital of France is", "Hello, my name is Tom, I am",
-    "The president of United States is", "AI future is"
+    "The capital of France is",
+    "Hello, my name is Tom, I am",
+    "The president of United States is",
+    "AI future is",
 ]
 model = "wemaster/deepseek_mtp_main_random_bf16"
 model_eagle3 = {
@@ -34,23 +35,24 @@ model_eagle3 = {
     "spec": "RedHatAI/Qwen3-8B-speculator.eagle3",
 }
 
+
 @wait_until_npu_memory_free()
 def test_pcp_dcp_mtp1_eager():
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 1,
-                "method": "deepseek_mtp",
-            },
-            enforce_eager=True,
-            async_scheduling=False,
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 1,
+            "method": "deepseek_mtp",
+        },
+        enforce_eager=True,
+        async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
@@ -58,20 +60,20 @@ def test_pcp_dcp_mtp1_eager():
 @wait_until_npu_memory_free()
 def test_pcp_dcp_mtp3_eager():
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            async_scheduling=True,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "deepseek_mtp",
-            },
-            enforce_eager=True,
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        async_scheduling=True,
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "deepseek_mtp",
+        },
+        enforce_eager=True,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
@@ -79,23 +81,23 @@ def test_pcp_dcp_mtp3_eager():
 @wait_until_npu_memory_free()
 def test_pcp_dcp_mtp3_piecewise_graph():
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "deepseek_mtp",
-            },
-            compilation_config={
-                "cudagraph_mode": "PIECEWISE",
-                "cudagraph_capture_sizes": [4, 8, 16],
-            },
-            async_scheduling=False,
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "deepseek_mtp",
+        },
+        compilation_config={
+            "cudagraph_mode": "PIECEWISE",
+            "cudagraph_capture_sizes": [4, 8, 16],
+        },
+        async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
@@ -103,23 +105,23 @@ def test_pcp_dcp_mtp3_piecewise_graph():
 @wait_until_npu_memory_free()
 def test_pcp_dcp_mtp3_full_graph():
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "deepseek_mtp",
-            },
-            compilation_config={
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [4, 8, 16],
-            },
-            async_scheduling=False,
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "deepseek_mtp",
+        },
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [4, 8, 16],
+        },
+        async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
@@ -127,22 +129,22 @@ def test_pcp_dcp_mtp3_full_graph():
 @wait_until_npu_memory_free()
 def test_dcp_mtp3_full_graph():
     with VllmRunner(
-            model,
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            decode_context_parallel_size=2,
-            max_num_batched_tokens=1024,
-            enable_expert_parallel=True,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "deepseek_mtp",
-            },
-            compilation_config={
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [4, 8, 16],
-            },
-            async_scheduling=False,
+        model,
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        decode_context_parallel_size=2,
+        max_num_batched_tokens=1024,
+        enable_expert_parallel=True,
+        block_size=128,
+        speculative_config={
+            "num_speculative_tokens": 3,
+            "method": "deepseek_mtp",
+        },
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [4, 8, 16],
+        },
+        async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)
 
@@ -150,19 +152,15 @@ def test_dcp_mtp3_full_graph():
 @wait_until_npu_memory_free()
 def test_pcp_eagle3_eager():
     with VllmRunner(
-            model_eagle3["main"],
-            max_model_len=1024,
-            tensor_parallel_size=2,
-            enforce_eager=True,
-            prefill_context_parallel_size=2,
-            decode_context_parallel_size=1,
-            max_num_batched_tokens=1024,
-            block_size=128,
-            speculative_config={
-                "num_speculative_tokens": 3,
-                "method": "eagle3",
-                "model": model_eagle3["spec"]
-            },
-            async_scheduling=False,
+        model_eagle3["main"],
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        enforce_eager=True,
+        prefill_context_parallel_size=2,
+        decode_context_parallel_size=1,
+        max_num_batched_tokens=1024,
+        block_size=128,
+        speculative_config={"num_speculative_tokens": 3, "method": "eagle3", "model": model_eagle3["spec"]},
+        async_scheduling=False,
     ) as runner:
         runner.generate_greedy(prompts, 32)

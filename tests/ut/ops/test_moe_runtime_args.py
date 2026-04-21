@@ -29,6 +29,16 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
+MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
+
+
+def _get_test_mxfp_dtype(quant_type: QuantType) -> torch.dtype | None:
+    if quant_type == QuantType.MXFP8:
+        return torch.float8_e4m3fn
+    if quant_type == QuantType.MXFP4:
+        return MXFP4_TEST_DTYPE
+    return None
+
 
 class TestMoERuntimeArgs(unittest.TestCase):
     def test_runtime_args_facade_exports_public_contracts_and_builders(self):
@@ -62,6 +72,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
             QuantType.W4A8,
             QuantType.W8A8,
             QuantType.MXFP8,
+            QuantType.MXFP4,
         ):
             with self.subTest(quant_type=quant_type):
                 hidden_states = torch.randn(4, 8)
@@ -82,7 +93,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     log2phy=torch.tensor([3, 2, 1, 0], dtype=torch.int32),
                     pertoken_scale=torch.randn(4),
                     activation="gelu",
-                    mxfp_act_quant_type=torch.float8_e4m3fn if quant_type == QuantType.MXFP8 else None,
+                    mxfp_act_quant_type=_get_test_mxfp_dtype(quant_type),
                 )
 
                 self.assertIs(fused_experts_input.hidden_states, hidden_states)
@@ -154,86 +165,98 @@ class TestMoERuntimeArgs(unittest.TestCase):
         self.assertIs(token_dispatch_input.topk_ids, routed_topk_ids)
 
     def test_build_fused_experts_input_requires_primitive_mxfp_params_for_mxfp_quant(self):
-        with self.assertRaisesRegex(ValueError, "primitive MXFP params are required"):
-            build_fused_experts_input(
-                hidden_states=torch.randn(2, 8),
-                topk_weights=torch.randn(2, 2),
-                topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
-                w1=torch.randn(2, 8, 16),
-                w2=torch.randn(2, 16, 8),
-                quant_type=QuantType.MXFP8,
-                dynamic_eplb=False,
-            )
+        for quant_type in (QuantType.MXFP8, QuantType.MXFP4):
+            with (
+                self.subTest(quant_type=quant_type),
+                self.assertRaisesRegex(ValueError, "primitive MXFP params are required"),
+            ):
+                build_fused_experts_input(
+                    hidden_states=torch.randn(2, 8),
+                    topk_weights=torch.randn(2, 2),
+                    topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
+                    w1=torch.randn(2, 8, 16),
+                    w2=torch.randn(2, 16, 8),
+                    quant_type=quant_type,
+                    dynamic_eplb=False,
+                )
 
     def test_build_mlp_compute_input_derives_fusion_and_preserves_mxfp_params(self):
-        fused_experts_input = build_fused_experts_input(
-            hidden_states=torch.randn(2, 8, dtype=torch.bfloat16),
-            topk_weights=torch.randn(2, 2),
-            topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
-            w1=torch.randn(2, 8, 16),
-            w2=torch.randn(2, 16, 8),
-            quant_type=QuantType.MXFP8,
-            dynamic_eplb=False,
-            mxfp_act_quant_type=torch.float8_e4m3fn,
-            mxfp_weight_quant_type=torch.float8_e4m3fn,
-            mxfp_scale_dtype=torch.float32,
-            mxfp_per_token_scale_dtype=torch.float16,
-            mxfp_use_bf16=False,
-            w1_scale=[torch.randn(1)],
-            w2_scale=[torch.randn(1)],
-        )
-        token_dispatch_output = MoETokenDispatchOutput(
-            hidden_states=torch.randn(4, 8, dtype=torch.bfloat16),
-            group_list=torch.tensor([2, 2], dtype=torch.int64),
-            group_list_type=1,
-            dynamic_scale=torch.randn(4, 1),
-            combine_metadata=MoEAllGatherCombineMetadata(
-                topk_weights=fused_experts_input.topk_weights,
-                expanded_row_idx=torch.arange(4, dtype=torch.int32),
-                restore_shape=torch.Size([2, 8]),
-            ),
-        )
+        for quant_type, expected_fusion in ((QuantType.MXFP8, True), (QuantType.MXFP4, False)):
+            with self.subTest(quant_type=quant_type):
+                mxfp_dtype = _get_test_mxfp_dtype(quant_type)
+                fused_experts_input = build_fused_experts_input(
+                    hidden_states=torch.randn(2, 8, dtype=torch.bfloat16),
+                    topk_weights=torch.randn(2, 2),
+                    topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
+                    w1=torch.randn(2, 8, 16),
+                    w2=torch.randn(2, 16, 8),
+                    quant_type=quant_type,
+                    dynamic_eplb=False,
+                    mxfp_act_quant_type=mxfp_dtype,
+                    mxfp_weight_quant_type=mxfp_dtype,
+                    mxfp_scale_dtype=torch.float32,
+                    mxfp_per_token_scale_dtype=torch.float16,
+                    mxfp_use_bf16=False,
+                    w1_scale=[torch.randn(1)],
+                    w2_scale=[torch.randn(1)],
+                )
+                token_dispatch_output = MoETokenDispatchOutput(
+                    hidden_states=torch.randn(4, 8, dtype=torch.bfloat16),
+                    group_list=torch.tensor([2, 2], dtype=torch.int64),
+                    group_list_type=1,
+                    dynamic_scale=torch.randn(4, 1),
+                    combine_metadata=MoEAllGatherCombineMetadata(
+                        topk_weights=fused_experts_input.topk_weights,
+                        expanded_row_idx=torch.arange(4, dtype=torch.int32),
+                        restore_shape=torch.Size([2, 8]),
+                    ),
+                )
 
-        mlp_compute_input = build_mlp_compute_input(
-            fused_experts_input=fused_experts_input,
-            token_dispatch_output=token_dispatch_output,
-            use_fusion_ops=True,
-        )
+                mlp_compute_input = build_mlp_compute_input(
+                    fused_experts_input=fused_experts_input,
+                    token_dispatch_output=token_dispatch_output,
+                    use_fusion_ops=True,
+                )
 
-        self.assertIs(mlp_compute_input.hidden_states, token_dispatch_output.hidden_states)
-        self.assertIs(mlp_compute_input.weights, fused_experts_input.weights)
-        self.assertIs(mlp_compute_input.weights.w1_scale, fused_experts_input.weights.w1_scale)
-        self.assertIs(mlp_compute_input.weights.w2_scale, fused_experts_input.weights.w2_scale)
-        self.assertTrue(mlp_compute_input.fusion)
-        self.assertTrue(mlp_compute_input.quant.is_mxfp)
-        assert mlp_compute_input.quant.mxfp is not None
-        self.assertEqual(mlp_compute_input.quant.mxfp.scale_dtype, torch.float32)
-        self.assertEqual(mlp_compute_input.quant.mxfp.per_token_scale_dtype, torch.float16)
-        self.assertFalse(mlp_compute_input.quant.mxfp.use_bf16)
+                self.assertIs(mlp_compute_input.hidden_states, token_dispatch_output.hidden_states)
+                self.assertIs(mlp_compute_input.weights, fused_experts_input.weights)
+                self.assertIs(mlp_compute_input.weights.w1_scale, fused_experts_input.weights.w1_scale)
+                self.assertIs(mlp_compute_input.weights.w2_scale, fused_experts_input.weights.w2_scale)
+                self.assertEqual(mlp_compute_input.fusion, expected_fusion)
+                self.assertTrue(mlp_compute_input.quant.is_mxfp)
+                assert mlp_compute_input.quant.mxfp is not None
+                self.assertEqual(mlp_compute_input.quant.mxfp.act_quant_type, mxfp_dtype)
+                self.assertEqual(mlp_compute_input.quant.mxfp.weight_quant_type, mxfp_dtype)
+                self.assertEqual(mlp_compute_input.quant.mxfp.scale_dtype, torch.float32)
+                self.assertEqual(mlp_compute_input.quant.mxfp.per_token_scale_dtype, torch.float16)
+                self.assertFalse(mlp_compute_input.quant.mxfp.use_bf16)
 
     def test_build_fused_experts_input_constructs_internal_mxfp_leaf_from_primitives(self):
-        fused_experts_input = build_fused_experts_input(
-            hidden_states=torch.randn(2, 8, dtype=torch.bfloat16),
-            topk_weights=torch.randn(2, 2),
-            topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
-            w1=torch.randn(2, 8, 16),
-            w2=torch.randn(2, 16, 8),
-            quant_type=QuantType.MXFP8,
-            dynamic_eplb=False,
-            mxfp_act_quant_type=torch.float8_e4m3fn,
-            mxfp_weight_quant_type=torch.float8_e4m3fn,
-            mxfp_scale_dtype=torch.float32,
-            mxfp_per_token_scale_dtype=torch.float16,
-            mxfp_use_bf16=False,
-        )
+        for quant_type in (QuantType.MXFP8, QuantType.MXFP4):
+            with self.subTest(quant_type=quant_type):
+                mxfp_dtype = _get_test_mxfp_dtype(quant_type)
+                fused_experts_input = build_fused_experts_input(
+                    hidden_states=torch.randn(2, 8, dtype=torch.bfloat16),
+                    topk_weights=torch.randn(2, 2),
+                    topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
+                    w1=torch.randn(2, 8, 16),
+                    w2=torch.randn(2, 16, 8),
+                    quant_type=quant_type,
+                    dynamic_eplb=False,
+                    mxfp_act_quant_type=mxfp_dtype,
+                    mxfp_weight_quant_type=mxfp_dtype,
+                    mxfp_scale_dtype=torch.float32,
+                    mxfp_per_token_scale_dtype=torch.float16,
+                    mxfp_use_bf16=False,
+                )
 
-        self.assertTrue(fused_experts_input.quant.is_mxfp)
-        assert fused_experts_input.quant.mxfp is not None
-        self.assertEqual(fused_experts_input.quant.mxfp.act_quant_type, torch.float8_e4m3fn)
-        self.assertEqual(fused_experts_input.quant.mxfp.weight_quant_type, torch.float8_e4m3fn)
-        self.assertEqual(fused_experts_input.quant.mxfp.scale_dtype, torch.float32)
-        self.assertEqual(fused_experts_input.quant.mxfp.per_token_scale_dtype, torch.float16)
-        self.assertFalse(fused_experts_input.quant.mxfp.use_bf16)
+                self.assertTrue(fused_experts_input.quant.is_mxfp)
+                assert fused_experts_input.quant.mxfp is not None
+                self.assertEqual(fused_experts_input.quant.mxfp.act_quant_type, mxfp_dtype)
+                self.assertEqual(fused_experts_input.quant.mxfp.weight_quant_type, mxfp_dtype)
+                self.assertEqual(fused_experts_input.quant.mxfp.scale_dtype, torch.float32)
+                self.assertEqual(fused_experts_input.quant.mxfp.per_token_scale_dtype, torch.float16)
+                self.assertFalse(fused_experts_input.quant.mxfp.use_bf16)
 
 
 if __name__ == "__main__":

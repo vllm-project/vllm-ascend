@@ -1,5 +1,6 @@
 import math
 from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from typing import Any
 
@@ -19,7 +20,6 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
-    vllm_version_is,
 )
 
 
@@ -30,11 +30,33 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
+_MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+
+
+@contextmanager
+def override_mrv2_in_profile_run(enabled: bool):
+    """Override MRv2's extra profile-run marker for one forward path.
+
+    MRv2 builds the base forward context inside upstream vLLM, so Ascend's
+    platform hook cannot tell whether the current forward is the extra MC2
+    profile dummy run. A ContextVar keeps this MRv2-only state scoped to the
+    current forward path without adding default fallback behavior.
+    """
+    token = _MRV2_IN_PROFILE_RUN.set(enabled)
+    try:
+        yield
+    finally:
+        _MRV2_IN_PROFILE_RUN.reset(token)
+
+
+def get_mrv2_in_profile_run() -> bool:
+    return _MRV2_IN_PROFILE_RUN.get()
+
+
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     num_tokens: int = 0,
     num_tokens_across_dp: torch.Tensor | None = None,
     in_profile_run: bool = False,
@@ -60,9 +82,6 @@ def set_ascend_forward_context(
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
     }
-    if vllm_version_is("0.18.0"):
-        forward_context_kwargs["virtual_engine"] = virtual_engine
-
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas

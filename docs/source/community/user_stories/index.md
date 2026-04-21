@@ -10,7 +10,7 @@ Read case studies on how users and developers solve real, everyday problems with
 
 - [GPUStack](https://github.com/gpustack/gpustack) is an open-source GPU cluster manager for running AI models. It supports vLLM Ascend since [v0.6.2](https://github.com/gpustack/gpustack/releases/tag/v0.6.2). See more GPUStack performance evaluation information at [this link](https://mp.weixin.qq.com/s/pkytJVjcH9_OnffnsFGaew).
 
-- [verl](https://github.com/volcengine/verl) is a flexible, efficient, and production-ready RL training library for LLMs. It uses vLLM Ascend since [v0.4.0](https://github.com/volcengine/verl/releases/tag/v0.4.0). See more information on [verl x Ascend Quickstart](https://verl.readthedocs.io/en/latest/ascend_tutorial/ascend_quick_start.html).
+- [verl](https://github.com/volcengine/verl) is a flexible, efficient, and production-ready RL training library for LLMs. It uses vLLM Ascend since [v0.4.0](https://github.com/volcengine/verl/releases/tag/v0.4.0). See more information on [verl x Ascend Quickstart](https://verl.readthedocs.io/en/latest/ascend_tutorial/quick_start/ascend_quick_start.html).
 
 :::{toctree}
 :caption: More details

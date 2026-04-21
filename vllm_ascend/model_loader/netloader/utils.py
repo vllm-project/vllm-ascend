@@ -15,9 +15,9 @@
 #
 
 import os
-import re
 import socket
 
+import regex as re
 from vllm.logger import logger
 
 

@@ -10,6 +10,7 @@ import pytest
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
+from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
@@ -329,6 +330,49 @@ def test_eagle_logprobs(
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 
+def test_suffix_logprobs(
+    model_name: str,
+):
+    """
+    Verify that suffix speculative decoding with logprobs enabled
+    does not crash and returns correct logprobs.
+    """
+    prompt = {"role": "user", "content": "Hello world " * 10}
+    sampling_params = SamplingParams(temperature=0, logprobs=1, max_tokens=10, ignore_eos=False)
+
+    ref_llm = LLM(model=model_name, max_model_len=2048)
+    ref_outputs = ref_llm.chat([prompt], sampling_params)
+    ref_logprobs = []
+    for output in ref_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                ref_logprobs.append(logprobs[token_id])
+    del ref_llm
+
+    with VllmRunner(
+        model_name,
+        speculative_config={
+            "method": "suffix",
+            "num_speculative_tokens": 8,
+        },
+        max_model_len=1024,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as runner:
+        spec_outputs = runner.model.chat([prompt], sampling_params)
+
+    spec_logprobs = []
+    for output in spec_outputs[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                spec_logprobs.append(logprobs[token_id])
+
+    assert len(spec_logprobs) > 0, "No logprobs returned from suffix spec decode"
+    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
+        assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1)
+        assert ref_logprob.rank == spec_logprob.rank
+        assert ref_logprob.decoded_token == spec_logprob.decoded_token
+
+
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
@@ -349,8 +393,9 @@ def test_llama_qwen_eagle_acceptance(
     main_model_name = MODELS[method]["main"]
     spec_model_name = MODELS[method]["spec"]
 
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
     tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
+        tokenizer_path,
         trust_remote_code=True,
     )
     sampling_params = SamplingParams(
@@ -456,8 +501,9 @@ def test_parallel_drafting_acceptance(
     main_model_name = DRAFT_PARALLEL_MODELS[method]["main"]
     spec_model_name = DRAFT_PARALLEL_MODELS[method]["spec"]
 
+    tokenizer_path = resolve_tokenizer_args(main_model_name)[1]
     tokenizer = AutoTokenizer.from_pretrained(
-        main_model_name,
+        tokenizer_path,
         trust_remote_code=True,
     )
     sampling_params = SamplingParams(
@@ -534,3 +580,32 @@ def test_parallel_drafting_acceptance(
         print(f"golden: {golden}")
 
     assert match
+
+
+@pytest.mark.parametrize("method", MODELS.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [3])
+def test_eagle3_fia_pad_under_max_concurrency(
+    method: str,
+    num_speculative_tokens: int,
+):
+    main_model_name = MODELS[method]["main"]
+    spec_model_name = MODELS[method]["spec"]
+    prompts = [
+        "Hello, I am",
+    ]
+    speculative_config = {
+        "method": method,
+        "num_speculative_tokens": num_speculative_tokens,
+        "model": spec_model_name,
+    }
+    max_num_tokens = 1 + num_speculative_tokens
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[max_num_tokens])
+    with VllmRunner(
+        main_model_name,
+        max_model_len=2048,
+        tensor_parallel_size=1,
+        speculative_config=speculative_config,
+        max_num_batched_tokens=max_num_tokens,
+        compilation_config=compilation_config,
+    ) as llm:
+        _ = llm.generate_greedy(prompts, max_tokens=10)

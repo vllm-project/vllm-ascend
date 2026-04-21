@@ -336,7 +336,7 @@ class KVPoolScheduler:
             return False, None
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
-            logger.info("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
+            logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
 
 

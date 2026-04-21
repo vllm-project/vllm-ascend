@@ -5,7 +5,7 @@ from typing import cast
 
 import numpy as np
 
-from .policy_abstract import DynamicConfig, EplbPolicy
+from .policy_abstract import EplbPolicy
 
 
 class DynamicTable:
@@ -25,9 +25,6 @@ class DynamicTable:
 
 
 class DefaultEplb(EplbPolicy):
-    def __init__(self, config: DynamicConfig):
-        super().__init__(config)
-
     @staticmethod
     def add_redundant(current_expert_table, expert_workload, num_original_expert):
         layer_num, npu_num, experts_per_npu = expert_workload.shape

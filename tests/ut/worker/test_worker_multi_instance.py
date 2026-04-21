@@ -49,30 +49,60 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
 
+        mock_cache_config = MagicMock()
+        mock_cache_config.kv_cache_memory_bytes = None
+        worker.cache_config = mock_cache_config
+
         mock_snapshot = MagicMock()
         mock_snapshot.free_memory = init_free_memory
         mock_snapshot.total_memory = init_total_memory
         worker.init_snapshot = mock_snapshot
 
         worker.requested_memory = requested_memory
+        worker.device = "npu:0"
         return worker
 
     @staticmethod
     def _make_profile_result(free_memory_after: int, non_kv_cache_memory: int):
-        """Return a mock profile_result compatible with memory_profiling output."""
+        """Return a mock profile_result compatible with memory_profiling output.
+
+        The worker code recomputes non_kv_cache_memory as:
+            non_torch_increase + torch_peak_increase + weights_memory
+        We set non_torch_increase=0, before_profile.torch_peak=0 (so
+        torch_peak_increase = peak - 0 = 0 since memory_stats is mocked to
+        return peak=0), and weights_memory=non_kv_cache_memory, ensuring the
+        recomputed value equals the requested non_kv_cache_memory.
+        """
         profile_result = MagicMock()
         profile_result.after_profile.free_memory = free_memory_after
         profile_result.non_kv_cache_memory = non_kv_cache_memory
+        profile_result.non_torch_increase = 0
+        profile_result.before_profile.torch_peak = 0
+        profile_result.weights_memory = non_kv_cache_memory
         return profile_result
 
     @staticmethod
     def _patch_memory_profiling(profile_result):
-        """Return a mock for `memory_profiling` that yields *profile_result*."""
+        """Return a context manager mocking `memory_profiling` and `torch.npu.memory_stats`."""
+        from contextlib import contextmanager
+
         mock_ctx = MagicMock()
         mock_ctx.__enter__ = MagicMock(return_value=profile_result)
         mock_ctx.__exit__ = MagicMock(return_value=False)
         mock_profiling = MagicMock(return_value=mock_ctx)
-        return patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling)
+
+        @contextmanager
+        def combined():
+            with (
+                patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling),
+                patch(
+                    "torch.npu.memory_stats",
+                    return_value={"allocated_bytes.all.peak": 0},
+                ),
+            ):
+                yield
+
+        return combined()
 
     # ------------------------------------------------------------------ #
     # Tests
@@ -83,9 +113,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         """Baseline: single instance on an empty card yields positive KV cache."""
         total = int(64 * GiB_bytes)
         gpu_util = 0.9
-        requested_memory = int(total * gpu_util)   # 57.6 GiB
-        init_free = int(62 * GiB_bytes)            # almost all free
-        non_kv_cache = int(0.5 * GiB_bytes)        # Qwen3-0.6B weights
+        requested_memory = int(total * gpu_util)  # 57.6 GiB
+        init_free = int(62 * GiB_bytes)  # almost all free
+        non_kv_cache = int(0.5 * GiB_bytes)  # Qwen3-0.6B weights
 
         worker = self._make_worker(requested_memory, init_free, total)
         profile_result = self._make_profile_result(
@@ -122,15 +152,15 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         """
         total = int(64 * GiB_bytes)
         gpu_util = 0.4
-        requested_memory = int(total * gpu_util)          # 25.6 GiB
+        requested_memory = int(total * gpu_util)  # 25.6 GiB
 
         # First instance already occupies its full requested_memory slice
-        first_instance_used = requested_memory            # 25.6 GiB
-        init_free = total - first_instance_used           # ~38.4 GiB
+        first_instance_used = requested_memory  # 25.6 GiB
+        init_free = total - first_instance_used  # ~38.4 GiB
 
         # After the fix: profiling correctly reports only the second
         # instance's own model weights, not the first instance's memory.
-        non_kv_cache = int(0.5 * GiB_bytes)              # Qwen3-0.6B weights
+        non_kv_cache = int(0.5 * GiB_bytes)  # Qwen3-0.6B weights
 
         worker = self._make_worker(requested_memory, init_free, total)
         profile_result = self._make_profile_result(
@@ -142,7 +172,8 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             result = worker.determine_available_memory()
 
         self.assertGreater(
-            result, 0,
+            result,
+            0,
             "Second instance must have positive KV cache memory. "
             "A non-positive value means the multi-instance OOM bug "
             "(PR #7427) has regressed.",
@@ -167,10 +198,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         """
         total = int(64 * GiB_bytes)
         gpu_util = 0.4
-        requested_memory = int(total * gpu_util)   # 25.6 GiB
+        requested_memory = int(total * gpu_util)  # 25.6 GiB
 
-        first_instance_used = requested_memory     # 25.6 GiB
-        init_free = total - first_instance_used    # ~38.4 GiB
+        first_instance_used = requested_memory  # 25.6 GiB
+        init_free = total - first_instance_used  # ~38.4 GiB
 
         # Buggy: non_kv_cache_memory = first-instance memory + second-instance weights
         buggy_non_kv_cache = int((25.6 + 0.5) * GiB_bytes)  # ~26.1 GiB
@@ -187,7 +218,8 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
         # Pre-fix: 25.6 GiB - 26.1 GiB = -0.5 GiB  (negative → OOM)
         self.assertLess(
-            result, 0,
+            result,
+            0,
             "With the pre-fix (buggy) non_kv_cache_memory the result must be "
             "negative; this documents the OOM regression that PR #7427 fixed.",
         )
@@ -210,9 +242,8 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             non_kv_cache_memory=int(0.5 * GiB_bytes),
         )
 
-        with self._patch_memory_profiling(profile_result):
-            with self.assertRaises(AssertionError) as ctx:
-                worker.determine_available_memory()
+        with self._patch_memory_profiling(profile_result), self.assertRaises(AssertionError) as ctx:
+            worker.determine_available_memory()
 
         self.assertIn("Error in memory profiling", str(ctx.exception))
 
@@ -225,13 +256,13 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         non_kv_cache_memory (i.e. there is room for at least some KV blocks),
         the result must be positive.
         """
-        total = int(32 * GiB_bytes)       # smaller card (e.g. 910B1)
+        total = int(32 * GiB_bytes)  # smaller card (e.g. 910B1)
         gpu_util = 0.3
-        requested_memory = int(total * gpu_util)   # 9.6 GiB
+        requested_memory = int(total * gpu_util)  # 9.6 GiB
 
         # First instance has consumed most of its requested slice
-        first_instance_used = requested_memory     # 9.6 GiB
-        init_free = total - first_instance_used    # 22.4 GiB
+        first_instance_used = requested_memory  # 9.6 GiB
+        init_free = total - first_instance_used  # 22.4 GiB
 
         non_kv_cache = int(0.5 * GiB_bytes)  # Qwen3-0.6B
 

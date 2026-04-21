@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -33,6 +34,25 @@ class TestRecord:
         }
 
 
+def _escape_github_actions_value(value: str) -> str:
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _print_github_actions_group_start(title: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::group::{_escape_github_actions_value(title)}", flush=True)
+
+
+def _print_github_actions_group_end() -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print("::endgroup::", flush=True)
+
+
+def _print_github_actions_annotation(annotation: str, message: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::{annotation}::{_escape_github_actions_value(message)}", flush=True)
+
+
 def run_tests(
     files: list[TestFile],
     continue_on_error: bool = False,
@@ -59,31 +79,41 @@ def run_tests(
     total_start = time.perf_counter()
 
     for i, test in enumerate(files):
-        print(f"\n{'.' * 60}", flush=True)
-        # NOTE: ci_log_summary.py depend on this
-        # START line format when splitting suite-level logs into test runs.
-        print(
-            f"{_Color.HEADER}[{i + 1}/{len(files)}] START  {test.name}{_Color.RESET}",
-            flush=True,
-        )
+        _print_github_actions_group_start(f"[{i + 1}/{len(files)}] {test.name}")
+        try:
+            print(f"\n{'.' * 60}", flush=True)
+            # NOTE: ci_log_summary.py depend on this
+            # START line format when splitting suite-level logs into test runs.
+            print(
+                f"{_Color.HEADER}[{i + 1}/{len(files)}] START  {test.name}{_Color.RESET}",
+                flush=True,
+            )
 
-        start = time.perf_counter()
-        result = subprocess.run(["pytest", "-sv", "--durations=0", "--color=yes", test.name])
-        elapsed = time.perf_counter() - start
-        passed = result.returncode == 0
+            start = time.perf_counter()
+            result = subprocess.run(["pytest", "-sv", "--durations=0", "--color=yes", test.name])
+            elapsed = time.perf_counter() - start
+            passed = result.returncode == 0
 
-        records.append(TestRecord(name=test.name, passed=passed, elapsed=elapsed, estimated=test.estimated_time))
+            records.append(TestRecord(name=test.name, passed=passed, elapsed=elapsed, estimated=test.estimated_time))
 
-        color = _Color.GREEN if passed else _Color.RED
-        status = "PASSED" if passed else f"FAILED (exit code {result.returncode})"
-        # NOTE: ci_log_summary.py depend on this
-        # PASSED / FAILED (exit code X) line format for suite end detection.
-        print(
-            f"{color}[{i + 1}/{len(files)}] {status}  {test.name}  ({elapsed:.0f}s){_Color.RESET}",
-            flush=True,
-        )
+            color = _Color.GREEN if passed else _Color.RED
+            status = "PASSED" if passed else f"FAILED (exit code {result.returncode})"
+            # NOTE: ci_log_summary.py depend on this
+            # PASSED / FAILED (exit code X) line format for suite end detection.
+            print(
+                f"{color}[{i + 1}/{len(files)}] {status}  {test.name}  ({elapsed:.0f}s){_Color.RESET}",
+                flush=True,
+            )
+        finally:
+            _print_github_actions_group_end()
 
         if not passed:
+            _print_github_actions_annotation(
+                "error",
+                f"[{i + 1}/{len(files)}] FAILED {test.name}. "
+                "Please go to the Summary section to quickly review the error overview, "
+                "or expand the logs to view the error details.",
+            )
             all_passed = False
             if not continue_on_error:
                 break

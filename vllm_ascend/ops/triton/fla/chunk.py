@@ -138,6 +138,7 @@ def chunk_gated_delta_rule_fwd(
             h_update=h_update,
             updated_h_state=updated_h_state,
             cu_seqlens=cu_seqlens,
+            chunk_offsets=chunk_offsets_chunk64,
         )
 
     o = chunk_fwd_o(
@@ -148,6 +149,7 @@ def chunk_gated_delta_rule_fwd(
         g=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_offsets=chunk_offsets_chunk64,
     )
 
     if SUPPRESS_LEVEL < 3:

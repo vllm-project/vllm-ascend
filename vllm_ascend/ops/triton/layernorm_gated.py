@@ -12,7 +12,7 @@ from vllm.triton_utils import tl, triton
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
-@triton.jit
+@triton.jit(do_not_specialize=["stride_x_row", "stride_y_row", "stride_z_row", "M", "N", "eps"])
 def _layer_norm_fwd_1pass_kernel_npu(
     X,  # pointer to the input
     Y,  # pointer to the output
