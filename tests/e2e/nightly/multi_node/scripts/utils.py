@@ -3,7 +3,6 @@ import os
 import socket
 import time
 from contextlib import contextmanager
-from typing import List, Optional
 
 import psutil
 
@@ -45,14 +44,13 @@ def dns_resolver(retries: int = 240, base_delay: float = 0.5):
     return resolve
 
 
-def get_cluster_dns_list(world_size: int) -> List[str]:
+def get_cluster_dns_list(world_size: int) -> list[str]:
     if world_size < 1:
         raise ValueError(f"world_size must be >= 1, got {world_size}")
 
     leader_dns = os.getenv("LWS_LEADER_ADDRESS")
     if not leader_dns:
-        raise RuntimeError(
-            "environment variable LWS_LEADER_ADDRESS is not set")
+        raise RuntimeError("environment variable LWS_LEADER_ADDRESS is not set")
 
     # Expected format:
     # <leader-name>.<group-name>.<namespace>
@@ -62,10 +60,7 @@ def get_cluster_dns_list(world_size: int) -> List[str]:
 
     leader_name, group_name, namespace = parts[0], parts[1], parts[2]
 
-    worker_dns_list = [
-        f"{leader_name}-{idx}.{group_name}.{namespace}"
-        for idx in range(1, world_size)
-    ]
+    worker_dns_list = [f"{leader_name}-{idx}.{group_name}.{namespace}" for idx in range(1, world_size)]
 
     return [leader_dns, *worker_dns_list]
 
@@ -77,6 +72,7 @@ def get_cluster_ips(word_size: int = 2) -> list[str]:
 
 def get_available_port(start_port: int = 6000, end_port: int = 7000) -> int:
     import socket
+
     for port in range(start_port, end_port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
@@ -112,7 +108,7 @@ def get_cur_ip(retries: int = 20, base_delay: float = 0.5):
                 delay = min(delay * 1.5, 5)
 
 
-def get_net_interface(ip: Optional[str] = None) -> str:
+def get_net_interface(ip: str | None = None) -> str:
     """
     Returns specified IP's inetwork interface.
     If no IP is provided, uses the first from hostname -I.

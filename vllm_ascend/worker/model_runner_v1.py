@@ -3545,13 +3545,11 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
 
-    def capture_model(self) -> None:
-        gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)
-        if gpu_model_runner_cls is None:
-            raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
-        parent_module_name = gpu_model_runner_cls.__module__
+    def capture_model(self) -> int:
+        """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            GPUModelRunner.capture_model(self)
+            return GPUModelRunner.capture_model(self)
 
     def _prepare_multimodal_fields(self):
         """
@@ -3586,6 +3584,20 @@ def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     This ensures all ranks send consistent values (all padded or all unpadded).
     """
     return int(tensor[1, :].min().item())
+
+
+def _get_gpu_model_runner_module_name(model_runner) -> str:
+    """Return the module name of GPUModelRunner found in the MRO."""
+    gpu_model_runner_cls = next(
+        (cls for cls in model_runner.__class__.__mro__ if cls.__name__ == "GPUModelRunner"),
+        None,
+    )
+    if gpu_model_runner_cls is None:
+        raise TypeError(
+            "Could not find GPUModelRunner in the MRO. "
+            "The class hierarchy may have changed."
+        )
+    return gpu_model_runner_cls.__module__
 
 
 @contextmanager
