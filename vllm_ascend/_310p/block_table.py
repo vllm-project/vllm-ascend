@@ -7,6 +7,7 @@ from vllm.v1.worker.cp_utils import get_total_cp_world_size
 from vllm_ascend.worker.block_table import BlockTable as AscendBlockTable
 from vllm_ascend.worker.block_table import MultiGroupBlockTable as AscendMultiGroupBlockTable
 
+
 class BlockTable(AscendBlockTable):
     def compute_slot_mapping(self, *args) -> None:
         req_indices, positions = self._normalize_slot_mapping_inputs(*args)
