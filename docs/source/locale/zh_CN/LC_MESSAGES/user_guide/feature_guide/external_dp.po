@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-01-22 17:30+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -40,7 +40,7 @@ msgstr ""
 "拥有自己的端点（Endpoint），并通过外部路由器在它们之间分配 HTTP 请求负载，同时利用来自每个服务器的实时遥测数据来做出路由决策。"
 
 #: ../../source/user_guide/feature_guide/external_dp.md:7
-msgid "Getting Start"
+msgid "Getting Started"
 msgstr "快速入门"
 
 #: ../../source/user_guide/feature_guide/external_dp.md:9
