@@ -503,6 +503,7 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
 
     def _make_method(self, is_kv_producer=False):
         from vllm_ascend.quantization.methods.kv_c8 import AscendC8KVCacheAttentionMethod
+
         mock_config = MagicMock(spec=VllmConfig)
         if is_kv_producer:
             kv_config = MagicMock(spec=KVTransferConfig)
@@ -583,6 +584,7 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
 
 class TestAscendC8AttentionBackendImplScales(TestBase):
     """Tests for AscendC8AttentionBackendImpl scale helpers (scalar scales/offsets)."""
+
     def setUp(self):
         self.original_dtype = torch.get_default_dtype()
 
