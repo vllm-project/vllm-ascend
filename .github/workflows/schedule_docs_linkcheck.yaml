@@ -72,7 +72,7 @@ jobs:
       - name: Run full Sphinx linkcheck
         if: ${{ github.event_name != 'pull_request' }}
         run: |
-          make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+          make -C docs linkcheck SPHINXOPTS="${LINKCHECK_SPHINXOPTS}"
 
       - name: Run Sphinx linkcheck for changed docs
         if: ${{ github.event_name == 'pull_request' && steps.changed-docs.outputs.has_linkcheck_files == 'true' }}
@@ -81,7 +81,7 @@ jobs:
 
           mapfile -t changed_docs < changed-docs.txt
           sphinx-build -b linkcheck docs/source docs/_build/linkcheck \
-            -W --keep-going "${changed_docs[@]}"
+            ${LINKCHECK_SPHINXOPTS} "${changed_docs[@]}"
 
       - name: Upload linkcheck reports
         if: ${{ always() && (github.event_name != 'pull_request' || steps.changed-docs.outputs.has_linkcheck_files == 'true') }}
