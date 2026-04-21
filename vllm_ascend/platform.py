@@ -882,6 +882,15 @@ class NPUPlatform(Platform):
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
 
+        # ==================== 9. Parallel Config ====================
+        if vllm_config.parallel_config:
+            if getattr(vllm_config.parallel_config, "enable_dbo", False):
+                logger.warning(
+                    "Parameter '--enable-dbo' is not yet supported on "
+                    "Ascend NPU. Resetting to False."
+                )
+                vllm_config.parallel_config.enable_dbo = False
+
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
