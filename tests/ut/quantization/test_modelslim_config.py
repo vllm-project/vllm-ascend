@@ -133,11 +133,16 @@ class TestAscendModelSlimConfig(TestBase):
         mock_vllm_config_for_kv_c8 = MagicMock()
         mock_vllm_config_for_kv_c8.kv_transfer_config = None
 
-        with patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_vllm_config), \
-                patch("vllm_ascend.quantization.methods.kv_c8.get_current_vllm_config",
-                      return_value=mock_vllm_config_for_kv_c8), \
-                patch("vllm_ascend.quantization.method_adapters.AscendKVCacheMethod",
-                      return_value=MagicMock()) as mock_kvcache:
+        with (
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_vllm_config),
+                patch(
+                    "vllm_ascend.quantization.methods.kv_c8.get_current_vllm_config",
+                    return_value=mock_vllm_config_for_kv_c8,
+                ),
+                patch(
+                    "vllm_ascend.quantization.method_adapters.AscendKVCacheMethod", return_value=MagicMock()
+                ) as mock_kvcache,
+        ):
             method = c8_config.get_quant_method(attention_layer, "model.layers.0.self_attn.attn")
             self.assertIs(method, mock_kvcache.return_value)
             args, _ = mock_kvcache.call_args
