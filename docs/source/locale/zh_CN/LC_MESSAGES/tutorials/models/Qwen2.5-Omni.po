@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-04-17 02:05+0000\n"
 "PO-Revision-Date: 2026-04-10 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -33,9 +33,7 @@ msgid ""
 "diverse modalities, including text, images, audio, and video, while "
 "simultaneously generating text and natural speech responses in a "
 "streaming manner."
-msgstr ""
-"Qwen2.5-Omni 是一个端到端的多模态模型，旨在感知包括文本、图像、音频和视频在内的多种模态，"
-"同时以流式方式生成文本和自然语音响应。"
+msgstr "Qwen2.5-Omni 是一个端到端的多模态模型，旨在感知包括文本、图像、音频和视频在内的多种模态，同时以流式方式生成文本和自然语音响应。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:7
 msgid ""
@@ -45,8 +43,8 @@ msgid ""
 "preparation, single-NPU and multi-NPU deployment, accuracy and "
 "performance evaluation."
 msgstr ""
-"`Qwen2.5-Omni` 模型从 `vllm-ascend:v0.11.0rc0` 版本开始支持。"
-"本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单 NPU 和多 NPU 部署、精度评估和性能评估。"
+"`Qwen2.5-Omni` 模型从 `vllm-ascend:v0.11.0rc0` "
+"版本开始支持。本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单 NPU 和多 NPU 部署、精度评估和性能评估。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:9
 msgid "Supported Features"
@@ -57,15 +55,13 @@ msgid ""
 "Refer to [supported "
 "features](../../user_guide/support_matrix/supported_models.md) to get the"
 " model's supported feature matrix."
-msgstr ""
-"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+msgstr "请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:13
 msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
 "the feature's configuration."
-msgstr ""
-"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:15
 msgid "Environment Preparation"
@@ -79,13 +75,17 @@ msgstr "模型权重"
 msgid ""
 "`Qwen2.5-Omni-3B`(BF16): [Download model "
 "weight](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-3B)"
-msgstr "`Qwen2.5-Omni-3B`（BF16）：[下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-3B)"
+msgstr ""
+"`Qwen2.5-Omni-"
+"3B`（BF16）：[下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-3B)"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:20
 msgid ""
 "`Qwen2.5-Omni-7B`(BF16): [Download model "
 "weight](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B)"
-msgstr "`Qwen2.5-Omni-7B`（BF16）：[下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B)"
+msgstr ""
+"`Qwen2.5-Omni-"
+"7B`（BF16）：[下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Omni-7B)"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:22
 msgid "Following examples use the 7B version by default."
@@ -105,7 +105,8 @@ msgid ""
 "your node, refer to [using docker](../../installation.md#set-up-using-"
 "docker)."
 msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md#set-up-using-docker)。"
+"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker 安装](../../installation.md"
+"#set-up-using-docker)。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:65
 msgid "Deployment"
@@ -121,13 +122,13 @@ msgstr "单 NPU（Qwen2.5-Omni-7B）"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:72
 msgid ""
-"The **environment variable** `LOCAL_MEDIA_PATH` which **allows** API "
-"requests to read local images or videos from directories specified by the"
-" server file system. Please note this is a security risk. Should only be "
-"enabled in trusted environments."
+"The environment variable `LOCAL_MEDIA_PATH` which allows API requests to "
+"read local images or videos from directories specified by the server file"
+" system. Please note this is a security risk. Should only be enabled in "
+"trusted environments."
 msgstr ""
-"**环境变量** `LOCAL_MEDIA_PATH` **允许** API 请求从服务器文件系统指定的目录读取本地图像或视频。"
-"请注意这存在安全风险，仅应在受信任的环境中启用。"
+"环境变量 `LOCAL_MEDIA_PATH` 允许 API "
+"请求从服务器文件系统指定的目录读取本地图像或视频。请注意这存在安全风险，仅应在受信任的环境中启用。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:92
 msgid ""
@@ -135,8 +136,8 @@ msgid ""
 "you encounter *audio not supported issue* by any chance, please re-build "
 "vllm with [audio] flag."
 msgstr ""
-"现在 vllm-ascend Docker 镜像应该包含 vllm[audio] 构建部分。"
-"如果您遇到“音频不支持”的问题，请使用 [audio] 标志重新构建 vLLM。"
+"现在 vllm-ascend Docker 镜像应该包含 vllm[audio] 构建部分。如果您遇到“音频不支持”的问题，请使用 [audio]"
+" 标志重新构建 vLLM。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:100
 msgid ""
@@ -173,8 +174,8 @@ msgid "Functional Verification"
 msgstr "功能验证"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:131
-msgid "If your service **starts** successfully, you can see the info shown below:"
-msgstr "如果服务**启动**成功，您将看到如下所示的信息："
+msgid "If your service starts successfully, you can see the info shown below:"
+msgstr "如果服务启动成功，您将看到如下所示的信息："
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:139
 msgid "Once your server is started, you can query the model with input prompts:"
@@ -205,14 +206,14 @@ msgid ""
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
 "details."
 msgstr ""
-"详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+"详细信息请参考[使用 AISBench "
+"进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:181
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen2.5"
 "-Omni-7B` with `vllm-ascend:0.11.0rc0` for reference only."
-msgstr ""
-"执行后即可获得结果，以下是 `Qwen2.5-Omni-7B` 在 `vllm-ascend:0.11.0rc0` 上的结果，仅供参考。"
+msgstr "执行后即可获得结果，以下是 `Qwen2.5-Omni-7B` 在 `vllm-ascend:0.11.0rc0` 上的结果，仅供参考。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:91
 msgid "dataset"
@@ -272,7 +273,9 @@ msgid ""
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
 msgstr ""
-"详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+"详细信息请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:194
 msgid "Using vLLM Benchmark"

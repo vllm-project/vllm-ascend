@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-17 02:05+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -141,8 +141,9 @@ msgid ""
 "[nightly_test_a3.yaml](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)"
 msgstr ""
-"当前，多节点测试工作流定义在 [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml) 中。"
+"当前，多节点测试工作流定义在 [nightly_test_a3.yaml](https://github.com/vllm-project"
+"/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml) "
+"中。"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:110
 msgid ""
@@ -184,7 +185,7 @@ msgid ""
 msgstr "参考 <https://lws.sigs.k8s.io/docs/installation/>"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:122
-msgid "Step 2. Deploy the following yaml file `lws.yaml` as what you want"
+msgid "Step 2. Deploy the following yaml file `lws.yaml` as needed"
 msgstr "步骤 2.按需部署以下 `lws.yaml` 文件"
 
 #: ../../source/developer_guide/contribution/multi_node_test.md:258
