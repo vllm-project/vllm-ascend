@@ -56,10 +56,11 @@ def test_qwen3_5_moe_tp4_fp16():
     ]
     max_tokens = 5
     with VllmRunner(
-        "Qwen/Qwen3.5-35B-A3B",
+        "Eco-Tech/Qwen3.5-35B-A3B-w8a8-mtp",
         tensor_parallel_size=4,
         enforce_eager=True,
         dtype="float16",
+        quantization="ascend",
         max_model_len=16384,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
