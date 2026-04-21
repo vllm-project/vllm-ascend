@@ -35,6 +35,6 @@ numba
 torch-npu==2.9.0
 
 arctic-inference==0.1.1
-transformers>=4.57.4
+transformers>=4.57.4, <5.0
 fastapi<0.124.0
 triton-ascend==3.2.0
