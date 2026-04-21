@@ -487,7 +487,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def tearDown(self):
         self._stop_all()
 
-def test_register_kv_caches_non_mla(self):
+    def test_register_kv_caches_non_mla(self):
         worker = self._make_worker()
         fake_cache = MagicMock()
         fake_cache.shape = [100, 16, 8, 64]
@@ -617,7 +617,7 @@ def test_register_kv_caches_non_mla(self):
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=True)
         self.assertEqual(result, 32)
 
-def test_lookup_scheduler_multi_tp(self):
+    def test_lookup_scheduler_multi_tp(self):
         self._stop_all()
         patches = {
             "tp_rank": patch(
@@ -628,9 +628,7 @@ def test_lookup_scheduler_multi_tp(self):
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_tensor_model_parallel_world_size",
                 return_value=2,
             ),
-            "pcp_group": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group"
-            ),
+            "pcp_group": patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_pcp_group"),
             "dcp_ws": patch(
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_world_size",
                 return_value=1,
@@ -639,9 +637,7 @@ def test_lookup_scheduler_multi_tp(self):
                 "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_decode_context_model_parallel_rank",
                 return_value=0,
             ),
-            "importlib": patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib"
-            ),
+            "importlib": patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib"),
         }
         mocks = {}
         for name, p in patches.items():

@@ -297,16 +297,17 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_get_into_multi_buffers.side_effect = Exception("fail")
         b.get(["k1"], [[100]], [[10]])
 
-
-def test_register_buffer(self):
-    b = self._make_backend()
-    with (
-        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.os") as mock_os,
-        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te") as mock_te,
-    ):
-        mock_os.getenv.return_value = "0"
-        b.register_buffer([100], [200])
-        mock_te.register_buffer.assert_called_once()
+    def test_register_buffer(self):
+        b = self._make_backend()
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.os") as mock_os,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+            ) as mock_te,
+        ):
+            mock_os.getenv.return_value = "0"
+            b.register_buffer([100], [200])
+            mock_te.register_buffer.assert_called_once()
 
 
 # =========================================================================
@@ -380,19 +381,15 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b._hetero_client.mset_d2h.side_effect = Exception("fail")
         b.put(["k1"], [[100]], [[10]])
 
-def test_set_device(self):
+    def test_set_device(self):
         b = self._make_backend()
         b.set_device()
 
-def test_register_buffer(self):
+    def test_register_buffer(self):
         b = self._make_backend()
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_ascend_device_type"
-        ) as mock_dt:
-            from vllm_ascend.utils import AscendDeviceType
-
-            mock_dt.return_value = AscendDeviceType.A2
-            b.register_buffer([100], [200])
+        b._helper._device_id = None
+        b._ensure_device_ready = MagicMock()
+        b.register_buffer([100], [200])
         b._ensure_device_ready.assert_called_once()
 
     def test_ensure_device_ready(self):
