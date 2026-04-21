@@ -37,9 +37,7 @@ def test_models_long_sequence_output_between_tp_and_cp(
     model: str,
     max_tokens: int,
 ) -> None:
-    prompts = [
-        "The president of the United States is", "The capital of France is"
-    ]
+    prompts = ["The president of the United States is", "The capital of France is"]
 
     common_kwargs = {
         "max_model_len": 1024,
@@ -70,10 +68,7 @@ def test_models_long_sequence_output_between_tp_and_cp(
             "tensor_parallel_size": 1,
             "decode_context_parallel_size": 1,
             "prefill_context_parallel_size": 2,
-            "compilation_config": {
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
-            },
+            "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8, 24, 48, 60]},
         }
         tp_kwargs = {
             "tensor_parallel_size": 2,
@@ -90,8 +85,7 @@ def test_models_long_sequence_output_between_tp_and_cp(
     tp_full_kwargs.update(common_kwargs)  # type: ignore
     tp_full_kwargs.update(tp_kwargs)  # type: ignore
     with VllmRunner(model, **cp_full_kwargs) as runner:  # type: ignore
-        vllm_context_parallel_outputs = runner.generate_greedy(
-            prompts, max_tokens)
+        vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
 
     with VllmRunner(model, **tp_full_kwargs) as runner:  # type: ignore
         vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
@@ -108,19 +102,16 @@ model = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 
 
 @pytest.mark.parametrize("max_tokens", [10])
-def test_accuracy_dcp_only_graph(max_tokens: int, ) -> None:
-    prompts = [
-        "The president of the United States is", "The capital of France is"
-    ]
+def test_accuracy_dcp_only_graph(
+    max_tokens: int,
+) -> None:
+    prompts = ["The president of the United States is", "The capital of France is"]
     cp_kwargs = {
         "tensor_parallel_size": 2,
         "decode_context_parallel_size": 2,
         "prefill_context_parallel_size": 1,
         "enable_expert_parallel": True,
-        "compilation_config": {
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [4, 8, 24, 48, 60]
-        },
+        "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8, 24, 48, 60]},
         "quantization": "ascend",
         "max_model_len": 1024,
     }
@@ -132,8 +123,7 @@ def test_accuracy_dcp_only_graph(max_tokens: int, ) -> None:
         "max_model_len": 1024,
     }
     with VllmRunner(model, **cp_kwargs) as runner:  # type: ignore
-        vllm_context_parallel_outputs = runner.generate_greedy(
-            prompts, max_tokens)
+        vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
 
     with VllmRunner(model, **tp_kwargs) as runner:  # type: ignore
         vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
@@ -147,10 +137,10 @@ def test_accuracy_dcp_only_graph(max_tokens: int, ) -> None:
 
 
 @pytest.mark.parametrize("max_tokens", [10])
-def test_accuracy_dcp_only_eager(max_tokens: int, ) -> None:
-    prompts = [
-        "The president of the United States is", "The capital of France is"
-    ]
+def test_accuracy_dcp_only_eager(
+    max_tokens: int,
+) -> None:
+    prompts = ["The president of the United States is", "The capital of France is"]
     cp_kwargs = {
         "tensor_parallel_size": 2,
         "decode_context_parallel_size": 2,
@@ -172,8 +162,7 @@ def test_accuracy_dcp_only_eager(max_tokens: int, ) -> None:
         "max_model_len": 1024,
     }
     with VllmRunner(model, **cp_kwargs) as runner:  # type: ignore
-        vllm_context_parallel_outputs = runner.generate_greedy(
-            prompts, max_tokens)
+        vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
 
     with VllmRunner(model, **tp_kwargs) as runner:  # type: ignore
         vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
@@ -187,10 +176,10 @@ def test_accuracy_dcp_only_eager(max_tokens: int, ) -> None:
 
 
 @pytest.mark.parametrize("max_tokens", [10])
-def test_accuracy_pcp_only(max_tokens: int, ) -> None:
-    prompts = [
-        "The president of the United States is", "The capital of France is"
-    ]
+def test_accuracy_pcp_only(
+    max_tokens: int,
+) -> None:
+    prompts = ["The president of the United States is", "The capital of France is"]
     cp_kwargs = {
         "tensor_parallel_size": 2,
         "decode_context_parallel_size": 1,
@@ -212,8 +201,7 @@ def test_accuracy_pcp_only(max_tokens: int, ) -> None:
         "max_model_len": 1024,
     }
     with VllmRunner(model, **cp_kwargs) as runner:  # type: ignore
-        vllm_context_parallel_outputs = runner.generate_greedy(
-            prompts, max_tokens)
+        vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
 
     with VllmRunner(model, **tp_kwargs) as runner:  # type: ignore
         vllm_eager_outputs = runner.generate_greedy(prompts, max_tokens)
@@ -235,15 +223,34 @@ def test_models_long_sequence_cp_kv_interleave_size_output_between_tp_and_cp(
 ) -> None:
     prompts = ["The president of the United States is"]
 
-    GOLDEN_TEXT_DS = 'The president of the United States is a man who has been elected to the highest office'
-    GOLDEN_TOKENS_DS = [100000, 549, 6847, 280, 254, 4794, 5110, 317, 245, 668, 779, 643, 803, 19136, 276, 254, 7492, 4995]
+    GOLDEN_TEXT_DS = "The president of the United States is a man who has been elected to the highest office"
+    GOLDEN_TOKENS_DS = [
+        100000,
+        549,
+        6847,
+        280,
+        254,
+        4794,
+        5110,
+        317,
+        245,
+        668,
+        779,
+        643,
+        803,
+        19136,
+        276,
+        254,
+        7492,
+        4995,
+    ]
 
-    GOLDEN_TEXT_QWEN = 'The president of the United States is the head of state and head of government of the'
+    GOLDEN_TEXT_QWEN = "The president of the United States is the head of state and head of government of the"
     GOLDEN_TOKENS_QWEN = [785, 4767, 315, 279, 3639, 4180, 374, 279, 1968, 315, 1584, 323, 1968, 315, 3033, 315, 279]
 
-    GOLDEN_DS = [(GOLDEN_TOKENS_DS,GOLDEN_TEXT_DS)]
-    GOLDEN_QWEN = [(GOLDEN_TOKENS_QWEN,GOLDEN_TEXT_QWEN)]
-    
+    GOLDEN_DS = [(GOLDEN_TOKENS_DS, GOLDEN_TEXT_DS)]
+    GOLDEN_QWEN = [(GOLDEN_TOKENS_QWEN, GOLDEN_TEXT_QWEN)]
+
     common_kwargs = {
         "max_model_len": 1024,
     }
@@ -266,8 +273,7 @@ def test_models_long_sequence_cp_kv_interleave_size_output_between_tp_and_cp(
         cp_full_kwargs.update(cp_kwargs)  # type: ignore
 
         with VllmRunner(model, **cp_full_kwargs) as runner:  # type: ignore
-            vllm_context_parallel_outputs = runner.generate_greedy(
-                prompts, max_tokens)
+            vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
 
         check_outputs_equal(
             outputs_0_lst=GOLDEN_DS,
@@ -292,12 +298,11 @@ def test_models_long_sequence_cp_kv_interleave_size_output_between_tp_and_cp(
         cp_full_kwargs.update(cp_kwargs)  # type: ignore
 
         with VllmRunner(model, **cp_full_kwargs) as runner:  # type: ignore
-            vllm_context_parallel_outputs = runner.generate_greedy(
-                prompts, max_tokens)
+            vllm_context_parallel_outputs = runner.generate_greedy(prompts, max_tokens)
 
         check_outputs_equal(
             outputs_0_lst=GOLDEN_QWEN,
             outputs_1_lst=vllm_context_parallel_outputs,
             name_0="GOLDEN_QWEN",
             name_1="vllm_context_parallel_outputs",
-    )
+        )

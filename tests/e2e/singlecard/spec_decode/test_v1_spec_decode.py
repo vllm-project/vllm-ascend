@@ -10,8 +10,8 @@ import pytest
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
-from vllm.v1.metrics.reader import Counter, Vector
 from vllm.tokenizers.registry import resolve_tokenizer_args
+from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
 
@@ -599,7 +599,7 @@ def test_eagle3_fia_pad_under_max_concurrency(
         "model": spec_model_name,
     }
     max_num_tokens = 1 + num_speculative_tokens
-    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY",cudagraph_capture_sizes=[max_num_tokens])
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[max_num_tokens])
     with VllmRunner(
         main_model_name,
         max_model_len=2048,
