@@ -30,8 +30,7 @@ class SingleNodeConfig:
     prompts: list[str] = field(default_factory=lambda: PROMPTS)
     api_keyword_args: dict[str, Any] = field(default_factory=lambda: API_KEYWORD_ARGS)
     benchmarks: dict[str, Any] = field(default_factory=dict)
-    server_cmd: list[str] = field(default_factory=list)
-    server_cmd2: list[str] = field(default_factory=list)
+    server_cmd: list = field(default_factory=list)
     test_content: list[str] = field(default_factory=lambda: ["completion"])
     service_mode: str = "openai"
     epd_server_cmds: list[list[str]] = field(default_factory=list)
@@ -55,8 +54,10 @@ class SingleNodeConfig:
         if self.test_content is None:
             self.test_content = []
 
-        self.server_cmd = self._expand_values(self.server_cmd or [], self.envs)
-        self.server_cmd2 = self._expand_values(self.server_cmd2 or [], self.envs)
+        if self.server_cmd and isinstance(self.server_cmd[0], list):
+            self.server_cmd = [self._expand_values(cmd, self.envs) for cmd in self.server_cmd]
+        else:
+            self.server_cmd = self._expand_values(self.server_cmd or [], self.envs)
         self.epd_server_cmds = [self._expand_values(cmd, self.envs) for cmd in self.epd_server_cmds]
         self.epd_proxy_args = self._expand_values(self.epd_proxy_args or [], self.envs)
 
@@ -79,6 +80,13 @@ class SingleNodeConfig:
         if value is None:
             raise ValueError(f"Missing required port env: {key}")
         return int(value)
+
+    @property
+    def server_cmds(self) -> list[list[str]]:
+        """Return server_cmd as a list of command-arg lists (always nested)."""
+        if self.server_cmd and isinstance(self.server_cmd[0], list):
+            return self.server_cmd
+        return [self.server_cmd]
 
     @property
     def server_port(self) -> int:
@@ -116,8 +124,6 @@ class SingleNodeConfigLoader:
         "service_mode",
         "server_cmd",
         "server_cmd_extra",
-        "server_cmd2",
-        "server_cmd2_extra",
         "test_content",
         "epd_server_cmds",
         "epd_proxy_args",
@@ -157,8 +163,6 @@ class SingleNodeConfigLoader:
             required = ["name", "model", "envs"]
             if mode == "epd":
                 required.extend(["epd_server_cmds", "epd_proxy_args"])
-            elif mode == "multi_instance":
-                required.extend(["server_cmd", "server_cmd2"])
             else:
                 required.append("server_cmd")
             missing = [k for k in required if k not in case]
@@ -174,11 +178,10 @@ class SingleNodeConfigLoader:
         for case in cases:
             server_cmd = case.get("server_cmd", [])
             server_cmd_extra = case.get("server_cmd_extra", [])
-            full_cmd = list(server_cmd) + list(server_cmd_extra)
-
-            server_cmd2 = case.get("server_cmd2", [])
-            server_cmd2_extra = case.get("server_cmd2_extra", [])
-            full_cmd2 = list(server_cmd2) + list(server_cmd2_extra)
+            if server_cmd and isinstance(server_cmd[0], list):
+                full_cmd = server_cmd
+            else:
+                full_cmd = list(server_cmd) + list(server_cmd_extra)
 
             extra_case_fields = {key: value for key, value in case.items() if key not in cls.STANDARD_CASE_FIELDS}
 
@@ -190,7 +193,6 @@ class SingleNodeConfigLoader:
                     envs=case.get("envs", {}),
                     special_dependencies=case.get("special_dependencies", {}),
                     server_cmd=full_cmd,
-                    server_cmd2=full_cmd2,
                     epd_server_cmds=case.get("epd_server_cmds", []),
                     epd_proxy_args=case.get("epd_proxy_args", []),
                     benchmarks=case.get("benchmarks", {}),

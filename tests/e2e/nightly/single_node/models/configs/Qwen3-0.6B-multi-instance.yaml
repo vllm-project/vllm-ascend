@@ -1,6 +1,6 @@
-# Regression test for PR #7427: two vllm-ascend instances on a single card.
-# The second instance starts while the first is still holding NPU memory.
-# Both must initialize without OOM and serve requests correctly.
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
 
 test_cases:
   - name: "Qwen3-0.6B-multi-instance"
@@ -10,23 +10,22 @@ test_cases:
       SERVER_PORT: "DEFAULT_PORT"
       SERVER_PORT_2: "DEFAULT_PORT"
     server_cmd:
-      - "--port"
-      - "$SERVER_PORT"
-      - "--gpu-memory-utilization"
-      - "0.4"
-      - "--max-model-len"
-      - "8192"
-      - "--enforce-eager"
-      - "--trust-remote-code"
-    server_cmd2:
-      - "--port"
-      - "$SERVER_PORT_2"
-      - "--gpu-memory-utilization"
-      - "0.4"
-      - "--max-model-len"
-      - "8192"
-      - "--enforce-eager"
-      - "--trust-remote-code"
+      - - "--port"
+        - "$SERVER_PORT"
+        - "--gpu-memory-utilization"
+        - "0.4"
+        - "--max-model-len"
+        - "8192"
+        - "--enforce-eager"
+        - "--trust-remote-code"
+      - - "--port"
+        - "$SERVER_PORT_2"
+        - "--gpu-memory-utilization"
+        - "0.4"
+        - "--max-model-len"
+        - "8192"
+        - "--enforce-eager"
+        - "--trust-remote-code"
     test_content:
       - "completion"
     benchmarks:
@@ -35,10 +34,10 @@ test_cases:
         dataset_path: vllm-ascend/gsm8k-lite
         request_conf: vllm_api_general_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-        max_out_len: 256
+        max_out_len: 4096
         num_prompts: 32
         batch_size: 32
-        baseline: 18
+        baseline: 68
         threshold: 5
       perf:
         case_type: performance
