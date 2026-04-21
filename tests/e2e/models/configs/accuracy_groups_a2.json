@@ -9,7 +9,8 @@
         "Qwen2-Audio-7B-Instruct",
         "Qwen3-8B-W8A8",
         "Qwen3-VL-8B-Instruct",
-        "Qwen2.5-Omni-7B"
+        "Qwen2.5-Omni-7B",
+        "Minitron-8B-Base"
       ]
     },
     {
@@ -47,8 +48,7 @@
       "os": "linux-aarch64-a2b3-1",
       "model_list": [
         "gemma-3-4b-it",
-        "internlm3-8b-instruct",
-        "Minitron-8B-Base"
+        "internlm3-8b-instruct"
       ]
     }
   ]
