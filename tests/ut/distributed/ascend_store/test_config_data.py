@@ -328,7 +328,6 @@ class TestReqMeta(unittest.TestCase):
         # so skip_save, and no load_spec => None
         self.assertIsNone(meta)
 
-
     def test_from_request_tracker_with_original_block_size(self):
         tracker = RequestTracker(
             req_id="r1",
