@@ -1,11 +1,16 @@
 name: Docs link check
 
 on:
+  schedule:
+    # GitHub cron uses UTC. This runs every Sunday at 20:00 UTC+8.
+    - cron: '0 12 * * 0'
   pull_request:
     branches:
       - 'main'
       - '*-dev'
       - 'releases/v*'
+    paths:
+      - 'docs/source/**/*.md'
   workflow_dispatch:
 
 permissions:
@@ -28,17 +33,52 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Collect changed docs files
+        id: changed-docs
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+
+          git diff --name-only --diff-filter=AMR \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            -- docs/source > changed-docs-all.txt
+
+          grep -E '\.md$' changed-docs-all.txt \
+            | sed 's#^docs/source/##' > changed-docs.txt || true
+
+          if [ ! -s changed-docs.txt ]; then
+            echo "has_linkcheck_files=false" >> "$GITHUB_OUTPUT"
+            echo "No added or modified Sphinx docs files to linkcheck."
+            exit 0
+          fi
+
+          echo "has_linkcheck_files=true" >> "$GITHUB_OUTPUT"
+          echo "Changed docs files:"
+          sed 's/^/  /' changed-docs.txt
+
       - name: Install docs dependencies
+        if: ${{ github.event_name != 'pull_request' || steps.changed-docs.outputs.has_linkcheck_files == 'true' }}
         run: |
           python -m pip install --upgrade pip
           pip install -r docs/requirements-docs.txt
 
-      - name: Run Sphinx linkcheck
+      - name: Run full Sphinx linkcheck
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           make -C docs linkcheck SPHINXOPTS="-W --keep-going"
 
+      - name: Run Sphinx linkcheck for changed docs
+        if: ${{ github.event_name == 'pull_request' && steps.changed-docs.outputs.has_linkcheck_files == 'true' }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t changed_docs < changed-docs.txt
+          sphinx-build -b linkcheck docs/source docs/_build/linkcheck \
+            -W --keep-going "${changed_docs[@]}"
+
       - name: Upload linkcheck reports
-        if: always()
+        if: ${{ always() && (github.event_name != 'pull_request' || steps.changed-docs.outputs.has_linkcheck_files == 'true') }}
         uses: actions/upload-artifact@v4
         with:
           name: sphinx-linkcheck-report

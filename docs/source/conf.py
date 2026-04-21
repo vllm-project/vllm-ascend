@@ -148,7 +148,7 @@ html_extra_path = ["llms.txt"]
 linkcheck_anchors = False
 linkcheck_retries = 2
 linkcheck_timeout = 15
-linkcheck_workers = 5
+linkcheck_workers = 10
 
 # Example service endpoints in docs are intentionally not reachable from CI.
 linkcheck_ignore = [
