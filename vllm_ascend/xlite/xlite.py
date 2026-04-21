@@ -24,7 +24,6 @@ from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size,
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import set_default_rope_theta
 from xlite._C import (  # type: ignore[attr-defined]
     AttnMeta,
     AttnMHA,
@@ -61,8 +60,6 @@ class LlamaXliteModel(XliteModel):
         hf_config = vllm_config.model_config.hf_text_config
         if hasattr(hf_config, "text_config"):
             hf_config = hf_config.text_config
-        set_default_rope_theta(hf_config, default_theta=1000000)
-        rope_parameters = getattr(hf_config, "rope_parameters", {}) or {}
         config = ModelConfig()
         config.vocab_size = hf_config.vocab_size
         config.hidden_size = hf_config.hidden_size
@@ -75,7 +72,7 @@ class LlamaXliteModel(XliteModel):
             config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
         config.rope_head_dim = config.head_dim
         config.norm_eps = hf_config.rms_norm_eps
-        config.rope_theta = rope_parameters["rope_theta"]
+        config.rope_theta = hf_config.rope_theta
         config.softmax_scale = config.head_dim**-0.5
         config.n_dense_layers = hf_config.num_hidden_layers
         config.intermediate_size = hf_config.intermediate_size
@@ -99,6 +96,7 @@ class LlamaXliteModel(XliteModel):
         config.block_size = vllm_config.cache_config.block_size
 
         vision_config = getattr(vllm_config.model_config.hf_config, "vision_config", None)
+        rope_parameters = getattr(hf_config, "rope_parameters", {})
         if hasattr(config, "deepstack_num_level"):
             config.deepstack_num_level = len(getattr(vision_config, "deepstack_visual_indexes", []))
         if hasattr(config, "mrope_section"):
