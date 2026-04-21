@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-19 02:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -44,9 +44,10 @@ msgid "The vLLM server is started successfully, if you see logs as below:"
 msgstr "如果您看到如下日志，表明 vLLM 服务器已成功启动："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:46
-#: ../../source/developer_guide/evaluation/using_lm_eval.md:175
-msgid "2. Run GSM8K using lm-eval for accuracy testing"
-msgstr "2. 使用 lm-eval 运行 GSM8K 准确率测试"
+msgid ""
+"2. Run GSM8K using the vLLM server (curl) and then run lm-eval for "
+"accuracy testing"
+msgstr "2. 使用 vLLM 服务器（curl）运行 GSM8K，然后使用 lm-eval 进行准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:48
 msgid "You can query the result with input prompts:"
@@ -68,7 +69,10 @@ msgid ""
 "may cause lm-eval to download datasets from ModelScope instead of "
 "HuggingFace. Setting `USE_MODELSCOPE_HUB=0` disables this behavior so "
 "that lm-eval can fetch datasets from HuggingFace correctly."
-msgstr "启动 Docker 容器时设置了 `VLLM_USE_MODELSCOPE=True`，这可能导致 lm-eval 从 ModelScope 而非 HuggingFace 下载数据集。设置 `USE_MODELSCOPE_HUB=0` 可禁用此行为，使 lm-eval 能够正确从 HuggingFace 获取数据集。"
+msgstr ""
+"启动 Docker 容器时设置了 `VLLM_USE_MODELSCOPE=True`，这可能导致 lm-eval 从 ModelScope 而非"
+" HuggingFace 下载数据集。设置 `USE_MODELSCOPE_HUB=0` 可禁用此行为，使 lm-eval 能够正确从 "
+"HuggingFace 获取数据集。"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:120
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:192
@@ -90,6 +94,10 @@ msgstr "1. 运行 Docker 容器"
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:147
 msgid "You can run docker container on a single NPU:"
 msgstr "您可以在单个 NPU 上运行 Docker 容器："
+
+#: ../../source/developer_guide/evaluation/using_lm_eval.md:175
+msgid "2. Run GSM8K using lm-eval for accuracy testing"
+msgstr "2. 使用 lm-eval 运行 GSM8K 准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:203
 msgid "After 1 to 2 minutes, the output is shown below:"
