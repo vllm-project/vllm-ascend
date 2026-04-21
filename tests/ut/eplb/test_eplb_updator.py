@@ -1,12 +1,13 @@
 import unittest
 from unittest.mock import MagicMock, patch
+
 import torch
+
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 
 
 class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
     def setUp(self):
-
         # ====================== 1. Mock environment ======================
         self.rank = 0
         self.world_size = 4
@@ -29,8 +30,7 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
 
         self.mock_comm_group.all_gather = mock_all_gather
 
-        p3 = patch("vllm_ascend.eplb.eplb_updator.get_dynamic_eplb_group",
-                   return_value=self.mock_comm_group)
+        p3 = patch("vllm_ascend.eplb.eplb_updator.get_dynamic_eplb_group", return_value=self.mock_comm_group)
         self.addCleanup(p3.stop)
         p3.start()
 
@@ -42,10 +42,7 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         self.eplb_process.shared_dict = {}
 
         self.updator = EplbUpdator(
-            eplb_config=self.eplb_config,
-            loader=self.loader,
-            eplb_process=self.eplb_process,
-            process=self.process
+            eplb_config=self.eplb_config, loader=self.loader, eplb_process=self.eplb_process, process=self.process
         )
 
         # ====================== 4. Mock adaptor ======================
@@ -77,5 +74,5 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         self.assertEqual(moe_load.device.type, "cpu")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

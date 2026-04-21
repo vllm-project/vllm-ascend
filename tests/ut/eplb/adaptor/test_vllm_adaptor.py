@@ -2,10 +2,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from transformers import DeepseekV2Config
 
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.quantization.methods.base import QuantType
-from transformers import DeepseekV2Config
 
 
 class TestVllmAdaptor(unittest.TestCase):
@@ -45,6 +45,6 @@ class TestVllmAdaptor(unittest.TestCase):
         self.mock_rank.stop()
         self.mock_size.stop()
 
+
 if __name__ == "__main__":
     unittest.main()
-    
