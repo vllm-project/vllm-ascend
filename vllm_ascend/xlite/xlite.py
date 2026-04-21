@@ -568,8 +568,8 @@ class XliteWrapper:
         # Full: graph for prefill and decode
         # Decode-Only: runnable for prefill, graph for decode
         if not self.full_mode and self.data_parallel_size > 1:
-            num_tokens = forward_context.batch_descriptor.num_tokens  # type: ignore[union-attr]
-            num_reqs = forward_context.batch_descriptor.num_reqs  # type: ignore[union-attr]
+            num_tokens = forward_context.batch_descriptor.num_tokens
+            num_reqs = forward_context.batch_descriptor.num_reqs
             use_xlite_graph = num_reqs is not None and num_tokens <= num_reqs
         else:
             use_xlite_graph = not with_prefill or self.full_mode
@@ -589,7 +589,7 @@ class XliteWrapper:
             query_lens = query_lens[:batch]
             cached_lens = seq_lens - query_lens
 
-            num_tokens = forward_context.batch_descriptor.num_tokens  # type: ignore[union-attr]
+            num_tokens = forward_context.batch_descriptor.num_tokens
             num_actual_tokens = attn_metadata.num_actual_tokens
             xlite_attn_metadata = AttnMeta()
             xlite_attn_metadata.lens = query_lens.tolist()
@@ -603,7 +603,7 @@ class XliteWrapper:
 
             # Compatibility between DP and Non-DP scenarios
             h = self.hidden_states[:num_tokens]
-            stream = torch.npu.current_stream().npu_stream  # type: ignore[union-attr]
+            stream = torch.npu.current_stream().npu_stream
             if inputs_embeds is None:
                 self.xlite_model.forward(
                     self.xlite_rt, input_ids, xlite_attn_metadata, self.kv_caches, self.freq_cis, h, stream
@@ -624,7 +624,7 @@ class XliteWrapper:
                     xlite_deepstack_input_embeds,
                 )
                 if xlite_deepstack_input_embeds and hasattr(self.runnable, "_clear_deepstack_input_embeds"):
-                    self.runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))  # type: ignore[attr-defined]
+                    self.runnable._clear_deepstack_input_embeds(inputs_embeds.size(0))
             return h[:num_actual_tokens]
         else:
             return self.runnable(input_ids, positions, intermediate_tensors, inputs_embeds)
