@@ -89,6 +89,12 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       contains_310: false
       type: full
+      p310_multicard_tests: >-
+        tests/e2e/310p/multicard/test_dense_model_multicard.py::test_qwen3_dense_tp2_fp16
+        tests/e2e/310p/multicard/test_moe_model_multicard.py::test_qwen3_moe_tp2_w8a8
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
 
   parse-trigger:
     name: Parse /e2e comment
