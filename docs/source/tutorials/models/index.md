@@ -5,8 +5,6 @@ This section provides tutorials for different models of vLLM Ascend.
 :::{toctree}
 :caption: Model Tutorials
 :maxdepth: 1
-Qwen2.5-Omni.md
-Qwen2.5-7B.md
 Qwen2.5-Math-RM-72B.md
 Qwen3-Dense.md
 Qwen-VL-Dense.md
