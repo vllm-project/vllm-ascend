@@ -178,7 +178,7 @@ jobs:
 
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-singlecard-light-part${{ matrix.part }}
@@ -308,7 +308,7 @@ jobs:
             --output "$GITHUB_STEP_SUMMARY"
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-singlecard-full-part${{ matrix.part }}
@@ -442,7 +442,7 @@ jobs:
 
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-2card-light-part${{ matrix.part }}
@@ -571,7 +571,7 @@ jobs:
 
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-2card-full-part${{ matrix.part }}
@@ -727,7 +727,7 @@ jobs:
 
 
       - name: Upload timing data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
         with:
           name: timing-data-4card-full-part${{ matrix.part }}
