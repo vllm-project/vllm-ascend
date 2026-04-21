@@ -4,6 +4,7 @@ from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch.nn.functional as F
 from vllm import config
 
 from tests.ut.base import TestBase
