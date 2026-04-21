@@ -15,11 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-
 import unittest
 from unittest.mock import MagicMock
 
+import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
@@ -250,9 +249,7 @@ class TestReqMeta(unittest.TestCase):
             num_saved_tokens=0,
             token_ids=list(range(32)),
         )
-        meta = ReqMeta.from_request_tracker(
-            tracker, block_size=16, block_hashes=[b"h1", b"h2"]
-        )
+        meta = ReqMeta.from_request_tracker(tracker, block_size=16, block_hashes=[b"h1", b"h2"])
         self.assertIsNotNone(meta)
         self.assertEqual(meta.req_id, "r1")
         self.assertTrue(meta.can_save)
@@ -261,35 +258,35 @@ class TestReqMeta(unittest.TestCase):
 
     def test_from_request_tracker_skip_save(self):
         tracker = RequestTracker(
-            req_id="r1", token_len=32, allocated_block_ids=[0, 1],
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(
-            tracker, block_size=16, skip_save=True
-        )
+        meta = ReqMeta.from_request_tracker(tracker, block_size=16, skip_save=True)
         self.assertIsNone(meta)
 
     def test_from_request_tracker_with_load_spec(self):
         tracker = RequestTracker(
-            req_id="r1", token_len=32, allocated_block_ids=[0, 1],
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
-        meta = ReqMeta.from_request_tracker(
-            tracker, block_size=16, load_spec=load_spec, skip_save=True
-        )
+        meta = ReqMeta.from_request_tracker(tracker, block_size=16, load_spec=load_spec, skip_save=True)
         self.assertIsNotNone(meta)
         self.assertIsNotNone(meta.load_spec)
 
     def test_from_request_tracker_load_spec_cannot_load(self):
         tracker = RequestTracker(
-            req_id="r1", token_len=32, allocated_block_ids=[0, 1],
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
             num_saved_tokens=32,
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=False)
-        meta = ReqMeta.from_request_tracker(
-            tracker, block_size=16, load_spec=load_spec, skip_save=True
-        )
+        meta = ReqMeta.from_request_tracker(tracker, block_size=16, load_spec=load_spec, skip_save=True)
         # can_load=False => load_spec set to None in meta,
         # but skip_save+load_spec input is not None, so meta is still created
         self.assertIsNotNone(meta)
@@ -298,57 +295,59 @@ class TestReqMeta(unittest.TestCase):
 
     def test_from_request_tracker_partial_tokens_discarded(self):
         tracker = RequestTracker(
-            req_id="r1", token_len=20, allocated_block_ids=[0, 1],
+            req_id="r1",
+            token_len=20,
+            allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(
-            tracker, block_size=16, discard_partial_chunks=True
-        )
+        meta = ReqMeta.from_request_tracker(tracker, block_size=16, discard_partial_chunks=True)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 16)
 
     def test_from_request_tracker_no_discard(self):
         tracker = RequestTracker(
-            req_id="r1", token_len=20, allocated_block_ids=[0, 1],
+            req_id="r1",
+            token_len=20,
+            allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(
-            tracker, block_size=16, discard_partial_chunks=False
-        )
+        meta = ReqMeta.from_request_tracker(tracker, block_size=16, discard_partial_chunks=False)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.token_len_chunk, 20)
 
     def test_from_request_tracker_already_saved(self):
         tracker = RequestTracker(
-            req_id="r1", token_len=32, allocated_block_ids=[0, 1],
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
             num_saved_tokens=32,
         )
-        meta = ReqMeta.from_request_tracker(
-            tracker, block_size=16
-        )
-        # num_saved_tokens=32, chunk_boundary=ceil(33/16)*16=48 > 32
-        # so skip_save, and no load_spec => None
-        self.assertIsNone(meta)
+        meta = ReqMeta.from_request_tracker(tracker, block_size=16)
 
-    def test_from_request_tracker_with_original_block_size(self):
-        tracker = RequestTracker(
-            req_id="r1", token_len=32, allocated_block_ids=[0, 1],
+    # num_saved_tokens=32, chunk_boundary=ceil(33/16)*16=48 > 32
+    # so skip_save, and no load_spec => None
+    self.assertIsNone(meta)
+
+
+def test_from_request_tracker_with_original_block_size(self):
+    tracker = RequestTracker(
+        req_id="r1",
+        token_len=32,
+        allocated_block_ids=[0, 1],
             num_saved_tokens=0,
         )
-        meta = ReqMeta.from_request_tracker(
-            tracker, block_size=16, original_block_size=8
-        )
+        meta = ReqMeta.from_request_tracker(tracker, block_size=16, original_block_size=8)
         self.assertIsNotNone(meta)
         self.assertEqual(meta.original_block_size, 8)
 
 
 class TestAscendConnectorMetadata(unittest.TestCase):
     def test_add_request(self):
-        meta = AscendConnectorMetadata(
-            unfinished_request_ids=set(), preempted_req_ids=set()
-        )
+        meta = AscendConnectorMetadata(unfinished_request_ids=set(), preempted_req_ids=set())
         req = ReqMeta(
-            req_id="r1", token_len_chunk=16, block_ids=[0],
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
             block_hashes=[],
         )
         meta.add_request(req)

@@ -15,11 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-
 import unittest
 from unittest.mock import MagicMock, patch
 
+import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     LoadSpec,
