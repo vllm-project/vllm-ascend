@@ -891,6 +891,14 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.parallel_config.enable_dbo = False
 
+            ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
+            if ubatch_size > 1:
+                logger.warning(
+                    "Parameter '--ubatch-size' relies on DBO which is not "
+                    "yet supported on Ascend NPU. Resetting to 0."
+                )
+                vllm_config.parallel_config.ubatch_size = 0
+
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
