@@ -903,6 +903,20 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.seq_lens[num_reqs:].fill_(0)
 
+        # In async spec decode mode, num_computed_tokens was corrected on GPU
+        # by update_num_computed_tokens_for_batch_change, so seq_lens (GPU) is
+        # correct but optimistic_seq_lens_cpu is stale (it assumed all drafts
+        # were accepted). Sync the corrected values back to CPU so that NPU
+        # attention backends (which use _seq_lens_cpu) get the right values.
+        if (
+            self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None
+            and prev_req_id_to_index
+        ):
+            self.optimistic_seq_lens_cpu[:num_reqs].copy_(
+                self.seq_lens[:num_reqs].cpu()
+            )
+
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
         if self.pcp_size <= 1:
