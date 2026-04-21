@@ -429,6 +429,28 @@ async def test_single_node(config: SingleNodeConfig) -> None:
             _run_benchmarks(config, proxy.port)
         return
 
+    # Multi-instance mode: two servers on the same card simultaneously
+    if config.service_mode == "multi_instance":
+        with RemoteOpenAIServer(
+            model=config.model,
+            vllm_serve_args=config.server_cmd,
+            server_port=config.server_port,
+            env_dict=config.envs,
+            auto_port=False,
+        ) as server1:
+            with RemoteOpenAIServer(
+                model=config.model,
+                vllm_serve_args=config.server_cmd2,
+                server_port=config.server_port2,
+                env_dict=config.envs,
+                auto_port=False,
+            ) as server2:
+                await _dispatch_tests(config, server2)
+                _run_benchmarks(config, config.server_port2)
+            await _dispatch_tests(config, server1)
+            _run_benchmarks(config, config.server_port)
+        return
+
     # Standard OpenAI service mode
     with RemoteOpenAIServer(
         model=config.model,

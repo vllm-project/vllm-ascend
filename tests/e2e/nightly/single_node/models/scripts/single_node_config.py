@@ -31,6 +31,7 @@ class SingleNodeConfig:
     api_keyword_args: dict[str, Any] = field(default_factory=lambda: API_KEYWORD_ARGS)
     benchmarks: dict[str, Any] = field(default_factory=dict)
     server_cmd: list[str] = field(default_factory=list)
+    server_cmd2: list[str] = field(default_factory=list)
     test_content: list[str] = field(default_factory=lambda: ["completion"])
     service_mode: str = "openai"
     epd_server_cmds: list[list[str]] = field(default_factory=list)
@@ -38,7 +39,7 @@ class SingleNodeConfig:
     extra_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        port_keys = ["SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"]
+        port_keys = ["SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT", "SERVER_PORT_2"]
         for env_key in port_keys:
             if self.envs.get(env_key) in ["DEFAULT_PORT", None]:
                 self.envs[env_key] = str(get_open_port())
@@ -55,6 +56,7 @@ class SingleNodeConfig:
             self.test_content = []
 
         self.server_cmd = self._expand_values(self.server_cmd or [], self.envs)
+        self.server_cmd2 = self._expand_values(self.server_cmd2 or [], self.envs)
         self.epd_server_cmds = [self._expand_values(cmd, self.envs) for cmd in self.epd_server_cmds]
         self.epd_proxy_args = self._expand_values(self.epd_proxy_args or [], self.envs)
 
@@ -81,6 +83,10 @@ class SingleNodeConfig:
     @property
     def server_port(self) -> int:
         return self._get_required_port("SERVER_PORT")
+
+    @property
+    def server_port2(self) -> int:
+        return self._get_required_port("SERVER_PORT_2")
 
     @property
     def encode_port(self) -> int:
@@ -110,6 +116,8 @@ class SingleNodeConfigLoader:
         "service_mode",
         "server_cmd",
         "server_cmd_extra",
+        "server_cmd2",
+        "server_cmd2_extra",
         "test_content",
         "epd_server_cmds",
         "epd_proxy_args",
@@ -149,6 +157,8 @@ class SingleNodeConfigLoader:
             required = ["name", "model", "envs"]
             if mode == "epd":
                 required.extend(["epd_server_cmds", "epd_proxy_args"])
+            elif mode == "multi_instance":
+                required.extend(["server_cmd", "server_cmd2"])
             else:
                 required.append("server_cmd")
             missing = [k for k in required if k not in case]
@@ -165,6 +175,11 @@ class SingleNodeConfigLoader:
             server_cmd = case.get("server_cmd", [])
             server_cmd_extra = case.get("server_cmd_extra", [])
             full_cmd = list(server_cmd) + list(server_cmd_extra)
+
+            server_cmd2 = case.get("server_cmd2", [])
+            server_cmd2_extra = case.get("server_cmd2_extra", [])
+            full_cmd2 = list(server_cmd2) + list(server_cmd2_extra)
+
             extra_case_fields = {key: value for key, value in case.items() if key not in cls.STANDARD_CASE_FIELDS}
 
             # Safe parsing mapping
@@ -175,6 +190,7 @@ class SingleNodeConfigLoader:
                     envs=case.get("envs", {}),
                     special_dependencies=case.get("special_dependencies", {}),
                     server_cmd=full_cmd,
+                    server_cmd2=full_cmd2,
                     epd_server_cmds=case.get("epd_server_cmds", []),
                     epd_proxy_args=case.get("epd_proxy_args", []),
                     benchmarks=case.get("benchmarks", {}),
