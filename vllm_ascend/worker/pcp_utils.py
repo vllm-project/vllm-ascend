@@ -81,12 +81,13 @@ class PCPManager:
             device=device,
             pin_memory=pin_memory,
         )
-        self.pcp_padded_slot_mapping = torch.full(
+        self.sample_slot_mapping = torch.full(
             (max_buffer_num_tokens,),
             fill_value=-1,
             dtype=torch.int32,
             device=device,
         )
+        self.pcp_padded_slot_mapping_list: list = []  # reinitialized in initialize_slot_mapping
         self.pcp_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.total_num_sampled_tokens_pcp = 0
         self.num_pcp_pads_cpu_tensor = torch.zeros((max_num_reqs,), device="cpu", dtype=torch.int64)
@@ -130,9 +131,10 @@ class PCPManager:
         self.pcp_pads_logits_hybrid_attn = torch.ones(self.max_num_reqs, dtype=torch.int32) * (self.pcp_world_size - 1)
         self.pcp_padded_tokens_fla = 0
         self.pcp_padded_tokens_length = 0
-        self.num_scheduled_tokens_padded = None
+        self.num_scheduled_tokens_padded: np.ndarray | None = None
         self.max_num_tokens_across_pcp = 0
         self.pcp_tokens_padded = None
+        self.total_num_scheduled_tokens = 0
 
     def _get_cumsum_and_arange(
         self,
@@ -169,10 +171,25 @@ class PCPManager:
         self.num_decode_reqs = first_prefill
         self.num_prefill_reqs = num_reqs - self.num_decode_reqs
         self.num_decode_tokens = num_scheduled_tokens[: self.num_decode_reqs].sum()
+        self.num_scheduled_tokens_padded = num_scheduled_tokens  # for graph compiling in hybrid_attn
 
         self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
         self.query_lens_pcp_full.cpu[self.num_reqs :].fill_(0)
         self.query_lens_pcp_full.copy_to_gpu()
+
+    def initialize_slot_mapping(self) -> None:
+        """
+        Hyrbid-attention models, such as qwen3_next, have plural kv_cache_groups, which may lead to
+        problems like overwriting last group's pcp_padded_slot_mapping, since they share the same
+        address. Therefore we need as many pcp_padded_slot_mappings as kv_cache_groups.
+        """
+        pcp_padded_slot_mapping = torch.full(
+            (self.sample_slot_mapping.shape[0],),
+            fill_value=-1,
+            dtype=torch.int32,
+            device=self.sample_slot_mapping.device,
+        )
+        self.pcp_padded_slot_mapping_list.append(pcp_padded_slot_mapping)
 
     def update_tokens_for_pcp(
         self,
@@ -455,6 +472,7 @@ class PCPManager:
             self.max_num_tokens_across_pcp = max_scheduled_tokens
             self.pcp_tokens_padded = pcp_tokens[: self.num_reqs]
             self.num_scheduled_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
+            self.total_num_scheduled_tokens = num_padded_scheduled_tokens[: self.num_reqs].sum()
             return num_padded_scheduled_tokens, positions_linear
         return pcp_tokens[: self.num_reqs], positions
 
@@ -480,24 +498,27 @@ class PCPManager:
             logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
         return logits_indices
 
-    def get_padded_slot_mapping(self, num_tokens: int, num_tokens_padded: int, slot_mapping: torch.Tensor):
+    def get_padded_slot_mapping(
+        self,
+        num_tokens: int,
+        num_tokens_padded: int,
+        slot_mapping: torch.Tensor,
+        kv_cache_group_id: int,
+    ):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
+        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping_list[kv_cache_group_id]
         if self.pcp_use_hybrid_attn:
             assert self.num_scheduled_tokens_padded is not None
             num_tokens = self.num_scheduled_tokens_padded.sum()
-        pcp_padded_slot_mapping = (
-            self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
-            if not self.pcp_use_hybrid_attn
-            else self.pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
-        )
+        if not self.pcp_use_hybrid_attn or self.total_num_sampled_tokens_pcp != num_tokens_padded:
+            pcp_padded_slot_mapping = pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
+        else:
+            pcp_padded_slot_mapping = pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping
-        if self.pcp_use_hybrid_attn:
-            return pcp_padded_slot_mapping.clone()
-        else:
-            return pcp_padded_slot_mapping
+        return pcp_padded_slot_mapping
 
     def get_restore_hidden_states(
         self,
@@ -519,11 +540,13 @@ class PCPManager:
                 restore_idx,
             )
         else:
-            if self.pcp_padded_tokens_fla > 0:
+            if hidden_states.shape[0] == self.total_num_scheduled_tokens and self.pcp_padded_tokens_fla > 0:
                 hidden_states = F.pad(
                     hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
                 )
-            hidden_states = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states[: self.max_num_tokens_across_pcp].contiguous(), dim=0
+            )
             restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
             return torch.index_select(hidden_states, 0, restore_idx)
 
@@ -598,7 +621,7 @@ class PCPManager:
                 )
             req_indices_mtp = np.concatenate(req_indices_split)
             positions_mtp = np.concatenate(positions_split)
-            input_batch.block_table.compute_slot_mapping(req_indices_mtp, positions_mtp)
+            input_batch.block_table.compute_slot_mapping_draft(req_indices_mtp, positions_mtp)
             mtp_slot_ori = input_batch.block_table.block_tables[0].slot_mapping.cpu[:num_tokens_mtp]
             unpad_mask = np.repeat(False, num_tokens_mtp_pad)
             unpad_mask[:: self.pcp_world_size] = True
@@ -882,25 +905,14 @@ class PCPManager:
                     tensor_npu = self._list_to_tensor(value, self.device)
                     self.kv_idx_names[key] = tensor_npu
 
-                attn_mask_seqlens = torch.tensor([chunk_seqlens, chunk_seqlens], dtype=torch.int32)
-                head_attn_nomask_seqlens = torch.tensor(
-                    [chunk_seqlens, kv_with_q_head_nomask_seqlens], dtype=torch.int32
-                )
-                tail_attn_nomask_seqlens = torch.tensor(
-                    [chunk_seqlens, kv_with_q_tail_nomask_seqlens], dtype=torch.int32
-                )
-                if self.vllm_config.model_config.use_mla:
-                    (
-                        split_q_head_nomask_idx_tensor_list,
-                        split_q_tail_nomask_idx_tensor_list,
-                        head_attn_nomask_seqlens_list,
-                        tail_attn_nomask_seqlens_list,
-                    ) = self._split_nomask_idx_tensor_list(
-                        split_with_q_head_nomask_idx_reqs,
-                        split_kv_with_q_tail_nomask_idx_reqs,
-                        head_attn_nomask_seqlens,
-                        chunk_seqlens,
-                    )
+                attn_chunk_seqlens = torch.tensor(chunk_seqlens, dtype=torch.int32)
+                attn_mask_seqlens = torch.cumsum(torch.tensor(chunk_seqlens, dtype=torch.int32), dim=0).tolist()
+                head_attn_nomask_seqlens = torch.cumsum(
+                    torch.tensor(kv_with_q_head_nomask_seqlens, dtype=torch.int32), dim=0
+                ).tolist()
+                tail_attn_nomask_seqlens = torch.cumsum(
+                    torch.tensor(kv_with_q_tail_nomask_seqlens, dtype=torch.int32), dim=0
+                ).tolist()
 
                 self.extra_long_seq_kwargs = {
                     "attn_mask_seqlens": attn_mask_seqlens,
@@ -920,6 +932,8 @@ class PCPManager:
                     long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
                         : pcp_unpad_mask.sum() + self.num_decode_reqs * (self.pcp_world_size - 1)
                     ]
+                    long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
+                    long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
                 long_seq_metadata.q_full_idx = self.q_full_idx
@@ -934,11 +948,7 @@ class PCPManager:
                 long_seq_metadata.attn_mask_seqlens = self.extra_long_seq_kwargs["attn_mask_seqlens"]
                 long_seq_metadata.head_attn_nomask_seqlens = self.extra_long_seq_kwargs["head_attn_nomask_seqlens"]
                 long_seq_metadata.tail_attn_nomask_seqlens = self.extra_long_seq_kwargs["tail_attn_nomask_seqlens"]
-                if self.vllm_config.model_config.use_mla:
-                    long_seq_metadata.kv_with_q_head_nomask_idx_tensor = split_q_head_nomask_idx_tensor_list
-                    long_seq_metadata.kv_with_q_tail_nomask_idx_tensor = split_q_tail_nomask_idx_tensor_list
-                    long_seq_metadata.head_attn_nomask_seqlens = head_attn_nomask_seqlens_list
-                    long_seq_metadata.tail_attn_nomask_seqlens = tail_attn_nomask_seqlens_list
+                long_seq_metadata.attn_chunk_seqlens = attn_chunk_seqlens
 
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
@@ -947,91 +957,3 @@ class PCPManager:
         tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)
         tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
         return tensor_npu
-
-    def _split_nomask_idx_tensor_list(
-        self,
-        split_with_q_head_nomask_idx_reqs,
-        split_kv_with_q_tail_nomask_idx_reqs,
-        head_attn_nomask_seqlens,
-        chunk_seqlens,
-    ):
-        split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list = [], []
-        head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = [], []
-        if split_with_q_head_nomask_idx_reqs:
-            # In long-sequence scenarios, the computational cost and latency
-            # of the _npu_ring_mla operator are not proportional, so we split
-            # long sequences into shorter ones to improve performance.
-            split_size = 16 * 1024
-            if self.pcp_world_rank == 0:
-                split_q_head_nomask_idx_list = [self.kv_idx_names["kv_with_q_head_nomask_idx_tensor"]]
-            else:
-                split_q_head_nomask_idx_list, split_q_head_nomask_lens_list = self._split_multi_batch_kv_idx(
-                    split_with_q_head_nomask_idx_reqs, split_size
-                )
-            split_q_tail_nomask_idx_list, split_q_tail_nomask_lens_list = self._split_multi_batch_kv_idx(
-                split_kv_with_q_tail_nomask_idx_reqs, split_size
-            )
-
-            for q_head_nomask_idx in split_q_head_nomask_idx_list:
-                split_q_head_nomask_idx_tensor_list.append(self._list_to_tensor(q_head_nomask_idx, self.device))
-
-            for q_tail_nomask_idx in split_q_tail_nomask_idx_list:
-                split_q_tail_nomask_idx_tensor_list.append(self._list_to_tensor(q_tail_nomask_idx, self.device))
-
-            if self.pcp_world_rank == 0:
-                head_attn_nomask_seqlens_list = [head_attn_nomask_seqlens]
-            else:
-                for q_head_nomask_lens in split_q_head_nomask_lens_list:
-                    head_attn_nomask_seqlens_list.append(
-                        torch.tensor([chunk_seqlens, q_head_nomask_lens], dtype=torch.int32)
-                    )
-            for q_tail_nomask_lens in split_q_tail_nomask_lens_list:
-                tail_attn_nomask_seqlens_list.append(
-                    torch.tensor([chunk_seqlens, q_tail_nomask_lens], dtype=torch.int32)
-                )
-        return (
-            split_q_head_nomask_idx_tensor_list,
-            split_q_tail_nomask_idx_tensor_list,
-            head_attn_nomask_seqlens_list,
-            tail_attn_nomask_seqlens_list,
-        )
-
-    def _split_multi_batch_kv_idx(
-        self,
-        kv_nomask_idx_multi_batch,
-        split_size,
-    ):
-        batch_lengths = [len(batch) for batch in kv_nomask_idx_multi_batch]
-        max_batch_length = max(batch_lengths) if batch_lengths else 0
-        time = (max_batch_length + split_size - 1) // split_size
-        split_kv_idx_3d = []
-        split_kv_len_2d = []
-        merged_split_kv_idx_3d = []
-
-        for single_batch in kv_nomask_idx_multi_batch:
-            current_batch_split = []
-            current_batch_len = []
-            for t in range(time):
-                start = t * split_size
-                current_segment = single_batch[start : start + split_size]
-                current_batch_split.append(current_segment)
-                current_batch_len.append(len(current_segment))
-
-            split_kv_idx_3d.append(current_batch_split)
-            split_kv_len_2d.append(current_batch_len)
-
-        for time_idx in range(time):
-            current_time_merged = []
-            for batch in split_kv_idx_3d:
-                current_time_merged.extend(batch[time_idx])
-            merged_split_kv_idx_3d.append(current_time_merged)
-
-        def reshape_kv_len_to_time_first(split_kv_len_2d):
-            if not split_kv_len_2d or not split_kv_len_2d[0]:
-                return []
-            return [
-                [batch_len[time_idx] for batch_len in split_kv_len_2d] for time_idx in range(len(split_kv_len_2d[0]))
-            ]
-
-        merged_split_kv_len_2d = reshape_kv_len_to_time_first(split_kv_len_2d)
-        return merged_split_kv_idx_3d, merged_split_kv_len_2d

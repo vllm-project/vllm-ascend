@@ -9,7 +9,7 @@ test_cases:
       HCCL_OP_EXPANSION_MODE: "AIV"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
-      HCCL_BUFFSIZE: "1024"
+      HCCL_BUFFSIZE: "256"
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
@@ -28,14 +28,14 @@ test_cases:
       - "--max-num-batched-tokens"
       - "8192"
       - "--max-num-seqs"
-      - "4"
+      - "8"
       - "--trust-remote-code"
       - "--quantization"
       - "ascend"
       - "--gpu-memory-utilization"
-      - "0.98"
+      - "0.93"
       - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[8, 16, 24, 32, 40, 48], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '{"cudagraph_capture_sizes":[4, 8, 16, 20, 24, 28, 32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
       - "--additional-config"
@@ -63,16 +63,16 @@ test_cases:
         max_out_len: 1500
         batch_size: 1
         request_rate: 11.2
-        baseline: 134
+        baseline: 1
         threshold: 0.97
       perf_2:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs400
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 100
+        num_prompts: 128
         max_out_len: 1500
-        batch_size: 4
+        batch_size: 32
         request_rate: 11.2
-        baseline: 134
+        baseline: 210
         threshold: 0.97

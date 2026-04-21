@@ -15,13 +15,11 @@
 
 import math
 import os
-from threading import Lock
 from unittest import mock
 
 import pytest
 import torch
-from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
-                         VllmConfig)
+from vllm.config import CompilationConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
@@ -29,12 +27,14 @@ from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 class TestUtils(TestBase):
-
     def setUp(self):
         import importlib
 
         from vllm_ascend import platform
+
         importlib.reload(platform)
+        utils.enable_dsa_cp_with_layer_shard.cache_clear()
+        utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
 
     def test_nd_to_nz_2d(self):
         # can be divided by 16
@@ -70,22 +70,29 @@ class TestUtils(TestBase):
         input_tensor = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]])
         output = utils.nd_to_nz_2d(input_tensor)
         expected = torch.tensor(
-            [[[[1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]]])
+            [
+                [
+                    [
+                        [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    ]
+                ]
+            ]
+        )
         self.assertTrue(torch.allclose(output, expected))
 
     def test_aligned_16(self):
@@ -105,23 +112,20 @@ class TestUtils(TestBase):
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
 
-    @pytest.mark.skip(
-        "Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
+    @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()
         self.assertTrue(result)
 
         utils._CUSTOM_OP_ENABLED = None
 
-        with mock.patch('builtins.__import__') as mock_import_module:
+        with mock.patch("builtins.__import__") as mock_import_module:
             mock_import_module.side_effect = ImportError("import error")
             self.assertFalse(utils.enable_custom_op())
 
     def test_find_hccl_library(self):
-        with mock.patch.dict(os.environ,
-                             {"HCCL_SO_PATH": "/path/to/hccl/libhccl.so"}):
-            self.assertEqual(utils.find_hccl_library(),
-                             "/path/to/hccl/libhccl.so")
+        with mock.patch.dict(os.environ, {"HCCL_SO_PATH": "/path/to/hccl/libhccl.so"}):
+            self.assertEqual(utils.find_hccl_library(), "/path/to/hccl/libhccl.so")
         with mock.patch("torch.version.cann", None):
             self.assertRaises(ValueError, utils.find_hccl_library)
         with mock.patch("torch.version.cann", "Ascend910"):
@@ -130,6 +134,82 @@ class TestUtils(TestBase):
     def test_current_stream(self):
         with mock.patch("torch.npu.current_stream") as mock_current_stream:
             self.assertEqual(utils.current_stream(), mock_current_stream())
+
+    def test_enable_dsa_cp_with_layer_shard_accepts_kv_producer(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertTrue(utils.enable_dsa_cp_with_layer_shard())
+
+    def test_enable_dsa_cp_with_layer_shard_rejects_kv_both(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
+
+    def test_enable_dsa_cp_with_layer_shard_rejects_missing_kv_transfer(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = None
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
+
+    def test_enable_dsa_cp_with_layer_shard_rejects_when_dsa_cp_disabled(self):
+        with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
+            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
+
+    def test_enable_dsa_cp_with_o_proj_tp_accepts_missing_kv_transfer(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = None
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_both(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_dsa_cp_with_o_proj_tp_rejects_single_role_pd(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_dsa_cp_with_o_proj_tp_rejects_when_dsa_cp_disabled(self):
+        with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
+            self.assertFalse(utils.enable_dsa_cp_with_o_proj_tp())
 
     def test_vllm_version_is(self):
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
@@ -160,7 +240,6 @@ class TestUtils(TestBase):
         from transformers import PretrainedConfig
 
         class SimpleConfig(PretrainedConfig):
-
             def __init__(self, num_hidden_layers=12):
                 self.num_hidden_layers = num_hidden_layers
 
@@ -171,39 +250,24 @@ class TestUtils(TestBase):
         self.assertEqual(utils.get_max_hidden_layers(SimpleConfig(24)), 24)
 
         class NestedConfig(PretrainedConfig):
-
             def to_dict(self):
                 return {
-                    "model": {
-                        "encoder": {
-                            "num_hidden_layers": 8
-                        },
-                        "decoder": {
-                            "num_hidden_layers": 12
-                        }
-                    },
-                    "other_setting": True
+                    "model": {"encoder": {"num_hidden_layers": 8}, "decoder": {"num_hidden_layers": 12}},
+                    "other_setting": True,
                 }
 
         self.assertEqual(utils.get_max_hidden_layers(NestedConfig()), 12)
 
         class MultiValueConfig(PretrainedConfig):
-
             def to_dict(self):
                 return {
                     "num_hidden_layers": 6,
-                    "submodule": {
-                        "num_hidden_layers": 18,
-                        "subsub": {
-                            "num_hidden_layers": 9
-                        }
-                    }
+                    "submodule": {"num_hidden_layers": 18, "subsub": {"num_hidden_layers": 9}},
                 }
 
         self.assertEqual(utils.get_max_hidden_layers(MultiValueConfig()), 18)
 
         class NoLayerConfig(PretrainedConfig):
-
             def to_dict(self):
                 return {"attention_heads": 8}
 
@@ -212,47 +276,44 @@ class TestUtils(TestBase):
         self.assertIn("num_hidden_layers", str(context.exception))
 
     def test_update_aclgraph_sizes(self):
-        test_compilation_config = CompilationConfig(
-            cudagraph_capture_sizes=[i for i in range(150)])
+        test_compilation_config = CompilationConfig(cudagraph_capture_sizes=[i for i in range(150)])
         model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
         test_model_config = ModelConfig(model=model_path, enforce_eager=True)
         test_parallel_config = ParallelConfig()
         test_vllm_config = VllmConfig(
             model_config=test_model_config,
             compilation_config=test_compilation_config,
-            parallel_config=test_parallel_config)
+            parallel_config=test_parallel_config,
+        )
         utils.update_aclgraph_sizes(test_vllm_config)
-        os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
+        os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
         utils.update_aclgraph_sizes(test_vllm_config)
-        del os.environ['HCCL_OP_EXPANSION_MODE']
+        del os.environ["HCCL_OP_EXPANSION_MODE"]
 
-        self.assertEqual(
-            0,
-            len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+        self.assertEqual(0, len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
     @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
     @mock.patch("vllm_ascend.ops.activation.AscendSiluAndMul")
     @mock.patch("vllm_ascend.ops.layernorm.AscendRMSNorm")
-    def test_register_ascend_customop(self, mock_ascend_rmsnorm,
-                                      mock_ascend_silu_and_mul,
-                                      mock_ascend_quick_gelu, mock_customop):
+    def test_register_ascend_customop(
+        self, mock_ascend_rmsnorm, mock_ascend_silu_and_mul, mock_ascend_quick_gelu, mock_customop
+    ):
         utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count,
-                         len(REGISTERED_ASCEND_OPS))
+        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        self.assertEqual(mock_customop.register_oot.call_count,
-                         len(REGISTERED_ASCEND_OPS))
-    
+        self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
+
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):
         from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+
         mock_npu_format_cast.side_effect = lambda weight, fmt: weight
 
         def assert_nz_cast(weight):

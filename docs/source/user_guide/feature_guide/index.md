@@ -13,6 +13,7 @@ structured_output
 lora
 eplb_swift_balancer
 netloader
+rfork
 Multi_Token_Prediction
 dynamic_batch
 epd_disaggregation
@@ -24,7 +25,6 @@ Fine_grained_TP
 layer_sharding
 speculative_decoding
 context_parallel
-npugraph_ex
 weight_prefetch
 sequence_parallelism
 batch_invariance
