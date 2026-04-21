@@ -51,10 +51,6 @@ on:
         required: false
         type: string
         default: ''
-      multicard_310p_tests:
-        required: false
-        type: string
-        default: ''
 env:
   UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
   UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
@@ -858,7 +854,7 @@ jobs:
   e2e_310p-4cards:
     name: 310p multicards 4cards
     runs-on: linux-aarch64-310p-4
-    if: ${{ inputs.contains_310 || inputs.multicard_310p_tests != '' }}
+    if: ${{ inputs.contains_310 }}
     container:
       image: ${{ inputs.image_310p }}
       env:
@@ -949,14 +945,6 @@ jobs:
           2>&1 | tee /tmp/e2e-310p-4cards.log
           exit ${PIPESTATUS[0]}
 
-      - name: Run E2E tests (comment-310p-multicard)
-        if: ${{ inputs.multicard_310p_tests != '' }}
-        env:
-          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-        run: |
-          pytest -sv --durations=0 ${{ inputs.multicard_310p_tests }}
-
       - name: Summarize 310p multicards failure
         if: ${{ always() && inputs.contains_310 }}
         run: |
@@ -964,3 +952,4 @@ jobs:
             --step-name "Run vllm-project/vllm-ascend test" \
             --log-file /tmp/e2e-310p-4cards.log \
             --output "$GITHUB_STEP_SUMMARY"
+
