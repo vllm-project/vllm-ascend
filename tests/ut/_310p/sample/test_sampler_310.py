@@ -2,7 +2,7 @@ import sys
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -13,21 +13,23 @@ if str(PROJECT_ROOT) not in sys.path:
 
 if "vllm" not in sys.modules:
     vllm_module = ModuleType("vllm")
-    vllm_module.envs = SimpleNamespace(VLLM_BATCH_INVARIANT=False)
+    vllm_envs_module = ModuleType("vllm.envs")
+    vllm_envs_module.VLLM_BATCH_INVARIANT = False  # type: ignore[attr-defined]
+    vllm_module.envs = vllm_envs_module  # type: ignore[attr-defined]
     sys.modules["vllm"] = vllm_module
-    sys.modules["vllm.envs"] = vllm_module.envs
+    sys.modules["vllm.envs"] = vllm_envs_module
 
 if "vllm_ascend.sample.sampler" not in sys.modules:
     sample_sampler_module = ModuleType("vllm_ascend.sample.sampler")
-    sample_sampler_module.DEFAULT_LOGPROBS_MODE = "raw_logprobs"
-    sample_sampler_module.AscendSampler = type("AscendSampler", (), {})
-    sample_sampler_module.AscendTopKTopPSampler = type("AscendTopKTopPSampler", (), {})
+    sample_sampler_module.DEFAULT_LOGPROBS_MODE = "raw_logprobs"  # type: ignore[attr-defined]
+    sample_sampler_module.AscendSampler = type("AscendSampler", (), {})  # type: ignore[attr-defined]
+    sample_sampler_module.AscendTopKTopPSampler = type("AscendTopKTopPSampler", (), {})  # type: ignore[attr-defined]
     sys.modules["vllm_ascend.sample.sampler"] = sample_sampler_module
 
 if "vllm_ascend.utils" not in sys.modules:
     utils_module = ModuleType("vllm_ascend.utils")
-    utils_module.global_stream = lambda: MagicMock()
-    utils_module.npu_stream_switch = lambda _: nullcontext()
+    utils_module.global_stream = lambda: MagicMock()  # type: ignore[attr-defined]
+    utils_module.npu_stream_switch = lambda _: nullcontext()  # type: ignore[attr-defined]
     sys.modules["vllm_ascend.utils"] = utils_module
 
 from vllm_ascend._310p.sample import sampler as sampler_310p  # noqa: E402
@@ -103,10 +105,11 @@ class TestSampler310pStandalone(unittest.TestCase):
             patch.object(
                 sampler_310p.torch,
                 "npu",
-                SimpleNamespace(current_stream=MagicMock(return_value=npu_stream)),
+                ModuleType("torch.npu"),
                 create=True,
             ),
         ):
+            sampler_310p.torch.npu.current_stream = MagicMock(return_value=npu_stream)
             sampler_310p._random_sample_310p(probs, generators)
             sampler_310p._random_sample_310p(probs, generators)
 
@@ -146,10 +149,11 @@ class TestSampler310pStandalone(unittest.TestCase):
             patch.object(
                 sampler_310p.torch,
                 "npu",
-                SimpleNamespace(current_stream=MagicMock(return_value=npu_stream)),
+                ModuleType("torch.npu"),
                 create=True,
             ),
         ):
+            sampler_310p.torch.npu.current_stream = MagicMock(return_value=npu_stream)
             sampler_310p._random_sample_310p(probs, generators)
 
         cached_cpu_generator, source_generator_id = sampler_310p._CPU_GENERATOR_CACHE_310P[0]
@@ -185,10 +189,11 @@ class TestSampler310pStandalone(unittest.TestCase):
             patch.object(
                 sampler_310p.torch,
                 "npu",
-                SimpleNamespace(current_stream=MagicMock(return_value=npu_stream)),
+                ModuleType("torch.npu"),
                 create=True,
             ),
         ):
+            sampler_310p.torch.npu.current_stream = MagicMock(return_value=npu_stream)
             sampler_310p._random_sample_310p(probs, {0: generator_first})
             sampler_310p._random_sample_310p(probs, {0: generator_second})
 
