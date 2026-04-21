@@ -86,9 +86,8 @@ class TestAscendStoreConnector(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):
         config = self._make_vllm_config()
-        role = MagicMock()
-        role.__eq__ = lambda self, other: other == "SCHEDULER"
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
@@ -101,6 +100,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_init_worker_role(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
@@ -113,6 +113,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_scheduler_methods_delegate(self, mock_scheduler_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
@@ -142,6 +143,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_update_connector_output_no_events(self, mock_scheduler_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
@@ -156,6 +158,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_update_connector_output_with_events(self, mock_scheduler_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
@@ -175,6 +178,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_update_connector_output_accumulate(self, mock_scheduler_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
@@ -201,6 +205,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_take_events(self, mock_scheduler_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
@@ -225,6 +230,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_worker_methods(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
@@ -257,6 +263,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_wait_for_layer_load_not_layerwise(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(extra_config={"use_layerwise": False})
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
@@ -270,6 +277,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_save_kv_layer_not_layerwise(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(extra_config={"use_layerwise": False})
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
@@ -283,6 +291,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_save_kv_layer_consumer(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(kv_role="kv_consumer", extra_config={"use_layerwise": True})
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
@@ -296,6 +305,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_wait_for_save_consumer(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(kv_role="kv_consumer")
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
@@ -309,6 +319,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_get_kv_connector_kv_cache_events_empty(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
@@ -323,6 +334,7 @@ class TestAscendStoreConnector(unittest.TestCase):
     def test_get_kv_connector_kv_cache_events_with_events(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
         connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
