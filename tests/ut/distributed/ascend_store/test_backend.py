@@ -163,11 +163,14 @@ class TestConvertToBytes(unittest.TestCase):
 # =========================================================================
 class TestYuanrongConfig(unittest.TestCase):
     def test_load_from_env(self):
-        with patch.dict(os.environ, {
-            "DS_WORKER_ADDR": "host:1234",
-            "DS_ENABLE_EXCLUSIVE_CONNECTION": "1",
-            "DS_ENABLE_REMOTE_H2D": "0",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "DS_WORKER_ADDR": "host:1234",
+                "DS_ENABLE_EXCLUSIVE_CONNECTION": "1",
+                "DS_ENABLE_REMOTE_H2D": "0",
+            },
+        ):
             cfg = YuanrongConfig.load_from_env()
             self.assertEqual(cfg.worker_addr, "host:1234")
             self.assertTrue(cfg.enable_exclusive_connection)
@@ -246,12 +249,15 @@ class TestYuanrongHelper(unittest.TestCase):
 class TestMooncakeBackendMethods(unittest.TestCase):
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
-        with patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": "/dev/null"}):
-            with patch.object(MooncakeBackend, "__init__", lambda self, pc: None):
-                backend = MooncakeBackend.__new__(MooncakeBackend)
-                backend.store = MagicMock()
-                backend.config = MagicMock()
-                return backend
+
+        with (
+            patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": "/dev/null"}),
+            patch.object(MooncakeBackend, "__init__", lambda self, pc: None),
+        ):
+            backend = MooncakeBackend.__new__(MooncakeBackend)
+            backend.store = MagicMock()
+            backend.config = MagicMock()
+            return backend
 
     def test_exists(self):
         b = self._make_backend()
@@ -291,13 +297,16 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         b.store.batch_get_into_multi_buffers.side_effect = Exception("fail")
         b.get(["k1"], [[100]], [[10]])
 
-    def test_register_buffer(self):
-        b = self._make_backend()
-        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.os") as mock_os:
-            mock_os.getenv.return_value = "0"
-            with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te") as mock_te:
-                b.register_buffer([100], [200])
-                mock_te.register_buffer.assert_called_once()
+
+def test_register_buffer(self):
+    b = self._make_backend()
+    with (
+        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.os") as mock_os,
+        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te") as mock_te,
+    ):
+        mock_os.getenv.return_value = "0"
+        b.register_buffer([100], [200])
+        mock_te.register_buffer.assert_called_once()
 
 
 # =========================================================================
@@ -306,6 +315,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
 class TestYuanrongBackendMethods(unittest.TestCase):
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import YuanrongBackend
+
         with patch.object(YuanrongBackend, "__init__", lambda self, pc: None):
             backend = YuanrongBackend.__new__(YuanrongBackend)
             backend._helper = MagicMock()
@@ -370,16 +380,19 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b._hetero_client.mset_d2h.side_effect = Exception("fail")
         b.put(["k1"], [[100]], [[10]])
 
-    def test_set_device(self):
+def test_set_device(self):
         b = self._make_backend()
-        import torch
         b.set_device()
 
-    def test_register_buffer(self):
+def test_register_buffer(self):
         b = self._make_backend()
-        b._helper._device_id = None
-        b._ensure_device_ready = MagicMock()
-        b.register_buffer([100], [200])
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_ascend_device_type"
+        ) as mock_dt:
+            from vllm_ascend.utils import AscendDeviceType
+
+            mock_dt.return_value = AscendDeviceType.A2
+            b.register_buffer([100], [200])
         b._ensure_device_ready.assert_called_once()
 
     def test_ensure_device_ready(self):
@@ -403,6 +416,7 @@ class TestYuanrongBackendMethods(unittest.TestCase):
 class TestMemcacheBackendMethods(unittest.TestCase):
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
+
         with patch.object(MemcacheBackend, "__init__", lambda self, pc: None):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
@@ -416,8 +430,11 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
     def test_register_buffer(self):
         b = self._make_backend()
-        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_ascend_device_type") as mock_dt:
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend.get_ascend_device_type"
+        ) as mock_dt:
             from vllm_ascend.utils import AscendDeviceType
+
             mock_dt.return_value = AscendDeviceType.A2
             b.register_buffer([100], [200])
 

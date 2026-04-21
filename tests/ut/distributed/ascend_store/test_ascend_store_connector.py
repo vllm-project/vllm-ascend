@@ -88,7 +88,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-        connector = AscendStoreConnector(
+        _connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
             kv_cache_config=None,
@@ -101,7 +101,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-        connector = AscendStoreConnector(
+        _connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
             kv_cache_config=None,

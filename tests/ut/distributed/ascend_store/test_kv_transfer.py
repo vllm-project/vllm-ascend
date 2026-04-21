@@ -50,7 +50,7 @@ class FakeStore:
         pass
 
     def exists(self, keys):
-        return self.exists_result[:len(keys)]
+        return self.exists_result[: len(keys)]
 
     def put(self, keys, addrs, sizes):
         self.put_calls.append((list(keys), list(addrs), list(sizes)))
@@ -99,8 +99,12 @@ class TestKVTransferThread(unittest.TestCase):
         store = FakeStore(exists_result or [])
         db = FakeTokenDatabase()
         t = KVTransferThread(
-            m_store=store, token_database=db, block_size=16,
-            tp_rank=0, dcp_size=1, ready_event=threading.Event(),
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
             name="test",
         )
         return t, store
@@ -156,9 +160,14 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         store = FakeStore(exists_result or [0, 0, 0, 0])
         db = FakeTokenDatabase()
         t = KVCacheStoreSendingThread(
-            m_store=store, token_database=db, block_size=16,
-            tp_rank=0, dcp_size=1, put_step=1,
-            kv_role=kv_role, ready_event=threading.Event(),
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role=kv_role,
+            ready_event=threading.Event(),
             enable_kv_event=enable_kv_event,
         )
         return t, store
@@ -166,7 +175,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
     def test_handle_request_puts_missing_keys(self):
         t, store = self._make_thread([1, 0, 1, 0])
         req = ReqMeta(
-            req_id="r1", token_len_chunk=64, block_ids=[0, 1, 2, 3],
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -180,7 +191,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
     def test_handle_request_all_exist_no_put(self):
         t, store = self._make_thread([1, 1])
         req = ReqMeta(
-            req_id="r1", token_len_chunk=32, block_ids=[0, 1],
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -192,7 +205,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
     def test_handle_request_not_in_stored(self):
         t, store = self._make_thread([0])
         req = ReqMeta(
-            req_id="r1", token_len_chunk=16, block_ids=[0],
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -203,7 +218,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
     def test_handle_request_with_kv_event(self):
         t, store = self._make_thread([0], enable_kv_event=True)
         req = ReqMeta(
-            req_id="r1", token_len_chunk=16, block_ids=[0],
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(16)),
@@ -218,7 +235,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
     def test_handle_request_consumer_role(self):
         t, store = self._make_thread([0], kv_role="kv_consumer")
         req = ReqMeta(
-            req_id="r1", token_len_chunk=16, block_ids=[0],
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -249,7 +268,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t, store = self._make_thread([0])
         event = MagicMock()
         req = ReqMeta(
-            req_id="r1", token_len_chunk=16, block_ids=[0],
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=event,
         )
@@ -262,12 +283,19 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         store = FakeStore([0, 0])
         db = FakeTokenDatabase()
         t = KVCacheStoreSendingThread(
-            m_store=store, token_database=db, block_size=16,
-            tp_rank=0, dcp_size=2, put_step=1,
-            kv_role="kv_producer", ready_event=threading.Event(),
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=2,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
         )
         req = ReqMeta(
-            req_id="r1", token_len_chunk=32, block_ids=[0, 1],
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -283,12 +311,18 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         store = FakeStore()
         db = FakeTokenDatabase()
         t = KVCacheStoreRecvingThread(
-            m_store=store, token_database=db, block_size=16,
-            tp_rank=0, dcp_size=1, ready_event=threading.Event(),
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
         req = ReqMeta(
-            req_id="r1", token_len_chunk=32, block_ids=[0, 1],
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             load_spec=load_spec,
         )
@@ -304,9 +338,14 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         store = FakeStore(exists_result or [0, 0])
         db = FakeTokenDatabase()
         t = KVCacheStoreLayerSendingThread(
-            m_store=store, token_database=db, block_size=16,
-            tp_rank=0, dcp_size=1, put_step=1,
-            ready_event=threading.Event(), num_layers=num_layers,
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            ready_event=threading.Event(),
+            num_layers=num_layers,
         )
         return t, store
 
@@ -314,7 +353,8 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         meta = KeyMetadata("m", 0, 0, 0, 0)
         keys = [LayerPoolKey(meta, f"h{i}", layer_id) for i in range(num_keys)]
         return LayerMultiBlockReqMeta(
-            req_id="r1", keys=keys,
+            req_id="r1",
+            keys=keys,
             starts=[i * 16 for i in range(num_keys)],
             ends=[(i + 1) * 16 for i in range(num_keys)],
             block_ids=list(range(num_keys)),
@@ -349,10 +389,15 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
 
     def test_handle_request_empty_keys(self):
         t, store = self._make_thread()
-        meta = KeyMetadata("m", 0, 0, 0, 0)
+        _meta = KeyMetadata("m", 0, 0, 0, 0)
         req = LayerMultiBlockReqMeta(
-            req_id="r1", keys=[], starts=[], ends=[],
-            block_ids=[], layer_id=0, is_last_chunk=True,
+            req_id="r1",
+            keys=[],
+            starts=[],
+            ends=[],
+            block_ids=[],
+            layer_id=0,
+            is_last_chunk=True,
         )
         t._handle_request(req)
         finished = t.get_and_clear_finished_requests()
@@ -365,8 +410,12 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
         req = LayerMultiBlockReqMeta(
             req_id="r1",
             keys=[LayerPoolKey(meta, "h0", 0)],
-            starts=[0], ends=[16], block_ids=[0],
-            layer_id=0, is_last_chunk=False, current_event=event,
+            starts=[0],
+            ends=[16],
+            block_ids=[0],
+            layer_id=0,
+            is_last_chunk=False,
+            current_event=event,
         )
         t.request_queue.put(req)
         t._handle_request(req)
@@ -387,15 +436,21 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
         db = FakeTokenDatabase()
         get_event = threading.Event()
         t = KVCacheStoreLayerRecvingThread(
-            m_store=store, token_database=db, block_size=16,
-            tp_rank=0, dcp_size=1, ready_event=threading.Event(),
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
             get_event=get_event,
         )
         meta = KeyMetadata("m", 0, 0, 0, 0)
         req = LayerMultiBlockReqMeta(
             req_id="r1",
             keys=[LayerPoolKey(meta, "h0", 0)],
-            starts=[0], ends=[16], block_ids=[0],
+            starts=[0],
+            ends=[16],
+            block_ids=[0],
             layer_id=0,
         )
         t.request_queue.put(req)
