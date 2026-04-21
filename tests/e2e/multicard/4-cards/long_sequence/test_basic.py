@@ -291,6 +291,7 @@ def test_dcp_full_graph():
     ) as runner:
         runner.model.generate(prompts, sampling_params)
 
+
 @wait_until_npu_memory_free()
 def test_dcp_piece_wise():
     prompts = [
