@@ -821,9 +821,24 @@ class NPUModelRunner(GPUModelRunner):
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            self.num_accepted_tokens.np[:num_reqs] = (
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-            )
+            # Async mode: condense() reordered indices, use prev_positions mapping
+            if self.use_async_scheduling and prev_req_id_to_index:
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[
+                        np.where(new_mask, 0, prev_idx)
+                    ]
+                )
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                    self.num_accepted_tokens.np[:num_reqs]
+                )
+            else:
+                # Non-async mode: use values directly
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
