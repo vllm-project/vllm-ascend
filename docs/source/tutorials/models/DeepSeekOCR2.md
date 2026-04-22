@@ -4,7 +4,7 @@
 
 DeepSeekOCR2 is a model to investigate the role of vision encoders from an LLM-centric viewpoint.
 
-The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0`.
+The `DeepSeek-OCR-2` model is first supported in `vllm-ascend:v0.16.0` and can stably run in v0.16.0 and later version.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 
@@ -106,6 +106,14 @@ vllm serve /weights/DeepSeek-OCR-2 \
     --mm-processor-cache-gb 0
 ```
 
+**Notice:**
+The parameters are explained as follows:
+
+- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request.
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
+- `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
+
 ### Multi-node Deployment
 
 Single-node deployment is recommended.
@@ -169,3 +177,17 @@ The performance result is:
 **Input/Output**: 1080P/256
 
 **Performance**: TTFT = 2s, TPOT = 200ms, Average performance of each card is 864 TPS (Token Per Second).
+
+## Best Practices
+
+In this chapter, we recommend best practices. for details about best practices, see the "Single-node Deployment" section.
+
+## FAQ
+
+- **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
+
+  A: Clean up old processes and restart: `pkill -f vLLM*`.
+
+- **Q: How to handle OOM or unstable startup?**
+
+  A: Reduce `--max-num-seqs` and `--max-model-len` first. If needed, reduce concurrency and load-testing pressure (e.g., `max-concurrency` / `num-prompts`).
