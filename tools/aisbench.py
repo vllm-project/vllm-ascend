@@ -42,14 +42,14 @@ class AisbenchRunner:
     def _run_aisbench_task(self):
         dataset_conf = self.dataset_conf.split("/")[-1]
         if self.task_type == "accuracy":
-            aisbench_cmd = ["ais_bench", "--models", f"{self.request_conf}_custom", "--datasets", f"{dataset_conf}"]
+            aisbench_cmd = ["ais_bench", "--models", self._request_conf_custom, "--datasets", f"{dataset_conf}"]
         if self.task_type == "performance":
             aisbench_cmd = [
                 "ais_bench",
                 "--models",
-                f"{self.request_conf}_custom",
+                self._request_conf_custom,
                 "--datasets",
-                f"{dataset_conf}_custom",
+                self._dataset_conf_custom,
                 "--mode",
                 "perf",
             ]
@@ -119,7 +119,8 @@ class AisbenchRunner:
             with open(conf_path, encoding="utf-8") as f:
                 content = f.read()
             content = re.sub(r"path=.*", f'path="{self.dataset_path}",', content)
-            conf_path_new = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}_custom.py")
+            self._dataset_conf_custom = f"{self.dataset_conf.split('/')[-1]}_custom_{self.port}"
+            conf_path_new = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}_custom_{self.port}.py")
             with open(conf_path_new, "w", encoding="utf-8") as f:
                 f.write(content)
 
@@ -165,7 +166,8 @@ class AisbenchRunner:
             content = re.sub(r"temperature.*", f"temperature={self.temperature},", content)
         if self.no_pred:
             content = re.sub(r"pred_postprocessor.*", "#pred_postprocessor", content)
-        conf_path_new = os.path.join(REQUEST_CONF_DIR, f"{self.request_conf}_custom.py")
+        self._request_conf_custom = f"{self.request_conf}_custom_{self.port}"
+        conf_path_new = os.path.join(REQUEST_CONF_DIR, f"{self._request_conf_custom}.py")
         with open(conf_path_new, "w", encoding="utf-8") as f:
             f.write(content)
         print(f"The request config is\n {content}")
