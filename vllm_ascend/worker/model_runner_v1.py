@@ -2991,7 +2991,7 @@ class NPUModelRunner(GPUModelRunner):
         # KV cache offloading configuration
         # NUM_SHARED_BUFFERS: number of shared KV cache buffers for round-robin reuse
         # INDEPENDENT_LAYER_INDICES: layer indices that have their own dedicated KV cache
-        NUM_SHARED_BUFFERS = 3
+        NUM_SHARED_BUFFERS = 2
         INDEPENDENT_LAYER_INDICES = set()
         enable_kvcache_offload = True
 
