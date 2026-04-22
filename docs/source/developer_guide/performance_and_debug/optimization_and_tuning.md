@@ -55,7 +55,7 @@ pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 pip install modelscope pandas datasets gevent sacrebleu rouge_score pybind11 pytest
 
 # Configure this var to speed up model download
-VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=True
 ```
 
 Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
