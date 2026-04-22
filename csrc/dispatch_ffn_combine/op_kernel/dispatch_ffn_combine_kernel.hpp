@@ -569,6 +569,7 @@ private:
         if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
             blockMmad.SynchronizeBlock();
         }
+        blockMmad.Finalize(params.expertPerRank - 1, 0);
     }
 
 
@@ -835,20 +836,16 @@ private:
 
         uint32_t n2 = params.problemShape.k();
 
+
         typename BlockEpilogue2::Params epilogueParams{
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
-            static_cast<int32_t>(params.rank),
             reinterpret_cast<__gm__ int32_t *>(shmem() + peermemInfo.offsetPeerTokenPerExpert),
-            params.layoutD2,
-            static_cast<int32_t>(n2),
-            static_cast<int32_t>(L1TileShape::N),
-            shmem,
-            static_cast<int32_t>(peermemInfo.offsetD)
+            static_cast<int32_t>(n2)
         };
 
         uint32_t n = params.problemShape.n();
-        BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
+        
         BlockEpilogue1 blockEpilogue1(resource, n);
 
         // Synchronous wait: SwiGLU waits for GMM1 [1]
@@ -887,45 +884,62 @@ private:
         }
 
         blockEpilogue1.Finalize();
-
-
-        CombineSetFlag();
-
-        CombineV2(params, blockEpilogue2);
-
+        BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
+        CombineV1(params, blockEpilogue2);
         AscendC::SyncAll<true>();
         #ifndef __CROSSRANKSYNCANDALLGATHERV1__
         ResetTokenPerExpert(params.EP * AlignUp(params.EP * params.expertPerRank, 128));
         #endif
-        shmem.InitStatusTargetSum();
-        if (get_subblockid() == 0) {
-            AscendC::LocalTensor<int32_t> ctrBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
-            shmem.CrossRankSyncV2Set(ctrBuffer);
-        } else {
-            uint32_t uboffset = 0;
-            uint32_t aicCoreNum = coreNum / 2;
-            uint32_t aicCoreIdx = get_block_idx();
-            uint32_t sendRankNum_ = params.EP / aicCoreNum;
-            uint32_t remainderRankNum = params.EP % aicCoreNum;
-            if (aicCoreIdx < remainderRankNum) {
-                sendRankNum_++;
+
+        shmem.CrossRankSync();
+        MoeTokenUnpermuteTilingData tilingData;
+        MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum);
+        KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
+        kernelMoeTokenUnpermuteOp.Init(shmem() + peermemInfo.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
+        kernelMoeTokenUnpermuteOp.Process();
+    }
+    CATLASS_DEVICE
+    void CombineV1(Params const &params, BlockEpilogue2 & blockEpilogue) {
+        uint32_t n2 = params.problemShape.k();
+        int32_t prevGroupSum2 = 0;
+
+        icache_preload(8);
+        for (uint32_t t_groupIdx = 0; t_groupIdx < params.expertPerRank; ++t_groupIdx) {
+            int32_t flagId = t_groupIdx / CROSS_CORE_FLAG_MAX_SET_COUNT;
+            AscendC::CrossCoreWaitFlag<0x2>(flagId);
+            AscendC::SyncAll<true>();
+
+            uint32_t groupIdx = t_groupIdx;
+
+            for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
+                __gm__ void* dstPeermemPtr = shmem(peermemInfo.offsetD, dstEpIdx);
+                AscendC::GlobalTensor<ElementD2> gmRemotePeer;
+                gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD2*>(dstPeermemPtr));
+                uint32_t srcRowOffset = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum2;
+                if (srcRowOffset < params.maxOutputSize) {
+                    uint32_t dataRows = tokenPerExpert(tokenPerExpertLayout(dstEpIdx, params.rank, groupIdx));
+                    if (srcRowOffset + dataRows > params.maxOutputSize) {
+                        dataRows = params.maxOutputSize - srcRowOffset;
+                    }
+                    //uint32_t dstRowOffset = preSumBeforeRank(2 * dstEpIdx * FLAGSTRIDE + groupIdx);
+                    int32_t tmpBlock = AlignUp(params.expertPerRank, FLAGSTRIDE);
+                    //uint32_t dstRowOffset = preSumBeforeRank(dstEpIdx * tmpBlock + groupIdx);
+                    uint32_t dstRowOffset = preSumBeforeRank(dstEpIdx * params.expertPerRank + groupIdx);
+                    MatrixCoord offsetC{srcRowOffset, 0};
+                    MatrixCoord offsetPeer{dstRowOffset, 0};
+                    MatrixCoord shapeC{dataRows, n2};
+                    int64_t gmOffsetC = params.layoutD2.GetOffset(offsetC);
+                    int64_t gmOffsetPeer = params.layoutD2.GetOffset(offsetPeer);
+                    if constexpr (std::is_same_v<ElementA, int8_t>) {
+                        blockEpilogue(gmC2[gmOffsetC], shapeC, gmPerTokenScale2[srcRowOffset], gmRemotePeer[gmOffsetPeer]);
+                    } else {
+                        blockEpilogue(gmC2[gmOffsetC], shapeC, gmRemotePeer[gmOffsetPeer]);
+                    }
+                }
             }
-            AscendC::LocalTensor<float> statusTensor = resource.ubBuf.template GetBufferByByte<float>(uboffset);
-            uboffset += sendRankNum_ * UB_ALIGN;
-            AscendC::LocalTensor<float> gatherMaskOutTensor = resource.ubBuf.template GetBufferByByte<float>(uboffset);
-            uboffset += AlignUp(params.EP * sizeof(float), 32);
-            AscendC::LocalTensor<uint32_t> gatherTmpTensor = resource.ubBuf.template GetBufferByByte<uint32_t>(uboffset);
-            uboffset += AlignUp(sizeof(uint32_t), 32);
-            AscendC::LocalTensor<float> statusSumOutTensor = resource.ubBuf.template GetBufferByByte<float>(uboffset);
-            uboffset += AlignUp(sizeof(float), 32);
-            shmem.CrossRankSyncV2Wait(statusTensor, gatherMaskOutTensor, gatherTmpTensor, statusSumOutTensor);
-            MoeTokenUnpermuteTilingData tilingData;
-            MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum / 2);
-            KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
-            kernelMoeTokenUnpermuteOp.Init(shmem() + peermemInfo.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
-            kernelMoeTokenUnpermuteOp.Process();
+            prevGroupSum2 += cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
         }
- 
+        blockEpilogue.Finalize();
     }
 
     CATLASS_DEVICE
