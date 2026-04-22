@@ -21,7 +21,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerMultiBlockReqMeta,
     ReqMeta,
-    PoolKey
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -169,8 +168,9 @@ class KVPoolWorker:
         # req_id, layer_id, block info
         self._request_addr_tracker: dict[str, dict[int, dict]] = {}
 
-        NUM_SHARED_BUFFERS = 3
-        INDEPENDENT_LAYER_INDICES = {}
+        NUM_SHARED_BUFFERS = 2
+        self.NUM_SHARED_BUFFERS = NUM_SHARED_BUFFERS
+        INDEPENDENT_LAYER_INDICES = {0, self.num_layers - 1}
         self.independent_layers = list(INDEPENDENT_LAYER_INDICES)
 
         shared_layer_indices = [i for i in range(self.num_layers)
@@ -433,13 +433,13 @@ class KVPoolWorker:
         layer_id: int,
         tracker: dict,
         is_last_chunk: bool = False,
-    ) -> LasyerMultiBlockReqMeta:
+    ) -> LayerMultiBlockReqMeta:
         final_addr_list = tracker['chunk_addr_list'] + tracker['last_block_addr']
         final_size_list = tracker['chunk_size_list'] + tracker['last_block_size']
         final_gvas_list = tracker['chunk_gvas_list'] + tracker['last_block_gvas']
 
         all_keys = block_keys + last_block_keys
-        req_meta = LasyerMultiBlockReqMeta(
+        req_meta = LayerMultiBlockReqMeta(
             request.req_id, all_keys,
             request.block_ids, layer_id, is_last_chunk
         )
@@ -548,26 +548,22 @@ class KVPoolWorker:
             self.current_layer = self.current_layer + 1
             return
         # Wait for KV cache saving to complete on the final layer that requires offloading.
-        if self.current_layer != self.layers_need_to_save[-1]:
+        if self.current_layer in self.layers_need_to_save:
             self.sync_save_events[self.current_layer].record()
             self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
             # add load task, in both prefill and decode stages
             # 1. wait for save, and clear save event
             # 2. start load, for prefill layer_load_tasks is None, skip load in the recv thread.
             # 3. set layer_load_finished_events (both prefill & decode)
-            self.layer_save_tasks[self.current_layer] = []
             if self.current_layer in self.layer_next_map:
                 next_layer = self.layer_next_map[self.current_layer]
                 self.kv_recv_thread.add_request(
                     (self.current_layer, self.layer_load_tasks[next_layer], next_layer))
-        else:
-            self.sync_save_events[self.current_layer].record()
-            self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
-            is_finish = self.layer_save_finished_events[self.current_layer].wait(timeout=10)
+        if self.current_layer == self.num_layers - 1:
+            is_finish = self.layer_save_finished_events[self.layers_need_to_save[-1]].wait(timeout=10)
             if not is_finish:
                 logger.info("Layerwise %d save wait timed out", self.current_layer)
-            self.layer_save_finished_events[self.current_layer].clear()
-            for layer_id in range(self.num_layers):
+            for layer_id in self.layers_need_to_save[-1*self.NUM_SHARED_BUFFERS:]:
                 self.layer_save_finished_events[layer_id].clear()
 
         self.current_layer = self.current_layer + 1

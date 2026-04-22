@@ -2992,7 +2992,6 @@ class NPUModelRunner(GPUModelRunner):
         # NUM_SHARED_BUFFERS: number of shared KV cache buffers for round-robin reuse
         # INDEPENDENT_LAYER_INDICES: layer indices that have their own dedicated KV cache
         NUM_SHARED_BUFFERS = 3
-        INDEPENDENT_LAYER_INDICES = {}
         INDEPENDENT_LAYER_INDICES = set()
         enable_kvcache_offload = True
 
@@ -3005,7 +3004,7 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_map[layer_idx] = layer_name
 
         sorted_attn_indices = sorted(attn_layer_map.keys())
-
+        INDEPENDENT_LAYER_INDICES = {0, len(sorted_attn_indices)-1}
         # Step 2: Classify layers into three categories
         # - independent: own dedicated KV cache, no offloading (e.g., first/last layer)
         # - buffer_owner: owns a shared buffer, first NUM_SHARED_BUFFERS non-independent layers
