@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import torch
 import vllm.v1.attention.backends.gdn_attn as gdn_attn
+from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ops.triton.gdn_chunk_meta import (
     _build_seq_lens,
@@ -548,6 +549,40 @@ def _build_non_spec_chunked_prefill_meta(
     return _build_chunked_prefill_metadata(builder, tensors, slot=slot)
 
 
+def _compute_prefix_caching_block_indices(common_attn_metadata, mamba_block_size):
+    """Compute block indices for APC all-mode, mirroring upstream logic."""
+    num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+    block_idx_last_computed_token = cdiv(num_computed_tokens, mamba_block_size) - 1
+    block_idx_first_scheduled_token = (
+        cdiv(num_computed_tokens + 1, mamba_block_size) - 1
+    )
+    block_idx_last_scheduled_token = (
+        cdiv(common_attn_metadata.seq_lens, mamba_block_size) - 1
+    )
+    block_idx_last_computed_token = torch.clamp(block_idx_last_computed_token, min=0)
+    block_idx_last_scheduled_token = torch.clamp(block_idx_last_scheduled_token, min=0)
+    return (
+        block_idx_last_computed_token,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+    )
+
+
+def _compute_gdn_chunk_metadata(chunk_size, query_start_loc_p_cpu):
+    """Compute last_chunk_indices for GDN prefill sequences."""
+    num_prefills = len(query_start_loc_p_cpu) - 1
+    if num_prefills == 0:
+        return []
+    last_chunk_indices = []
+    cumulative = 0
+    for i in range(num_prefills):
+        seq_len = int((query_start_loc_p_cpu[i + 1] - query_start_loc_p_cpu[i]).item())
+        n_chunks = max(1, (seq_len + chunk_size - 1) // chunk_size)
+        cumulative += n_chunks
+        last_chunk_indices.append(cumulative - 1)
+    return last_chunk_indices
+
+
 def _patched_build(
     self,
     common_prefix_len: int,
@@ -565,6 +600,64 @@ def _patched_build(
         fast_build=fast_build,
     )
     attn_metadata.non_spec_prefill_fallback_meta = None
+
+    # Inject APC all-mode metadata
+    mamba_cache_mode = getattr(self.vllm_config.cache_config, "mamba_cache_mode", None)
+    if mamba_cache_mode == "all":
+        m = common_attn_metadata
+        mamba_block_size = self.kv_cache_spec.block_size
+        chunk_size = _GDN_CHUNK_SIZE
+
+        (
+            block_idx_last_computed_token,
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+        ) = _compute_prefix_caching_block_indices(m, mamba_block_size)
+
+        num_computed_tokens = m.compute_num_computed_tokens()
+        num_decodes = attn_metadata.num_decodes
+        num_prefills = attn_metadata.num_prefills
+
+        # state_indices_tensor is the full 2D block table
+        attn_metadata.state_indices_tensor = m.block_table_tensor
+        attn_metadata.block_idx_last_scheduled_token = block_idx_last_scheduled_token
+        attn_metadata.block_idx_last_computed_token = block_idx_last_computed_token
+        attn_metadata.block_size = mamba_block_size
+        attn_metadata.chunk_size = chunk_size
+
+        # Split prefill-specific indices
+        if num_prefills > 0:
+            attn_metadata.block_idx_first_scheduled_token_p = (
+                block_idx_first_scheduled_token[num_decodes:num_decodes + num_prefills]
+            )
+            attn_metadata.num_computed_tokens_p = (
+                num_computed_tokens[num_decodes:num_decodes + num_prefills]
+            )
+            # Compute last_chunk_indices_p
+            query_start_loc_cpu = m.query_start_loc_cpu
+            query_start_loc_p_cpu = query_start_loc_cpu[num_decodes:]
+            last_chunk_indices = _compute_gdn_chunk_metadata(chunk_size, query_start_loc_p_cpu)
+            if last_chunk_indices:
+                attn_metadata.last_chunk_indices_p = torch.tensor(
+                    last_chunk_indices, dtype=torch.int32,
+                    device=m.query_start_loc.device,
+                )
+            else:
+                attn_metadata.last_chunk_indices_p = None
+        else:
+            attn_metadata.block_idx_first_scheduled_token_p = None
+            attn_metadata.num_computed_tokens_p = None
+            attn_metadata.last_chunk_indices_p = None
+    else:
+        attn_metadata.state_indices_tensor = None
+        attn_metadata.block_idx_last_scheduled_token = None
+        attn_metadata.block_idx_last_computed_token = None
+        attn_metadata.block_idx_first_scheduled_token_p = None
+        attn_metadata.num_computed_tokens_p = None
+        attn_metadata.last_chunk_indices_p = None
+        attn_metadata.block_size = None
+        attn_metadata.chunk_size = None
+
     if attn_metadata.num_prefills <= 0:
         return attn_metadata
 
