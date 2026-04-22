@@ -37,7 +37,7 @@ test_cases:
         max_out_len: 4096
         num_prompts: 32
         batch_size: 32
-        baseline: 60
+        baseline: 68
         threshold: 10
       perf:
         case_type: performance
