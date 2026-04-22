@@ -7,10 +7,10 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_inputs_kernel_single_grid
-from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
+from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
 
-class AscendDflashProposer(SpecDecodeBaseProposer):
+class AscendDflashProposer(AscendEagleProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -20,7 +20,6 @@ class AscendDflashProposer(SpecDecodeBaseProposer):
         super().__init__(
             vllm_config,
             device,
-            pass_hidden_states_to_model=True,
             runner=runner,
         )
 
