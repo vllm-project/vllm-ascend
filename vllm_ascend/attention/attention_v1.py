@@ -507,12 +507,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_v_aq_scale,
                         c8_v_aq_offset,
                     ) = param
+
+                    sparse_mode = 3
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         block_tables = attn_metadata[draft_step][key].block_tables
                         attn_count = attn_count + 1
+                        if not attn_metadata[draft_step][key].causal:
+                            sparse_mode = 0
                     else:
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
@@ -520,7 +524,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
-                    sparse_mode = 3
                     extra_args = {}
                     if c8_k_aq_scale is not None:
                         extra_args = {
@@ -585,7 +588,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode = 3
+        sparse_mode=3 if attn_metadata.causal else 0
         extra_args = {}
         if self.enable_c8_quant:
             extra_args = {
@@ -636,7 +639,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             weak_ref_tensors(key),
             weak_ref_tensors(value),
             weak_ref_tensors(block_table),
-            weak_ref_tensors(attn_metadata.attn_mask) if not self.enable_c8_quant else None,
+            weak_ref_tensors(attn_metadata.attn_mask) if attn_metadata.attn_mask is not None else None,
             block_size,
             actual_seq_lengths_kv,
             actual_seq_lengths_q,
