@@ -12,11 +12,19 @@ from ci_utils import TestFile, TestRecord, run_tests
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 _CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config.yaml"
 
+<<<<<<< HEAD
 # Each entry: (config_path, is_upstream)
 # When is_upstream is True, sanity_check is skipped for tests from that config.
 _DEFAULT_CONFIGS: list[tuple[Path, bool]] = [
     (_CONFIG_PATH, False),
     (_CONFIG_UPSTREAM, True),
+=======
+# Each entry: (config_path, path_prefix or None)
+# path_prefix is prepended to every test name when loading that config.
+_DEFAULT_CONFIGS: list[tuple[Path, str | None]] = [
+    (_CONFIG_PATH, None),
+    (_CONFIG_UPSTREAM, None),
+>>>>>>> f19ecad0... modify run_suite.py schedule_vllm_e2e_test.yaml
 ]
 
 
