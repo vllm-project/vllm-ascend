@@ -236,3 +236,14 @@ class LAPSSchedulerMixin:
             wait_window_ms,
             wait_max_batch,
         )
+
+
+from vllm.v1.core.sched.scheduler import Scheduler as BaseScheduler
+
+
+class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
+    """vLLM scheduler with the Ascend LAPS waiting queue installed."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_laps_waiting_queue()

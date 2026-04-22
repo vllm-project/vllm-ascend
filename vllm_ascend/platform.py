@@ -435,14 +435,51 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
+        enable_laps = envs_ascend.VLLM_ASCEND_LAPS_SCHEDULING
+        if enable_laps and vllm_config.scheduler_config.policy != "fcfs":
+            logger.warning_once(
+                "VLLM_ASCEND_LAPS_SCHEDULING currently supports only FCFS "
+                "scheduler policy; current policy=%s. The default waiting "
+                "queue will be used.",
+                vllm_config.scheduler_config.policy,
+            )
+
         if ascend_config.recompute_scheduler_enable:
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
+            if enable_laps:
+                logger.info(
+                    "Ascend LAPS scheduler selected through recompute "
+                    "scheduler: scheduler_cls=%s, policy=%s, threshold=%d, "
+                    "wait_window_ms=%.3f, wait_max_batch=%d",
+                    vllm_config.scheduler_config.scheduler_cls,
+                    vllm_config.scheduler_config.policy,
+                    envs_ascend.VLLM_ASCEND_LAPS_THRESHOLD,
+                    envs_ascend.VLLM_ASCEND_LAPS_WAIT_WINDOW_MS,
+                    envs_ascend.VLLM_ASCEND_LAPS_WAIT_MAX_BATCH,
+                )
+        elif enable_laps:
+            vllm_config.scheduler_config.scheduler_cls = "vllm_ascend.core.laps_scheduler.LAPSScheduler"
+            logger.info(
+                "Ascend LAPS scheduler selected: scheduler_cls=%s, "
+                "policy=%s, threshold=%d, wait_window_ms=%.3f, "
+                "wait_max_batch=%d",
+                vllm_config.scheduler_config.scheduler_cls,
+                vllm_config.scheduler_config.policy,
+                envs_ascend.VLLM_ASCEND_LAPS_THRESHOLD,
+                envs_ascend.VLLM_ASCEND_LAPS_WAIT_WINDOW_MS,
+                envs_ascend.VLLM_ASCEND_LAPS_WAIT_MAX_BATCH,
+            )
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
+            if enable_laps:
+                logger.warning_once(
+                    "VLLM_ASCEND_LAPS_SCHEDULING is ignored because "
+                    "SLO_limits_for_dynamic_batch selects SchedulerDynamicBatch."
+                )
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
             )
