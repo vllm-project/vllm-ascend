@@ -4,4 +4,5 @@
 :caption: Deployment Guide
 :maxdepth: 1
 using_volcano_kthena
+kimi_k26
 :::

@@ -791,6 +791,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata
             attn_keys = list(attn_metadata.keys())
+        if graph_params is None:
+            return
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         num_layers = len(attn_keys)
@@ -1466,6 +1468,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        if graph_params is None:
+            return
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
