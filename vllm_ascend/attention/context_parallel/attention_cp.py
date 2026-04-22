@@ -144,7 +144,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 if self.pcp_size > 1 and common_long_seq_metadata.pcp_use_hybrid_attn:
                     query_lens = attn_mask_seqlens[0] * 2
                 local_context_lens_allranks = (
-                    torch.tensor(num_computed_tokens_of_pcp_dcp)[self.num_decodes_flatten :]
+                    torch.tensor(num_computed_tokens_of_pcp_dcp)[num_decodes :]
                     .to(self.device)
                     .to(dtype=torch.int32)
                 )
