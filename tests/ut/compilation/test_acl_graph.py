@@ -866,12 +866,13 @@ class TestPCPDCPGraphParams(TestBase):
 
         _mock_graph_task_end.assert_called_once()
 
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch(
         "torch.npu.graph_task_update_end",
     )
     @patch("torch.npu.graph_task_update_begin", MagicMock())
     @patch("torch_npu.npu_fused_infer_attention_score.out", MagicMock())
-    def test_update_attn_dcp_pcp_params(self, _mock_graph_task_end):
+    def test_update_attn_dcp_pcp_params(self, _mock_graph_task_end, mock_context):
         block_table = torch.zeros(2, 5, dtype=torch.long)
         num_heads = 256
         scale = 0.1
@@ -897,6 +898,7 @@ class TestPCPDCPGraphParams(TestBase):
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
         forward_context.is_draft_model = False
+        mock_context.return_value = forward_context
 
         self.graph_params.attn_params[4] = []
         self.graph_params.attn_params[4].append(
