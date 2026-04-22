@@ -16,18 +16,17 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
-import functools
+from contextlib import contextmanager
 
 import numpy as np
 import torch
-import vllm
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -37,41 +36,51 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import (
+    MoECommType,
+    get_mc2_tokens_capacity,
+    override_mrv2_in_profile_run,
+    select_moe_comm_method,
+    set_mc2_mask,
+    set_mc2_tokens_capacity,
+)
+from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_weight_prefetch_method
-from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.sample.sampler import AscendSampler
-from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.eagle import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.eagle import init_speculator
+from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import block_table_wrapper, model_states_wrapper, torch_cuda_wrapper
+from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        with torch_cuda_wrapper(), block_table_wrapper(), model_states_wrapper():
+        # Ascend-specific configurations
+        self.ascend_config = get_ascend_config()
+        # The following features are not yet supported in Ascend NPU model runner v2:
+        # - Context parallelism (prefill or decode)
+        # - Dynamic EPLB
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError("Context parallelism is not supported by Ascend NPU model runner v2.")
+
+        if self.ascend_config.eplb_config.dynamic_eplb:
+            raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
+
+        with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
-        del self.cudagraph_manager
         del self.req_states
         del self.input_buffers
-        del self.sampler
         del self.speculator
 
-        # NPU specific initializations can be added below.
-        self.cudagraph_manager: AclGraphManager = AclGraphManager(
-            self.vllm_config,
-            self.use_aux_hidden_state_outputs,
-            self.device,
-            self,
-        )
-
-        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle
+        # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
@@ -95,16 +104,6 @@ class NPUModelRunner(GPUModelRunner):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        # we need to adjust triton operators in sampler,
-        # so reinitialize sampler here.
-        self.sampler: AscendSampler = AscendSampler(
-            max_num_reqs=self.max_num_reqs,
-            vocab_size=self.vocab_size,
-            device=self.device,
-            req_states=self.req_states,
-            logprobs_mode=self.model_config.logprobs_mode,
-            num_speculative_tokens=self.num_speculative_steps + 1,
-        )
 
         # we need to copy num_computed_tokens back to cpu to help
         # update actual seq_lens_cpu. gpu attention backend doesn't need these
@@ -119,10 +118,13 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=True,
         )
 
-        # Ascend-specific configurations
-        self.ascend_config = get_ascend_config()
-        # set this just the same as model runner v1, or it will raise error.
+        # set _WEIGHT_PREFETCH_METHOD, _mc2_tokens_capacity and _reserved_mc2_mask which
+        # is necessary for weight_prfetching function, and MoE communication optimization.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
+        set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
+        set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
+        set_mc2_mask(vllm_config, self.device)
 
         # we need to update full graph params in run_fullgraph,
         # so create a stream to update full graph params.
@@ -138,50 +140,39 @@ class NPUModelRunner(GPUModelRunner):
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
 
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        with graph_manager_wrapper(self):
+            super().initialize_kv_cache(kv_cache_config)
+
     @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        intermediate_tensors: IntermediateTensors | None = None,
-        dummy_run: bool = False,
-        skip_attn_for_dummy_run: bool = False,
-    ) -> ModelRunnerOutput | IntermediateTensors | None:
-        """Override GPUModelRunner.execute_model for Ascend NPUs by there reasons:
-        1. when run fullgraph, we need to use ret value of `get_cudagraph_and_dp_padding`
-        to set forward_context in `run_fullgraph`.
+    def profile_run(self) -> None:
+        """Override GPUModelRunner.profile_run for Ascend NPUs.
+        When running moe models, we need an extra dummy run with mc2_tokens_capacity tokens to reserve
+        necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
+        override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
         """
-
-        # use closure to store return value of get_cudagraph_and_dp_padding in model runner.
-        def wrapper(func):
-            @functools.wraps(func)
-            def inner(*args, **kwargs):
-                self.cudagraph_and_dp_padding = func(*args, **kwargs)
-                return self.cudagraph_and_dp_padding
-
-            return inner
-
-        if self.cudagraph_and_dp_padding is None:
-            vllm.v1.worker.gpu.model_runner.get_cudagraph_and_dp_padding = wrapper(
-                vllm.v1.worker.gpu.model_runner.get_cudagraph_and_dp_padding
-            )
-
-        return super().execute_model(
-            scheduler_output,
-            intermediate_tensors,
-            dummy_run,
-            skip_attn_for_dummy_run,
-        )
+        mc2_tokens_capacity = get_mc2_tokens_capacity()
+        with override_mrv2_in_profile_run(True):
+            if (
+                mc2_tokens_capacity is not None
+                and self.max_num_tokens > mc2_tokens_capacity
+                and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
+                in {MoECommType.MC2, MoECommType.FUSED_MC2}
+            ):
+                self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
+            super().profile_run()
 
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
-        num_tokens_after_padding: int,
+        batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
         num_tokens = scheduler_output.total_num_scheduled_tokens
+        num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
@@ -247,6 +238,7 @@ class NPUModelRunner(GPUModelRunner):
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
         query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
@@ -254,14 +246,17 @@ class NPUModelRunner(GPUModelRunner):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
-        # This is only required for vllm-ascend.
-        query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
-            num_tokens_padded=num_tokens_after_padding,
-            num_tokens=num_tokens,
-            num_reqs=num_reqs,
-            query_start_loc_np=query_start_loc_np,
-            max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
-        )
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # This is only required for vllm-ascend.
+            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
+                num_tokens_after_padding,
+                num_reqs_padded,
+                num_reqs,
+                query_start_loc_np,
+                batch_desc.cg_mode,
+                batch_desc.num_reqs,
+            )
+
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
@@ -311,7 +306,8 @@ class NPUModelRunner(GPUModelRunner):
 
         self.input_batch = AscendInputBatch(
             req_ids=req_ids,
-            num_reqs=num_reqs_padded,
+            num_reqs=num_reqs,
+            num_reqs_after_padding=num_reqs_padded,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
@@ -334,6 +330,10 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
+
+        # For mla/sfa, update cos/sin. Here is for execute_model.
+        update_cos_sin(self.input_batch.positions)
+
         return self.input_batch
 
     def postprocess(
@@ -353,6 +353,7 @@ class NPUModelRunner(GPUModelRunner):
             num_sampled,
             num_rejected,
         )
+
         # npu attention backend still need to use seq_lens_cpu,
         # we need to copy num_computed_tokens back to cpu.
         default_stream = torch.cuda.current_stream()
@@ -394,40 +395,52 @@ class NPUModelRunner(GPUModelRunner):
     def _pad_query_start_loc_for_fia(
         self,
         num_tokens_padded: int,
-        num_tokens: int,
+        num_reqs_padded: int,
         num_reqs: int,
         query_start_loc_np: np.ndarray,
-        max_query_len: int,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+        batch_desc_num_reqs: int | None = None,
     ) -> tuple[np.ndarray, int]:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
         the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
         """
-        assert self.cudagraph_and_dp_padding is not None
-        _num_tokens_after_padding, _num_tokens_across_dp, synced_cudagraph_mode = self.cudagraph_and_dp_padding
-        cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
-        if cudagraph_runtime_mode != CUDAGraphMode.FULL:
-            return query_start_loc_np, num_reqs
-        uniform_decode_query_len = self.cudagraph_manager.uniform_decode_query_len
-        is_uniform_decode = self.cudagraph_manager.is_uniform_decode(
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            max_query_len=max_query_len,
-        )
-        if is_uniform_decode:
+        # TODO: need refactor later, related to vllm PR #34043 this pr delete func
+        # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            num_reqs_padded = num_reqs
+        else:
+            num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
+
+        if num_tokens_padded == num_reqs_padded * self.decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
-            num_reqs_padded = num_tokens_padded // uniform_decode_query_len
+            assert num_reqs <= num_reqs_padded
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * uniform_decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
-            num_reqs_padded = min(num_tokens_padded, self.max_num_reqs)
+            assert num_reqs == num_reqs_padded
 
             # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
             query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
         return query_start_loc_np, num_reqs_padded
+
+
+@contextmanager
+def graph_manager_wrapper(model_runner):
+    """Context manager to override graph manager."""
+    original_graph_manager = vllm_model_runner.ModelCudaGraphManager
+
+    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+        return ModelAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, model_runner)
+
+    try:
+        vllm_model_runner.ModelCudaGraphManager = factory
+        yield
+    finally:
+        vllm_model_runner.ModelCudaGraphManager = original_graph_manager

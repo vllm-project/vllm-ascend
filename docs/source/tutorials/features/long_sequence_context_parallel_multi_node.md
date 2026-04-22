@@ -8,7 +8,7 @@ Context parallel feature currently is only supported on Atlas A3 device, and wil
 
 vLLM-Ascend now supports long sequence with context parallel options. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Take the Deepseek-V3.1-w8a8 model as an example, use 3 Atlas 800T A3 servers to deploy the “1P1D” architecture. Node p is deployed across multiple machines, while node d is deployed on a single machine. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1). On each server, use 8 NPUs 16 chips to deploy one service instance.In the current example, we will enable the context parallel feature on node p to improve TTFT. Although enabling the DCP feature on node d can reduce memory usage, it would introduce additional communication and small operator overhead. Therefore, we will not enable the DCP feature on node d.
+Take the Deepseek-V3.1-w8a8 model as an example, use 3 Atlas 800T A3 servers to deploy the “1P1D” architecture. Node p is deployed across multiple machines, while node d is deployed on a single machine. Assume the IP of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1). On each server, use 8 NPUs 16 chips to deploy one service instance. In the current example, we will enable the context parallel feature on node p to improve TTFT. Although enabling the DCP feature on node d can reduce memory usage, it would introduce additional communication and small operator overhead. Therefore, we will not enable the DCP feature on node d.
 
 ## Environment Preparation
 
@@ -273,19 +273,19 @@ vllm serve /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp \
 
 2. Prefill master node `proxy.sh` script
 
-```shell
-python load_balance_proxy_server_example.py \
-  --port 8005 \
-  --host 192.0.0.1 \
-  --prefiller-hosts \
-    192.0.0.1 \
-  --prefiller-ports \
-    8004 \
-  --decoder-hosts \
-    192.0.0.3 \
-  --decoder-ports \
-    8004
-```
+    ```shell
+    python load_balance_proxy_server_example.py \
+      --port 8005 \
+      --host 192.0.0.1 \
+      --prefiller-hosts \
+        192.0.0.1 \
+      --prefiller-ports \
+        8004 \
+      --decoder-hosts \
+        192.0.0.3 \
+      --decoder-ports \
+        8004
+    ```
 
 3. Run proxy
 
@@ -300,7 +300,7 @@ bash proxy.sh
 The parameters are explained as follows:
 
 - `--tensor-parallel-size` 16 are common settings for tensor parallelism (TP) sizes.
-- `--prefill-context-parallel-size` 2 are common settings for prefill context parallelism (PCP) sizes.
+- `--prefill-context-parallel-size` 2 is common setting for prefill context parallelism (PCP) sizes.
 - `--decode-context-parallel-size` 8 are common settings for decode context parallelism (DCP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
@@ -325,8 +325,6 @@ The parameters are explained as follows:
 
 ## Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
-
 ### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
@@ -347,7 +345,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `DeepSeek-V3.1-w8a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 

@@ -18,14 +18,14 @@ from .utils import prepare_chunk_indices
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H"])
 def solve_tril_16x16_kernel(
     A,
     Ad,
     cu_seqlens,
     chunk_indices,
     T,
-    H: tl.constexpr,
+    H,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     LARGE_BLOCK_T: tl.constexpr,
@@ -134,7 +134,7 @@ def solve_tril_16x16_kernel(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H"])
 def merge_16x16_to_32x32_inverse_kernel(
     A,
     Ad,
@@ -142,7 +142,7 @@ def merge_16x16_to_32x32_inverse_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    H: tl.constexpr,
+    H,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -198,7 +198,7 @@ def merge_16x16_to_32x32_inverse_kernel(
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "H"])
 def merge_16x16_to_64x64_inverse_kernel(
     A,
     Ad,
@@ -206,7 +206,7 @@ def merge_16x16_to_64x64_inverse_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    H: tl.constexpr,
+    H,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
