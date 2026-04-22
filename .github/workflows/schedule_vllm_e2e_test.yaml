@@ -110,6 +110,7 @@ jobs:
               uv pip install mteb[bm25s] open_clip_torch terratorch==1.2.2 imagehash
               uv pip install lm-eval[api]
           - name: Run vllm-project/vllm test
+            working-directory: ./vllm-empty
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
