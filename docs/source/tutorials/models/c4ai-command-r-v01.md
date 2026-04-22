@@ -15,19 +15,21 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export HCCL_INTRA_ROCE_ENABLE=1
 ```
 
-## Launch Server (TP=4)
-```bash
-$PY -m vllm.entrypoints.openai.api_server \
-  --model /data/models/c4ai-command-r-v01 \
-  --served-model-name c4ai-command-r-v01 \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --trust-remote-code \
-  --dtype bfloat16 \
-  --tensor-parallel-size 4 \
-  --max-model-len 8192
-```
+## Deployment
 
+```{test} bash
+:sync-yaml: tests/e2e/models/configs/c4ai-command-r-v01.yaml
+:sync-target: test_cases[0].model test_cases[0].server_cmd
+:sync-class: cmd
+
+vllm serve "CohereLabs/c4ai-command-r-v01" \
+  --served-model-name c4ai-command-r-v01 \
+  --tensor-parallel-size 4 \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.90 \
+  --enforce-eager \
+  --port 8000
+````
 ## Quick Verification
 Open another terminal and run:
 ```bash
