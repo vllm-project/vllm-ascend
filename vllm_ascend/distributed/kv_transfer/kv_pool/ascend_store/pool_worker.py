@@ -541,12 +541,6 @@ class KVPoolWorker:
         self.layer_load_finished_events[self.current_layer].clear()
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
-        if self.current_layer in self.independent_layers:
-            self.current_layer = self.current_layer + 1
-            return
-        if len(self.layer_save_tasks[self.current_layer]) == 0:
-            self.current_layer = self.current_layer + 1
-            return
         # Wait for KV cache saving to complete on the final layer that requires offloading.
         if self.current_layer in self.layers_need_to_save:
             self.sync_save_events[self.current_layer].record()
