@@ -374,6 +374,15 @@ You can validate external links in the Sphinx docs locally with:
 make -C docs linkcheck SPHINXOPTS="-W --keep-going"
 ```
 
+To check links in a specific Markdown file, pass the file to `sphinx-build`.
+For example, to check only `docs/source/user_guide/release_notes.md`:
+
+```bash
+cd docs
+sphinx-build -b linkcheck -W --keep-going \
+  source _build/linkcheck source/user_guide/release_notes.md
+```
+
 The detailed report will be written to:
 
 - `docs/_build/linkcheck/output.txt`
