@@ -103,6 +103,7 @@ class KVPoolScheduler:
                 chunk_keys, self.page_size_bytes,
                 chunk_block_hash_groups if chunk_block_hash_groups else None)
             # TODO here should verify the gvas is not None
+            # TODO if gvas is None, should release the keys and retry
             key_gva_mapping: dict[str, Any] = dict(zip(chunk_keys, gvas))
             if has_last_block and req_id in self._req_last_block_gvas:
                 key_gva_mapping.update(self._req_last_block_gvas[req_id])

@@ -450,7 +450,7 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 
 
 @dataclass
-class LasyerMultiBlockReqMeta:
+class LayerMultiBlockReqMeta:
     req_id: str
     keys: list[str]
     block_ids: list[int]

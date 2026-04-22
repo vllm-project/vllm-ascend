@@ -18,7 +18,7 @@ def test_chunk_gated_delta_rule_310_output_shape_and_dtype():
     v = torch.randn(bsz, total_tokens, num_v_heads, vdim, dtype=torch.float16)
     g = -0.2 * torch.rand(bsz, total_tokens, num_v_heads, dtype=torch.float32)
     beta = (0.15 + 0.35 * torch.rand(bsz, total_tokens, num_v_heads, dtype=torch.float32)).to(torch.float16)
-    initial_state = torch.randn(bsz, num_v_heads, kdim, vdim, dtype=torch.float16)
+    initial_state = torch.randn(bsz, num_v_heads, vdim, kdim, dtype=torch.float16)
 
     out, final_state = chunk_gated_delta_rule_pytorch(
         q=q,
@@ -56,7 +56,7 @@ def test_chunk_gated_delta_rule_310_varlen_path():
     g = -0.2 * torch.rand(bsz, total_tokens, num_v_heads, dtype=torch.float32)
     beta = (0.15 + 0.35 * torch.rand(bsz, total_tokens, num_v_heads, dtype=torch.float32)).to(torch.float16)
     cu_seqlens = torch.tensor([0, 4, 9], dtype=torch.long)
-    initial_state = torch.randn(2, num_v_heads, kdim, vdim, dtype=torch.float16)
+    initial_state = torch.randn(2, num_v_heads, vdim, kdim, dtype=torch.float16)
 
     out, final_state = chunk_gated_delta_rule_pytorch(
         q=q,
@@ -91,7 +91,7 @@ def test_chunk_gated_delta_rule_310_varlen_tnd_path():
     g_tnd = -0.2 * torch.rand(total_tokens, num_v_heads, dtype=torch.float32)
     beta_tnd = (0.15 + 0.35 * torch.rand(total_tokens, num_v_heads, dtype=torch.float32)).to(torch.float16)
     cu_seqlens = torch.tensor([0, 4, 9], dtype=torch.long)
-    initial_state = torch.randn(2, num_v_heads, kdim, vdim, dtype=torch.float16)
+    initial_state = torch.randn(2, num_v_heads, vdim, kdim, dtype=torch.float16)
 
     out_tnd, final_state_tnd = chunk_gated_delta_rule_pytorch(
         q=q_tnd,

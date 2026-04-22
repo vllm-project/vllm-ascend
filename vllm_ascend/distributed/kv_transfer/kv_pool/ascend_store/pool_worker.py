@@ -19,7 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
-    LasyerMultiBlockReqMeta,
+    LayerMultiBlockReqMeta,
     ReqMeta,
     PoolKey
 )
@@ -724,8 +724,9 @@ class KVPoolWorker:
                     )
                     multi_tp_keys.append(new_str)
 
+            pp_base_keys = multi_tp_keys.copy()
             for i in range(1, self.pp_size):
-                for item in keys:
+                for item in pp_base_keys:
                     new_str = item.replace(  # type: ignore[attr-defined]
                         "@pp_rank:0", f"@pp_rank:{i}", 1
                     )

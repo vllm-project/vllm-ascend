@@ -22,7 +22,7 @@ repos:
       args: [
         --toml, pyproject.toml,
         '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
-        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog'
+        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,outter'
       ]
       additional_dependencies:
         - tomli
@@ -114,6 +114,12 @@ repos:
     entry: python tools/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-docs-yaml-sync
+    name: Check docs/yaml sync blocks
+    entry: python tools/check_docs_yaml_sync.py
+    language: python
+    files: ^docs/source/tutorials/models/.*\.md$
+    additional_dependencies: [pyyaml, regex, tomli]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

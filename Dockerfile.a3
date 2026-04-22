@@ -28,7 +28,7 @@ WORKDIR /workspace
 
 # Install clang-15 (for triton-ascend) and Mooncake
 RUN apt-get update -y && \
-    apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev libjemalloc2 clang-15 && \
+    apt-get install -y git vim wget net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
@@ -50,8 +50,8 @@ RUN pip config set global.index-url ${PIP_INDEX_URL} && \
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.18.0
-RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
+ARG VLLM_TAG=v0.19.0
+RUN git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm/[audio] --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton && \
