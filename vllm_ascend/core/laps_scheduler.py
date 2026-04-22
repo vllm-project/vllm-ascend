@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable, Iterator
-from typing import cast
+from typing import Callable, cast
 
 from vllm.logger import logger
 from vllm.v1.core.sched.request_queue import (
@@ -40,15 +40,25 @@ class LAPSRequestQueue(RequestQueue):
         threshold: int,
         wait_window_ms: float,
         wait_max_batch: int,
+        immediate_predicate: Callable[[Request], bool] | None = None,
     ) -> None:
         self.policy = policy
         self.threshold = threshold
         self.wait_window_ms = max(wait_window_ms, 0.0)
         self.wait_max_batch = max(wait_max_batch, 1)
+        self.immediate_predicate = immediate_predicate
+        self._immediate_queue = create_request_queue(policy)
         self._short_queue = create_request_queue(policy)
         self._long_queue = create_request_queue(policy)
         self._short_wait_started_at: float | None = None
         self._short_ready_to_dispatch = False
+
+    def _queues(self) -> tuple[RequestQueue, ...]:
+        return (self._immediate_queue, self._short_queue, self._long_queue)
+
+    @property
+    def num_immediate_requests(self) -> int:
+        return len(self._immediate_queue)
 
     @property
     def num_short_requests(self) -> int:
@@ -64,7 +74,14 @@ class LAPSRequestQueue(RequestQueue):
     def has_long_requests(self) -> bool:
         return len(self._long_queue) > 0
 
+    def has_immediate_requests(self) -> bool:
+        return len(self._immediate_queue) > 0
+
     def _classify_queue(self, request: Request) -> RequestQueue:
+        if self.immediate_predicate is not None and self.immediate_predicate(
+            request
+        ):
+            return self._immediate_queue
         if request.num_prompt_tokens <= self.threshold:
             return self._short_queue
         return self._long_queue
@@ -109,6 +126,8 @@ class LAPSRequestQueue(RequestQueue):
         return False
 
     def _select_schedulable_queue(self) -> RequestQueue | None:
+        if self._immediate_queue:
+            return self._immediate_queue
         if self._short_batch_ready():
             return self._short_queue
         if self._long_queue:
@@ -147,32 +166,38 @@ class LAPSRequestQueue(RequestQueue):
             self.prepend_request(cast(Request, request))
 
     def remove_request(self, request: Request) -> None:
-        queue = self._classify_queue(request)
-        queue.remove_request(request)
-        if queue is self._short_queue:
-            self._on_short_queue_changed()
+        for queue in self._queues():
+            if request in queue:
+                queue.remove_request(request)
+                if queue is self._short_queue:
+                    self._on_short_queue_changed()
+                return
+        raise ValueError("request not found in LAPS queue")
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
-        short_requests: list[Request] = []
-        long_requests: list[Request] = []
+        queue_to_requests: dict[int, list[Request]] = {}
+        queue_map = {id(queue): queue for queue in self._queues()}
         for request in requests:
-            if request.num_prompt_tokens <= self.threshold:
-                short_requests.append(request)
-            else:
-                long_requests.append(request)
-        if short_requests:
-            self._short_queue.remove_requests(short_requests)
-        if long_requests:
-            self._long_queue.remove_requests(long_requests)
+            for queue in self._queues():
+                if request in queue:
+                    queue_to_requests.setdefault(id(queue), []).append(request)
+                    break
+        for queue_id, matched_requests in queue_to_requests.items():
+            queue_map[queue_id].remove_requests(matched_requests)
         self._on_short_queue_changed()
 
     def __bool__(self) -> bool:
         return self._select_schedulable_queue() is not None
 
     def __len__(self) -> int:
-        return len(self._short_queue) + len(self._long_queue)
+        return (
+            len(self._immediate_queue)
+            + len(self._short_queue)
+            + len(self._long_queue)
+        )
 
     def __iter__(self) -> Iterator[Request]:
+        yield from self._immediate_queue
         yield from self._short_queue
         yield from self._long_queue
 
@@ -183,7 +208,10 @@ class LAPSRequestQueue(RequestQueue):
 class LAPSSchedulerMixin:
     """Inject a LAPS-style waiting queue into vLLM's scheduler."""
 
-    def _init_laps_waiting_queue(self) -> None:
+    def _init_laps_waiting_queue(
+        self,
+        immediate_predicate: Callable[[Request], bool] | None = None,
+    ) -> None:
         if self.policy != SchedulingPolicy.FCFS:
             logger.warning_once(
                 "VLLM_ASCEND_LAPS_SCHEDULING currently supports only FCFS "
@@ -199,6 +227,7 @@ class LAPSSchedulerMixin:
             threshold=threshold,
             wait_window_ms=wait_window_ms,
             wait_max_batch=wait_max_batch,
+            immediate_predicate=immediate_predicate,
         )
         logger.info(
             "LAPS scheduling enabled on Ascend: threshold=%d, "

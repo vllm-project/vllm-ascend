@@ -103,3 +103,40 @@ def test_short_batch_dispatches_early_when_target_batch_size_is_reached():
         assert queue
         assert queue.pop_request() is short_request_1
         assert queue.pop_request() is short_request_2
+
+
+def test_immediate_requests_bypass_short_wait_window():
+    current_time = {"value": 0.0}
+
+    with patch(
+        "vllm_ascend.core.laps_scheduler.time.monotonic",
+        side_effect=lambda: current_time["value"],
+    ):
+        queue = LAPSRequestQueue(
+            policy=SchedulingPolicy.FCFS,
+            threshold=16,
+            wait_window_ms=10.0,
+            wait_max_batch=4,
+            immediate_predicate=lambda req: getattr(req, "immediate", False),
+        )
+        short_request = SimpleNamespace(
+            request_id="short",
+            num_prompt_tokens=8,
+            immediate=False,
+        )
+        resumed_request = SimpleNamespace(
+            request_id="resumed",
+            num_prompt_tokens=8,
+            immediate=True,
+        )
+        queue.add_request(short_request)
+        queue.add_request(resumed_request)
+
+        assert queue
+        assert queue.peek_request() is resumed_request
+        assert queue.pop_request() is resumed_request
+        assert not queue
+
+        current_time["value"] = 0.011
+        assert queue
+        assert queue.pop_request() is short_request

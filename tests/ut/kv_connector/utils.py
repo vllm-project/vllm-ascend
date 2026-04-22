@@ -55,6 +55,7 @@ def create_vllm_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_num_batched_tokens,
+        is_encoder_decoder=False,
     )
     fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "fake_weight")
     model_config = ModelConfig(
@@ -65,7 +66,6 @@ def create_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=True,
     )
@@ -88,7 +88,17 @@ def create_scheduler(
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], FullAttentionSpec(block_size, 1, 1, torch.float16, False, False))],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["layer"],
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
 

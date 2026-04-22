@@ -46,6 +46,8 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
+from vllm_ascend import envs
+from vllm_ascend.core.laps_scheduler import LAPSSchedulerMixin
 
 # `spec_manager_map` in single_type_kv_cache_manager is a module-level dict
 # whose keys are class objects bound at import time.  When the async
@@ -104,7 +106,7 @@ class RecomputeSchedulerOutput(SchedulerOutput):
     recomputed_reqs: list[RecomputeReqInfo] | None = None
 
 
-class RecomputeScheduler(Scheduler):
+class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
     running: list[Request]
 
     def __init__(self, *args, **kwargs):
@@ -124,6 +126,38 @@ class RecomputeScheduler(Scheduler):
             "qwen3_next" in self.vllm_config.model_config.hf_text_config.model_type
             or "qwen3_5" in self.vllm_config.model_config.hf_text_config.model_type
         )
+        if envs.VLLM_ASCEND_LAPS_SCHEDULING:
+            self._init_laps_waiting_queue(
+                immediate_predicate=self._should_bypass_laps_wait_window
+            )
+
+    def _should_bypass_laps_wait_window(self, request: Request) -> bool:
+        """PD recovery requests should not be delayed by the short wait window."""
+        return (
+            request.status == RequestStatus.PREEMPTED
+            or request.num_computed_tokens > 0
+            or request.num_external_computed_tokens > 0
+            or self._get_attached_waiting_computed_tokens(request) is not None
+            or request.num_output_tokens > 0
+        )
+
+    def _get_attached_waiting_computed_tokens(self, request: Request) -> int | None:
+        """Return already attached computed tokens for a waiting request.
+
+        In PD recovery flows a request can legitimately carry attached/cached KV
+        blocks while ``num_computed_tokens`` has been reset to 0 for a retry.
+        Re-running ``get_computed_blocks()`` for such a request violates the KV
+        cache manager invariant for resumed requests because the blocks are
+        already attached to the request.
+        """
+        if request.num_computed_tokens != 0:
+            return None
+
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        if not any(block_ids):
+            return None
+
+        return max(request.num_cached_tokens, 0)
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
@@ -478,7 +512,17 @@ class RecomputeScheduler(Scheduler):
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
 
                 # Get already-cached tokens.
-                if request.num_computed_tokens == 0:
+                attached_computed_tokens = self._get_attached_waiting_computed_tokens(
+                    request
+                )
+                if attached_computed_tokens is not None:
+                    # Treat the request as a resumed request with already
+                    # attached KV blocks. Do not re-run local/remote prefix-hit
+                    # discovery against the same request.
+                    new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+                    num_new_local_computed_tokens = 0
+                    num_computed_tokens = attached_computed_tokens
+                elif request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = self.kv_cache_manager.get_computed_blocks(
                         request

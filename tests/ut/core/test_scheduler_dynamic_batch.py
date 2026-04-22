@@ -111,6 +111,7 @@ class TestSchedulerDynamicBatch(TestBase):
             disable_chunked_mm_input=False,
             enable_chunked_prefill=True,
             max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+            is_encoder_decoder=False,
         )
 
         scheduler_config.max_num_encoder_input_tokens = 10000
@@ -141,7 +142,6 @@ class TestSchedulerDynamicBatch(TestBase):
         cache_config = CacheConfig(
             block_size=block_size,
             gpu_memory_utilization=0.9,
-            swap_space=0,
             cache_dtype="auto",
             **kwargs_cache,
         )
@@ -169,9 +169,15 @@ class TestSchedulerDynamicBatch(TestBase):
             num_blocks=10000,  # A large number of blocks to hold all requests
             kv_cache_tensors=[],
             kv_cache_groups=[
-                KVCacheGroupSpec(['layer'],
-                                 FullAttentionSpec(block_size, 1, 1,
-                                                   torch.float32, False))
+                KVCacheGroupSpec(
+                    layer_names=["layer"],
+                    kv_cache_spec=FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
             ],
         )
         kv_cache_config.hash_block_size = block_size
