@@ -404,8 +404,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 activation=activation,
                 w1_scale=[layer.w13_weight_scale],
                 w2_scale=[layer.w2_weight_scale],
-                w1_scale_bias=layer.w13_scale_bias if hasattr(layer, "w13_scale_bias") else None,
-                w2_scale_bias=layer.w2_scale_bias if hasattr(layer, "w2_scale_bias") else None,
+                w1_scale_bias=[layer.w13_scale_bias] if hasattr(layer, "w13_scale_bias") else None,
+                w2_scale_bias=[layer.w2_scale_bias] if hasattr(layer, "w2_scale_bias") else None,
             )
         )
 

@@ -209,11 +209,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale = [torch.tensor([], dtype=torch.int64)]
             w2 = [layer.w2_weight]
             w2_scale = [torch.tensor([], dtype=torch.int64)]
+            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
             w1 = layer.w13_weight
             w1_scale = None
             w2 = layer.w2_weight
             w2_scale = None
+            w1_scale_bias = None
+            w2_scale_bias = None
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -235,6 +239,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:
