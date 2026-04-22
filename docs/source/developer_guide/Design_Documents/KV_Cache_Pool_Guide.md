@@ -33,7 +33,7 @@ When combined with vLLM's Prefix Caching mechanism, the pool enables efficient c
 Prefix Caching with on-chip memory is already supported by the vLLM V1 Engine.
 By introducing KV Connector V1, users can seamlessly combine on-chip memory-based Prefix Caching with Mooncake-backed KV Pool.
 
- The user can enable both features simply by enabling Prefix Caching, which is enabled by default in vLLM V1 unless the `--no_enable_prefix_caching` flag is set, and setting up the KV Connector for KV Pool (e.g., the MooncakeStoreConnector).
+ The user can enable both features simply by enabling Prefix Caching, which is enabled by default in vLLM V1 unless the `--no-enable-prefix-caching` flag is set, and setting up the KV Connector for KV Pool (e.g., the MooncakeStoreConnector).
 
 **Workflow**:
 

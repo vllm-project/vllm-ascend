@@ -33,4 +33,5 @@ Kimi-K2.5.md
 PaddleOCR-VL.md
 MiniMax-M2.5.md
 Molmo2-8B.md
+Minitron-8B-Base.md
 :::
