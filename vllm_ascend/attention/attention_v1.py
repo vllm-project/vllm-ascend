@@ -513,6 +513,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         block_tables = attn_metadata[draft_step][key].block_tables
                         attn_count = attn_count + 1
+                        if not attn_metadata[draft_step][key].causal:
+                            sparse_mode = 0
                     else:
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
@@ -583,9 +585,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             next_tokens = 0
         else:
             atten_mask = attn_metadata.attn_mask
-            sparse_mode = 3
-            pre_tokens = None
-            next_tokens = None
+            sparse_mode = 3 if attn_metadata.causal else 0
+            pre_tokens = SWA_INT_MAX
+            next_tokens = 0
         # Prepare tensors for attention output
         # TODO: Refactor this to step-level instead of layer-level
 
@@ -606,8 +608,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens if pre_tokens is not None else SWA_INT_MAX,
-                next_tokens=next_tokens if next_tokens is not None else 0,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
                 scale=self.scale,
             )
             if _EXTRA_CTX.is_draft_model:
@@ -628,7 +630,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 weak_ref_tensors(key),
                 weak_ref_tensors(value),
                 weak_ref_tensors(block_table),
-                weak_ref_tensors(atten_mask),
+                weak_ref_tensors(atten_mask) if atten_mask is not None else None,
                 block_size,
                 actual_seq_lengths_kv,
                 actual_seq_lengths_q,
@@ -638,8 +640,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 weak_ref_tensors(output),
                 weak_ref_tensors(softmax_lse),
                 sparse_mode,
-                pre_tokens if pre_tokens is not None else SWA_INT_MAX,
-                next_tokens if next_tokens is not None else 0,
+                pre_tokens,
+                next_tokens,
             )
         )
 
@@ -658,8 +660,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_heads=self.num_heads,
             scale=self.scale,
             sparse_mode=sparse_mode,
-            pre_tokens=pre_tokens if pre_tokens is not None else SWA_INT_MAX,
-            next_tokens=next_tokens if next_tokens is not None else 0,
+            pre_tokens=pre_tokens,
+            next_tokens=next_tokens,
             workspace=workspace,
             out=[output, softmax_lse],
         )
