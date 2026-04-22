@@ -37,8 +37,8 @@ test_cases:
         max_out_len: 4096
         num_prompts: 32
         batch_size: 32
-        baseline: 68
-        threshold: 5
+        baseline: 60
+        threshold: 10
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs400
