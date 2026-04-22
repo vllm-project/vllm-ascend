@@ -7,10 +7,12 @@ import torch
 from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
 
@@ -141,6 +143,21 @@ class TestEagleProposerInitialization(TestBase):
             self.assertTrue(proposer.use_cuda_graph)
             expected_max_num_tokens = proposer.max_num_tokens
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 2048))
+
+    def test_initialization_draft_model(self):
+        self.vllm_config.speculative_config.method = "draft_model"
+        self.vllm_config.speculative_config.parallel_drafting = False
+        # TODO(klyzhenko-vadim): remove when target_tp != draft_tp will be supported.
+        self.vllm_config.speculative_config.draft_parallel_config.tensor_parallel_size = 1
+        self.vllm_config.speculative_config.target_parallel_config.tensor_parallel_size = 1
+        init_ascend_config(self.vllm_config)
+
+        with set_current_vllm_config(self.vllm_config):
+            proposer = AscendDraftModelProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
+
+            self.assertTrue(isinstance(proposer, DraftModelProposer))
+            self.assertFalse(proposer.pass_hidden_states_to_model)
+            self.assertTrue(proposer.needs_extra_input_slots)
 
 
 @unittest.skip("Skip due to the changes in #7153, fix me later")
