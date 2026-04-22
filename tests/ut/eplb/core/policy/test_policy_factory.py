@@ -1,8 +1,10 @@
 import unittest
+
 import torch
+
+from vllm_ascend.eplb.core.eplb_worker import EplbWorker
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 from vllm_ascend.eplb.core.policy.policy_flashlb import generate_layered_experts
-from vllm_ascend.eplb.core.eplb_worker import EplbWorker
 
 
 class TestEplbRebalancePolicies(unittest.TestCase):
@@ -10,7 +12,7 @@ class TestEplbRebalancePolicies(unittest.TestCase):
         torch.manual_seed(42)
         self.current_expert_table = generate_layered_experts()
         x = torch.rand(100, 58, 32, 9)
-        x = x ** 10
+        x = x**10
         self.expert_workload = (x * 999 + 1).long()
         self.hotness = EplbWorker._calculate_hotness(self.current_expert_table, self.expert_workload.sum(0))
 
@@ -30,5 +32,5 @@ class TestEplbRebalancePolicies(unittest.TestCase):
         self.assertLessEqual(update_mean, 1.1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main(verbosity=2)
