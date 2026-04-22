@@ -37,7 +37,8 @@
       "os": "linux-aarch64-a2b3-4",
       "model_list": [
         "Qwen3-Next-80B-A3B-Instruct",
-        "Qwen3-Omni-30B-A3B-Instruct"
+        "Qwen3-Omni-30B-A3B-Instruct",
+        "Hunyuan-A13B-Instruct"
       ]
     }
   ],
