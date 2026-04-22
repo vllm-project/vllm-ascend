@@ -140,11 +140,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             self.tp_group_context = nullcontext()
 
-        self.use_cuda_graph = (
-            self.runner._use_aclgraph()
-            and not self.speculative_config.enforce_eager
-            and self.pcp_size * self.dcp_size == 1
-        )
+        self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
@@ -169,6 +165,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
+
+        # pcp needs independent block table tensor in step=0 and step>0, and the following is for step>0
+        # since final block table tensor is not ready in __init__, it is delayed until dummy_run
+        self.block_table_tensor_clone: torch.Tensor | None = None
 
         self._runnable = self._run_merged_draft
         self.is_multimodal_model = self.vllm_config.model_config.is_multimodal_model
@@ -379,6 +379,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
+
+        # init block table tensor clone is only available after profile run and is only used for graph mode
+        if self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
+            self.block_table_tensor_clone = torch.zeros(
+                (
+                    self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs,
+                    self.runner.input_batch.block_table[0].get_device_tensor().shape[1],
+                ),
+                dtype=torch.int32,
+                device=self.device,
+                pin_memory=self.runner.pin_memory,
+            )
+
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
             num_computed_tokens_cpu = self.runner.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
 
@@ -421,6 +434,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
                 common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:num_reqs]
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
+                if draft_step > 0:
+                    slicing_length = num_reqs * self.decode_threshold if self.pcp_size * self.dcp_size > 1 else num_reqs
+                    assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
+                    common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:slicing_length]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
                     AscendAttentionState.SpecDecoding if self.method == "mtp" else AscendAttentionState.ChunkedPrefill,
@@ -571,8 +588,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
+            slicing_length = (
+                num_reqs_padded * self.decode_threshold if self.pcp_size * self.dcp_size > 1 else num_reqs_padded
+            )
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
-                common_attn_metadata.block_table_tensor, num_reqs_padded
+                common_attn_metadata.block_table_tensor, slicing_length
             )
             if self.method == "dflash":
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
@@ -585,6 +605,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.num_computed_tokens_cpu = self._adjust_tensor(
                     common_attn_metadata.num_computed_tokens_cpu, num_reqs_padded
                 )
+
+            if self.pcp_size > 1:
+                pcp_allgather_restore_idx = (
+                    common_attn_metadata.prefill_context_parallel_metadata.pcp_allgather_restore_idx
+                )
+                index = torch.arange(pcp_allgather_restore_idx.shape[0], device=pcp_allgather_restore_idx.device)
+                mask = (index % (self.pcp_size * self.decode_threshold)) >= self.decode_threshold
+                pcp_allgather_restore_idx[mask] = 0
+                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: pcp_allgather_restore_idx.shape[0]] = (
+                    pcp_allgather_restore_idx
+                )
+                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[pcp_allgather_restore_idx.shape[0] :] = 0
         else:
             num_reqs_padded = common_attn_metadata.num_reqs
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
@@ -647,7 +679,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
         # FIXME(lilinsiman)
-        common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
+        if self.use_cuda_graph:
+            assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
+            self.block_table_tensor_clone[: common_attn_metadata.block_table_tensor.shape[0]] = (
+                common_attn_metadata.block_table_tensor
+            )
+            common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[
+                : common_attn_metadata.block_table_tensor.shape[0]
+            ]
+        else:
+            common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
         if self.pcp_size * self.dcp_size > 1:
             if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
@@ -819,21 +860,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_indices = token_indices_to_sample.shape[0]
         if self.pcp_size > 1:
             # remove graph padding before all_gather
-            hidden_states = hidden_states[:num_tokens]
+            hidden_states = hidden_states[:num_input_tokens]
             hidden_states = get_pcp_group().all_gather(hidden_states, 0)
             hidden_states = torch.index_select(
-                hidden_states, 0, self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
+                hidden_states,
+                0,
+                self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
             )
             if self.method == "mtp":
                 last_hidden_states = hidden_states
             else:
                 # eagle and eagle3 need allgather last_hidden_states.
-                last_hidden_states = last_hidden_states[:num_tokens]
+                last_hidden_states = last_hidden_states[:num_input_tokens]
                 last_hidden_states = get_pcp_group().all_gather(last_hidden_states, 0)
                 last_hidden_states = torch.index_select(
                     last_hidden_states,
                     0,
-                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: last_hidden_states.shape[0]],
+                    self.runner.pcp_manager.pcp_allgather_restore_idx.gpu[: num_input_tokens * self.pcp_size],
                 )
 
         if lmhead_tp_enable():
@@ -1321,19 +1364,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
 
-            self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]].copy_(
-                common_attn_metadata.seq_lens
-            )
-            self.seq_lens_group[draft_step][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
-            common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]]
+        self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
+        self.seq_lens_group[draft_step][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
+        common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][: common_attn_metadata.seq_lens.shape[0]]
 
-            self.query_start_loc_group[draft_step][: common_attn_metadata.query_start_loc.shape[0]].copy_(
-                common_attn_metadata.query_start_loc
-            )
-            self.query_start_loc_group[draft_step][common_attn_metadata.query_start_loc.shape[0] :].fill_(0)
-            common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][
-                : common_attn_metadata.query_start_loc.shape[0]
-            ]
+        self.query_start_loc_group[draft_step][: common_attn_metadata.query_start_loc.shape[0]].copy_(
+            common_attn_metadata.query_start_loc
+        )
+        self.query_start_loc_group[draft_step][common_attn_metadata.query_start_loc.shape[0] :].fill_(0)
+        common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][
+            : common_attn_metadata.query_start_loc.shape[0]
+        ]
 
         attn_metadata_builder = attn_group.get_metadata_builder()
 
@@ -1347,7 +1388,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if getattr(attn_metadata, "decode", None):
                     attn_metadata.decode.cp_seq_len = cp_seq_len
             else:
-                attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
+                attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp.numpy()
 
         return common_attn_metadata, attn_metadata
 
