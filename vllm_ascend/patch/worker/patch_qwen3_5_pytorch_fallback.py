@@ -622,7 +622,7 @@ class PyTorchQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         # ---- Merge output ----
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
+                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),  # type: ignore[union-attr]
                 dtype=core_attn_out_non_spec.dtype,
                 device=core_attn_out_non_spec.device,
             )
