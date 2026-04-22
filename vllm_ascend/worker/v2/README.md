@@ -24,3 +24,9 @@ to get specific plans.
     Why: FIA ops in FULL mode need explicit workspace allocating, and each workspace corresponding to each graph (a specific batch_size) should be released via `weak_ref_workspaces` when each capturing is exactly completed to avoid OOM, thus that leads us to regard `weak_ref_workspaces` as post-processing in `torch.npu.graph` and patch it. This should be removed when we don't need such special operations.
 
     Location: `utils.torch_cuda_wrapper`, `utils.torch_npu_graph_wrapper`.
+
+- [ ] `graph_manager_wrapper`
+
+    Why: ModelAclGraphManager needs model_runner's input_buffers and model_state.attn_metadata to update_full_graph_params, so model_runner should be passed into __init__ of ModelAclGraphManager.
+
+    Location: `model_runner.NPUModelRunner.initialize_kv_cache`.
