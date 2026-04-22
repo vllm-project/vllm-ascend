@@ -21,12 +21,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.utils import enable_sp
 
 # Use the non-triton causal_conv1d_ops if available (some builds have PyTorch versions)
-try:
-    from vllm_ascend.ops.triton.causal_conv1d import causal_conv1d_fn as _conv1d_fn
-    from vllm_ascend.ops.triton.causal_conv1d import causal_conv1d_update as _conv1d_update
-    _CONV_TRITON_AVAILABLE = False  # triton conv1d is also broken on NPU
-except ImportError:
-    _CONV_TRITON_AVAILABLE = False
+_CONV_TRITON_AVAILABLE = False  # triton conv1d is broken on NPU
 
 
 def _softplus(x, beta=1.0, threshold=20.0):
@@ -57,7 +52,6 @@ def _pytorch_causal_conv1d_decode(
     """
     # For decode, each token just does: out = x * weight[0] + state * weight[1:] + bias
     K = weight.shape[1]  # kernel size
-    D = x.shape[1]
 
     # x: (num_tokens, D), weight[:, 0]: (D,)
     out = x * weight[:, 0]  # (num_tokens, D)
@@ -72,9 +66,9 @@ def _pytorch_causal_conv1d_decode(
         out = out + bias.unsqueeze(0)
 
     # Apply activation
-    if activation == 'silu':
+    if activation == "silu":
         out = F.silu(out)
-    elif activation == 'gelu':
+    elif activation == "gelu":
         out = F.gelu(out)
 
     return out
@@ -105,8 +99,6 @@ def _pytorch_causal_conv1d_prefill(
     D, T = x.shape
     K = weight.shape[1]
     N = len(cache_indices)
-    device = x.device
-    dtype = x.dtype
 
     # Output
     out = torch.zeros_like(x)  # (D, T)
@@ -142,16 +134,16 @@ def _pytorch_causal_conv1d_prefill(
             conv_out = conv_out + bias.unsqueeze(1)
 
         # Apply activation
-        if activation == 'silu':
+        if activation == "silu":
             conv_out = F.silu(conv_out)
-        elif activation == 'gelu':
+        elif activation == "gelu":
             conv_out = F.gelu(conv_out)
 
         out[:, bos:eos] = conv_out
 
         # Update conv_state with last K-1 values of this sequence
         if K > 1:
-            conv_states[slot_idx] = x_seq[:, -(K - 1):].float().to(conv_states.dtype)
+            conv_states[slot_idx] = x_seq[:, -(K - 1) :].float().to(conv_states.dtype)
 
     return out
 
@@ -219,7 +211,6 @@ def _pytorch_recurrent_gdn_decode(
     """
     T = q.shape[1]
     H = q.shape[2]
-    K = q.shape[3]
     HV = v.shape[2]
     V = v.shape[3]
     kv_ratio = HV // H
@@ -318,7 +309,6 @@ def _pytorch_recurrent_gdn_prefill(
     """
     T = q.shape[1]
     H = q.shape[2]
-    K = q.shape[3]
     HV = v.shape[2]
     V = v.shape[3]
     kv_ratio = HV // H
@@ -381,8 +371,7 @@ def _rearrange_mixed_qkv(mixed_qkv, head_k_dim, head_v_dim):
     """Split mixed_qkv into query, key, value tensors."""
     if mixed_qkv is None:
         return None, None, None
-    key_dim = head_k_dim * (mixed_qkv.shape[-1] // (2 * head_k_dim + head_v_dim)) // head_k_dim * head_k_dim
-    # Actually, let's use a simpler approach
+    # Use a simpler approach for splitting mixed_qkv
     # mixed_qkv: (T, key_dim + key_dim + value_dim) from conv output
     D = mixed_qkv.shape[-1]
     # Split proportionally: 2*key_dim + value_dim = D
@@ -434,7 +423,6 @@ class PyTorchQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        num_accepted_tokens = attn_metadata.num_accepted_tokens
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
@@ -454,9 +442,7 @@ class PyTorchQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             a = a[:num_actual_tokens]
 
         # Convolution weights
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
 
         # Split into spec and non-spec tokens
         if spec_sequence_masks is not None:
@@ -510,7 +496,7 @@ class PyTorchQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
-        scale = self.head_k_dim ** -0.5
+        scale = self.head_k_dim**-0.5
 
         # ---- GDN Recurrent Computation ----
         if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
@@ -518,9 +504,7 @@ class PyTorchQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
             # Compute gating values for all actual tokens
             a_for_gating = a[:num_actual_tokens] if not enable_sp() else a
             b_for_gating = b[:num_actual_tokens] if not enable_sp() else b
-            g_all, beta_all = _compute_gdn_gating(
-                self.A_log, a_for_gating, b_for_gating, self.dt_bias
-            )
+            g_all, beta_all = _compute_gdn_gating(self.A_log, a_for_gating, b_for_gating, self.dt_bias)
 
             # Split gating for spec and non-spec tokens
             if spec_sequence_masks is not None:
