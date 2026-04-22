@@ -166,35 +166,61 @@ class AscendDflashProposer(AscendEagleProposer):
         num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = num_reqs * num_query_per_req
 
+        # init block table tensor clone is only available after profile run
+        # and is only used for graph mode
+        if self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
+            self.block_table_tensor_clone = torch.zeros(
+                (
+                    self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs,
+                    self.runner.input_batch.block_table[0].get_device_tensor().shape[1],
+                ),
+                dtype=torch.int32,
+                device=self.device,
+                pin_memory=self.runner.pin_memory,
+            )
+
         context_positions = self._context_positions_buffer[:num_input_tokens]
         context_states = self.hidden_states[:num_input_tokens]
 
+        # Build attn_metadata for FULL graph capture so that FIA operators
+        # are properly included in the captured graph (DFlash needs non-causal attention).
         multi_steps_attn_metadata = []
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
-            builder = self.draft_attn_groups[0].get_metadata_builder()
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.draft_attn_groups) > 0:
+            # DFlash uses num_query_per_req tokens per request
+            num_query_per_req = 1 + self.num_speculative_tokens
+            batch_size = max(num_input_tokens // num_query_per_req, 1)
+
+            # Build correct DFlash query_start_loc: [0, nq, 2*nq, ...]
+            dflash_qsl = self.arange_dflash[: batch_size + 1] * num_query_per_req
+            dflash_qsl_cpu = torch.arange(batch_size + 1, dtype=torch.int32) * num_query_per_req
+            # Correct actual_seq_lengths_q for DFlash: cumulative query lengths
+            dflash_actual_seq_q = self.arange_dflash[1 : batch_size + 1] * num_query_per_req
+
             common_attn_metadata = AscendCommonAttentionMetadata(
-                query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
-                query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
+                query_start_loc=dflash_qsl,
+                query_start_loc_cpu=dflash_qsl_cpu,
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
-                seq_lens=self.runner.seq_lens[:num_reqs],
-                num_reqs=num_reqs,
-                num_actual_tokens=num_query_tokens,
+                seq_lens=self.runner.seq_lens[:batch_size],
+                num_reqs=batch_size,
+                num_actual_tokens=num_input_tokens,
+                num_input_tokens=num_input_tokens,
                 max_query_len=num_query_per_req,
-                max_seq_len=0,
-                slot_mapping=self._slot_mapping_buffer[:num_query_total],
+                num_computed_tokens_cpu=None,
+                actual_seq_lengths_q=dflash_actual_seq_q,
+                block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:batch_size],
+                slot_mapping=self.runner.input_batch.block_table[0].slot_mapping.gpu,
+                positions=self.runner.positions,
                 attn_state=AscendAttentionState.ChunkedPrefill,
+                decode_token_per_req=num_query_per_req,
+                max_seq_len=0,
                 causal=False,
-                block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs],
             )
 
+            builder = self.draft_attn_groups[0].get_metadata_builder()
             attn_metadata_dflash = builder.build_for_graph_capture(
                 common_attn_metadata,
                 AscendAttentionState.ChunkedPrefill,
             )
-
-            attn_metadata_dflash.attn_mask = None
-            attn_metadata_dflash.attn_state = AscendAttentionState.ChunkedPrefill
-
             per_layer_attn_metadata = dict()
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata_dflash
@@ -210,7 +236,7 @@ class AscendDflashProposer(AscendEagleProposer):
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
-            draft_attn_metadatas=multi_steps_attn_metadata,
+            draft_attn_metadatas=multi_steps_attn_metadata if multi_steps_attn_metadata else None,
         ):
             self.model.precompute_and_store_context_kv(context_states, context_positions)
 
@@ -219,23 +245,54 @@ class AscendDflashProposer(AscendEagleProposer):
                 positions=self._get_positions(num_query_total),
                 inputs_embeds=None,
             )
+            if multi_steps_attn_metadata:
+                forward_context = get_forward_context()
+                if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+                    self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
+        # Clear ALL draft_graph_params stored during dummy_run warmup.
+        # Issues with keeping dummy_run's params:
+        # 1. attn_params: duplicate entries when real call uses same key
+        # 2. workspaces: computed with stale seq_lens (near 0), too small for
+        #    real inference (e.g. seq_lens=118) → NPU buffer overflow (error 507057)
+        # 3. events/handles: stale references
+        # The first real ACLGraphWrapper capture will re-populate everything correctly.
+        if multi_steps_attn_metadata:
+            from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, get_draft_graph_params
 
-    def build_model_inputs_first_pass(
-        self,
-        num_input_tokens: int,
-    ) -> dict[str, Any]:
+            draft_gp = get_draft_graph_params()
+            if draft_gp is not None:
+                for key in list(draft_gp.attn_params.keys()):
+                    draft_gp.attn_params[key] = []
+                    draft_gp.events[key] = []
+                    draft_gp.handles[key] = []
+                for key in list(draft_gp.workspaces.keys()):
+                    draft_gp.workspaces[key] = None
+            # Invalidate ACLGraphWrapper's captured graph entries so the first
+            # real _propose() call re-captures with correct runtime params.
+            # During dummy_run, self.model (ACLGraphWrapper) captured a graph
+            # with stale dummy values. Without clearing, the first real call
+            # would replay that stale graph instead of re-capturing.
+            if isinstance(self.model, ACLGraphWrapper):
+                self.model.concrete_aclgraph_entries.clear()
+
+    def prepare_context_kv(self) -> None:
+        """Precompute and store context KV OUTSIDE the graph boundary.
+
+        This must run eagerly (before graph replay) because num_context varies
+        between calls, making it incompatible with fixed-shape graph replay.
+        """
         num_context = self._dflash_num_context
-
         self.model.precompute_and_store_context_kv(
             self._dflash_hidden_states,
             self._context_positions_buffer[:num_context],
             self._context_slot_mapping_buffer[:num_context],
         )
 
+    def build_model_inputs_first_pass(
+        self,
+        num_input_tokens: int,
+    ) -> dict[str, Any]:
         return dict(
             input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens], inputs_embeds=None
         )

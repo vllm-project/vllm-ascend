@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+from collections import defaultdict
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ import torch_npu
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
-from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
+from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
@@ -134,8 +135,8 @@ class ACLGraphWrapper:
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
                 logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
-            # validate that aclgraph capturing is legal at this point.
-            validate_cudagraph_capturing_enabled()
+            # enable aclgraph capturing for lazy capture path (draft model)
+            set_cudagraph_capturing_enabled(True)
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
@@ -246,10 +247,10 @@ def update_full_graph_params(
 
 @dataclass
 class GraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
+    events: defaultdict[int, list[torch.npu.ExternalEvent]]
     workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
+    handles: defaultdict[int, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: defaultdict[int, list[tuple]]
 
 
 _graph_params: GraphParams | None = None
@@ -260,10 +261,10 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
     _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
     )
 
 
@@ -285,10 +286,10 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
     _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
     )
 
 
@@ -310,10 +311,10 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     if _draft_graph_prefill_params is not None:
         raise ValueError("DraftGraph preill parameters have already been set!")
     _draft_graph_prefill_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
+        defaultdict(list, {size: [] for size in aclgraph_capture_sizes}),
     )
 
 

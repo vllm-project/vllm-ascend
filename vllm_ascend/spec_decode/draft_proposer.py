@@ -21,5 +21,6 @@ class AscendDraftModelProposer(DraftModelProposer, AscendSpecDecodeBaseProposer)
         # But we still need to initialize full graph support if enabled.
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+
             self.update_stream = torch.npu.Stream()
             self._runnable = ACLGraphWrapper(self._run_merged_draft, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)

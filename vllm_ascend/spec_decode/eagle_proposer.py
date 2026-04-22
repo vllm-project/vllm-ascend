@@ -728,6 +728,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
             # while draft model is run in graph model, which means we should pad the `query_start_loc`.
             # Need to be fixed in the future.
+            #
+            # For DFlash: sync proposer's query_start_loc into runner's buffer before padding,
+            # because DFlash rebuilds query_start_loc in set_inputs_first_pass with different
+            # values (num_query_per_req per request) than what the target model runner has.
+            # Without this, _pad_query_start_loc_for_fia operates on stale target model values.
+            if self.method == "dflash":
+                num_reqs = common_attn_metadata.num_reqs
+                self.runner.query_start_loc.np[: num_reqs + 1] = common_attn_metadata.query_start_loc_cpu[
+                    : num_reqs + 1
+                ].numpy()
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
                 num_input_tokens,
                 batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
@@ -946,6 +956,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
+            # DFlash: precompute context KV OUTSIDE graph boundary because
+            # num_context varies between calls (incompatible with graph replay).
+            if self.method == "dflash":
+                self.prepare_context_kv()
+
             model_inputs: dict[str, Any] = {
                 "num_input_tokens": num_input_tokens,
                 "batch_size": batch_size,
@@ -964,6 +979,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+
+            # NPU graph capture does not execute kernels — only records
+            # operations. The first ACLGraphWrapper call (capture) returns
+            # uninitialized garbage in the output tensor. Clamp token IDs
+            # to valid vocabulary range to prevent OOB embedding access
+            # in the target model (which would cause NPU error 507057).
+            vocab_size = self.vllm_config.model_config.get_vocab_size()
+            if draft_token_ids is not None and isinstance(draft_token_ids, torch.Tensor):
+                draft_token_ids.clamp_(0, vocab_size - 1)
         return draft_token_ids
 
     def _run_merged_draft(
@@ -1278,7 +1302,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)
-            self.hidden_states[:num_tokens] = target_hidden_states
+            if self.pass_hidden_states_to_model:
+                self.hidden_states[:num_tokens] = target_hidden_states
 
             return num_tokens, token_indices_to_sample, cad, (query_lens_d, ori_token_indices_to_sample)
         else:
