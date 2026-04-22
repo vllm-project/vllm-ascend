@@ -44,6 +44,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.compilation.acl_graph import should_use_piecewise_runner_barrier
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -140,6 +141,14 @@ class NPUModelRunner(GPUModelRunner):
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
 
+    def _synchronize_before_piecewise_input_prep(self) -> None:
+        if should_use_piecewise_runner_barrier(
+            self.compilation_config.cudagraph_mode,
+            self.model_config.enforce_eager,
+            self.speculative_config,
+        ):
+            torch.npu.current_stream().synchronize()
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
@@ -171,6 +180,7 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
+        self._synchronize_before_piecewise_input_prep()
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0

@@ -107,6 +107,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Platform validation: only PD-mixed mode (`kv_role='kv_both'` or no kv_transfer_config).
     # Not supported in PD-disaggregated mode (`kv_producer` / `kv_consumer` only).
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
+    # Whether to move the PIECEWISE aclgraph replay fence from each graph replay
+    # to the model runner input-preparation boundary. 0: disabled, 1: enabled.
+    "VLLM_ASCEND_ENABLE_PIECEWISE_RUNNER_BARRIER": lambda: int(
+        os.getenv("VLLM_ASCEND_ENABLE_PIECEWISE_RUNNER_BARRIER", "0")
+    ),
     # use fused op transpose_kv_cache_by_block, default is True
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))

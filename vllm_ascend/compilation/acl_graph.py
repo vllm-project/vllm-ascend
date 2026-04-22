@@ -19,9 +19,42 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
+
+
+def piecewise_runner_barrier_enabled() -> bool:
+    enabled = envs_ascend.VLLM_ASCEND_ENABLE_PIECEWISE_RUNNER_BARRIER
+    assert enabled in (0, 1), f"VLLM_ASCEND_ENABLE_PIECEWISE_RUNNER_BARRIER must be 0 or 1, got {enabled}"
+    return enabled == 1
+
+
+def piecewise_runner_barrier_supports_spec_decode(
+    speculative_config: Any | None,
+) -> bool:
+    if speculative_config is None:
+        return True
+    return speculative_config.method in ("ngram", "suffix")
+
+
+def should_use_piecewise_runner_barrier(
+    cudagraph_mode: CUDAGraphMode,
+    enforce_eager: bool,
+    speculative_config: Any | None,
+) -> bool:
+    if not piecewise_runner_barrier_enabled():
+        return False
+    if not piecewise_runner_barrier_supports_spec_decode(speculative_config):
+        return False
+    assert not enforce_eager, (
+        "VLLM_ASCEND_ENABLE_PIECEWISE_RUNNER_BARRIER requires graph mode, but enforce_eager is enabled."
+    )
+    assert cudagraph_mode == CUDAGraphMode.PIECEWISE, (
+        f"VLLM_ASCEND_ENABLE_PIECEWISE_RUNNER_BARRIER only supports PIECEWISE cudagraph mode, got {cudagraph_mode}."
+    )
+    return True
 
 
 @dataclasses.dataclass
@@ -198,7 +231,17 @@ class ACLGraphWrapper:
         # If we do not in main model and in full-graph mode when using merge-eagle-graph,
         # we do not need to synchronize.
         use_eagle = self.vllm_config.speculative_config.use_eagle() if self.vllm_config.speculative_config else False
-        if self.runtime_mode != CUDAGraphMode.FULL or not _EXTRA_CTX.is_draft_model or not use_eagle:
+        runner_barrier_owns_sync = (
+            self.runtime_mode == CUDAGraphMode.PIECEWISE
+            and not _EXTRA_CTX.is_draft_model
+            and should_use_piecewise_runner_barrier(
+                self.runtime_mode,
+                self.vllm_config.model_config.enforce_eager,
+                self.vllm_config.speculative_config,
+            )
+        )
+        full_graph_eagle_skip_sync = self.runtime_mode == CUDAGraphMode.FULL and _EXTRA_CTX.is_draft_model and use_eagle
+        if not runner_barrier_owns_sync and not full_graph_eagle_skip_sync:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
