@@ -93,8 +93,8 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
   --quantization ascend \
   --served-model-name qwen3 \
   --max-num-seqs 1 \
-  --max-model-len 133008 \
-  --max-num-batched-tokens 133008 \
+  --max-model-len 131072 \
+  --max-num-batched-tokens 131072 \
   --enable-expert-parallel \
   --trust-remote-code \
   --gpu-memory-utilization 0.95 \
