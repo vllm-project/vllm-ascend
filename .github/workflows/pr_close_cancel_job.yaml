@@ -1,0 +1,46 @@
+name: Cancel runs on PR close
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const branch = context.payload.pull_request.head.ref;
+
+            const statuses = ["in_progress", "queued", "waiting", "pending", "requested"];
+            for (const status of statuses) {
+              let page = 1;
+              while (true) {
+                const resp = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner, repo, branch, status, per_page: 100, page
+                });
+
+                const runs = resp.data.workflow_runs;
+                if (!runs.length) break;
+
+                for (const run of runs) {
+                  if (run.id === context.runId) continue; // don't cancel this workflow
+                  try {
+                    await github.rest.actions.cancelWorkflowRun({ owner, repo, run_id: run.id });
+                    core.info(`Cancel requested: ${run.html_url}`);
+                  } catch (e) {
+                    // common reasons: already completed (409) or insufficient permissions (403)
+                    core.warning(`Failed to cancel ${run.html_url}: ${e.message}`);
+                  }
+                }
+
+                if (runs.length < 100) break;
+                page++;
+              }
+            }

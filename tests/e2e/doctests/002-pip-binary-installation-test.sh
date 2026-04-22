@@ -1,0 +1,80 @@
+#!/bin/bash
+
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+trap clean_venv EXIT
+
+function install_system_packages() {
+    if command -v apt-get >/dev/null; then
+        apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
+    elif command -v yum >/dev/null; then
+        yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
+    else
+        echo "Unknown package manager. Please install curl manually."
+    fi
+}
+
+function config_pip_mirror() {
+    pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+    pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        case "$ID" in
+            ubuntu|debian)
+                sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+                ;;
+            openEuler|centos|rhel|fedora)
+                sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
+                ;;
+        esac
+    fi
+}
+
+
+function install_binary_test() {
+
+    config_pip_mirror
+    install_system_packages
+    create_vllm_venv
+    pip install -r ${SCRIPT_DIR}/../../docs/requirements-docs.txt
+
+    PIP_VLLM_VERSION=$(get_version pip_vllm_version)
+    VLLM_VERSION=$(get_version vllm_version)
+    PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version)
+    _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
+
+    # Setup extra-index-url for x86 & torch_npu dev version
+    pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
+
+    # The vLLM version already in pypi, we install from pypi.
+    pip install --default-timeout=300 --retries 3 vllm=="${PIP_VLLM_VERSION}"
+
+    pip install vllm-ascend=="${PIP_VLLM_ASCEND_VERSION}"
+
+    pip list | grep vllm
+
+    # Verify the installation
+    _info "====> Run offline example test"
+    pip install modelscope
+    cd ${SCRIPT_DIR}/../../examples && python3 ./offline_inference_npu.py
+    cd -
+
+}
+
+_info "====> Start install_binary_test"
+time install_binary_test

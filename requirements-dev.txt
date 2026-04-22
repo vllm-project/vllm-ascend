@@ -1,0 +1,24 @@
+-r requirements-lint.txt
+-r requirements.txt
+modelscope>=1.35.1
+openai
+pytest >= 6.0,<9.0.0
+pytest-asyncio
+pytest-mock
+lm-eval==0.4.9.2
+types-jsonschema
+xgrammar
+zmq
+types-psutil
+pytest-cov
+regex
+sentence_transformers
+ray>=2.47.1,<=2.48.0
+protobuf>3.20.0
+librosa 
+soundfile
+pytest_mock
+mindstudio-probe>=8.3.0
+arctic-inference==0.1.1
+xlite==0.1.0rc4
+uc-manager

@@ -1,0 +1,130 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+default_stages:
+  - pre-commit # Run locally
+  - manual # Run in CI
+exclude: '^(\.agents|\.claude|\.gemini)/.*'
+
+repos:
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.14.0
+  hooks:
+  - id: ruff-check
+    args: [--output-format, github, --fix]
+  - id: ruff-format
+
+- repo: https://github.com/codespell-project/codespell
+  rev: v2.4.1
+  hooks:
+    - id: codespell
+      args: [
+        --toml, pyproject.toml,
+        '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
+        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,outter'
+      ]
+      additional_dependencies:
+        - tomli
+
+- repo: https://github.com/crate-ci/typos
+  rev: v1.32.0
+  hooks:
+  - id: typos
+    args: [
+      "--force-exclude",
+      "--exclude", "csrc/**"
+    ]
+
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: v21.1.2
+  hooks:
+  - id: clang-format
+    exclude: ^csrc/.*
+    types_or: [c++]
+    args: [--style=file, --verbose]
+
+- repo: https://github.com/igorshubovych/markdownlint-cli
+  rev: v0.45.0
+  hooks:
+  - id: markdownlint
+    args: ['--fix']
+    exclude: '.*\.inc\.md$|.*report_template\.md$|.*contributors\.md$|.*PULL_REQUEST_TEMPLATE\.md$'
+    stages: [manual] # Only run in CI
+
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.7
+  hooks:
+  - id: actionlint
+    exclude: '.*\.github/workflows/scripts/.*\.ya?ml$'
+
+- repo: local
+  hooks:
+  - id: shellcheck
+    name: Lint shell scripts
+    entry: tools/shellcheck.sh
+    language: script
+    types: [shell]
+  - id: png-lint
+    name: Lint PNG exports from excalidraw
+    entry: tools/png-lint.sh
+    language: script
+    types: [png]
+  - id: signoff-commit
+    name: Sign-off Commit
+    entry: bash
+    args:
+      - -c
+      - |
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+        fi
+    language: system
+    verbose: true
+    stages: [commit-msg]
+  - id: check-filenames
+    name: Check for spaces in all filenames
+    entry: bash
+    args:
+      - -c
+      - 'git ls-files | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
+    language: system
+    always_run: true
+    pass_filenames: false
+  - id: python-init
+    name: Enforce __init__.py in Python packages
+    entry: python tools/check_python_src_init.py
+    language: python
+    types: [python]
+    pass_filenames: false
+  - id: check-logger
+    name: Forbid init_logger(__name__) in vllm_ascend modules
+    entry: tools/check_logger.sh
+    language: script
+    types: [python]
+    pass_filenames: false
+  - id: check-forbidden-imports
+    name: Check for forbidden imports
+    entry: python tools/check_forbidden_imports.py
+    language: python
+    types: [python]
+    additional_dependencies: [regex]
+  - id: check-boolean-context-manager
+    name: Check for boolean ops in with-statements
+    entry: python tools/check_boolean_context_manager.py
+    language: python
+    types: [python]
+  - id: check-docs-yaml-sync
+    name: Check docs/yaml sync blocks
+    entry: python tools/check_docs_yaml_sync.py
+    language: python
+    files: ^docs/source/tutorials/models/.*\.md$
+    additional_dependencies: [pyyaml, regex, tomli]
+  # Keep `suggestion` last
+  - id: suggestion
+    name: Suggestion
+    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    language: system
+    verbose: true
+    pass_filenames: false
+  # Insert new entries above the `suggestion` entry

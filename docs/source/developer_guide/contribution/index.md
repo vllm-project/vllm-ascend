@@ -1,0 +1,115 @@
+# Contributing
+
+## Building and Testing
+
+It's recommended to set up a local development environment to build vllm-ascend and run tests
+before you submit a PR.
+
+### Set up a development environment
+
+Theoretically, the vllm-ascend build is only supported on Linux because
+`vllm-ascend` dependency `torch_npu` only supports Linux.
+
+But you can still set up a development environment on Linux/Windows/macOS for linting and running basic
+tests.
+
+#### Run lint locally
+
+```bash
+# Choose a base dir (~/vllm-project/) and set up venv
+cd ~/vllm-project/
+python3 -m venv .venv
+source ./.venv/bin/activate
+
+# Clone vllm-ascend and install
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+
+# Install lint requirement and enable pre-commit hook
+pip install -r requirements-lint.txt
+
+# Run lint (You need to install pre-commits deps via proxy network at first time)
+bash format.sh
+```
+
+#### Run CI locally
+
+After completing "Run lint" setup, you can run CI (Continuous integration) locally:
+
+```{code-block} bash
+   :substitutions:
+cd ~/vllm-project/
+
+# Run CI needs vLLM installed
+git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
+cd vllm
+pip install -r requirements/build.txt
+VLLM_TARGET_DEVICE="empty" pip install .
+cd ..
+
+# Install requirements
+cd vllm-ascend
+# For Linux:
+pip install -r requirements-dev.txt
+# For non-Linux:
+cat requirements-dev.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
+cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
+
+# Run ci:
+bash format.sh ci
+```
+
+#### Submit the commit
+
+```bash
+# Commit changed files using `-s`
+git commit -sm "your commit info"
+```
+
+🎉 Congratulations! You have completed the development environment setup.
+
+### Testing locally
+
+You can refer to [Testing](./testing.md)  to set up a testing environment and running tests locally.
+
+## DCO and Signed-off-by
+
+When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).
+
+Using `-s` with `git commit` will automatically add this header.
+
+## PR Title and Classification
+
+Only specific types of PRs will be reviewed. The PR title is prefixed appropriately to indicate the type of change. Please use one of the following:
+
+- `[Attention]` for new features or optimization in attention.
+- `[Communicator]` for new features or optimization in communicators.
+- `[ModelRunner]` for new features or optimization in model runner.
+- `[Platform]` for new features or optimization in platform.
+- `[Worker]` for new features or optimization in worker.
+- `[Core]` for new features or optimization  in the core vllm-ascend logic (such as platform, attention, communicators, model runner)
+- `[Kernel]` for changes affecting compute kernels and ops.
+- `[Bugfix]` for bug fixes.
+- `[Doc]` for documentation fixes and improvements.
+- `[Test]` for tests (such as unit tests).
+- `[CI]` for build or continuous integration improvements.
+- `[Misc]` for PRs that do not fit the above categories. Please use this sparingly.
+
+:::{note}
+If the PR spans more than one category, please include all relevant prefixes.
+:::
+
+## Others
+
+You may find more information about contributing to vLLM Ascend backend plugin on [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing).
+If you encounter any problems while contributing, feel free to submit a PR to improve the documentation to help other developers.
+
+:::{toctree}
+:caption: Index
+:maxdepth: 1
+testing
+multi_node_test
+nightly_ci_test
+e2e_ci_test
+doc_writing
+:::

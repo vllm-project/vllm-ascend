@@ -1,0 +1,217 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+"""
+Service profiling configuration generator module.
+
+This module generates the service_profiling_symbols.yaml configuration file
+to ~/.config/vllm_ascend/ directory.
+"""
+
+import contextlib
+import tempfile
+from pathlib import Path
+
+import vllm
+from vllm.logger import logger
+
+VLLM_VERSION = vllm.__version__
+# Configuration file name
+CONFIG_FILENAME = f"service_profiling_symbols.{VLLM_VERSION}.yaml"
+
+# Hard-coded YAML content, default symbols changed by user can be added here.
+SERVICE_PROFILING_SYMBOLS_YAML = """
+# ===== Batch / Scheduler =====
+
+- symbol: vllm.v1.core.sched.scheduler:Scheduler.schedule
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.batch_handlers:schedule
+  name: batchFrameworkProcessing
+
+- symbol: vllm_ascend.core.scheduler:AscendScheduler.schedule
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.batch_handlers:schedule
+  name: batchFrameworkProcessing
+
+- symbol: vllm.v1.core.sched.scheduler:Scheduler.add_request
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.batch_handlers:add_request
+
+# ===== KV Cache =====
+- symbol: vllm.v1.core.kv_cache_manager:KVCacheManager.free
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.kvcache_handlers:free
+
+- symbol: vllm.v1.core.kv_cache_manager:KVCacheManager.get_computed_blocks
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.kvcache_handlers:get_computed_blocks
+
+# ===== Model Execute =====
+- symbol: vllm.model_executor.layers.logits_processor:LogitsProcessor.forward
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:compute_logits
+  name: computing_logits
+
+- symbol: vllm.v1.sample.sampler:Sampler.forward
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:sampler_forward
+  name: sample
+
+- symbol: vllm.v1.executor.abstract:Executor.execute_model
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model
+  name: modelExec
+
+- symbol: vllm.v1.executor.multiproc_executor:MultiprocExecutor.execute_model
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model
+  name: modelExec
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+  name: modelRunnerExec
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:execute_model_runner
+  domain: Execute
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._update_states
+  name: _update_states
+  domain: Execute
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._prepare_inputs
+  name: _prepare_inputs
+  domain: Execute
+
+- symbol: "vllm.model_executor.models.*:*.embed_multimodal"
+  name: multimodalEmbedding
+  domain: Multimodal
+
+- symbol: vllm_ascend.utils:ProfileExecuteDuration.capture_async
+  min_version: "0.9.1"
+  max_version: "0.14.0rc1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:capture_async
+
+- symbol: vllm.v1.utils:record_function_or_nullcontext
+  min_version: "0.15.0rc1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.model_handlers:record_function_or_nullcontext
+
+# ===== MTP / NPUModelRunner =====
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.propose_draft_token_ids
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.mtp_handlers:propose_draft_token_ids_npu
+
+- symbol: vllm_ascend.sample.rejection_sampler:rejection_sample
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.mtp_handlers:capture_rejection_output
+
+# ===== Request Lifecycle =====
+- symbol: vllm.v1.engine.async_llm:AsyncLLM.add_request
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.request_handlers:add_request_async
+
+- symbol: vllm.engine.async_llm_engine:AsyncLLMEngine.add_request
+  min_version: "0.9.1"
+  max_version: "0.11.0"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.request_handlers:add_request_async
+
+- symbol: vllm.v1.engine.output_processor:OutputProcessor.process_outputs
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.request_handlers:process_outputs
+
+# ===== Meta =====
+
+- symbol: vllm.v1.engine.core:DPEngineCoreProc.add_request
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.meta_handlers:init_data_parallel
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+  min_version: "0.9.1"
+  handler: ms_service_profiler.patcher.vllm.handlers.v1.meta_handlers:init_data_parallel_worker
+"""
+
+
+def get_config_dir() -> Path:
+    """
+    Get the vllm_ascend configuration directory path.
+
+    Returns:
+        Path: The path to ~/.config/vllm_ascend/ directory.
+    """
+    home_dir = Path.home()
+    config_dir = home_dir / ".config" / "vllm_ascend"
+    return config_dir
+
+
+def _cleanup_temp_file(tmp_path: Path | None) -> None:
+    """
+    Clean up a temporary file if it exists.
+
+    Args:
+        tmp_path: Path to the temporary file to clean up.
+    """
+    if tmp_path is not None and tmp_path.exists():
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+
+
+def generate_service_profiling_config() -> Path | None:
+    """
+    Generate the service_profiling_symbols.yaml configuration file
+    to ~/.config/vllm_ascend/ directory.
+
+    If the configuration file already exists, this function will skip
+    creating it and return the existing file path.
+
+    If any error occurs during file creation, it will be logged but
+    will not interrupt the execution. The function will return None
+    to indicate that the file could not be created.
+
+    Returns:
+        Optional[Path]: The path to the generated (or existing) configuration file.
+                       Returns None if file creation failed.
+    """
+    config_dir = get_config_dir()
+    config_file = config_dir / CONFIG_FILENAME
+
+    # Check if the configuration file already exists
+    if config_file.exists():
+        return config_file
+
+    # Create the configuration directory if it doesn't exist
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as e:
+        logger.error(f"Failed to create configuration directory {config_dir}: {e}", exc_info=True)
+        return None
+
+    # Write the configuration file atomically using a temporary file
+    # This ensures the file is only written if the write succeeds completely
+    tmp_path = None
+    try:
+        # Create a temporary file in the same directory for atomic write
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=config_dir, delete=False, suffix=".tmp", prefix=CONFIG_FILENAME + "."
+        ) as tmp_file:
+            tmp_file.write(SERVICE_PROFILING_SYMBOLS_YAML)
+            tmp_path = Path(tmp_file.name)
+
+        # Atomically replace the target file with the temporary file
+        tmp_path.replace(config_file)
+        return config_file
+    except (OSError, PermissionError) as e:
+        logger.error(f"Failed to write configuration file {config_file}: {e}", exc_info=True)
+        return None
+    finally:
+        # Clean up the temporary file if it wasn't successfully replaced
+        _cleanup_temp_file(tmp_path)

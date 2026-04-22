@@ -1,0 +1,460 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Release Code and Wheel
+
+on:
+  schedule:
+    # UTC+8: 10am, 16pm
+    - cron: '0 2,8 * * *'
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Docker tag for build results'
+        default: main
+        required: true
+        type: choice
+        options:
+          - main
+          - v0.18.0rc1
+          - v0.17.0rc1
+          - v0.16.0rc1
+          - v0.15.0rc1
+          - v0.14.0rc1
+          - v0.13.0
+
+jobs:
+  build_and_release_code:
+    name: release code
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - name: checkout vllm-ascend
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v6
+
+      - name: checkout vllm-ascend ${{ inputs.tag }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Print
+        run: |
+          lscpu
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install twine setuptools_scm
+
+      - name: Generate tar.gz
+        env:
+          SOC_VERSION: ascend910b1
+        run: |
+          python3 setup.py sdist
+          ls dist
+
+      - name: Archive tar.gz
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-src
+          path: dist/*
+
+      - name: Release
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          python3 -m twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
+
+  build_and_release_wheel:
+    name: build and release wheel
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        python-version: ["3.10", "3.11"]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout vllm-ascend
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v6
+
+      - name: checkout vllm-ascend ${{ inputs.tag }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Build wheel
+        run: |
+          ls
+          docker build -f ./.github/workflows/dockerfiles/Dockerfile.buildwheel.a2 \
+          --build-arg PY_VERSION=${{ matrix.python-version }} \
+          -t wheel:v1 .
+          docker run --rm \
+          -u "$(id -u):$(id -g)" \
+          -v "$(pwd):/outpwd" \
+          wheel:v1 \
+          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          ls dist
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Repair wheels with auditwheel
+        run: |
+          python3 -m pip install auditwheel
+          python3 -m pip install patchelf
+          mkdir -p dist/repaired
+          for whl in dist/*.whl; do
+            auditwheel repair "$whl" -w dist/repaired/ \
+            --exclude libplatform.so \
+            --exclude libregister.so \
+            --exclude libge_common_base.so \
+            --exclude libc10.so \
+            --exclude libc_sec.so \
+            --exclude libnnopbase.so \
+            --exclude libprofapi.so \
+            --exclude libgraph_base.so \
+            --exclude libgraph.so \
+            --exclude libexe_graph.so \
+            --exclude "libascend*.so" \
+            --exclude "libtorch*.so" \
+            --exclude "libopapi.so" \
+            --exclude "liberror_manager.so" \
+            --exclude "libruntime.so" \
+            --exclude "libmmpa.so"
+
+          done
+          rm -f dist/*.whl
+          mv dist/repaired/*.whl dist/
+          rmdir dist/repaired
+          ls dist
+
+      - name: Verify automatic platform tags
+        run: |
+          cd dist
+          for wheel in *.whl; do
+            echo "verification file: $wheel"
+            auditwheel show "$wheel"
+          done
+
+      - name: Generate variant wheels
+        env:
+          WHEEL_FILE: dist
+          PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
+          OUTPUT_DIR: dist/variants
+        run: |
+          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          mkdir -p dist/variants
+          python3 .github/workflows/scripts/wheel/make_variant.py \
+            -c .github/workflows/scripts/wheel/config.json \
+            -l a2
+          echo "Generated variant wheels:"
+          ls dist/variants/
+
+      - name: Archive wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
+          path: dist/
+
+      - name: Release
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        run: |
+          python3 -m pip install twine
+          python3 -m twine upload --verbose dist/*.whl -u __token__ -p ${{ secrets.PYPI_TOKEN }}
+
+
+  build_and_release_wheel_a3:
+    name: build and release wheel (A3)
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        python-version: ["3.10", "3.11"]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout vllm-ascend
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v6
+
+      - name: checkout vllm-ascend ${{ inputs.tag }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Build wheel
+        run: |
+          ls
+          docker build -f ./.github/workflows/dockerfiles/Dockerfile.buildwheel.a3 \
+          --build-arg PY_VERSION=${{ matrix.python-version }} \
+          -t wheel-a3:v1 .
+          docker run --rm \
+          -u "$(id -u):$(id -g)" \
+          -v "$(pwd):/outpwd" \
+          wheel-a3:v1 \
+          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          ls dist
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Repair wheels with auditwheel
+        run: |
+          python3 -m pip install auditwheel
+          python3 -m pip install patchelf
+          mkdir -p dist/repaired
+          for whl in dist/*.whl; do
+            auditwheel repair "$whl" -w dist/repaired/ \
+            --exclude libplatform.so \
+            --exclude libregister.so \
+            --exclude libge_common_base.so \
+            --exclude libc10.so \
+            --exclude libc_sec.so \
+            --exclude libnnopbase.so \
+            --exclude libprofapi.so \
+            --exclude libgraph_base.so \
+            --exclude libgraph.so \
+            --exclude libexe_graph.so \
+            --exclude "libascend*.so" \
+            --exclude "libtorch*.so" \
+            --exclude "libopapi.so" \
+            --exclude "liberror_manager.so" \
+            --exclude "libruntime.so" \
+            --exclude "libmmpa.so"
+
+          done
+          rm -f dist/*.whl
+          mv dist/repaired/*.whl dist/
+          rmdir dist/repaired
+          ls dist
+
+      - name: Verify automatic platform tags
+        run: |
+          cd dist
+          for wheel in *.whl; do
+            echo "verification file: $wheel"
+            auditwheel show "$wheel"
+          done
+
+      - name: Generate variant wheels
+        env:
+          WHEEL_FILE: dist
+          PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
+          OUTPUT_DIR: dist/variants
+        run: |
+          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          mkdir -p dist/variants
+          python3 .github/workflows/scripts/wheel/make_variant.py \
+            -c .github/workflows/scripts/wheel/config.json \
+            -l a3
+          echo "Generated variant wheels:"
+          ls dist/variants/
+
+      - name: Archive wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-a3-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
+          path: dist/
+
+
+  build_and_release_wheel_310p:
+    name: build and release wheel (310P)
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        python-version: ["3.10", "3.11"]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout vllm-ascend
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/checkout@v6
+
+      - name: checkout vllm-ascend ${{ inputs.tag }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: true
+          docker-images: false
+
+      - name: Build wheel
+        run: |
+          ls
+          docker build -f ./.github/workflows/dockerfiles/Dockerfile.buildwheel.310p \
+          --build-arg PY_VERSION=${{ matrix.python-version }} \
+          -t wheel-310p:v1 .
+          docker run --rm \
+          -u "$(id -u):$(id -g)" \
+          -v "$(pwd):/outpwd" \
+          wheel-310p:v1 \
+          bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
+          ls dist
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Repair wheels with auditwheel
+        run: |
+          python3 -m pip install auditwheel
+          python3 -m pip install patchelf
+          mkdir -p dist/repaired
+          for whl in dist/*.whl; do
+            auditwheel repair "$whl" -w dist/repaired/ \
+            --exclude libplatform.so \
+            --exclude libregister.so \
+            --exclude libge_common_base.so \
+            --exclude libc10.so \
+            --exclude libc_sec.so \
+            --exclude libnnopbase.so \
+            --exclude libprofapi.so \
+            --exclude libgraph_base.so \
+            --exclude libgraph.so \
+            --exclude libexe_graph.so \
+            --exclude "libascend*.so" \
+            --exclude "libtorch*.so" \
+            --exclude "libopapi.so" \
+            --exclude "liberror_manager.so" \
+            --exclude "libruntime.so" \
+            --exclude "libmmpa.so"
+
+          done
+          rm -f dist/*.whl
+          mv dist/repaired/*.whl dist/
+          rmdir dist/repaired
+          ls dist
+
+      - name: Verify automatic platform tags
+        run: |
+          cd dist
+          for wheel in *.whl; do
+            echo "verification file: $wheel"
+            auditwheel show "$wheel"
+          done
+
+      - name: Generate variant wheels
+        env:
+          WHEEL_FILE: dist
+          PROJECT_TOML: .github/workflows/scripts/wheel/pyproject.toml
+          OUTPUT_DIR: dist/variants
+        run: |
+          pip install build git+https://github.com/wheelnext/variantlib.git --quiet
+          mkdir -p dist/variants
+          python3 .github/workflows/scripts/wheel/make_variant.py \
+            -c .github/workflows/scripts/wheel/config.json \
+            -l 310p
+          echo "Generated variant wheels:"
+          ls dist/variants/
+
+      - name: Archive wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-310p-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
+          path: dist/
+
+
+  generate_and_upload_variant_index:
+    name: generate and upload variant index
+    needs: [build_and_release_wheel, build_and_release_wheel_a3, build_and_release_wheel_310p]
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all variant wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-wheel'
+          path: all-wheels/
+          merge-multiple: true
+
+      - name: Collect variant wheels
+        run: |
+          mkdir -p combined-variants
+          find all-wheels/ -path '*/variants/*.whl' -exec cp {} combined-variants/ \;
+          echo "Combined variant wheels:"
+          ls combined-variants/
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Generate combined variant index
+        run: |
+          pip install git+https://github.com/wheelnext/variantlib.git --quiet
+          variantlib generate-index-json -d combined-variants/
+          echo "Generated index files:"
+          ls combined-variants/
+
+      - name: Upload wheels and variant index to OBS
+        env:
+          OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+        run: |
+          pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os, glob
+          from obs import ObsClient
+          OBS_BUCKET = 'ascend-artifcat-packages'
+          OBS_PATH = 'pypi/packages/ascend/repos/pypi/variant/vllm-ascend'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com'
+          )
+          files = glob.glob('combined-variants/*.whl') + glob.glob('combined-variants/*.json')
+          for file in files:
+              filename = os.path.basename(file)
+              resp = client.putFile(OBS_BUCKET, f'{OBS_PATH}/{filename}', file)
+              if resp.status < 300:
+                  print(f'Uploaded: {filename}')
+              else:
+                  raise Exception(f'Failed to upload {filename}: {resp.errorMessage}')
+          EOF

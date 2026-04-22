@@ -1,0 +1,46 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "MiniMax-M2.5-TP16-Reasoning-Tool"
+    model: "MiniMax/MiniMax-M2.5"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "false"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    prompts:
+      - "Hello. Please introduce yourself briefly."
+    api_keyword_args:
+      max_tokens: 128
+      temperature: 0
+    test_content:
+      - chat_completion
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "16"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--trust-remote-code"
+      - "--dtype"
+      - "bfloat16"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-num-batched-tokens"
+      - "32768"
+      # Prefer a smaller max length for nightly stability. For full context,
+      # omit this flag and rely on the model config (196608).
+      - "--max-model-len"
+      - "32768"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "minimax_m2"
+      - "--reasoning-parser"
+      - "minimax_m2_append_think"
+

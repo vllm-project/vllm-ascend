@@ -1,0 +1,212 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"PO-Revision-Date: 2026-01-22 16:40+0800\n"
+"Last-Translator: Gemini\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/user_guide/feature_guide/quantization.md:1
+msgid "Quantization Guide"
+msgstr "量化指南"
+
+#: ../../source/user_guide/feature_guide/quantization.md:3
+msgid ""
+"Model quantization is a technique that reduces model size and "
+"computational overhead by lowering the numerical precision of weights and"
+" activations, thereby saving memory and improving inference speed."
+msgstr "模型量化是一种通过降低权重和激活值的数值精度来减少模型大小和计算开销的技术，从而节省内存并提高推理速度。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:5
+msgid ""
+"`vLLM Ascend` supports multiple quantization methods. This guide provides"
+" instructions for using different quantization tools and running "
+"quantized models on vLLM Ascend."
+msgstr "`vLLM Ascend` 支持多种量化方法。本指南提供了使用不同量化工具以及在 vLLM Ascend 上运行量化模型的说明。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:7
+msgid "**Note**"
+msgstr "**注意**"
+
+#: ../../source/user_guide/feature_guide/quantization.md:9
+msgid ""
+"You can choose to convert the model yourself or use the quantized model "
+"we uploaded. See <https://www.modelscope.cn/models/vllm-ascend/Kimi-K2"
+"-Instruct-W8A8>. Before you quantize a model, ensure sufficient RAM is "
+"available."
+msgstr ""
+"您可以选择自行转换模型，也可以使用我们上传的量化模型。请参阅 <https://www.modelscope.cn/models/vllm-"
+"ascend/Kimi-K2-Instruct-W8A8>。在量化模型之前，请确保有足够的 RAM 可用。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:13
+msgid "Quantization Tools"
+msgstr "量化工具"
+
+#: ../../source/user_guide/feature_guide/quantization.md:15
+msgid ""
+"vLLM Ascend supports models quantized by two main tools: `ModelSlim` and "
+"`LLM-Compressor`."
+msgstr "vLLM Ascend 支持由两种主要工具量化的模型：`ModelSlim` 和 `LLM-Compressor`。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:17
+msgid "1. ModelSlim (Recommended)"
+msgstr "1. ModelSlim（推荐）"
+
+#: ../../source/user_guide/feature_guide/quantization.md:19
+msgid ""
+"[ModelSlim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
+" is an Ascend-friendly compression tool focused on acceleration, using "
+"compression techniques, and built for Ascend hardware. It includes a "
+"series of inference optimization technologies such as quantization and "
+"compression, aiming to accelerate large language dense models, MoE "
+"models, multimodal understanding models, multimodal generation models, "
+"etc."
+msgstr ""
+"[ModelSlim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
+" 是一个对 Ascend 友好的压缩工具，专注于利用压缩技术实现加速，并专为 Ascend "
+"硬件构建。它包含一系列推理优化技术，如量化和压缩，旨在加速大语言稠密模型、MoE 模型、多模态理解模型、多模态生成模型等。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:21
+#: ../../source/user_guide/feature_guide/quantization.md:67
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/user_guide/feature_guide/quantization.md:23
+msgid ""
+"To use ModelSlim for model quantization, install it from its [Git "
+"repository](https://gitcode.com/Ascend/msit):"
+msgstr "若要使用 ModelSlim 进行模型量化，请从其 [Git 仓库](https://gitcode.com/Ascend/msit) 安装："
+
+#: ../../source/user_guide/feature_guide/quantization.md:34
+#: ../../source/user_guide/feature_guide/quantization.md:73
+msgid "Model Quantization"
+msgstr "模型量化"
+
+#: ../../source/user_guide/feature_guide/quantization.md:36
+msgid ""
+"The following example shows how to generate W8A8 quantized weights for "
+"the [Qwen3-MoE "
+"model](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/Qwen3-MOE/README.md)."
+msgstr ""
+"以下示例展示了如何为 [Qwen3-MoE "
+"模型](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/Qwen3-MOE/README.md)"
+" 生成 W8A8 量化权重。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:38
+msgid "**Quantization Script:**"
+msgstr "**量化脚本：**"
+
+#: ../../source/user_guide/feature_guide/quantization.md:59
+msgid ""
+"After quantization completes, the output directory will contain the "
+"quantized model files."
+msgstr "量化完成后，输出目录将包含量化后的模型文件。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:61
+msgid ""
+"For more examples, refer to the [official "
+"examples](https://gitcode.com/Ascend/msit/tree/master/msmodelslim/example)."
+msgstr ""
+"更多示例请参考 "
+"[官方示例](https://gitcode.com/Ascend/msit/tree/master/msmodelslim/example)。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:63
+msgid "2. LLM-Compressor"
+msgstr "2. LLM-Compressor"
+
+#: ../../source/user_guide/feature_guide/quantization.md:65
+msgid ""
+"[LLM-Compressor](https://github.com/vllm-project/llm-compressor) is a "
+"unified compressed model library for faster vLLM inference."
+msgstr ""
+"[LLM-Compressor](https://github.com/vllm-project/llm-compressor) "
+"是一个统一的压缩模型库，用于实现更快的 vLLM 推理。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:75
+msgid "`LLM-Compressor` provides various quantization scheme examples."
+msgstr "`LLM-Compressor` 提供了多种量化方案示例。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:77
+msgid "Dense Quantization"
+msgstr "稠密模型量化"
+
+#: ../../source/user_guide/feature_guide/quantization.md:79
+msgid "An example to generate W8A8 dynamic quantized weights for dense model:"
+msgstr "为稠密模型生成 W8A8 动态量化权重的示例："
+
+#: ../../source/user_guide/feature_guide/quantization.md:89
+msgid "MoE Quantization"
+msgstr "MoE 模型量化"
+
+#: ../../source/user_guide/feature_guide/quantization.md:91
+msgid "An example to generate W8A8 dynamic quantized weights for MoE model:"
+msgstr "为 MoE 模型生成 W8A8 动态量化权重的示例："
+
+#: ../../source/user_guide/feature_guide/quantization.md:101
+msgid ""
+"For more content, refer to the [official examples](https://github.com"
+"/vllm-project/llm-compressor/tree/main/examples)."
+msgstr ""
+"更多内容请参考 [官方示例](https://github.com/vllm-project/llm-"
+"compressor/tree/main/examples)。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:103
+msgid ""
+"Currently supported quantization types by LLM-Compressor: `W8A8` and "
+"`W8A8_DYNAMIC`."
+msgstr "目前 LLM-Compressor 支持的量化类型：`W8A8` 和 `W8A8_DYNAMIC`。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:105
+msgid "Running Quantized Models"
+msgstr "运行量化模型"
+
+#: ../../source/user_guide/feature_guide/quantization.md:107
+msgid ""
+"Once you have a quantized model which is generated by **ModelSlim**, you "
+"can use vLLM Ascend for inference by specifying the `--quantization "
+"ascend` parameter to enable quantization features, while for models "
+"quantized by **LLM-Compressor**, do not need to add this parameter."
+msgstr ""
+"一旦您拥有了由 **ModelSlim** 生成的量化模型，您可以通过指定 `--quantization ascend` "
+"参数来启用量化特性并使用 vLLM Ascend 进行推理；而对于由 **LLM-Compressor** 量化的模型，则无需添加此参数。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:109
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../source/user_guide/feature_guide/quantization.md:143
+msgid "Online Inference"
+msgstr "在线推理"
+
+#: ../../source/user_guide/feature_guide/quantization.md:158
+msgid "References"
+msgstr "参考资料"
+
+#: ../../source/user_guide/feature_guide/quantization.md:160
+msgid ""
+"[ModelSlim "
+"Documentation](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
+msgstr ""
+"[ModelSlim "
+"文档](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)"
+
+#: ../../source/user_guide/feature_guide/quantization.md:161
+msgid "[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"
+msgstr "[LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)"
+
+#: ../../source/user_guide/feature_guide/quantization.md:162
+msgid "[vLLM Quantization Guide](https://docs.vllm.ai/en/latest/quantization/)"
+msgstr "[vLLM 量化指南](https://docs.vllm.ai/en/latest/quantization/)"

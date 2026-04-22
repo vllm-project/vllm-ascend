@@ -1,0 +1,124 @@
+[build-system]
+# Should be mirrored in requirements.txt
+requires = [
+    "attrs",
+    "cmake>=3.26",
+    "decorator",
+    "einops",
+    "googleapis-common-protos",
+    "numpy<2.0.0",
+    "packaging",
+    "pip",
+    "pybind11",
+    "pyyaml",
+    "scipy",
+    "pandas",
+    "pandas-stubs",
+    "psutil",
+    "setuptools>=64",
+    "setuptools-scm>=8",
+    "transformers>=4.57.4",
+    "torch-npu==2.9.0",
+    "torch==2.9.0",
+    "torchvision",
+    "wheel",
+    "msgpack",
+    "quart",
+    "numba",
+    "xgrammar>=0.1.30",
+    "fastapi<0.124.0",
+    "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
+    "compressed_tensors>=0.11.0",
+    "arctic-inference==0.1.1",
+    "triton-ascend==3.2.0"
+]
+build-backend = "setuptools.build_meta"
+
+[tool.pymarkdown]
+plugins.md004.style = "sublist" # ul-style
+plugins.md007.indent = 4 # ul-indent
+plugins.md007.start_indented = true # ul-indent
+plugins.md013.enabled = false # line-length
+plugins.md041.enabled = false # first-line-h1
+plugins.md033.enabled = false # inline-html
+plugins.md046.enabled = false # code-block-style
+plugins.md024.allow_different_nesting = true # no-duplicate-headers
+plugins.md029.enabled = false # ol-prefix
+
+[tool.ruff]
+# TODO: according to PEP8, there should be 120 characters per line
+line-length = 120
+# Folder to be modified
+exclude = [
+    "tests/e2e/nightly/single_node/",
+]
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+    # flake8-logging-format
+    "G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # zip without `strict=`
+    "B905",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # TODO: FIE ME
+    "G004",
+    "B904",
+    "SIM108",
+    "SIM102"
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.check_docs_yaml_sync]
+exclude = [
+    "docs/source/tutorials/models/DeepSeek-R1.md",
+    "docs/source/tutorials/models/DeepSeek-V3.1.md",
+    "docs/source/tutorials/models/DeepSeek-V3.2.md",
+    "docs/source/tutorials/models/DeepSeekOCR2.md",
+    "docs/source/tutorials/models/GLM4.x.md",
+    "docs/source/tutorials/models/GLM5.md",
+    "docs/source/tutorials/models/Kimi-K2.5.md",
+    "docs/source/tutorials/models/MiniMax-M2.5.md",
+    "docs/source/tutorials/models/PaddleOCR-VL.md",
+    "docs/source/tutorials/models/Qwen-VL-Dense.md",
+    "docs/source/tutorials/models/Qwen3-235B-A22B.md",
+    "docs/source/tutorials/models/Qwen3-30B-A3B.md",
+    "docs/source/tutorials/models/Qwen3-32B-W4A4.md",
+    "docs/source/tutorials/models/Qwen3-8B-W4A8.md",
+    "docs/source/tutorials/models/Qwen3-Coder-30B-A3B.md",
+    "docs/source/tutorials/models/Qwen3-Dense.md",
+    "docs/source/tutorials/models/Qwen3-Next.md",
+    "docs/source/tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md",
+    "docs/source/tutorials/models/Qwen3-VL-235B-A22B-Instruct.md",
+    "docs/source/tutorials/models/Qwen3-VL-30B-A3B-Instruct.md",
+    "docs/source/tutorials/models/Qwen3-VL-Embedding.md",
+    "docs/source/tutorials/models/Qwen3-VL-Reranker.md",
+    "docs/source/tutorials/models/Qwen3.5-27B.md",
+    "docs/source/tutorials/models/Qwen3.5-397B-A17B.md",
+    "docs/source/tutorials/models/Qwen3_embedding.md",
+    "docs/source/tutorials/models/Qwen3_reranker.md",
+    "docs/source/tutorials/models/index.md",
+    "docs/source/tutorials/models/Hunyuan-A13B-Instruct.md",
+]
