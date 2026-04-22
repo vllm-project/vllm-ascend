@@ -338,6 +338,11 @@ class cmake_build_ext(build_ext):
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
 
+        # Pass VLLM_ASCEND_ENABLE_BATCH_MEMCPY to CMake if explicitly set.
+        # When unset (None), CMake will auto-detect from CANN headers.
+        if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
+            cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
+
         build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
         # if which('ninja') is not None:
