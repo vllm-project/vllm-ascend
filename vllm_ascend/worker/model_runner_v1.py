@@ -2136,6 +2136,7 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
                 slot_mapping = blk_table.slot_mapping.gpu[:maybe_pcp_full_tokens]
+                # TDD
                 # Only expand block_table for decode requests when using CP.
                 # For prefill-only requests, num_decode_reqs = 0, no expansion needed.
                 # if self.use_cp and self.pcp_manager.num_decode_reqs > 0:
