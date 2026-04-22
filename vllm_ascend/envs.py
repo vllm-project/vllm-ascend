@@ -113,6 +113,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to enable KVCOMP sparse optimization.
     "VLLM_ASCEND_ENABLE_KVCOMP_SPARSE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_KVCOMP_SPARSE", "0"))),
+    # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
+    # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
+    "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
 }
 
 # end-env-vars-definition
