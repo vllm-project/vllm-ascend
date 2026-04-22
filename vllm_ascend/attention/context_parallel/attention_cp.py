@@ -112,7 +112,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         block_table = common_attn_metadata.block_table_tensor
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        self.num_decodes_flatten = query_lens[:num_decodes].sum().item()
+        # self.num_decodes_flatten = query_lens[:num_decodes].sum().item()
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
 
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
@@ -214,7 +214,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 pcp_metadata=pcp_metadata,
                 pcp_exit_fa_scatter_idx=common_long_seq_metadata.pcp_exit_fa_scatter_idx,
                 chunked_context=chunked_context_metadata,
-                block_tables=block_table[self.num_decodes_flatten :, ...],
+                block_tables=block_table[num_decodes :, ...],
                 actual_seq_lengths_q=torch.cumsum(query_lens, dim=0),
             )
 
@@ -235,7 +235,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             actual_seq_lengths_q = query_start_loc_cpu[1 : num_decodes + 1].tolist()
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
-                block_tables=block_table[: self.num_decodes_flatten],
+                block_tables=block_table[: num_decodes],
                 mtp_attn_mask=mtp_attn_mask,
                 actual_seq_lengths_q=actual_seq_lengths_q,
             )
@@ -244,7 +244,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
-            num_decodes_flatten=self.num_decodes_flatten,
+            # num_decodes_flatten=self.num_decodes_flatten,
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
