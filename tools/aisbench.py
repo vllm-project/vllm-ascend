@@ -234,7 +234,9 @@ class AisbenchRunner:
         output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
         logging.info(
             "Performance result: %s token/s (baseline=%s, threshold=%.2f)",
-            output_throughput, self.baseline, self.threshold,
+            output_throughput,
+            self.baseline,
+            self.threshold,
         )
         assert float(output_throughput) >= self.threshold * self.baseline, (
             "Performance verification failed. "
@@ -247,7 +249,9 @@ class AisbenchRunner:
         acc_value = self.result
         logging.info(
             "Accuracy result: %s (baseline=%s, threshold=±%s)",
-            acc_value, self.baseline, self.threshold,
+            acc_value,
+            self.baseline,
+            self.threshold,
         )
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, (
             "Accuracy verification failed. "
