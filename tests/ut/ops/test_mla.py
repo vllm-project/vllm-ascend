@@ -8,6 +8,7 @@ from vllm.model_executor.layers.mla import MLAModules
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestIndexerWrapper(TestBase):
@@ -19,8 +20,11 @@ class TestIndexerWrapper(TestBase):
         mock_indexer.topk_tokens = 2048
         mock_indexer.q_lora_rank = 1536
         mock_indexer.wq_b = nn.Linear(128, 128)
-        mock_indexer.wk = nn.Linear(128, 128)
-        mock_indexer.weights_proj = nn.Linear(128, 128)
+        if vllm_version_is("0.19.0"):
+            mock_indexer.wk = nn.Linear(128, 128)
+            mock_indexer.weights_proj = nn.Linear(128, 128)
+        else:
+            mock_indexer.wk_weights_proj = nn.Linear(128, 128)
         mock_indexer.k_norm = nn.LayerNorm(128)
         mock_indexer.softmax_scale = 0.123
         mock_indexer.topk_indices_buffer = torch.randn(10)
@@ -33,8 +37,11 @@ class TestIndexerWrapper(TestBase):
         self.assertEqual(wrapper.topk_tokens, 2048)
         self.assertEqual(wrapper.q_lora_rank, 1536)
         self.assertIs(wrapper.wq_b, mock_indexer.wq_b)
-        self.assertIs(wrapper.wk, mock_indexer.wk)
-        self.assertIs(wrapper.weights_proj, mock_indexer.weights_proj)
+        if vllm_version_is("0.19.0"):
+            self.assertIs(wrapper.wk, mock_indexer.wk)
+            self.assertIs(wrapper.weights_proj, mock_indexer.weights_proj)
+        else:
+            self.assertIs(wrapper.wk_weights_proj, mock_indexer.wk_weights_proj)
         self.assertIs(wrapper.k_norm, mock_indexer.k_norm)
         self.assertEqual(wrapper.softmax_scale, 0.123)
 
