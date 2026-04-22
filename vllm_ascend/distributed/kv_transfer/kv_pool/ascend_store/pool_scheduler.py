@@ -57,6 +57,7 @@ class KVPoolScheduler:
         logger.info(f"==============> page_size_bytes {page_size_bytes}")
         self.store_scheduler = DistributedObjectStore()
         self.store_scheduler.init(device_id=0, init_bm=False)
+        # TODO here should caculate the lru capacity with a formula.
         lru_capacity = 1000000
         self.key_lru_cache = KeyLRUCache(lru_capacity, self.store_scheduler)
         logger.info("KV pool LRU cache enabled with capacity %d", lru_capacity)
@@ -101,6 +102,7 @@ class KVPoolScheduler:
             gvas = self.key_lru_cache.batch_get_and_alloc(
                 chunk_keys, self.page_size_bytes,
                 chunk_block_hash_groups if chunk_block_hash_groups else None)
+            # TODO here should verify the gvas is not None
             key_gva_mapping: dict[str, Any] = dict(zip(chunk_keys, gvas))
             if has_last_block and req_id in self._req_last_block_gvas:
                 key_gva_mapping.update(self._req_last_block_gvas[req_id])
