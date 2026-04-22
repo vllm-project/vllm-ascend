@@ -9,7 +9,6 @@ _envs: &envs
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"
   - "--tensor-parallel-size"
@@ -19,7 +18,7 @@ _server_cmd: &server_cmd
   - "--port"
   - "$SERVER_PORT"
   - "--max-model-len"
-  - "8192"
+  - "16384"
   - "--max-num-batched-tokens"
   - "4096"
   - "--trust-remote-code"
@@ -31,7 +30,7 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--async-scheduling"
   - "--additional-config"
-  - '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
+  - '{"fuse_muls_add": true, "multistream_overlap_shared_expert": false, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
@@ -44,7 +43,7 @@ _benchmarks: &benchmarks
     dataset_path: vllm-ascend/gsm8k-lite
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 4096
+    max_out_len: 8192
     batch_size: 8
     baseline: 95
     threshold: 5

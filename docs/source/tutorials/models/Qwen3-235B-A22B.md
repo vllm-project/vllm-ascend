@@ -343,7 +343,6 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export TASK_QUEUE_ENABLE=1
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
@@ -389,7 +388,7 @@ Reference test results:
 
 Note:
 
-1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community.
+1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community. **Note** that this environment variable can only be enabled on decode nodes.
 2. Here we disable prefix cache because of random datasets. You can enable prefix cache if requests have long common prefix.
 
 ### Three Node A3 -- PD disaggregation
@@ -417,7 +416,6 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=2
 export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -618,4 +616,4 @@ Reference test results:
 
 Note:
 
-1. We recommend to set `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` on this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator.
+1. We recommend to set `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` on this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator. **Note** that this environment variable can only be enabled on decode nodes.
