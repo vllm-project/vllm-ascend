@@ -3,11 +3,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import vllm.envs as envs_vllm
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -85,6 +87,24 @@ class TestNPUPlatform(TestBase):
         self.platform.pre_register_and_update(None)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
+
+    @patch("vllm_ascend.utils.adapt_patch")
+    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
+    def test_pre_register_and_update_registers_ascend_envs(
+        self, mock_quant_config, mock_adapt_patch
+    ):
+        self.platform.pre_register_and_update(None)
+
+        mock_adapt_patch.assert_called_once_with(is_global_patch=True)
+        for env_name in (
+            "VLLM_ASCEND_LAPS_SCHEDULING",
+            "VLLM_ASCEND_LAPS_THRESHOLD",
+            "VLLM_ASCEND_LAPS_WAIT_WINDOW_MS",
+            "VLLM_ASCEND_LAPS_WAIT_MAX_BATCH",
+        ):
+            self.assertIn(env_name, envs_vllm.environment_variables)
+            self.assertIs(envs_vllm.environment_variables[env_name],
+                          envs_ascend.env_variables[env_name])
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")

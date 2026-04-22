@@ -132,6 +132,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
+        # Register Ascend-specific env vars before vLLM validates VLLM_* names.
+        envs_vllm.environment_variables.update(envs_ascend.env_variables)
+
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
 
