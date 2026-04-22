@@ -217,6 +217,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int = 1
 
+    # SWA mask dtype: bool for general platforms, float16 for 310P
+    swa_mask_dtype: torch.dtype = torch.bool
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -304,7 +307,9 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         swa_mask = None
         is_swa = hasattr(self.model_config.hf_text_config, "sliding_window")
         if self.model_config is not None and is_swa:
-            swa_mask = self.attn_mask_builder.get_swa_mask(torch.bool, self.model_config.hf_text_config.sliding_window)
+            swa_mask = self.attn_mask_builder.get_swa_mask(
+                self.swa_mask_dtype, self.model_config.hf_text_config.sliding_window
+            )
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -895,7 +900,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=3,
                 )
 
-        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+            attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
