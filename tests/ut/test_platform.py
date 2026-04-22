@@ -689,12 +689,13 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 512)
 
-    def test_validate_layer_sharding_config_accepts_single_node(self):
+    def test_validate_layer_sharding_config_rejects_missing_kv_transfer_config(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
         vllm_config.kv_transfer_config = None
 
-        self.platform._validate_layer_sharding_config(vllm_config)
+        with pytest.raises(ValueError, match="layer_sharding is only supported on P nodes"):
+            self.platform._validate_layer_sharding_config(vllm_config)
 
     def test_validate_layer_sharding_config_accepts_kv_producer(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

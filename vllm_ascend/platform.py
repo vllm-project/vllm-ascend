@@ -241,7 +241,7 @@ class NPUPlatform(Platform):
             return
 
         kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is not None and kv_transfer_config.kv_role != "kv_producer":
+        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
             raise ValueError(
                 "additional_config.layer_sharding is only supported on P nodes "
                 "(kv_role='kv_producer') when KV transfer is enabled."
