@@ -19,7 +19,7 @@
 import os
 from unittest.mock import patch
 
-from tests.e2e.conftest import VllmRunner, DPVllmRunner
+from tests.e2e.conftest import DPVllmRunner, VllmRunner
 
 
 def test_qwen3_5_27b_distributed_mp_tp4():
