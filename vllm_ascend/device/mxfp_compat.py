@@ -9,6 +9,13 @@ FLOAT4_E2M1FN_X2_DTYPE = getattr(torch_npu, "float4_e2m1fn_x2", getattr(torch, "
 HIFLOAT8_DTYPE = getattr(torch_npu, "hifloat8", None)
 
 
+# TODO(zzzzzz198): Currently three formats(float8_e8m0fnu, float4_e2m1fn_x2, hifloat8) have to be
+# specified for some operators like GMM in Ascend950, while float8_e4m3fn does not. Remove these
+# filterations when operators allow to pass data with these three dtypes directly.
+QUANT_DTYPES = tuple(dtype for dtype in (FLOAT4_E2M1FN_X2_DTYPE, HIFLOAT8_DTYPE) if dtype is not None)
+SCALE_DTYPES = tuple(dtype for dtype in (FLOAT8_E8M0FNU_DTYPE,) if dtype is not None)
+
+
 def _get_missing_symbols(symbols: tuple[str, ...]) -> list[str]:
     return [symbol for symbol in symbols if not hasattr(torch_npu, symbol)]
 
@@ -40,4 +47,17 @@ def ensure_mxfp8_moe_available(feature: str) -> None:
     _ensure_symbols_available(
         feature,
         ("float8_e8m0fnu", "npu_dynamic_mx_quant", "npu_grouped_matmul_swiglu_quant_v2"),
+    )
+
+
+def ensure_mxfp4_linear_available(feature: str) -> None:
+    _ensure_symbols_available(
+        feature, ("float4_e2m1fn_x2", "float8_e8m0fnu", "npu_dynamic_mx_quant", "npu_quant_matmul")
+    )
+
+
+def ensure_mxfp4_moe_available(feature: str) -> None:
+    _ensure_symbols_available(
+        feature,
+        ("float4_e2m1fn_x2", "float8_e8m0fnu", "npu_dynamic_mx_quant", "npu_grouped_matmul_swiglu_quant_v2"),
     )

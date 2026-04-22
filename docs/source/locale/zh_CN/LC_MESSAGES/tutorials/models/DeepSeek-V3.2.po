@@ -1,0 +1,410 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: 2026-04-10 18:37+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:1
+msgid "DeepSeek-V3.2"
+msgstr "DeepSeek-V3.2"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:5
+msgid ""
+"DeepSeek-V3.2 is a sparse attention model. The main architecture is "
+"similar to DeepSeek-V3.1, but with a sparse attention mechanism, which is"
+" designed to explore and validate optimizations for training and "
+"inference efficiency in long-context scenarios."
+msgstr ""
+"DeepSeek-V3.2 是一个稀疏注意力模型。其主要架构与 DeepSeek-V3.1 相似，但采用了稀疏注意力机制，"
+"旨在探索和验证长上下文场景下训练和推理效率的优化方案。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:7
+msgid ""
+"This document will show the main verification steps of the model, "
+"including supported features, feature configuration, environment "
+"preparation, single-node and multi-node deployment, accuracy and "
+"performance evaluation."
+msgstr ""
+"本文档将展示模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度评估和性能评估。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:9
+msgid "Supported Features"
+msgstr "支持的特性"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:11
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参阅[支持的特性矩阵](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性列表。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:13
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:15
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:17
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:19
+msgid ""
+"`DeepSeek-V3.2-Exp-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G "
+"× 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-"
+"W8A8)"
+msgstr ""
+"`DeepSeek-V3.2-Exp-W8A8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800 A2（64G × 8）节点。"
+"[下载模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:20
+msgid ""
+"`DeepSeek-V3.2-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × "
+"16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model "
+"weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)"
+msgstr ""
+"`DeepSeek-V3.2-w8a8`（量化版本）：需要 1 个 Atlas 800 A3（64G × 16）节点或 2 个 Atlas 800 A2（64G × 8）节点。"
+"[下载模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:22
+msgid ""
+"It is recommended to download the model weight to the shared directory of"
+" multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:24
+msgid "Verify Multi-node Communication(Optional)"
+msgstr "验证多节点通信（可选）"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:26
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../../installation.md#verify-multi-node-communication)."
+msgstr ""
+"如果要部署多节点环境，需要按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:28
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:30
+msgid "You can use our official docker image to run `DeepSeek-V3.2` directly."
+msgstr "您可以使用官方 Docker 镜像直接运行 `DeepSeek-V3.2`。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md
+msgid "A3 series"
+msgstr "A3 系列"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:39
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:82
+msgid "Start the docker image on your each node."
+msgstr "在每个节点上启动 Docker 镜像。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md
+msgid "A2 series"
+msgstr "A2 系列"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:115
+msgid ""
+"In addition, if you don't want to use the docker image as above, you can "
+"also build all from source:"
+msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码构建："
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:117
+msgid ""
+"Install `vllm-ascend` from source, refer to "
+"[installation](../../installation.md)."
+msgstr "从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:119
+msgid ""
+"If you want to deploy multi-node environment, you need to set up "
+"environment on each node."
+msgstr "如果要部署多节点环境，需要在每个节点上设置环境。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:121
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:124
+msgid ""
+"In this tutorial, we suppose you downloaded the model weight to "
+"`/root/.cache/`. Feel free to change it to your own path."
+msgstr "在本教程中，假设您已将模型权重下载到 `/root/.cache/`。请根据实际情况修改为您自己的路径。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:127
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:129
+msgid ""
+"Quantized model `DeepSeek-V3.2-w8a8` can be deployed on 1 Atlas 800 A3 "
+"(64G × 16)."
+msgstr "量化模型 `DeepSeek-V3.2-w8a8` 可以部署在 1 台 Atlas 800 A3（64G × 16）上。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:131
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:164
+msgid "Multi-node Deployment"
+msgstr "多节点部署"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:166
+msgid "`DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64G × 8)."
+msgstr "`DeepSeek-V3.2-w8a8`：至少需要 2 台 Atlas 800 A2（64G × 8）。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:168
+msgid "Run the following scripts on two nodes respectively."
+msgstr "分别在两个节点上运行以下脚本。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:177
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:281
+msgid "**Node0**"
+msgstr "**节点 0**"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:226
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:335
+msgid "**Node1**"
+msgstr "**节点 1**"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:393
+msgid "Prefill-Decode Disaggregation"
+msgstr "预填充-解码分离部署"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:395
+msgid ""
+"We'd like to show the deployment guide of `DeepSeek-V3.2` on multi-node "
+"environment with 1P1D for better performance."
+msgstr "我们将在多节点环境下以 1P1D 方式展示 `DeepSeek-V3.2` 的部署指南，以获得更好的性能。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:397
+msgid "Before you start, please"
+msgstr "开始之前，请"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:399
+msgid "prepare the script `launch_online_dp.py` on each node:"
+msgstr "在每个节点上准备脚本 `launch_online_dp.py`："
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:502
+msgid "prepare the script `run_dp_template.sh` on each node."
+msgstr "在每个节点上准备脚本 `run_dp_template.sh`。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:504
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:807
+msgid "Prefill node 0"
+msgstr "预填充节点 0"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:578
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:814
+msgid "Prefill node 1"
+msgstr "预填充节点 1"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:651
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:821
+msgid "Decode node 0"
+msgstr "解码节点 0"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:728
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:828
+msgid "Decode node 1"
+msgstr "解码节点 1"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:804
+msgid ""
+"Once the preparation is done, you can start the server with the following"
+" command on each node: Refer to [Distributed DP Server With Large-Scale "
+"Expert "
+"Parallelism](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html)"
+" to get the detailed boot method."
+msgstr ""
+"准备工作完成后，您可以在每个节点上使用以下命令启动服务器："
+"详细启动方法请参考[大规模专家并行分布式 DP 服务器]"
+"(https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/large_scale_ep.html)。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:835
+msgid "Request Forwarding"
+msgstr "请求转发"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:837
+msgid ""
+"To set up request forwarding, run the following script on any machine. "
+"You can get the proxy program in the repository's examples: "
+"[load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
+msgstr ""
+"要设置请求转发，请在任意机器上运行以下脚本。您可以在仓库的示例中获取代理程序："
+"[load_balance_proxy_layerwise_server_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:866
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:868
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:881
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:883
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:885
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:911
+msgid "Using AISBench"
+msgstr "使用 AISBench"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:887
+msgid ""
+"Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
+"details."
+msgstr ""
+"详细信息请参考[使用 AISBench 进行精度评估](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:889
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:907
+msgid "After execution, you can get the result."
+msgstr "执行后即可获得结果。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:891
+msgid "Using Language Model Evaluation Harness"
+msgstr "使用 Language Model Evaluation Harness"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:893
+msgid ""
+"As an example, take the `gsm8k` dataset as a test dataset, and run "
+"accuracy evaluation of `DeepSeek-V3.2-W8A8` in online mode."
+msgstr ""
+"以 `gsm8k` 数据集为例，以在线模式运行 `DeepSeek-V3.2-W8A8` 的精度评估。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:895
+msgid ""
+"Refer to [Using "
+"lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for `lm_eval`"
+" installation."
+msgstr ""
+"请参考[使用 lm_eval 进行精度评估](../../developer_guide/evaluation/using_lm_eval.md)了解 `lm_eval` 的安装方法。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:897
+msgid "Run `lm_eval` to execute the accuracy evaluation."
+msgstr "运行 `lm_eval` 执行精度评估。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:909
+msgid "Performance"
+msgstr "性能"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:913
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详细信息请参考[使用 AISBench 进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:915
+msgid "The performance result is:"
+msgstr "性能结果如下："
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:917
+msgid "**Hardware**: A3-752T, 4 node"
+msgstr "**硬件**：A3-752T，4 节点"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:919
+msgid "**Deployment**: 1P1D, Prefill node: DP2+TP16, Decode Node: DP8+TP4"
+msgstr "**部署**：1P1D，预填充节点：DP2+TP16，解码节点：DP8+TP4"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:921
+msgid "**Input/Output**: 64k/3k"
+msgstr "**输入/输出**：64k/3k"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:923
+msgid "**Performance**: 533tps, TPOT 32ms"
+msgstr "**性能**：533 tps，TPOT 32 毫秒"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:925
+msgid "Using vLLM Benchmark"
+msgstr "使用 vLLM 基准测试"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:927
+msgid "Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example."
+msgstr "以 `DeepSeek-V3.2-W8A8` 为例运行性能评估。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:929
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) "
+"for more details."
+msgstr "更多详细信息请参考 [vLLM 基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:931
+msgid "There are three `vllm bench` subcommands:"
+msgstr "有三个 `vllm bench` 子命令："
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:933
+msgid "`latency`: Benchmark the latency of a single batch of requests."
+msgstr "`latency`：基准测试单批次请求的延迟。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:934
+msgid "`serve`: Benchmark the online serving throughput."
+msgstr "`serve`：基准测试在线服务的吞吐量。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:935
+msgid "`throughput`: Benchmark offline inference throughput."
+msgstr "`throughput`：基准测试离线推理的吞吐量。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:937
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以 `serve` 为例，运行如下代码。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:944
+msgid "Function Call"
+msgstr "函数调用"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:946
+msgid ""
+"The function call feature is supported from v0.13.0rc1 on. Please use the"
+" latest version."
+msgstr "函数调用功能从 v0.13.0rc1 版本开始支持。请使用最新版本。"
+
+#: ../../source/tutorials/models/DeepSeek-V3.2.md:948
+msgid ""
+"Refer to [DeepSeek-V3.2 Usage "
+"Guide](https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html"
+"#tool-calling-example) for details."
+msgstr ""
+"详细信息请参考 [DeepSeek-V3.2 使用指南]"
+"(https://docs.vllm.ai/projects/recipes/en/latest/DeepSeek/DeepSeek-V3_2.html"
+"#tool-calling-example)。"
