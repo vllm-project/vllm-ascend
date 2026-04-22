@@ -25,6 +25,8 @@ from vllm_ascend.sample.sampler import (
 )
 from vllm_ascend.utils import global_stream, npu_stream_switch
 
+_CPU_GENERATOR_CACHE_310P: dict[int, tuple[torch.Generator, int]] = {}
+
 
 def _random_sample_310p(
     probs: torch.Tensor,
@@ -38,7 +40,18 @@ def _random_sample_310p(
             q.exponential_()
         if generators:
             for i, generator in generators.items():
-                q[i].exponential_(generator=generator)
+                cache_entry = _CPU_GENERATOR_CACHE_310P.get(i)
+                if cache_entry is None or cache_entry[1] != id(generator):
+                    cpu_generator = torch.Generator(device="cpu")
+                    try:
+                        # Keep RNG stream consistent with the original generator.
+                        cpu_generator.set_state(generator.get_state())
+                    except Exception:
+                        cpu_generator.manual_seed(generator.initial_seed())
+                    cache_entry = (cpu_generator, id(generator))
+                    _CPU_GENERATOR_CACHE_310P[i] = cache_entry
+                cpu_generator, _ = cache_entry
+                q[i].exponential_(generator=cpu_generator)
         q = q.npu()
     torch.npu.current_stream().wait_stream(global_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
