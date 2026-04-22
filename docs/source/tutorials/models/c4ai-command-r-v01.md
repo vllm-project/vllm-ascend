@@ -29,7 +29,7 @@ vllm serve "CohereLabs/c4ai-command-r-v01" \
   --gpu-memory-utilization 0.90 \
   --enforce-eager \
   --port 8000
-````
+```
 ## Quick Verification
 Open another terminal and run:
 ```bash
