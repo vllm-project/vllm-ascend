@@ -279,6 +279,8 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+            m = fused_experts_input.hidden_states.shape[0]
+            x_active_mask = torch.ones([m], dtype=torch.bool, device="npu")
             out = torch.empty_like(fused_experts_input.hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=fused_experts_input.hidden_states,
@@ -292,6 +294,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 probs=fused_experts_input.topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
+                x_active_mask = x_active_mask,
                 out=out,
                 expert_token_nums=self.expert_token_nums,
             )
