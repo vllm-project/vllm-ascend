@@ -94,10 +94,10 @@ static ge::graphStatus InferDataType4CopyAndExpandDflashInputs(gert::InferDataTy
 {
     // out_input_ids: INT32
     context->SetOutputDataType(OUT_INPUT_IDS, DT_INT32);
-    // out_context_positions: INT64
-    context->SetOutputDataType(OUT_CONTEXT_POSITIONS, DT_INT64);
-    // out_query_positions: INT64
-    context->SetOutputDataType(OUT_QUERY_POSITIONS, DT_INT64);
+    // out_context_positions: INT32
+    context->SetOutputDataType(OUT_CONTEXT_POSITIONS, DT_INT32);
+    // out_query_positions: INT32
+    context->SetOutputDataType(OUT_QUERY_POSITIONS, DT_INT32);
     // out_context_slot_mapping: INT32
     context->SetOutputDataType(OUT_CONTEXT_SLOT_MAPPING, DT_INT32);
     // out_query_slot_mapping: INT32

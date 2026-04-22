@@ -84,11 +84,11 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     // ========== 4. Get operator attributes ==========
     auto attrs = context->GetAttrs();
 
-    int32_t parallelDraftingTokenId = *(attrs->GetAttrPointer<int32_t>(0));
-    int32_t numQueryPerReq = *(attrs->GetAttrPointer<int32_t>(1));
-    int32_t numSpeculativeTokens = *(attrs->GetAttrPointer<int32_t>(2));
-    int32_t blockSize = *(attrs->GetAttrPointer<int32_t>(3));
-    int32_t totalInputTokens = *(attrs->GetAttrPointer<int32_t>(4));
+    int64_t parallelDraftingTokenId = *(attrs->GetAttrPointer<int64_t>(0));
+    int64_t numQueryPerReq = *(attrs->GetAttrPointer<int64_t>(1));
+    int64_t numSpeculativeTokens = *(attrs->GetAttrPointer<int64_t>(2));
+    int64_t blockSize = *(attrs->GetAttrPointer<int64_t>(3));
+    int64_t totalInputTokens = *(attrs->GetAttrPointer<int64_t>(4));
     bool hasNumRejected = *(attrs->GetAttrPointer<bool>(5));
 
     // ========== 5. Compute core distribution ==========
@@ -130,10 +130,10 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
 
     OPS_LOG_I(context, "Block Dim: %u", usedCoreNum);
     OPS_LOG_I(context,
-        "numReqs: %u, numQueryPerReq: %u, numSpeculativeTokens: %u, totalInputTokens: %d, totalQueryTokens: %u",
+        "numReqs: %u, numQueryPerReq: %ld, numSpeculativeTokens: %ld, totalInputTokens: %ld, totalQueryTokens: %u",
         numReqs, numQueryPerReq, numSpeculativeTokens, totalInputTokens, totalQueryTokens);
     OPS_LOG_I(context,
-        "blockTableStride: %u, blockSize: %u, hasNumRejected: %d",
+        "blockTableStride: %u, blockSize: %ld, hasNumRejected: %d",
         blockTableStride, blockSize, hasNumRejected ? 1 : 0);
 
     return ge::GRAPH_SUCCESS;

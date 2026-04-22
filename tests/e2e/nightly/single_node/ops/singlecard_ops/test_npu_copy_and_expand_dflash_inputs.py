@@ -106,25 +106,20 @@ def golden_copy_and_expand_dflash_inputs_torch(
                 query_out = req_idx * num_query_per_req + (j - num_ctx)
                 out_query_slot_mapping[query_out] = slot
 
-def generate_test_case(num_reqs, num_speculative_tokens, block_size, max_tokens_per_req=64):
+def generate_test_case(num_reqs, num_speculative_tokens, block_size, min_tokens_per_req=1, max_tokens_per_req=64):
     rng = np.random.default_rng(42)
-
-    num_reqs_prefill = num_reqs // 2
-    num_reqs_decode = num_reqs - num_reqs_prefill
 
     next_token_ids = rng.integers(1, 50000, size=num_reqs, dtype=np.int32)
 
-    query_lens = rng.integers(1, max_tokens_per_req, size=num_reqs)
-    query_lens[:num_reqs_decode] = 1 + num_speculative_tokens
+    query_lens = rng.integers(min_tokens_per_req, max_tokens_per_req, size=num_reqs)
     query_start_loc = np.zeros(num_reqs + 1, dtype=np.int32)
     query_start_loc[1:] = np.cumsum(query_lens)
 
-    seq_lens = rng.integers(1, max_tokens_per_req, size=num_reqs)
+    seq_lens = rng.integers(min_tokens_per_req, max_tokens_per_req, size=num_reqs)
     seq_lens = np.maximum(seq_lens, query_lens)
 
     num_rejected_tokens = rng.integers(0, num_speculative_tokens, size=num_reqs)
-    num_rejected_tokens[num_reqs_decode: ] = 0
-    num_rejected_tokens = np.minimum(num_rejected_tokens, query_lens)
+    num_rejected_tokens = np.minimum(num_rejected_tokens, query_lens - 1)
 
     total_input_tokens = query_start_loc[-1]
     target_positions = np.zeros(total_input_tokens, dtype=np.int32)
@@ -137,6 +132,11 @@ def generate_test_case(num_reqs, num_speculative_tokens, block_size, max_tokens_
     max_blocks = (np.max(seq_lens) + block_size - 1) // block_size
     num_blocks = num_reqs * max_blocks
     block_table_tensor = np.arange(0, num_blocks, dtype=np.int32).reshape(num_reqs, max_blocks)
+
+    # print(f"query_lens: {query_lens}")
+    # print(f"seq_lens: {seq_lens}")
+    # print(f"num_rejected_tokens: {num_rejected_tokens}")
+    # print(f"target_positions: {target_positions}")
 
     return (
             torch.from_numpy(next_token_ids).to(torch.int32).npu(),
@@ -153,10 +153,9 @@ def test_copy_and_expand_dflash_inputs(num_reqs, num_speculative_tokens):
     block_size = 128
 
     next_token_ids, target_positions, query_start_loc, num_rejected_tokens, block_table_tensor = generate_test_case(
-        num_reqs, num_speculative_tokens, block_size, 64)
+        num_reqs, num_speculative_tokens, block_size, min_tokens_per_req=1, max_tokens_per_req=64)
 
     parallel_drafting_token_id = 151669
-    num_speculative_tokens = 15
 
     num_query_per_req = num_speculative_tokens + 1
 
@@ -227,6 +226,97 @@ def test_copy_and_expand_dflash_inputs(num_reqs, num_speculative_tokens):
     )
 
     # Check if outputs are equal
+    input_ids_match = torch.equal(out_input_ids, torch_out_input_ids)
+    context_positions_match = torch.equal(out_context_positions, torch_out_context_positions)
+    query_positions_match = torch.equal(out_query_positions, torch_out_query_positions)
+    context_slot_mapping_match = torch.equal(out_context_slot_mapping, torch_out_context_slot_mapping)
+    query_slot_mapping_match = torch.equal(out_query_slot_mapping, torch_out_query_slot_mapping)
+    token_indices_match = torch.equal(out_token_indices, torch_out_token_indices)
+
+    all_match = (input_ids_match and context_positions_match and
+                 query_positions_match and context_slot_mapping_match and
+                 query_slot_mapping_match and token_indices_match)
+
+@pytest.mark.parametrize("num_reqs", [1, 2])
+@pytest.mark.parametrize("num_speculative_tokens", [3])
+def test_copy_and_expand_dflash_inputs_large_context(num_reqs, num_speculative_tokens):
+    block_size = 128
+
+    # Generate a test case with more than 4096 context tokens per request
+    next_token_ids, target_positions, query_start_loc, num_rejected_tokens, block_table_tensor = generate_test_case(
+        num_reqs, num_speculative_tokens, block_size, min_tokens_per_req=4500, max_tokens_per_req=5000)  # 5000 >
+
+    parallel_drafting_token_id = 151669
+
+    num_query_per_req = num_speculative_tokens + 1
+
+    num_query_total = num_reqs * (1 + num_speculative_tokens)
+    num_context = query_start_loc[-1]
+
+    # Prepare output tensors for Ascend C operator (in-place)
+    out_input_ids = torch.zeros(num_query_total, device='npu:0', dtype=torch.int32)
+    out_context_positions = torch.zeros(num_context, device='npu:0', dtype=torch.int32)
+    out_query_positions = torch.zeros(num_query_total, device='npu:0', dtype=torch.int32)
+    out_context_slot_mapping = torch.zeros(num_context, device='npu:0', dtype=torch.int32)
+    out_query_slot_mapping = torch.zeros(num_query_total, device='npu:0', dtype=torch.int32)
+    out_token_indices = torch.zeros(num_reqs * num_speculative_tokens, device='npu:0', dtype=torch.int32)
+
+    # Call Ascend C operator - this should trigger the batch processing code path
+    torch.ops._C_ascend.npu_copy_and_expand_dflash_inputs(
+        # Inputs
+        next_token_ids,
+        target_positions,
+        query_start_loc,
+        num_rejected_tokens,
+        block_table_tensor,
+        # Scalars
+        parallel_drafting_token_id,
+        num_query_per_req,
+        num_speculative_tokens,
+        block_size,
+        # In-place outputs
+        out_input_ids,
+        out_context_positions,
+        out_query_positions,
+        out_context_slot_mapping,
+        out_query_slot_mapping,
+        out_token_indices
+    )
+
+    torch_out_input_ids = torch.zeros(num_query_total, device='npu:0', dtype=torch.int32)
+    torch_out_context_positions = torch.zeros(num_context, device='npu:0', dtype=torch.int32)
+    torch_out_query_positions = torch.zeros(num_query_total, device='npu:0', dtype=torch.int32)
+    torch_out_context_slot_mapping = torch.zeros(num_context, device='npu:0', dtype=torch.int32)
+    torch_out_query_slot_mapping = torch.zeros(num_query_total, device='npu:0', dtype=torch.int32)
+    torch_out_token_indices = torch.zeros(num_reqs * num_speculative_tokens, device='npu:0', dtype=torch.int32)
+
+    # Call PyTorch native implementation
+    golden_copy_and_expand_dflash_inputs_torch(
+        # Inputs
+        next_token_ids,
+        target_positions,
+        # Outputs
+        torch_out_input_ids,
+        torch_out_context_positions,
+        torch_out_query_positions,
+        torch_out_context_slot_mapping,
+        torch_out_query_slot_mapping,
+        torch_out_token_indices,
+        # Block table
+        block_table_tensor,
+        # Metadata
+        query_start_loc,
+        num_rejected_tokens,
+        # Scalars
+        parallel_drafting_token_id,
+        block_size,
+        num_query_per_req,
+        num_speculative_tokens,
+        num_context,
+        num_reqs
+    )
+
+    # Check if outputs are equal - this verifies that the batch processing works correctly
     input_ids_match = torch.equal(out_input_ids, torch_out_input_ids)
     context_positions_match = torch.equal(out_context_positions, torch_out_context_positions)
     query_positions_match = torch.equal(out_query_positions, torch_out_query_positions)

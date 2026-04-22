@@ -162,47 +162,79 @@ private:
 
         int32_t queryOffset = r * numQueryPerReq;
 
-        // 读取所有 context positions，确保不超过totalInputTokens
-        LocalTensor<int64_t> ctxPosLocal = inputBuf.Get<int64_t>();
-        if (numCtxTokens > 0) {
-            for (int32_t i = 0; i < numCtxTokens; i++) {
-                int32_t ctxPosIdx = ctxStart + i;
-                // 限制索引不超过 totalInputTokens - 1
-                ctxPosIdx = (ctxPosIdx < static_cast<int32_t>(totalInputTokens)) ? ctxPosIdx : static_cast<int32_t>(totalInputTokens) - 1;
-                int64_t pos = (ctxPosIdx >= 0 && ctxPosIdx < static_cast<int32_t>(totalInputTokens)) ?
-                              gmTargetPositions.GetValue(ctxPosIdx) : 0;
-                ctxPosLocal.SetValue(i, pos);
-            }
-            pipe_barrier(PIPE_ALL);
-        }
-
-        // 获取最后一个有效的 context position（排除 rejected tokens）
-        // 用于计算 query positions 的起始点
+        // 获取最后一个有效的 context position（排除 rejected tokens），用于计算 query positions
+        // 只需要读取最后一个有效token，不需要读取所有tokens
         int64_t lastCtxPos = 0;
         if (validCtxEnd > ctxStart) {
-            // 如果有有效的 context tokens，使用最后一个有效 token 的 position
-            lastCtxPos = ctxPosLocal.GetValue(validCtxEnd - ctxStart - 1);
+            int32_t lastValidIdx = validCtxEnd - 1;
+            // 限制索引不超过 totalInputTokens - 1
+            lastValidIdx = (lastValidIdx < static_cast<int32_t>(totalInputTokens)) ? lastValidIdx : static_cast<int32_t>(totalInputTokens) - 1;
+            if (lastValidIdx >= 0) {
+                lastCtxPos = gmTargetPositions.GetValue(lastValidIdx);
+            }
         }
 
-        // 输出 context positions
+        // 分批处理 context tokens 以避免缓冲区溢出
+        constexpr uint32_t BATCH_SIZE = 4096;  // 保持原有缓冲区大小
+        LocalTensor<int64_t> ctxPosLocal = inputBuf.Get<int64_t>();
         LocalTensor<int32_t> outCtxPos = outCtxPosBuf.Get<int32_t>();
-        for (int32_t i = 0; i < numCtxTokens; i++) {
-            outCtxPos.SetValue(i, static_cast<int32_t>(ctxPosLocal.GetValue(i)));
-        }
-        DataCopyOut_int32(gmOutContextPositions, outCtxPos, ctxStart, numCtxTokens);
-
-        // 计算 context slot mapping
         LocalTensor<int32_t> outCtxSlot = outCtxSlotBuf.Get<int32_t>();
-        for (int32_t i = 0; i < numCtxTokens; i++) {
-            int64_t pos = ctxPosLocal.GetValue(i);
-            int32_t blockNum = static_cast<int32_t>(pos / blockSize);
-            // clamp blockNum避免OOB
-            blockNum = (blockNum < static_cast<int32_t>(blockTableStride)) ? blockNum : static_cast<int32_t>(blockTableStride) - 1;
-            int32_t blockId = gmBlockTable.GetValue(r * blockTableStride + blockNum);
-            int32_t blockOffset = static_cast<int32_t>(pos % blockSize);
-            outCtxSlot.SetValue(i, blockId * blockSize + blockOffset);
+
+        int32_t processedTokens = 0;
+        while (processedTokens < numCtxTokens) {
+            int32_t currentBatchSize = numCtxTokens - processedTokens;
+            if (currentBatchSize > static_cast<int32_t>(BATCH_SIZE)) {
+                currentBatchSize = static_cast<int32_t>(BATCH_SIZE);
+            }
+
+            // 使用 DataCopy 批量读取当前批次的 context positions，避免 scalar Global Memory reads
+            int32_t ctxPosIdx = ctxStart + processedTokens;
+            // 确保索引范围合法
+            ctxPosIdx = (ctxPosIdx < 0) ? 0 : ctxPosIdx;
+            ctxPosIdx = (ctxPosIdx >= static_cast<int32_t>(totalInputTokens)) ? static_cast<int32_t>(totalInputTokens) - 1 : ctxPosIdx;
+
+            // 检查是否会越界，如果会则调整当前批次大小
+            int32_t remainingGlobalTokens = static_cast<int32_t>(totalInputTokens) - ctxPosIdx;
+            if (currentBatchSize > remainingGlobalTokens) {
+                currentBatchSize = remainingGlobalTokens;
+            }
+
+            if (currentBatchSize > 0) {
+                // 使用 DataCopy 批量读取，性能更好
+                constexpr int32_t ELEMS_PER_BLK = ONE_BLK_SIZE / (int32_t)sizeof(int64_t);
+                int32_t aligned = (currentBatchSize + ELEMS_PER_BLK - 1) / ELEMS_PER_BLK * ELEMS_PER_BLK;
+                DataCopy(ctxPosLocal, gmTargetPositions[ctxPosIdx], aligned);
+                pipe_barrier(PIPE_ALL);
+
+                // 如果实际读取的数据少于需要的，用 0 填充
+                for (int32_t i = currentBatchSize; i < aligned; i++) {
+                    ctxPosLocal.SetValue(i, 0);
+                }
+            }
+
+            // 处理当前批次的输出
+            if (currentBatchSize > 0) {
+                for (int32_t i = 0; i < currentBatchSize; i++) {
+                    int32_t outIdx = processedTokens + i;
+                    // 输出 context positions
+                    outCtxPos.SetValue(i, static_cast<int32_t>(ctxPosLocal.GetValue(i)));
+                    // 计算 context slot mapping
+                    int64_t pos = ctxPosLocal.GetValue(i);
+                    int32_t blockNum = static_cast<int32_t>(pos / blockSize);
+                    // clamp blockNum避免OOB
+                    blockNum = (blockNum < static_cast<int32_t>(blockTableStride)) ? blockNum : static_cast<int32_t>(blockTableStride) - 1;
+                    int32_t blockId = gmBlockTable.GetValue(r * blockTableStride + blockNum);
+                    int32_t blockOffset = static_cast<int32_t>(pos % blockSize);
+                    outCtxSlot.SetValue(i, blockId * blockSize + blockOffset);
+                }
+
+                // 输出当前批次的结果
+                DataCopyOut_int32(gmOutContextPositions, outCtxPos, ctxStart + processedTokens, currentBatchSize);
+                DataCopyOut_int32(gmOutContextSlotMapping, outCtxSlot, ctxStart + processedTokens, currentBatchSize);
+            }
+
+            processedTokens += currentBatchSize;
         }
-        DataCopyOut_int32(gmOutContextSlotMapping, outCtxSlot, ctxStart, numCtxTokens);
 
         // 计算 query positions 和 input_ids
         LocalTensor<int32_t> queryPosLocal = outQueryPosBuf.Get<int32_t>();
