@@ -220,7 +220,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         if num_decodes > 0:
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
-            num_computed_tokens_array = num_computed_tokens_array[: self.num_decodes_flatten]
+            num_computed_tokens_array = num_computed_tokens_array[: num_decodes]
             # Get MTP attention mask from PCP metadata
             mtp_attn_mask = None
             if common_long_seq_metadata and common_long_seq_metadata.mtp_attention_masks_for_decode:
