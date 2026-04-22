@@ -206,8 +206,8 @@ class ACLGraphWrapper:
         # we do not need to synchronize.
         # When enable_enpu is on, model_runner orders update vs replay; skip here.
         # When EAGLE draft (merge path), replay does not need this barrier.
-        need_sync = _EXTRA_CTX.is_draft_model and self.use_eagle
-        if not self.enable_enpu and need_sync:
+        is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+        if not self.enable_enpu and not is_draft_eagle:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
         return entry.output
