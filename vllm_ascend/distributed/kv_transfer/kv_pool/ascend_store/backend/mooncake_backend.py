@@ -31,12 +31,21 @@ class MooncakeBackend(Backend):
             ) from e
         self.config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
+        self._use_dummy_client = self.config.use_dummy_client
+
         if self.config.protocol == "ascend":
             local_hostname = get_ip()
+            if self._use_dummy_client:
+                self.local_seg = local_hostname
+                ret = self.store.setup_dummy(
+                    mem_pool_size=0,
+                    local_buffer_size=0,
+                    server_address=self.config.dummy_server_address,
+                )
             # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
             # and only can be used for 800 I/T A3 series.
             # Required supporting hardware versions are as follows:
-            if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
+            elif os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
                 transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
                 self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
                 ret = self.store.setup(
@@ -72,6 +81,10 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
+        if self._use_dummy_client:
+            for ptr, length in zip(ptrs, lengths):
+                self.store.register_buffer(ptr, length)
+            return
         if os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") != "1":
             global_te.register_buffer(ptrs, lengths)
 
@@ -105,11 +118,21 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
+    use_dummy_client: bool
+    dummy_server_address: str
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
+        master_server_address = os.getenv("MOONCAKE_MASTER", None)
+        use_dummy_client = os.getenv("MOONCAKE_USE_DUMMY_CLIENT", config.get("use_dummy_client", False))
+        if isinstance(use_dummy_client, str):
+            use_dummy_client = use_dummy_client.lower() in ("1", "true")
+        dummy_server_address = os.getenv(
+            "MOONCAKE_DUMMY_SERVER_ADDRESS",
+            config.get("dummy_server_address", ""),
+        )
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
@@ -118,7 +141,11 @@ class MooncakeStoreConfig:
             local_buffer_size=_parse_global_segment_size(config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "ascend"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
+            master_server_address=master_server_address
+            if master_server_address is not None
+            else config.get("master_server_address"),
+            use_dummy_client=use_dummy_client,
+            dummy_server_address=dummy_server_address,
         )
 
     @staticmethod
