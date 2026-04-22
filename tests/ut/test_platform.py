@@ -489,9 +489,11 @@ class TestNPUPlatform(TestBase):
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
 
-        with pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"):
-            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
-                self.platform.check_and_update_config(vllm_config)
+        with (
+            pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
@@ -517,12 +519,12 @@ class TestNPUPlatform(TestBase):
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
 
-        with pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"):
-            with (
-                patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
-                patch.object(platform, "check_kv_extra_config"),
-            ):
-                self.platform.check_and_update_config(vllm_config)
+        with (
+            pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
@@ -548,13 +550,13 @@ class TestNPUPlatform(TestBase):
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
 
-        with patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True):
-            with pytest.raises(ValueError, match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*PD-mixed.*PD-disaggregated"):
-                with (
-                    patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
-                    patch.object(platform, "check_kv_extra_config"),
-                ):
-                    self.platform.check_and_update_config(vllm_config)
+        with (
+            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True),
+            pytest.raises(ValueError, match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*PD-mixed.*PD-disaggregated"),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
@@ -580,13 +582,13 @@ class TestNPUPlatform(TestBase):
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
 
-        with patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True):
-            with pytest.raises(ValueError, match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*PD-mixed.*PD-disaggregated"):
-                with (
-                    patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
-                    patch.object(platform, "check_kv_extra_config"),
-                ):
-                    self.platform.check_and_update_config(vllm_config)
+        with (
+            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True),
+            pytest.raises(ValueError, match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*PD-mixed.*PD-disaggregated"),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     def test_update_block_size_for_backend_preserves_hybrid_block_size(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
