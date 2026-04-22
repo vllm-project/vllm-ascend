@@ -16,7 +16,7 @@ _CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config.yaml"
 # path_prefix is prepended to every test name when loading that config.
 _DEFAULT_CONFIGS: list[tuple[Path, str | None]] = [
     (_CONFIG_PATH, None),
-    (_CONFIG_UPSTREAM, "vllm-empty"),
+    (_CONFIG_UPSTREAM, None),
 ]
 
 
