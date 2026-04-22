@@ -250,7 +250,7 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
       --trust-remote-code \
       --gpu-memory-utilization 0.96 \
       --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-      --compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4]}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4]}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
