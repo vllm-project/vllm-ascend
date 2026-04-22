@@ -16,7 +16,6 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.utils import enable_sp
 
