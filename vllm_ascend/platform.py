@@ -895,7 +895,7 @@ class NPUPlatform(Platform):
                 vllm_config.parallel_config.enable_dbo = False
 
             ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
-            if ubatch_size > 1:
+            if ubatch_size != 0:
                 logger.warning(
                     "'--ubatch-size' is currently ignored on Ascend NPU because it "
                     "depends on the generic DBO path, which is not yet aligned with "
