@@ -355,7 +355,7 @@ private:
 
         int32_t totalElements = m * topK;
         int32_t elementsPerCore = CeilDiv(totalElements, coreNum);
-        int32_t startIdx = coreIdx * elementsPerCore;
+        int32_t startIdx = min(coreIdx * elementsPerCore, totalElements);
         int32_t endIdx = min(startIdx + elementsPerCore, totalElements);
 
         AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
