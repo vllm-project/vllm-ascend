@@ -50,7 +50,12 @@ from vllm_ascend.attention.utils import (
     filter_chunked_req_indices,
     split_decodes_and_prefills,
 )
-from vllm_ascend.compilation.acl_graph import get_graph_params, update_graph_params_workspaces
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params,
+    get_graph_params,
+    update_draft_graph_params_workspaces,
+    update_graph_params_workspaces,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
@@ -226,6 +231,10 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 block_tables=block_table[: self.num_decodes_flatten],
             )
 
+        actual_seq_lengths_q = (torch.arange(self.num_decodes_flatten) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
+            num_decodes:
+        ]
+
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -237,7 +246,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
-            actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
+            actual_seq_lengths_q=actual_seq_lengths_q,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
@@ -295,12 +304,25 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
-        graph_params = get_graph_params()
+        if _EXTRA_CTX.is_draft_model:
+            graph_params = get_draft_graph_params()
+            attn_metadata = draft_attn_metadatas
+            attn_keys = list(attn_metadata[0].keys())
+        else:
+            graph_params = get_graph_params()
+            attn_metadata = forward_context.attn_metadata
+            attn_keys = list(attn_metadata.keys())
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
+        num_layers = len(attn_keys)
+        if num_layers == 0:
+            return
+        if _EXTRA_CTX.is_draft_model:
+            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+        attn_count = 0
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
-                forward_context.attn_metadata,
+                attn_keys,
                 graph_params.attn_params[num_tokens],
                 graph_params.handles[num_tokens],
                 graph_params.events[num_tokens],
@@ -322,14 +344,29 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     pcp_rank,
                     dcp_rank,
                 ) = param
-                attn_metadata = forward_context.attn_metadata[key]
-                actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:, pcp_rank, dcp_rank]
-                pad_length = num_tokens - len(actual_seq_lengths_kv)
-                if pad_length > 0:
-                    pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
-                    actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
 
-                actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+                if _EXTRA_CTX.is_draft_model:
+                    draft_step = attn_count // num_layers
+                    actual_seq_lengths_kv = attn_metadata[draft_step][key].decode_meta.num_computed_tokens_of_pcp_dcp[
+                        :, pcp_rank, dcp_rank
+                    ]
+                    pad_length = num_tokens - len(actual_seq_lengths_kv)
+                    if pad_length > 0:
+                        pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
+                        actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
+
+                    actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                    attn_count = attn_count + 1
+                else:
+                    actual_seq_lengths_kv = attn_metadata[key].decode_meta.num_computed_tokens_of_pcp_dcp[
+                        :, pcp_rank, dcp_rank
+                    ]
+                    pad_length = num_tokens - len(actual_seq_lengths_kv)
+                    if pad_length > 0:
+                        pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
+                        actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
+
+                    actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
 
                 if dcp_size > 1:
                     num_heads = num_heads * dcp_size
@@ -530,10 +567,15 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
                 :, self.pcp_rank, self.dcp_rank
             ],
-            "actual_seq_lengths": torch.arange(attn_metadata.num_decodes_flatten) + 1,
+            "actual_seq_lengths": attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes_flatten],
         }
-        graph_params = get_graph_params()
+
+        if _EXTRA_CTX.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
         num_tokens = query.shape[0]
+
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
@@ -547,7 +589,10 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     query, k_nope, value, **common_kwargs
                 )
-                update_graph_params_workspaces(num_tokens, weak_ref_tensors(workspace))
+                if _EXTRA_CTX.is_draft_model:
+                    update_draft_graph_params_workspaces(num_tokens, workspace)
+                else:
+                    update_graph_params_workspaces(num_tokens, workspace)
             attn_out = torch.empty_like(query)
             attn_lse = torch.empty((num_tokens, num_heads, 1), dtype=torch.float, device=query.device)
 
@@ -562,7 +607,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     attn_metadata.block_tables,
                     self.key_cache.shape[1],
                     attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank],
-                    attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes],
+                    attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes_flatten],
                     weak_ref_tensors(attn_out),
                     weak_ref_tensors(attn_lse),
                     self.dcp_size,
