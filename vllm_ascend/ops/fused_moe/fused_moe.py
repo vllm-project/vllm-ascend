@@ -57,6 +57,7 @@ from vllm_ascend.utils import (
 class FusedMoEResult:
     routed_out: torch.Tensor
     before_dispatch_evt: torch.npu.Event | None = None
+    before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
 
 
@@ -64,6 +65,7 @@ class FusedMoEResult:
 class FusedMoEEvents:
     before_routed_experts: torch.npu.Event
     before_dispatch: torch.npu.Event | None = field(default=None)
+    before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
 
 
@@ -539,6 +541,7 @@ class AscendFusedMoE(FusedMoE):
             return FusedMoEResult(
                 routed_out=routed_out,
                 before_dispatch_evt=fused_experts_results.before_dispatch_evt,
+                before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                 before_combine_evt=fused_experts_results.before_combine_evt,
             )
         else:
@@ -655,7 +658,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     @property
     def is_internal_router(self) -> bool:
-        return False
+        return self.multistream_overlap_shared_expert
 
     @property
     def use_dp_chunking(self) -> bool:
@@ -689,16 +692,45 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                 torch.npu.current_stream().wait_event(evt)
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
-            # Ensure the shared experts wait for hidden_states to be ready.
+            original_dtype = hidden_states.dtype
+            # Execute dynamic quant concurrently with MoE gate.
             torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
             # Execute the gate projection and activation concurrently with the
             # dispatch communication.
             maybe_wait_event(fused_moe_evts.before_dispatch)
-            part1_out = self._shared_experts_part1(hidden_states)
+            hidden_states = torch_npu.npu_quant_matmul(
+                quantized_x,
+                self._shared_experts.gate_up_proj.weight,
+                self._shared_experts.gate_up_proj.weight_scale,
+                pertoken_scale=None,
+                bias=None,
+                output_dtype=torch.int32
+            )
+            # Execute activation concurrently with gmm2.
+            maybe_wait_event(fused_moe_evts.before_gmm2)
+            quantized_x, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
+                x=hidden_states,
+                weight_scale=self._shared_experts.gate_up_proj.weight_scale_fp32,
+                activation_scale=pertoken_scale,
+                bias=None,
+                quant_scale=None,
+                quant_offset=None,
+                group_index=None,
+                activate_left=True,
+                quant_mode=1
+            )
             # Execute the down projection concurrently with the combine
             # communication.
             maybe_wait_event(fused_moe_evts.before_combine)
-            shared_out = self._shared_experts_part2(hidden_states, part1_out)
+            shared_out = torch_npu.npu_quant_matmul(
+                quantized_x,
+                self._shared_experts.down_proj.weight,
+                self._shared_experts.down_proj.weight_scale,
+                pertoken_scale=swiglu_out_scale,
+                bias=None,
+                output_dtype=original_dtype
+            )
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
@@ -722,6 +754,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             set_flash_common3_context(shared_experts=self._shared_experts)
 
         before_routed_experts = torch.npu.current_stream().record_event()
+        if self.multistream_overlap_shared_expert:
+            router_logits = F.linear(hidden_states.float(), self.gate.weight)
+
         fused_moe_results = AscendFusedMoE.forward_impl(
             self,
             hidden_states=hidden_states,
@@ -743,6 +778,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                 FusedMoEEvents(
                     before_routed_experts=before_routed_experts,
                     before_dispatch=fused_moe_results.before_dispatch_evt,
+                    before_gmm2=fused_moe_results.before_gmm2_evt,
                     before_combine=fused_moe_results.before_combine_evt,
                 ),
             )
