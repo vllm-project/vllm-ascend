@@ -159,6 +159,7 @@
       "nv-community/audio-flamingo-3",
       "nv-community/audio-flamingo-3-hf",
       "nvidia/audio-flamingo-3-hf",
+      "nv-community/Minitron-8B-Base",
       "openbmb/MiniCPM-2B-sft-bf16",
       "openbmb/MiniCPM-V-2_6",
       "openbmb/MiniCPM-V-4_5",

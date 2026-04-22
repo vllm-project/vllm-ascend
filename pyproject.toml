@@ -101,6 +101,7 @@ exclude = [
     "docs/source/tutorials/models/GLM5.md",
     "docs/source/tutorials/models/Kimi-K2.5.md",
     "docs/source/tutorials/models/MiniMax-M2.5.md",
+    "docs/source/tutorials/models/Minitron-8B-Base.md‎",
     "docs/source/tutorials/models/PaddleOCR-VL.md",
     "docs/source/tutorials/models/Qwen-VL-Dense.md",
     "docs/source/tutorials/models/Qwen3-235B-A22B.md",
