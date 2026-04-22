@@ -7,8 +7,6 @@ on:
   pull_request:
     branches:
       - 'main'
-      - '*-dev'
-      - 'releases/v*'
     paths:
       - 'docs/source/**/*.md'
   workflow_dispatch:
@@ -29,14 +27,10 @@ jobs:
     name: Sphinx linkcheck
     runs-on: linux-aarch64-a2b3-0
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
     timeout-minutes: 30
     steps:
-      - name: Install system dependencies
-        run: |
-          apt-get update -y && apt-get install git -y
-
-      - name: Checkout repository
+      - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -51,10 +45,8 @@ jobs:
 
           git diff --name-only --diff-filter=AMR \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
-            -- docs/source > changed-docs-all.txt
-
-          grep -E '\.md$' changed-docs-all.txt \
-            | sed 's#^docs/##' > changed-docs.txt || true
+            -- docs/source \
+            | sed -n '/\.md$/ s#^docs/##p' > changed-docs.txt
 
           if [ ! -s changed-docs.txt ]; then
             echo "has_linkcheck_files=false" >> "$GITHUB_OUTPUT"
@@ -82,18 +74,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          changed_docs=()
-          while IFS= read -r changed_doc; do
-            [ -n "$changed_doc" ] || continue
-            changed_docs+=("$changed_doc")
-          done < changed-docs.txt
+          mapfile -t changed_docs < changed-docs.txt
 
           cd docs
           sphinx-build -b linkcheck -W --keep-going \
             source _build/linkcheck "${changed_docs[@]}"
 
       - name: Upload linkcheck reports
-        if: ${{ always() && (github.event_name != 'pull_request' || steps.changed-docs.outputs.has_linkcheck_files == 'true') }}
+        if: ${{ always() && github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: sphinx-linkcheck-report
