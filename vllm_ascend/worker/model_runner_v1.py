@@ -92,7 +92,8 @@ from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 
 # yapf conflicts with isort for this block
@@ -921,27 +922,28 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        # In async spec decode mode, num_computed_tokens was corrected on GPU
-        # by update_num_computed_tokens_for_batch_change, so seq_lens (GPU) is
-        # correct but optimistic_seq_lens_cpu is stale (it assumed all drafts
-        # were accepted). Sync the corrected values back to CPU so that NPU
-        # attention backends (which use _seq_lens_cpu) get the right values.
-        # Use non_blocking copy to pinned memory and record an event;
-        # _build_attention_metadata will synchronize before reading.
-        if (
-            self.use_async_spec_decode
-            and self.valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-        ):
-            self.optimistic_seq_lens_cpu[:num_reqs].copy_(
-                self.seq_lens[:num_reqs], non_blocking=True
-            )
-            if self._seq_lens_cpu_event is None:
-                self._seq_lens_cpu_event = torch.npu.Event()
-            self._seq_lens_cpu_event.record()
-            self._seq_lens_cpu_event_pending = True
-        else:
-            self._seq_lens_cpu_event_pending = False
+        if isinstance(self.attn_backend, AscendAttentionBackend | AscendMLABackend):
+            # In async spec decode mode, num_computed_tokens was corrected on GPU
+            # by update_num_computed_tokens_for_batch_change, so seq_lens (GPU) is
+            # correct but optimistic_seq_lens_cpu is stale (it assumed all drafts
+            # were accepted). Sync the corrected values back to CPU so that NPU
+            # attention backends (which use _seq_lens_cpu) get the right values.
+            # Use non_blocking copy to pinned memory and record an event;
+            # _build_attention_metadata will synchronize before reading.
+            if (
+                self.use_async_spec_decode
+                and self.valid_sampled_token_count_gpu is not None
+                and prev_req_id_to_index
+            ):
+                self.optimistic_seq_lens_cpu[:num_reqs].copy_(
+                    self.seq_lens[:num_reqs], non_blocking=True
+                )
+                if self._seq_lens_cpu_event is None:
+                    self._seq_lens_cpu_event = torch.npu.Event()
+                self._seq_lens_cpu_event.record()
+                self._seq_lens_cpu_event_pending = True
+            else:
+                self._seq_lens_cpu_event_pending = False
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
@@ -2321,11 +2323,13 @@ class NPUModelRunner(GPUModelRunner):
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
-        # Ensure the async GPU→CPU copy of corrected seq_lens (launched in
-        # _prepare_inputs) has completed before we read optimistic_seq_lens_cpu.
-        if self._seq_lens_cpu_event_pending and self._seq_lens_cpu_event is not None:
-            self._seq_lens_cpu_event.synchronize()
-            self._seq_lens_cpu_event_pending = False
+
+        if isinstance(self.attn_backend, AscendAttentionBackend | AscendMLABackend):
+            # Ensure the async GPU→CPU copy of corrected seq_lens (launched in
+            # _prepare_inputs) has completed before we read optimistic_seq_lens_cpu.
+            if self._seq_lens_cpu_event_pending and self._seq_lens_cpu_event is not None:
+                self._seq_lens_cpu_event.synchronize()
+                self._seq_lens_cpu_event_pending = False
 
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
