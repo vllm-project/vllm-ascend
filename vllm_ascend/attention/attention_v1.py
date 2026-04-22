@@ -588,7 +588,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode=3 if attn_metadata.causal else 0
+        sparse_mode= 3 if attn_metadata.causal else 0
         extra_args = {}
         if self.enable_c8_quant:
             extra_args = {
