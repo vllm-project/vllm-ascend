@@ -84,9 +84,9 @@ Benchmark results on Ascend 910B x16 (TP=16, W4A16, input=512, output=128, 64 co
 
 | Metric | Value |
 |---|---|
-| Output Token Throughput | ~46.6 tok/s |
-| Mean TTFT | ~83 s |
-| Mean TPOT | ~83 ms |
+| Output Token Throughput | 46.58 tok/s |
+| Mean TTFT | 691 ms |
+| Mean TPOT | 83 ms |
 | Peak Output Throughput | 52 tok/s |
 
-> **Note**: TTFT is high due to the large model size and concurrent prefill on 555B MoE. TPOT (~83 ms) reflects the per-token decode speed.
+> **Note**: Benchmark measured with `vllm bench serve` (input=512, output=128, 64 concurrent requests). TTFT (~691 ms) includes prefill on the 555B MoE model. TPOT (~83 ms) reflects the per-token decode speed.
