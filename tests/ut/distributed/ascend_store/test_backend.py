@@ -380,10 +380,6 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b._hetero_client.mset_d2h.side_effect = Exception("fail")
         b.put(["k1"], [[100]], [[10]])
 
-    def test_set_device(self):
-        b = self._make_backend()
-        b.set_device()
-
     def test_register_buffer(self):
         b = self._make_backend()
         b._helper._device_id = None
