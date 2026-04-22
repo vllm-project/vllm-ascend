@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-15 09:41+0000\n"
+"POT-Creation-Date: 2026-04-22 08:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -193,8 +193,10 @@ msgid "**Build CPU pools**:"
 msgstr "**构建 CPU 池**："
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:39
-msgid "Use **global_slice** for A3 devices; **topo_affinity** for A2 and 310P."
-msgstr "对 A3 设备使用 **global_slice**；对 A2 和 310P 使用 **topo_affinity**。"
+msgid ""
+"Use **global_slice** for A3 devices; **topo_affinity** for A2 and Atlas "
+"300 inference products."
+msgstr "对 A3 设备使用 **global_slice**；对 A2 和 Atlas 300 推理产品使用 **topo_affinity**。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:40
 msgid "If topo affinity is missing, fall back to global_slice."
@@ -597,6 +599,7 @@ msgid "Example 5: A2/310P topo_affinity with NUMA extension"
 msgstr "示例 5: 具有NUMA扩展的 A2/310P topo_affinity"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:163
+#, python-brace-format
 msgid "npu_affinity = {0: [0..7], 1: [0..7]} (from `npu-smi info -t topo`)"
 msgstr "npu_affinity = {0: [0..7], 1: [0..7]} (来自 `npu-smi info -t topo`)"
 
@@ -748,7 +751,9 @@ msgid ""
 "global slicing yields 16 CPUs per NPU (0–15, 16–31, 32–47, 48–63), so "
 "each NPU’s pool stays within a single NUMA node."
 msgstr ""
-"示例（对称布局）：2个NUMA节点，共64个CPU。NUMA0 = CPU 0–31，NUMA1 = CPU 32–63，cpuset为0–63。对于4个逻辑NPU，全局切片为每个NPU分配16个CPU (0–15, 16–31, 32–47, 48–63)，因此每个NPU的CPU池都保持在单个NUMA节点内。"
+"示例（对称布局）：2个NUMA节点，共64个CPU。NUMA0 = CPU 0–31，NUMA1 = CPU "
+"32–63，cpuset为0–63。对于4个逻辑NPU，全局切片为每个NPU分配16个CPU (0–15, 16–31, 32–47, "
+"48–63)，因此每个NPU的CPU池都保持在单个NUMA节点内。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:212
 msgid "**Runtime dependencies**:"

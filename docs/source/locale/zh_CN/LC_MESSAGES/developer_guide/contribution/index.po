@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-22 08:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -19,7 +19,7 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/developer_guide/contribution/index.md:108
+#: ../../source/developer_guide/contribution/index.md:107
 msgid "Index"
 msgstr "索引"
 
@@ -62,120 +62,124 @@ msgid "Run CI locally"
 msgstr "本地运行 CI"
 
 #: ../../source/developer_guide/contribution/index.md:37
-msgid "After completing \"Run lint\" setup, you can run CI locally:"
-msgstr "完成“运行代码检查”设置后，你可以在本地运行 CI："
+msgid ""
+"After completing \"Run lint\" setup, you can run CI (Continuous "
+"integration) locally:"
+msgstr "完成“运行代码检查”设置后，你可以在本地运行 CI（持续集成）："
 
-#: ../../source/developer_guide/contribution/index.md:63
+#: ../../source/developer_guide/contribution/index.md:62
 msgid "Submit the commit"
 msgstr "提交更改"
 
-#: ../../source/developer_guide/contribution/index.md:70
+#: ../../source/developer_guide/contribution/index.md:69
 msgid "🎉 Congratulations! You have completed the development environment setup."
 msgstr "🎉 恭喜！您已完成开发环境的设置。"
 
-#: ../../source/developer_guide/contribution/index.md:72
+#: ../../source/developer_guide/contribution/index.md:71
 msgid "Testing locally"
 msgstr "本地测试"
 
-#: ../../source/developer_guide/contribution/index.md:74
+#: ../../source/developer_guide/contribution/index.md:73
 msgid ""
 "You can refer to [Testing](./testing.md)  to set up a testing environment"
 " and running tests locally."
 msgstr "你可以参考 [测试](./testing.md) 文档来设置测试环境并在本地运行测试。"
 
-#: ../../source/developer_guide/contribution/index.md:76
+#: ../../source/developer_guide/contribution/index.md:75
 msgid "DCO and Signed-off-by"
 msgstr "DCO 与签署确认"
 
-#: ../../source/developer_guide/contribution/index.md:78
+#: ../../source/developer_guide/contribution/index.md:77
 msgid ""
 "When contributing changes to this project, you must agree to the DCO. "
 "Commits must include a `Signed-off-by:` header which certifies agreement "
-"with the terms of the DCO."
-msgstr "向本项目贡献更改时，您必须同意 DCO。提交必须包含 `Signed-off-by:` 标头，以证明您同意 DCO 的条款。"
+"with the terms of the DCO (Developer Certificate of Origin)."
+msgstr "向本项目贡献更改时，您必须同意 DCO。提交必须包含 `Signed-off-by:` 标头，以证明您同意 DCO（开发者原创证书）的条款。"
 
-#: ../../source/developer_guide/contribution/index.md:80
+#: ../../source/developer_guide/contribution/index.md:79
 msgid "Using `-s` with `git commit` will automatically add this header."
 msgstr "在 `git commit` 命令中使用 `-s` 参数会自动添加此标头。"
 
-#: ../../source/developer_guide/contribution/index.md:82
+#: ../../source/developer_guide/contribution/index.md:81
 msgid "PR Title and Classification"
 msgstr "PR 标题与分类"
 
-#: ../../source/developer_guide/contribution/index.md:84
+#: ../../source/developer_guide/contribution/index.md:83
 msgid ""
 "Only specific types of PRs will be reviewed. The PR title is prefixed "
 "appropriately to indicate the type of change. Please use one of the "
 "following:"
 msgstr "只有特定类型的 PR 会被审核。PR 标题应使用适当的前缀来指明更改类型。请使用以下前缀之一："
 
-#: ../../source/developer_guide/contribution/index.md:86
+#: ../../source/developer_guide/contribution/index.md:85
 msgid "`[Attention]` for new features or optimization in attention."
 msgstr "`[Attention]` 用于注意力机制的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:87
+#: ../../source/developer_guide/contribution/index.md:86
 msgid "`[Communicator]` for new features or optimization in communicators."
 msgstr "`[Communicator]` 用于通信器的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:88
+#: ../../source/developer_guide/contribution/index.md:87
 msgid "`[ModelRunner]` for new features or optimization in model runner."
 msgstr "`[ModelRunner]` 用于模型运行器的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:89
+#: ../../source/developer_guide/contribution/index.md:88
 msgid "`[Platform]` for new features or optimization in platform."
 msgstr "`[Platform]` 用于平台的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:90
+#: ../../source/developer_guide/contribution/index.md:89
 msgid "`[Worker]` for new features or optimization in worker."
 msgstr "`[Worker]` 用于工作器的新功能或优化。"
 
-#: ../../source/developer_guide/contribution/index.md:91
+#: ../../source/developer_guide/contribution/index.md:90
 msgid ""
 "`[Core]` for new features or optimization  in the core vllm-ascend logic "
 "(such as platform, attention, communicators, model runner)"
 msgstr "`[Core]` 用于核心 vllm-ascend 逻辑中的新功能或优化（例如平台、注意力机制、通信器、模型运行器）。"
 
-#: ../../source/developer_guide/contribution/index.md:92
+#: ../../source/developer_guide/contribution/index.md:91
 msgid "`[Kernel]` for changes affecting compute kernels and ops."
 msgstr "`[Kernel]` 用于影响计算内核和操作的更改。"
 
-#: ../../source/developer_guide/contribution/index.md:93
+#: ../../source/developer_guide/contribution/index.md:92
 msgid "`[Bugfix]` for bug fixes."
 msgstr "`[Bugfix]` 用于错误修复。"
 
-#: ../../source/developer_guide/contribution/index.md:94
+#: ../../source/developer_guide/contribution/index.md:93
 msgid "`[Doc]` for documentation fixes and improvements."
 msgstr "`[Doc]` 用于文档修复和改进。"
 
-#: ../../source/developer_guide/contribution/index.md:95
+#: ../../source/developer_guide/contribution/index.md:94
 msgid "`[Test]` for tests (such as unit tests)."
 msgstr "`[Test]` 用于测试（例如单元测试）。"
 
-#: ../../source/developer_guide/contribution/index.md:96
+#: ../../source/developer_guide/contribution/index.md:95
 msgid "`[CI]` for build or continuous integration improvements."
 msgstr "`[CI]` 用于构建或持续集成的改进。"
 
-#: ../../source/developer_guide/contribution/index.md:97
+#: ../../source/developer_guide/contribution/index.md:96
 msgid ""
 "`[Misc]` for PRs that do not fit the above categories. Please use this "
 "sparingly."
 msgstr "`[Misc]` 用于不属于上述类别的 PR。请谨慎使用此标签。"
 
-#: ../../source/developer_guide/contribution/index.md:100
+#: ../../source/developer_guide/contribution/index.md:99
 msgid ""
 "If the PR spans more than one category, please include all relevant "
 "prefixes."
 msgstr "如果 PR 涉及多个类别，请包含所有相关的前缀。"
 
-#: ../../source/developer_guide/contribution/index.md:103
+#: ../../source/developer_guide/contribution/index.md:102
 msgid "Others"
 msgstr "其他"
 
-#: ../../source/developer_guide/contribution/index.md:105
+#: ../../source/developer_guide/contribution/index.md:104
 msgid ""
 "You may find more information about contributing to vLLM Ascend backend "
 "plugin on "
 "[<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing). If "
 "you encounter any problems while contributing, feel free to submit a PR "
 "to improve the documentation to help other developers."
-msgstr "你可以在 [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing) 上找到有关为 vLLM Ascend 后端插件做贡献的更多信息。如果在贡献过程中遇到任何问题，欢迎随时提交 PR 来改进文档，以帮助其他开发者。"
+msgstr ""
+"你可以在 [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing) "
+"上找到有关为 vLLM Ascend 后端插件做贡献的更多信息。如果在贡献过程中遇到任何问题，欢迎随时提交 PR 来改进文档，以帮助其他开发者。"

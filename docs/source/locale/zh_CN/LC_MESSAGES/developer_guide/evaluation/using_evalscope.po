@@ -1,14 +1,8 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
-#
 msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-22 08:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -65,8 +59,10 @@ msgid "3. Run GSM8K using EvalScope for accuracy testing"
 msgstr "3. 使用 EvalScope 运行 GSM8K 进行精度测试"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:68
-msgid "You can use `evalscope eval` to run GSM8K for accuracy testing:"
-msgstr "你可以使用 `evalscope eval` 运行 GSM8K 进行精度测试："
+msgid ""
+"You can use `evalscope eval` to run GSM8K (a grade-school math benchmark "
+"dataset) for accuracy testing:"
+msgstr "你可以使用 `evalscope eval` 运行 GSM8K（一个小学数学基准数据集）进行精度测试："
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:80
 #: ../../source/developer_guide/evaluation/using_evalscope.md:117

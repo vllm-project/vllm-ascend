@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-22 08:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,21 +29,21 @@ msgstr "工作原理"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:5
 msgid ""
-"This is an optimization based on Fx graphs, which can be considered an "
+"This is an optimization based on FX graphs, which can be considered an "
 "acceleration solution for the aclgraph mode."
-msgstr "这是一种基于 Fx 图的优化，可视为 aclgraph 模式的一种加速方案。"
+msgstr "这是一种基于 FX 图的优化，可视为 aclgraph 模式的一种加速方案。"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:7
 msgid "You can get its code [code](https://gitcode.com/Ascend/torchair)"
 msgstr "您可以在 [code](https://gitcode.com/Ascend/torchair) 获取其代码"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:9
-msgid "Default Fx Graph Optimization"
-msgstr "默认 Fx 图优化"
+msgid "Default FX Graph Optimization"
+msgstr "默认 FX 图优化"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:11
-msgid "Fx Graph pass"
-msgstr "Fx 图处理过程"
+msgid "FX Graph pass"
+msgstr "FX 图处理过程"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:13
 msgid ""
@@ -59,11 +59,13 @@ msgid ""
 "operators with a form of non-in-place operators + copy operators. "
 "npugraph_ex will reverse this process, restoring the in-place operators "
 "and reducing memory movement."
-msgstr "对于模型的原始输入参数，如果包含原位运算符，Dynamo 的 Functionalize 过程会将其替换为非原位运算符 + 复制运算符的形式。npugraph_ex 将逆转此过程，恢复原位运算符，减少内存移动。"
+msgstr ""
+"对于模型的原始输入参数，如果包含原位运算符，Dynamo 的 Functionalize 过程会将其替换为非原位运算符 + "
+"复制运算符的形式。npugraph_ex 将逆转此过程，恢复原位运算符，减少内存移动。"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:16
-msgid "Fx fusion pass"
-msgstr "Fx 融合处理过程"
+msgid "FX fusion pass"
+msgstr "FX 融合处理过程"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:18
 msgid ""
@@ -92,7 +94,9 @@ msgid ""
 "Users can register a custom graph fusion pass in TorchAir to modify "
 "PyTorch FX graphs. The registration relies on the register_replacement "
 "API."
-msgstr "用户可以在 TorchAir 中注册自定义的图融合处理过程，以修改 PyTorch FX 图。注册依赖于 register_replacement API。"
+msgstr ""
+"用户可以在 TorchAir 中注册自定义的图融合处理过程，以修改 PyTorch FX 图。注册依赖于 register_replacement"
+" API。"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:28
 msgid "Below is the declaration of this API and a demo of its usage."
@@ -182,7 +186,9 @@ msgid ""
 " on the matching result, such as checking whether the fused operators are"
 " on the same stream, checking the device type, checking the input shapes,"
 " and so on."
-msgstr "算子融合后的额外验证函数。该函数的输入参数必须是来自 torch._inductor.pattern_matcher 的 Match 对象，用于对匹配结果进行进一步的自定义检查，例如检查融合后的算子是否在同一流上、检查设备类型、检查输入形状等。"
+msgstr ""
+"算子融合后的额外验证函数。该函数的输入参数必须是来自 torch._inductor.pattern_matcher 的 Match "
+"对象，用于对匹配结果进行进一步的自定义检查，例如检查融合后的算子是否在同一流上、检查设备类型、检查输入形状等。"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md
 msgid "search_fn_pattern"
@@ -195,7 +201,9 @@ msgid ""
 "object. After passing this parameter, search_fn will no longer be used to"
 " match operator combinations; instead, this parameter will be used "
 "directly as the matching rule."
-msgstr "通常无需提供自定义模式对象。其定义遵循原生 PyTorch MultiOutputPattern 对象的规则。传入此参数后，将不再使用 search_fn 来匹配算子组合，而是直接使用此参数作为匹配规则。"
+msgstr ""
+"通常无需提供自定义模式对象。其定义遵循原生 PyTorch MultiOutputPattern 对象的规则。传入此参数后，将不再使用 "
+"search_fn 来匹配算子组合，而是直接使用此参数作为匹配规则。"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:43
 msgid "Usage Example"
@@ -206,7 +214,9 @@ msgid ""
 "The default fusion pass in npugraph_ex is also implemented based on this "
 "API. You can see more examples of using this API in the vllm-ascend and "
 "npugraph_ex code repositories."
-msgstr "npugraph_ex 中的默认融合处理过程也是基于此 API 实现的。您可以在 vllm-ascend 和 npugraph_ex 代码仓库中查看更多使用此 API 的示例。"
+msgstr ""
+"npugraph_ex 中的默认融合处理过程也是基于此 API 实现的。您可以在 vllm-ascend 和 npugraph_ex "
+"代码仓库中查看更多使用此 API 的示例。"
 
 #: ../../source/developer_guide/Design_Documents/npugraph_ex.md:99
 msgid "DFX"
@@ -217,4 +227,6 @@ msgid ""
 "By reusing the TORCH_COMPILE_DEBUG environment variable from the PyTorch "
 "community, when TORCH_COMPILE_DEBUG=1 is set, it will output the FX "
 "graphs throughout the entire process."
-msgstr "通过复用 PyTorch 社区的 TORCH_COMPILE_DEBUG 环境变量，当设置 TORCH_COMPILE_DEBUG=1 时，将输出整个过程中的 FX 图。"
+msgstr ""
+"通过复用 PyTorch 社区的 TORCH_COMPILE_DEBUG 环境变量，当设置 TORCH_COMPILE_DEBUG=1 "
+"时，将输出整个过程中的 FX 图。"

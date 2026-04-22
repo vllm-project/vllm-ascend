@@ -1,14 +1,7 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
-#
-msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-15 09:41+0000\n"
+"POT-Creation-Date: 2026-04-22 08:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -187,8 +180,8 @@ msgstr "`--tensor-parallel-size` 16 是张量并行（TP）大小的常见设置
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_multi_node.md:305
 msgid ""
-"`--prefill-context-parallel-size` 2 are common settings for prefill "
-"context parallelism (PCP) sizes."
+"`--prefill-context-parallel-size` 2 is common setting for prefill context"
+" parallelism (PCP) sizes."
 msgstr "`--prefill-context-parallel-size` 2 是预填充上下文并行（PCP）大小的常见设置。"
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_multi_node.md:306

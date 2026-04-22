@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 09:08+0000\n"
+"POT-Creation-Date: 2026-04-22 08:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,35 +29,33 @@ msgstr "概述"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:5
 msgid ""
-"**Layer Shard Linear** is a memory-optimization feature designed for "
+"**Layer Sharding Linear** is a memory-optimization feature designed for "
 "large language model (LLM) inference. It addresses the high memory "
 "pressure caused by **repeated linear operators across many layers** that "
 "share identical structure but have distinct weights."
 msgstr ""
-"**层分片线性算子** 是一项为大语言模型推理设计的内存优化功能。它旨在解决由**跨越多层的重复线性算子**所引起的高内存压力，这些算子结构相同但权重不同。"
+"**层分片线性算子** "
+"是一项为大语言模型推理设计的内存优化功能。它旨在解决由**跨越多层的重复线性算子**所引起的高内存压力，这些算子结构相同但权重不同。"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:7
 msgid ""
-"Instead of replicating all weights on every device, **Layer Shard Linear "
-"shards the weights of a \"series\" of such operators across the NPU "
-"devices in a communication group**:"
-msgstr ""
-"与在每个设备上复制所有权重不同，**层分片线性算子将此类算子的一个\"系列\"的权重分片到通信组内的NPU设备上**："
+"Instead of replicating all weights on every device, **Layer Sharding "
+"Linear shards the weights of a \"series\" of such operators across the "
+"NPU devices in a communication group**:"
+msgstr "与在每个设备上复制所有权重不同，**层分片线性算子将此类算子的一个\"系列\"的权重分片到通信组内的NPU设备上**："
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:9
 msgid ""
-"The **i-th layer's linear weight** is stored **only on device `i % K`**, "
+"The **i-th layer's linear weight** is stored **only on device `i % K`** "
 "where `K` is the number of devices in the group."
-msgstr ""
-"**第 i 层的线性权重** **仅存储在设备 `i % K` 上**，其中 `K` 是组内的设备数量。"
+msgstr "**第 i 层的线性权重** **仅存储在设备 `i % K` 上**，其中 `K` 是组内的设备数量。"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:10
 msgid ""
 "Other devices hold a lightweight **shared dummy tensor** during "
 "initialization and fetch the real weight **on-demand** via asynchronous "
 "broadcast during the forward pass."
-msgstr ""
-"其他设备在初始化期间持有一个轻量级的**共享虚拟张量**，并在前向传播期间通过异步广播**按需**获取真实权重。"
+msgstr "其他设备在初始化期间持有一个轻量级的**共享虚拟张量**，并在前向传播期间通过异步广播**按需**获取真实权重。"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:12
 msgid ""
@@ -75,8 +73,7 @@ msgstr ""
 msgid ""
 "This approach **preserves exact computational semantics** while "
 "**significantly reducing NPU memory footprint**, especially critical for:"
-msgstr ""
-"这种方法**保持了精确的计算语义**，同时**显著减少了NPU内存占用**，这对于以下情况尤其关键："
+msgstr "这种方法**保持了精确的计算语义**，同时**显著减少了NPU内存占用**，这对于以下情况尤其关键："
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:16
 msgid "Extremely deep architectures (e.g., DeepSeek-V3/R1 with 61 layers);"
@@ -89,7 +86,9 @@ msgid ""
 "/vllm-ascend/pull/4188)**, where the full `O` (output) projection matrix "
 "must reside in memory per layer;"
 msgstr ""
-"使用 **[DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702)** 或 **[FlashComm2](https://github.com/vllm-project/vllm-ascend/pull/4188)** 的模型，其中完整的`O`（输出）投影矩阵必须驻留在每层的内存中；"
+"使用 **[DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702)** 或 "
+"**[FlashComm2](https://github.com/vllm-project/vllm-ascend/pull/4188)** "
+"的模型，其中完整的`O`（输出）投影矩阵必须驻留在每层的内存中；"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:18
 msgid ""
@@ -111,12 +110,13 @@ msgstr "层分片"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:26
 msgid ""
-"**Figure.** Layer Shard Linear workflow: weights are sharded by layer "
+"**Figure.** Layer Sharding Linear workflow: weights are sharded by layer "
 "across devices (top), and during forward execution (bottom), asynchronous"
 " broadcast **pre-fetches** the next layer's weight while the current "
-"layer computes—enabling **zero-overhead** weight loading."
+"layer computes-enabling **zero-overhead** weight loading."
 msgstr ""
-"**图.** 层分片线性算子工作流程：权重按层分片到各设备（顶部），在前向执行期间（底部），异步广播**预取**下一层的权重，同时当前层进行计算——实现**零开销**的权重加载。"
+"**图.** "
+"层分片线性算子工作流程：权重按层分片到各设备（顶部），在前向执行期间（底部），异步广播**预取**下一层的权重，同时当前层进行计算——实现**零开销**的权重加载。"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:30
 msgid "Getting Started"
@@ -124,11 +124,12 @@ msgstr "快速开始"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:32
 msgid ""
-"To enable **Layer Shard Linear**, specify the target linear layers using "
-"the `--additional-config` argument when launching your inference job. For"
-" example, to shard the `o_proj` and `q_b_proj` layers, use:"
+"To enable **Layer Sharding Linear**, specify the target linear layers "
+"using the `--additional-config` argument when launching your inference "
+"job. For example, to shard the `o_proj` and `q_b_proj` layers, use:"
 msgstr ""
-"要启用**层分片线性算子**，请在启动推理作业时使用 `--additional-config` 参数指定目标线性层。例如，要对 `o_proj` 和 `q_b_proj` 层进行分片，请使用："
+"要启用**层分片线性算子**，请在启动推理作业时使用 `--additional-config` 参数指定目标线性层。例如，要对 `o_proj`"
+" 和 `q_b_proj` 层进行分片，请使用："
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:40
 msgid ""
@@ -136,7 +137,8 @@ msgid ""
 "be enabled on the **P node** with `kv_role=\"kv_producer\"`. "
 "`kv_role=\"kv_consumer\"` and `kv_role=\"kv_both\"` are not supported."
 msgstr ""
-"**限制** 在PD解耦部署中，层分片只能在 `kv_role=\"kv_producer\"` 的 **P节点** 上启用。不支持 `kv_role=\"kv_consumer\"` 和 `kv_role=\"kv_both\"`。"
+"**限制** 在PD解耦部署中，层分片只能在 `kv_role=\"kv_producer\"` 的 **P节点** 上启用。不支持 "
+"`kv_role=\"kv_consumer\"` 和 `kv_role=\"kv_both\"`。"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:46
 msgid "Supported Scenarios"
@@ -157,7 +159,8 @@ msgid ""
 "resident in memory for each layer. Layer sharding significantly reduces "
 "memory pressure by distributing these weights across devices."
 msgstr ""
-"当使用 [FlashComm2](https://github.com/vllm-project/vllm-ascend/pull/4188) 时，完整的输出投影（`o_proj`）矩阵必须驻留在每层的内存中。层分片通过将这些权重分布到各设备上，显著降低了内存压力。"
+"当使用 [FlashComm2](https://github.com/vllm-project/vllm-ascend/pull/4188) "
+"时，完整的输出投影（`o_proj`）矩阵必须驻留在每层的内存中。层分片通过将这些权重分布到各设备上，显著降低了内存压力。"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:54
 #: ../../source/user_guide/feature_guide/layer_sharding.md:71
@@ -175,11 +178,12 @@ msgid ""
 "stored per layer. Sharding these layers across NPUs helps fit extremely "
 "deep models (e.g., 61-layer architectures) into limited device memory."
 msgstr ""
-"使用 [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702) 时，`q_b_proj` 和 `o_proj` 层都需要每层存储大型权重矩阵。将这些层分片到多个NPU上有助于将极深的模型（例如，61层架构）装入有限的设备内存中。"
+"使用 [DSA-CP](https://github.com/vllm-project/vllm-ascend/pull/4702) "
+"时，`q_b_proj` 和 `o_proj` "
+"层都需要每层存储大型权重矩阵。将这些层分片到多个NPU上有助于将极深的模型（例如，61层架构）装入有限的设备内存中。"
 
 #: ../../source/user_guide/feature_guide/layer_sharding.md:69
 msgid ""
 "In PD-disaggregated deployments, this mode is supported only on the **P "
 "node** with `kv_role=\"kv_producer\"`."
-msgstr ""
-"在PD解耦部署中，此模式仅在 `kv_role=\"kv_producer\"` 的 **P节点** 上受支持。"
+msgstr "在PD解耦部署中，此模式仅在 `kv_role=\"kv_producer\"` 的 **P节点** 上受支持。"
