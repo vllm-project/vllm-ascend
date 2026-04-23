@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.nn as nn
+from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 
@@ -500,10 +501,19 @@ class TestC8KVScaleWeightLoader(TestBase):
 class TestAscendC8KVCacheAttentionMethod(TestBase):
     """Tests for AscendC8KVCacheAttentionMethod in kv_c8.py."""
 
-    def _make_method(self):
+    def _make_method(self, is_kv_producer=False):
         from vllm_ascend.quantization.methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
-        return AscendC8KVCacheAttentionMethod(quant_description={}, prefix="model.layers.0.self_attn.attn")
+        mock_config = MagicMock(spec=VllmConfig)
+        if is_kv_producer:
+            kv_config = MagicMock(spec=KVTransferConfig)
+            kv_config.is_kv_producer = True
+            mock_config.kv_transfer_config = kv_config
+        else:
+            mock_config.kv_transfer_config = None
+
+        with patch("vllm_ascend.quantization.methods.kv_c8.get_current_vllm_config", return_value=mock_config):
+            return AscendC8KVCacheAttentionMethod(quant_description={}, prefix="model.layers.0.self_attn.attn")
 
     def _make_layer_with_impl(self):
         layer = nn.Module()
@@ -511,10 +521,16 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
         return layer
 
     def test_create_weights_sets_kv_cache_torch_dtype(self):
-        method = self._make_method()
+        method = self._make_method(is_kv_producer=False)
         layer = self._make_layer_with_impl()
         method.create_weights(layer)
         self.assertEqual(layer.kv_cache_torch_dtype, torch.int8)
+
+    def test_create_weights_does_not_set_int8_when_kv_producer(self):
+        method = self._make_method(is_kv_producer=True)
+        layer = self._make_layer_with_impl()
+        method.create_weights(layer)
+        self.assertFalse(hasattr(layer, "kv_cache_torch_dtype"))
 
     def test_create_weights_registers_scale_offset_params(self):
         method = self._make_method()
@@ -567,7 +583,10 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
 
 
 class TestAscendC8AttentionBackendImplScales(TestBase):
-    """Tests for AscendC8AttentionBackendImpl scale helpers."""
+    """Tests for AscendC8AttentionBackendImpl scale helpers (scalar scales/offsets)."""
+
+    def setUp(self):
+        self.original_dtype = torch.get_default_dtype()
 
     def _make_impl(self, num_kv_heads=4, head_size=8):
         from vllm_ascend.attention.attention_v1 import AscendC8AttentionBackendImpl
@@ -583,18 +602,11 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
 
     def _make_layer(self, num_kv_heads=4, head_size=8):
         layer = nn.Module()
-        layer.k_cache_scale = nn.Parameter(
-            torch.ones(num_kv_heads * head_size, dtype=torch.float32), requires_grad=False
-        )
-        layer.k_cache_offset = nn.Parameter(
-            torch.zeros(num_kv_heads * head_size, dtype=torch.float32), requires_grad=False
-        )
-        layer.v_cache_scale = nn.Parameter(
-            torch.ones(num_kv_heads * head_size, dtype=torch.float32), requires_grad=False
-        )
-        layer.v_cache_offset = nn.Parameter(
-            torch.zeros(num_kv_heads * head_size, dtype=torch.float32), requires_grad=False
-        )
+        shape = num_kv_heads * head_size
+        layer.k_cache_scale = nn.Parameter(torch.ones(shape, dtype=self.original_dtype), requires_grad=False)
+        layer.k_cache_offset = nn.Parameter(torch.zeros(shape, dtype=self.original_dtype), requires_grad=False)
+        layer.v_cache_scale = nn.Parameter(torch.ones(shape, dtype=self.original_dtype), requires_grad=False)
+        layer.v_cache_offset = nn.Parameter(torch.zeros(shape, dtype=self.original_dtype), requires_grad=False)
         return layer
 
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
@@ -613,7 +625,7 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         layer = self._make_layer()
         impl._prepare_c8_scales(layer, torch.device("cpu"))
         k_scale_after_first = layer._c8_k_scale.clone()
-        layer.k_cache_scale.data = torch.ones(32, dtype=torch.float32) * 99
+        layer.k_cache_scale.data = torch.ones(32, dtype=self.original_dtype) * 99
         impl._prepare_c8_scales(layer, torch.device("cpu"))
         self.assertTrue(torch.allclose(layer._c8_k_scale, k_scale_after_first))
 
@@ -626,7 +638,7 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         impl._prepare_c8_scales(layer, torch.device("cpu"))
         self.assertEqual(layer._c8_k_aq_scale.shape, (1, num_kv_heads, 1, head_size))
         self.assertEqual(layer._c8_v_aq_scale.shape, (1, num_kv_heads, 1, head_size))
-        self.assertEqual(layer._c8_k_aq_scale.dtype, torch.bfloat16)
+        self.assertEqual(layer._c8_k_aq_scale.dtype, self.original_dtype)
 
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
@@ -636,8 +648,8 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         layer = self._make_layer(num_kv_heads, head_size)
         impl._prepare_c8_scales(layer, torch.device("cpu"))
         num_tokens = 6
-        key = torch.zeros(num_tokens, num_kv_heads, head_size, dtype=torch.bfloat16)
-        value = torch.zeros(num_tokens, num_kv_heads, head_size, dtype=torch.bfloat16)
+        key = torch.zeros(num_tokens, num_kv_heads, head_size, dtype=self.original_dtype)
+        value = torch.zeros(num_tokens, num_kv_heads, head_size, dtype=self.original_dtype)
         key_q, value_q = impl._quantize_kv_to_int8(key, value, layer, num_tokens)
         self.assertEqual(key_q.dtype, torch.int8)
         self.assertEqual(value_q.dtype, torch.int8)
@@ -650,18 +662,18 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         num_kv_heads, head_size = 1, 4
         impl = self._make_impl(num_kv_heads, head_size)
         layer = nn.Module()
-        scale_val = torch.full((num_kv_heads * head_size,), 2.0, dtype=torch.float32)
+        scale_val = torch.full((num_kv_heads * head_size,), 2.0, dtype=self.original_dtype)
         layer.k_cache_scale = nn.Parameter(scale_val.clone(), requires_grad=False)
         layer.k_cache_offset = nn.Parameter(
-            torch.zeros(num_kv_heads * head_size, dtype=torch.float32), requires_grad=False
+            torch.zeros(num_kv_heads * head_size, dtype=self.original_dtype), requires_grad=False
         )
         layer.v_cache_scale = nn.Parameter(scale_val.clone(), requires_grad=False)
         layer.v_cache_offset = nn.Parameter(
-            torch.zeros(num_kv_heads * head_size, dtype=torch.float32), requires_grad=False
+            torch.zeros(num_kv_heads * head_size, dtype=self.original_dtype), requires_grad=False
         )
         impl._prepare_c8_scales(layer, torch.device("cpu"))
-        key = torch.full((1, num_kv_heads, head_size), 4.0, dtype=torch.bfloat16)
-        value = torch.full((1, num_kv_heads, head_size), 4.0, dtype=torch.bfloat16)
+        key = torch.full((1, num_kv_heads, head_size), 4.0, dtype=self.original_dtype)
+        value = torch.full((1, num_kv_heads, head_size), 4.0, dtype=self.original_dtype)
         key_q, _ = impl._quantize_kv_to_int8(key, value, layer, 1)
         self.assertTrue(torch.all(key_q[0] == 2))
 
