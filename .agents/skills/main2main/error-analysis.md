@@ -240,6 +240,14 @@ else:
     # Use new API
 ```
 
+**Three rules that prevent subtle mistakes:**
+
+1. **Use `vllm_version_is()` — not `hasattr()`, not `try/except`, not a derived boolean flag.** The version string is the source of truth; anything that hides it makes future cleanup require archaeology. See SKILL.md Version Compatibility Pattern for the full rationale.
+
+2. **Apply the guard at each branching site.** If two files diverge by version, both import and call `vllm_version_is()` directly. Don't set a flag in one place and read it in another — that turns a version boundary into a capability toggle, which future maintainers won't delete when dropping the version.
+
+3. **When in doubt, grep the existing codebase.** `grep -rn 'vllm_version_is' vllm_ascend/` shows how other fixes are structured; follow that pattern.
+
 This pattern appears throughout the Common Error Patterns below.
 
 ### 4.3 Output Fix Summary

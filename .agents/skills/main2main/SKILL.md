@@ -59,6 +59,16 @@ else:
 
 The compatible release version comes from `vllm_version` matrix in `.github/workflows/pr_test_full.yaml`.
 
+**Always use `vllm_version_is()`. Do not use these alternatives:**
+
+- `hasattr(obj, "attr")` — looks like duck typing but silently accepts unexpected API shapes. It also hides which version boundary introduced the change, making future cleanup require code archaeology instead of a grep.
+- A boolean flag derived from a version check (e.g., `self.use_new_api = not vllm_version_is("0.16.0")`) set once and propagated downstream — this disguises a version boundary as a capability toggle. Future readers preserve the flag when dropping the version instead of deleting the branch.
+- `try/except ImportError` or `try/except AttributeError` — same problem as `hasattr`: hides the version boundary.
+
+**Why `vllm_version_is()` specifically:** it is grep-able by version string. When the pinned version is eventually dropped, `grep -rn 'vllm_version_is("0.16.0")'` finds every cleanup site in one command. None of the alternatives support this workflow.
+
+**Apply the guard at each branching site, not once at the top.** Every file that diverges by version should import and call `vllm_version_is()` directly at the point of divergence. This keeps each version-gated branch independently discoverable and independently removable — the key question a future maintainer asks is "where does this version boundary live?" not "which flag was derived from which check?"
+
 ---
 
 ## Output Contract
