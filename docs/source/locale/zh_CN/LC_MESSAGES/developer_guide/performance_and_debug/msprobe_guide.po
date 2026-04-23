@@ -399,113 +399,10 @@ msgstr ""
 msgid "5.2 Visualization"
 msgstr "5.2 可视化"
 
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:171
-msgid ""
-"Use `msprobe -f pytorch graph` to generate results that can be opened "
-"inside `tb_graph_ascend`."
-msgstr "使用 `msprobe -f pytorch graph` 生成可在 `tb_graph_ascend` 中打开的结果。"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:173
-msgid ""
-"Ensure the dump contains `construct.json` (i.e., `level = L0` or `level ="
-" mix`)."
-msgstr "确保采集数据包含 `construct.json`（即 `level = L0` 或 `level = mix`）。"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:174
-msgid ""
-"Prepare a comparison file such as `compare.json`. Its format and "
-"generation flow are described in section 3.1.3 of "
-"`msprobe_visualization.md`. Example (minimal runnable snippet):"
-msgstr ""
-"准备对比文件（例如 `compare.json`）。其格式和生成流程在 `msprobe_visualization.md` 第 3.1.3 "
-"节中有描述。示例（最小可运行代码片段）："
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:184
-msgid ""
-"Replace the paths with your dump directories before invoking `msprobe -f "
-"pytorch graph`. **If you only need to build a single graph**, omit "
-"`bench_path` to visualize one dump.   Multi-rank scenarios (single rank, "
-"multi-rank, or multi-step multi-rank) are also supported. `npu_path` or "
-"`bench_path` must contain folders named `rank+number`, and every rank "
-"folder must contain a non-empty `construct.json` together with "
-"`dump.json` and `stack.json`. If any `construct.json` is empty, verify "
-"that the dump level includes `L0` or `mix`. When comparing graphs, both "
-"`npu_path` and `bench_path` must contain the same set of rank folders so "
-"they can be paired one-to-one."
-msgstr ""
-"在调用 `msprobe -f pytorch graph` 之前，将路径替换为您的采集目录。**如果只需要构建单个图**，可省略 "
-"`bench_path` 以可视化单个采集数据。支持多 rank 场景（单 rank、多 rank 或多步多 rank）。`npu_path` 或"
-" `bench_path` 必须包含名为 `rank+数字` 的文件夹，且每个 rank 文件夹必须包含非空的 `construct.json` "
-"以及 `dump.json` 和 `stack.json`。如果任何 `construct.json` 为空，请确认采集级别包含 `L0` 或 "
-"`mix`。比较图形时，`npu_path` 和 `bench_path` 必须包含相同的一组 rank 文件夹，以便它们可以一对一配对。"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:209
-msgid "Run:"
-msgstr "运行："
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:217
-msgid ""
-"After the comparison finishes, a `*.vis.db` file is created under "
-"`graph_output`."
-msgstr "比较完成后，将在 `graph_output` 下创建 `*.vis.db` 文件。"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:219
-#, python-brace-format
-msgid "Graph build: `build_{timestamp}.vis.db`"
-msgstr "图构建：`build_{timestamp}.vis.db`"
-
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:220
 #, python-brace-format
 msgid "Graph comparison: `compare_{timestamp}.vis.db`"
 msgstr "图比较：`compare_{timestamp}.vis.db`"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:222
-msgid ""
-"Launch `tensorboard` and load the output directory to inspect structural "
-"differences, numerical comparisons, overflow detection results, cross-"
-"device communication nodes, and filters/search. Pass the directory "
-"containing the `.vis.db` files to `--logdir`:"
-msgstr ""
-"启动 `tensorboard` 并加载输出目录，以检查结构差异、数值比较、溢出检测结果、跨设备通信节点以及过滤器/搜索功能。将包含 "
-"`.vis.db` 文件的目录传递给 `--logdir`："
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:228
-msgid ""
-"Inspect the visualization. The UI usually displays the overall model "
-"structure with operators, parameters, and tensor I/O. Click any node to "
-"expand its children."
-msgstr "检查可视化界面。UI 通常会显示整体模型结构，包括算子、参数和张量输入/输出。点击任意节点可展开其子节点。"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:229
-msgid ""
-"**Difference visualization**: Comparison results highlight divergent "
-"nodes with different colors (the larger the difference, the redder the "
-"node). Click a node to view its detailed information including tensor "
-"inputs/outputs, parameters, and operator type. Analyze the data "
-"difference and the surrounding connections to pinpoint the exact "
-"divergence."
-msgstr "**差异可视化**：比较结果使用不同颜色突出显示差异节点（差异越大，节点越红）。点击节点可查看其详细信息，包括张量输入/输出、参数和算子类型。分析数据差异及其周围连接，以精确定位具体差异点。"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:230
-msgid "**Helper features**:"
-msgstr "**辅助功能**："
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:231
-msgid ""
-"Switch rank/step: Quickly check difference nodes on different ranks and "
-"steps."
-msgstr "切换 rank/step：快速检查不同 rank 和步数上的差异节点。"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:232
-msgid "Search/filter: Use the search box to filter nodes by operator name, etc."
-msgstr "搜索/过滤：使用搜索框按算子名称等过滤节点。"
-
-#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:233
-msgid ""
-"Manual mapping: Automatic mapping cannot cover every case, so the tool "
-"lets you manually map nodes between the problem and benchmark graphs "
-"before generating comparison results."
-msgstr "手动映射：自动映射无法覆盖所有情况，因此该工具允许您在生成比较结果之前，手动映射问题和基准图中的节点。"
 
 #: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:235
 msgid "6. Troubleshooting"
@@ -620,3 +517,107 @@ msgid ""
 "A `mix` dump.json contains both L0 and L1 level data; the file format is "
 "the same as the examples above."
 msgstr "`mix` 级别的 dump.json 同时包含 L0 和 L1 级别的数据；文件格式与上述示例相同。"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:5
+msgid "For more details, see [Ascend/msprobe](https://gitcode.com/Ascend/msprobe)."
+msgstr "更多详情请参见 [Ascend/msprobe](https://gitcode.com/Ascend/msprobe)。"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:104
+msgid "Start vLLM and pass the config path through `--additional-config`:"
+msgstr "启动 vLLM，并通过 `--additional-config` 传入配置路径："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:215
+msgid "Use `msprobe graph_visualize` to build or compare graphs, then open the generated `*.vis.db` file(s) with TensorBoard (`tb_graph_ascend` plugin)."
+msgstr "使用 `msprobe graph_visualize` 构建或比较图，然后通过 TensorBoard（`tb_graph_ascend` 插件）打开生成的 `*.vis.db` 文件。"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:217
+msgid "Ensure dump data is visualization-ready:"
+msgstr "确保 dump 数据满足可视化要求："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:218
+msgid "Dump level must be `L0` or `mix` so `construct.json` is non-empty."
+msgstr "dump 级别必须为 `L0` 或 `mix`，以确保 `construct.json` 非空。"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:219
+msgid "Each rank directory should contain `dump.json`, `stack.json`, and `construct.json`."
+msgstr "每个 rank 目录都应包含 `dump.json`、`stack.json` 和 `construct.json`。"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:221
+msgid "Choose command mode:"
+msgstr "选择命令模式："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:222
+msgid "Single-graph build:"
+msgstr "单图构建："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:228
+msgid "Graph comparison:"
+msgstr "图对比："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:234
+msgid "Common optional flags:"
+msgstr "常用可选参数："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:235
+msgid "`-oc` / `--overflow_check`: enable overflow marking"
+msgstr "`-oc` / `--overflow_check`：启用溢出标记"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:236
+msgid "`-fm` / `--fuzzy_match`: enable fuzzy matching for node mapping"
+msgstr "`-fm` / `--fuzzy_match`：为节点映射启用模糊匹配"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:237
+msgid "`-lm` / `--layer_mapping [mapping.yaml]`: cross-framework/layer mapping compare"
+msgstr "`-lm` / `--layer_mapping [mapping.yaml]`：跨框架/层映射对比"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:238
+msgid "`-tensor_log`: print per-node compare log (tensor dump scenarios)"
+msgstr "`-tensor_log`：打印逐节点对比日志（tensor dump 场景）"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:239
+msgid "`-progress_log`: print detailed progress log"
+msgstr "`-progress_log`：打印详细进度日志"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:241
+msgid "Path granularity is auto-detected by `graph_visualize`:"
+msgstr "`graph_visualize` 会自动识别路径粒度："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:242
+msgid "Single-rank: `.../step0/rank0`"
+msgstr "单 rank：`.../step0/rank0`"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:243
+msgid "Multi-rank (batch): `.../step0`"
+msgstr "多 rank（批量）：`.../step0`"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:244
+msgid "Multi-step (batch): dump root path containing `step*`"
+msgstr "多 step（批量）：包含 `step*` 的 dump 根路径"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:246
+msgid "Output files:"
+msgstr "输出文件："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:247
+msgid "Single-graph build: `build_{timestamp}.vis.db`"
+msgstr "单图构建：`build_{timestamp}.vis.db`"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:250
+msgid "Launch TensorBoard with the output directory:"
+msgstr "以输出目录启动 TensorBoard："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:256
+msgid "In the visualization UI, inspect structure and numeric differences:"
+msgstr "在可视化界面中，检查结构差异和数值差异："
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:257
+msgid "Switch rank/step to locate unstable nodes quickly."
+msgstr "切换 rank/step 以快速定位不稳定节点。"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:258
+msgid "Use search/filter to focus on target ops/modules."
+msgstr "使用搜索/过滤聚焦目标算子/模块。"
+
+#: ../../source/developer_guide/performance_and_debug/msprobe_guide.md:259
+msgid "For compare mode, prioritize highlighted high-difference nodes and trace surrounding I/O/parameters."
+msgstr "在对比模式下，优先关注高亮的高差异节点，并追踪其周边的 I/O/参数。"

@@ -270,12 +270,23 @@ class NPUModelRunner(GPUModelRunner):
         dump_cfg = self.ascend_config.dump_config_path
         self.debugger = None
         if dump_cfg is not None:
+            self._debugger_started = False
             if self.model_config.enforce_eager:
                 from msprobe.pytorch import PrecisionDebugger
 
                 self.debugger = PrecisionDebugger(dump_cfg)
+            elif self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                try:
+                    from msprobe.pytorch import AclGraphDumper
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Failed to import AclGraphDumper from msprobe. "
+                        "Please install/rebuild msprobe with aclgraph_dump enabled."
+                    ) from exc
+
+                self.debugger = AclGraphDumper(dump_cfg)
             else:
-                raise RuntimeError("Dumping/debugging only works in eager mode.")
+                raise RuntimeError("Dumping/debugging requires eager mode or cudagraph mode.")
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
@@ -1585,14 +1596,7 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        # prevent debugger is None
-        if self.debugger is not None:
-            dbg_cfg = getattr(self.debugger, "config", None)
-            dump_level = str(getattr(dbg_cfg, "level", "L1")).upper() if dbg_cfg is not None else "L1"
-            if dump_level in ("L0", "MIX"):
-                self.debugger.start(model=self.model)
-            else:
-                self.debugger.start()
+        self._start_dump_data()
         if self.ascend_config.enable_async_exponential:
             self.sampler.do_async_exponential(
                 b_s=logits_indices.shape[0],
@@ -1652,9 +1656,7 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
-                    if self.debugger is not None:
-                        self.debugger.stop()
-                        self.debugger.step()
+                    self._finalize_dump_data()
                     return hidden_states
                 if self.is_pooling_model:
                     # Return the pooling output.
@@ -1662,9 +1664,7 @@ class NPUModelRunner(GPUModelRunner):
                         hidden_states, num_scheduled_tokens, num_scheduled_tokens_np, kv_connector_output
                     )
                     output.kv_connector_output = kv_connector_output
-                    if self.debugger is not None:
-                        self.debugger.stop()
-                        self.debugger.step()
+                    self._finalize_dump_data()
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
@@ -1858,9 +1858,7 @@ class NPUModelRunner(GPUModelRunner):
             with record_function_or_nullcontext("EPLB update"):
                 self.eplb_updator.forward_end()
 
-        if self.debugger is not None:
-            self.debugger.stop()
-            self.debugger.step()
+        self._finalize_dump_data()
 
         if self.need_accepted_tokens:
             assert self.sampling_done_event is not None
@@ -2852,6 +2850,25 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+
+        if self.debugger is not None and not self.model_config.enforce_eager:
+            self._start_dump_data()
+
+    def _start_dump_data(self) -> None:
+        if self.debugger is None:
+            return
+        self.debugger.start(self.model)
+        self._debugger_started = True
+
+    def _finalize_dump_data(self) -> None:
+        if self.debugger is None or not self._debugger_started:
+            return
+        if self.model_config.enforce_eager:
+            self.debugger.stop()
+            self.debugger.step()
+            self._debugger_started = False
+            return
+        self.debugger.step()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
