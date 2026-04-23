@@ -77,7 +77,7 @@ from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
+from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU, copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -236,8 +236,17 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.parallel_config.prefill_context_parallel_size * 2 * vllm_config.scheduler_config.max_num_seqs
         )
         vllm_config.scheduler_config.max_num_batched_tokens += max_pcp_pad_tokens
-        with _torch_cuda_wrapper():
-            super().__init__(vllm_config, device)
+        # Monkey-patch NgramProposerGPU.__init__ during super().__init__() to
+        # prevent the upstream from creating and running GPU-specific
+        # NgramGPUKernel (torch.compile) on NPU, which causes hardware errors.
+        # The Ascend _set_up_drafter() will replace the drafter afterwards.
+        _orig_ngram_init = NgramProposerGPU.__init__
+        NgramProposerGPU.__init__ = AscendNgramProposerNPU.__init__
+        try:
+            with _torch_cuda_wrapper():
+                super().__init__(vllm_config, device)
+        finally:
+            NgramProposerGPU.__init__ = _orig_ngram_init
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -1310,9 +1319,16 @@ class NPUModelRunner(GPUModelRunner):
                 k=self.drafter.k,
             )
 
-            # only async scheduling, set prev_sampled_token_ids，
-            if self.use_async_scheduling:
-                self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+            # Compute valid_sampled_tokens_count for async num_computed_tokens
+            # correction: count accepted tokens per request, zeroing discarded.
+            vocab_size = self.model_config.get_vocab_size()
+            valid_mask = (sampled_token_ids_tensor[:batch_size] != -1) & \
+                         (sampled_token_ids_tensor[:batch_size] < vocab_size)
+            valid_sampled_tokens_count = valid_mask.sum(dim=1).to(torch.int32)
+            valid_sampled_tokens_count.masked_fill_(
+                self.discard_request_mask.gpu[:batch_size], 0)
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count)
 
             # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
