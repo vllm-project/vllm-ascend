@@ -1579,6 +1579,7 @@ class TestAscendMLAImpl(TestBase):
         # 第一次调用（处理权重）返回 [128, 64] 形状的张量
         # 第二次调用（处理deq_scale）返回 [64] 形状的张量
         call_count = 0
+
         def mock_trans_rope_weight_func(x, rope_dim):
             nonlocal call_count
             call_count += 1
@@ -1588,6 +1589,7 @@ class TestAscendMLAImpl(TestBase):
             else:
                 # 第一次调用，返回相同形状的张量
                 return torch.randn(x.shape[0], x.shape[1])
+
         mock_trans_rope_weight.side_effect = mock_trans_rope_weight_func
         mock_torch_npu.npu_format_cast.return_value = torch.randn(1, 128, 128)
 
@@ -1670,17 +1672,17 @@ class TestAscendMLAImpl(TestBase):
     def test__forward_prefill(self, mock_npu_attention_update, mock_fia, mock_device_operator):
         # 测试_forward_prefill方法
         batch_size = 2
-        
+
         # 创建输入张量
         q_nope = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_nope_head_dim)
         q_pe = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_rope_head_dim)
         k_nope = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_nope_head_dim)
         k_pe = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_rope_head_dim)
         value = torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim)
-        
+
         # 模拟kv_c_and_k_pe_cache
         kv_c_and_k_pe_cache = [torch.randn(10, 1, 1, 192), torch.randn(10, 1, 1, 32)]
-        
+
         # 创建一个mock的attn_metadata
         attn_metadata = MagicMock()
         prefill_metadata = MagicMock()
@@ -1693,22 +1695,22 @@ class TestAscendMLAImpl(TestBase):
         prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list = [[10], [10]]
         prefill_metadata.block_table = torch.randint(0, 100, (2, 4))
         attn_metadata.prefill = prefill_metadata
-        
+
         # 模拟DeviceOperator.mla_cache_load
         mock_device_operator.mla_cache_load = MagicMock()
-        
+
         # 模拟torch_npu.npu_fused_infer_attention_score
         mock_fia.return_value = (
             torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim),
             torch.randn(self.impl.num_heads, batch_size),
         )
-        
+
         # 模拟torch_npu.npu_attention_update
         mock_npu_attention_update.return_value = (
             torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim),
             None,
         )
-        
+
         # 模拟kv_b_proj方法，让它返回一个包含正确形状张量的元组
         mock_kv_b_proj = MagicMock()
         # 创建一个形状为 [toks, num_heads, qk_nope_head_dim + v_head_dim] 的张量
@@ -1716,10 +1718,10 @@ class TestAscendMLAImpl(TestBase):
         kv_nope_shape = (toks, self.impl.num_heads, self.impl.qk_nope_head_dim + self.impl.v_head_dim)
         mock_kv_b_proj.return_value = (torch.randn(kv_nope_shape), None)
         self.impl.kv_b_proj = mock_kv_b_proj
-        
+
         # 调用_forward_prefill方法
         result = self.impl._forward_prefill(q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata)
-        
+
         # 验证返回值
         self.assertEqual(result.shape[0], batch_size)
         self.assertEqual(result.shape[1], self.impl.num_heads * self.impl.v_head_dim)
@@ -1757,10 +1759,10 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
-        
+
         # 设置enable_mlapo为True
         self.impl.enable_mlapo = True
-        
+
         # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
@@ -1944,7 +1946,7 @@ class TestAscendMLAImpl(TestBase):
 
         # 验证is_hidden_layer被调用了两次
         self.assertEqual(mock_is_hidden_layer.call_count, 2)
-        
+
         # 验证post_process_after_loading_for_shard_weight_series被调用了一次（只有第一个layer是hidden layer）
         mock_post_process.assert_called_once_with(mock_layer1)
 
