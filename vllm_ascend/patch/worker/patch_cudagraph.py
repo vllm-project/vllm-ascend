@@ -9,6 +9,7 @@ def _create_padded_batch_descriptor(
     uniform_decode: bool,
     has_lora: bool,
     num_active_loras: int = 0,
+    num_dycp_reqs: int = 0,
 ) -> BatchDescriptor:
     max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
     uniform_decode_query_len = self.uniform_decode_query_len
@@ -32,6 +33,7 @@ def _create_padded_batch_descriptor(
         uniform=uniform_decode,
         has_lora=has_lora,
         num_active_loras=num_active_loras,
+        num_dycp_reqs=num_dycp_reqs,
     )
 
 
