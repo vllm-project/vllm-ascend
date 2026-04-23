@@ -289,7 +289,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export IP_ADDRESS=$local_ip
        export NETWORK_CARD_NAME=$nic_name
        export HCCL_IF_IP=$IP_ADDRESS
@@ -364,7 +365,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        node0_ip="xxxx"
 
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export MASTER_IP_ADDRESS=$node0_ip
        export IP_ADDRESS=$local_ip
 
@@ -444,7 +446,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        node0_ip="xxxx"
 
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export MASTER_IP_ADDRESS=$node0_ip
        export IP_ADDRESS=$local_ip
 
