@@ -17,6 +17,7 @@ defaults:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: docs-linkcheck-${{ github.ref }}
@@ -32,34 +33,18 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
       - name: Collect changed docs files
         id: changed-docs
         if: ${{ github.event_name == 'pull_request' }}
-        run: |
-          set -euo pipefail
-
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-          git diff --name-only --diff-filter=AMR \
-            "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
-            -- docs/source \
-            | sed -n '/\.md$/ s#^docs/##p' > changed-docs.txt
-
-          if [ ! -s changed-docs.txt ]; then
-            echo "has_linkcheck_files=false" >> "$GITHUB_OUTPUT"
-            echo "No added or modified Sphinx docs files to linkcheck."
-            exit 0
-          fi
-
-          echo "has_linkcheck_files=true" >> "$GITHUB_OUTPUT"
-          echo "Changed docs files:"
-          sed 's/^/  /' changed-docs.txt
+        uses: tj-actions/changed-files@v47
+        with:
+          use_rest_api: true
+          files: |
+            docs/source/**/*.md
 
       - name: Install docs dependencies
-        if: ${{ github.event_name != 'pull_request' || steps.changed-docs.outputs.has_linkcheck_files == 'true' }}
+        if: ${{ github.event_name != 'pull_request' || steps.changed-docs.outputs.any_changed == 'true' }}
         run: |
           python -m pip install --upgrade pip
           pip install -r docs/requirements-docs.txt
@@ -70,15 +55,17 @@ jobs:
           make -C docs linkcheck SPHINXOPTS="-W --keep-going"
 
       - name: Run Sphinx linkcheck for changed docs
-        if: ${{ github.event_name == 'pull_request' && steps.changed-docs.outputs.has_linkcheck_files == 'true' }}
+        if: ${{ github.event_name == 'pull_request' && steps.changed-docs.outputs.any_changed == 'true' }}
+        env:
+          CHANGED_DOCS: ${{ steps.changed-docs.outputs.all_changed_files }}
         run: |
           set -euo pipefail
 
-          mapfile -t changed_docs < changed-docs.txt
+          echo "Changed docs files:"
+          printf '  %s\n' ${CHANGED_DOCS}
 
-          cd docs
           sphinx-build -b linkcheck -W --keep-going \
-            source _build/linkcheck "${changed_docs[@]}"
+            docs/source docs/_build/linkcheck ${CHANGED_DOCS}
 
       - name: Upload linkcheck reports
         if: ${{ always() && github.event_name != 'pull_request' }}

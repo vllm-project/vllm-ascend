@@ -157,7 +157,6 @@ linkcheck_ignore = [
     r"https?://0\.0\.0\.0(:\d+)?($|/.*)",
     r"https?://192\.0\.0\.1(:\d+)?($|/.*)",
     r"https?://<[^>]+>.*",
-    r"https://blog\.csdn\.net/qq_37368095/article/details/156429653\?spm=1011\.2124\.3001\.6209",
     r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
     r"https://github\.com/[^/?#]+/?$",
 ]
