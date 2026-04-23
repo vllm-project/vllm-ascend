@@ -138,23 +138,23 @@ msgstr "**注意：**"
 #: ../../source/tutorials/features/long_sequence_context_parallel_single_node.md:108
 #, python-brace-format
 msgid ""
-"for vllm version below `v0.12.0` use parameter: `--rope_scaling "
+"for vllm version below `v0.12.0` use parameter: `--rope-scaling "
 "'{\"rope_type\":\"yarn\",\"factor\":4,\"original_max_position_embeddings\":32768}'"
 " \\`"
 msgstr ""
-"对于 vllm 版本低于 `v0.12.0`，使用参数：`--rope_scaling "
+"对于 vllm 版本低于 `v0.12.0`，使用参数：`--rope-scaling "
 "'{\"rope_type\":\"yarn\",\"factor\":4,\"original_max_position_embeddings\":32768}'"
 " \\`"
 
 #: ../../source/tutorials/features/long_sequence_context_parallel_single_node.md:109
 #, python-brace-format
 msgid ""
-"for vllm version `v0.12.0` use parameter: `--hf-overrides "
+"for vllm version same as or newer than `v0.12.0` use parameter: `--hf-overrides "
 "'{\"rope_parameters\": "
 "{\"rope_type\":\"yarn\",\"rope_theta\":1000000,\"factor\":4,\"original_max_position_embeddings\":32768}}'"
 " \\`"
 msgstr ""
-"对于 vllm 版本 `v0.12.0`，使用参数：`--hf-overrides '{\"rope_parameters\": "
+"对于 vllm 版本 `v0.12.0`及以上，使用参数：`--hf-overrides '{\"rope_parameters\": "
 "{\"rope_type\":\"yarn\",\"rope_theta\":1000000,\"factor\":4,\"original_max_position_embeddings\":32768}}'"
 " \\`"
 

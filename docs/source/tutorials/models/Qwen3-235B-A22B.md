@@ -127,7 +127,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 
 - [Qwen3-235B-A22B](https://huggingface.co/Qwen/Qwen3-235B-A22B#processing-long-texts) originally only supports 40960 context(max_position_embeddings). If you want to use it and its related quantization weights to run long seqs (such as 128k context), it is required to use yarn rope-scaling technique.
     - For vLLM version same as or new than `v0.12.0`, use parameter: `--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \`.
-    - For vllm version below `v0.12.0`, use parameter: `--rope_scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \`.
+    - For vllm version below `v0.12.0`, use parameter: `--rope-scaling '{"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}' \`.
   If you are using weights like [Qwen3-235B-A22B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) which originally supports long contexts, there is no need to add this parameter.
 
 The parameters are explained as follows:
@@ -310,7 +310,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
@@ -589,7 +589,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 PD proxy:
 
 ```shell
-python load_balance_proxy_server_example.py --port 12347 --prefiller-hosts prefill_node_1_ip --prefiller-port 8000 --decoder-hosts decode_node_1_ip --decoder-ports 8000
+python load_balance_proxy_server_example.py --port 12347 --prefiller-hosts prefill_node_1_ip --prefiller-ports 8000 --decoder-hosts decode_node_1_ip --decoder-ports 8000
 ```
 
 Benchmark scripts:
