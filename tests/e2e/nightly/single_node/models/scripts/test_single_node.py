@@ -360,7 +360,13 @@ def _all_passed(case_configs: list[dict[str, Any]], results: list[Any]) -> bool:
     return all(_task_passed(cfg, res) for cfg, res in zip(case_configs, results))
 
 
-def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[str], results: list[Any], name_suffix: str = "", instance_idx: int = 0) -> None:
+def _save_benchmark_results_json(
+    config: SingleNodeConfig,
+    benchmark_keys: list[str],
+    results: list[Any],
+    name_suffix: str = "",
+    instance_idx: int = 0,
+) -> None:
     """Serialize acc & perf benchmark results to a JSON file under benchmark_results/."""
     runner = os.environ.get("VLLM_CI_RUNNER", "")
     case_configs = [config.benchmarks[k] for k in benchmark_keys]
@@ -375,7 +381,9 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
         "model_name": config.model,
         "hardware": _extract_hardware(runner),
         "dtype": _extract_dtype(config),
-        "feature": _extract_features(config.server_cmds[instance_idx] if config.server_cmds else config.server_cmd, config.envs),
+        "feature": _extract_features(
+            config.server_cmds[instance_idx] if config.server_cmds else config.server_cmd, config.envs
+        ),
         "vllm_version": vllm.__version__,
         "vllm_ascend_version": os.environ.get("VLLM_ASCEND_VERSION", ""),
         "tasks": tasks,
@@ -441,39 +449,39 @@ async def test_single_node(config: SingleNodeConfig) -> None:
     # Multi-instance mode: two servers on the same card simultaneously
     if config.service_mode == "multi_instance":
         cmds = config.server_cmds
-        with RemoteOpenAIServer(
-            model=config.model,
-            vllm_serve_args=cmds[0],
-            server_port=config.server_port,
-            env_dict=config.envs,
-            auto_port=False,
-        ) as server1:
-            with RemoteOpenAIServer(
+        with (
+            RemoteOpenAIServer(
+                model=config.model,
+                vllm_serve_args=cmds[0],
+                server_port=config.server_port,
+                env_dict=config.envs,
+                auto_port=False,
+            ) as server1,
+            RemoteOpenAIServer(
                 model=config.model,
                 vllm_serve_args=cmds[1],
                 server_port=config.server_port2,
                 env_dict=config.envs,
                 auto_port=False,
-            ) as server2:
-                await asyncio.gather(
-                    _dispatch_tests(config, server1),
-                    _dispatch_tests(config, server2),
-                )
-                def _run_and_capture(port, name_suffix, instance_idx):
-                    buf = io.StringIO()
-                    with contextlib.redirect_stdout(buf):
-                        _run_benchmarks(config, port, name_suffix=name_suffix, instance_idx=instance_idx)
-                    return buf.getvalue()
+            ) as server2,
+        ):
+            await asyncio.gather(
+                _dispatch_tests(config, server1),
+                _dispatch_tests(config, server2),
+            )
 
-                loop = asyncio.get_event_loop()
-                out1, out2 = await asyncio.gather(
-                    loop.run_in_executor(None, lambda: _run_and_capture(config.server_port, f"instance1_{config.server_port}", 0)),
-                    loop.run_in_executor(None, lambda: _run_and_capture(config.server_port2, f"instance2_{config.server_port2}", 1)),
-                )
-                print(f"\n{'='*60}\nBenchmark - Instance 1 (port {config.server_port})\n{'='*60}")
-                print(out1)
-                print(f"\n{'='*60}\nBenchmark - Instance 2 (port {config.server_port2})\n{'='*60}")
-                print(out2)
+            def _run_and_capture(port, name_suffix, instance_idx):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    _run_benchmarks(config, port, name_suffix=name_suffix, instance_idx=instance_idx)
+                return buf.getvalue()
+
+            out1 = _run_and_capture(config.server_port, f"instance1_{config.server_port}", 0)
+            out2 = _run_and_capture(config.server_port2, f"instance2_{config.server_port2}", 1)
+            print(f"\n{'=' * 60}\nBenchmark - Instance 1 (port {config.server_port})\n{'=' * 60}")
+            print(out1)
+            print(f"\n{'=' * 60}\nBenchmark - Instance 2 (port {config.server_port2})\n{'=' * 60}")
+            print(out2)
         return
 
     # Standard OpenAI service mode
