@@ -241,7 +241,7 @@ class NPUPlatform(Platform):
             return
 
         kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is not None and kv_transfer_config.kv_role != "kv_producer":
+        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
             raise ValueError(
                 "additional_config.layer_sharding is only supported on P nodes "
                 "(kv_role='kv_producer') when KV transfer is enabled."
@@ -447,17 +447,6 @@ class NPUPlatform(Platform):
         # Activate custom ops for v1, except on 310P
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
-
-        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
-            kv_transfer_config = vllm_config.kv_transfer_config
-            kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role != "kv_consumer":
-                raise ValueError(
-                    "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) only supports PD-disaggregated "
-                    "decode nodes (D-side) with kv_role='kv_consumer'. It is not supported "
-                    "in PD-mixed mode (no kv_transfer_config / kv_role='kv_both') nor on "
-                    "prefill nodes (P-side) with kv_role='kv_producer'."
-                )
 
         if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
             kv_transfer_config = vllm_config.kv_transfer_config

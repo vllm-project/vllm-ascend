@@ -244,7 +244,7 @@ python load_balance_proxy_server_example.py \
     --host 192.0.0.1 \
     --port 8080 \
     --prefiller-hosts 192.0.0.1 \
-    --prefiller-port 13700 \
+    --prefiller-ports 13700 \
     --decoder-hosts 192.0.0.1 \
     --decoder-ports 13701
 ```
@@ -252,7 +252,7 @@ python load_balance_proxy_server_example.py \
 |Parameter  | Meaning |
 | --- | --- |
 | --port | Port of proxy |
-| --prefiller-port | All ports of prefill |
+| --prefiller-ports | All ports of prefill |
 | --decoder-ports | All ports of decoder |
 
 ## Verification

@@ -86,3 +86,7 @@ Online example:
 ```shell
 vllm serve someother_model_weight --enforce-eager
 ```
+
+## Common Limitations and Caveats
+
+- NPU soft partitioning + `CUDAGraphMode.PIECEWISE` is not supported. With soft-partitioned virtual NPU instances, the 2048 device streams are shared and split across containers (see the [virtual instance with vCANN RT description](https://gitcode.com/Ascend/mind-cluster/blob/branch_v26.0.0/docs/zh/scheduling/usage/virtual_instance/virtual_instance_with_vcann_rt/00_description.md)), but vLLM Ascend still derives ACL graph capture limits from a fixed full-device stream budget in `update_aclgraph_sizes` (`vllm_ascend/utils.py`) and does not use the per-container stream quota, so this combination is incompatible.

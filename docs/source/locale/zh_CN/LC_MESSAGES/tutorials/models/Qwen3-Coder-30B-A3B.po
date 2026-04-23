@@ -155,8 +155,8 @@ msgstr "详情请参考[使用 AISBench](../../developer_guide/evaluation/using_
 #: ../../source/tutorials/models/Qwen3-Coder-30B-A3B.md:95
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen3"
-"-Coder-30B-A3B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only."
-msgstr "执行后，您可以获得结果。以下是 `Qwen3-Coder-30B-A3B-Instruct` 在 `vllm-ascend:0.11.0rc0` 中的结果，仅供参考。"
+"-Coder-30B-A3B-Instruct` in `vllm-ascend:v0.11.0rc0` for reference only."
+msgstr "执行后，您可以获得结果。以下是 `Qwen3-Coder-30B-A3B-Instruct` 在 `vllm-ascend:v0.11.0rc0` 中的结果，仅供参考。"
 
 #: ../../source/tutorials/models/Qwen3-Coder-30B-A3B.md:29
 msgid "dataset"

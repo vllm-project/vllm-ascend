@@ -28,7 +28,7 @@ msgstr ""
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:5
 msgid "1. Online server"
-msgstr "1. 在线服务器"
+msgstr "1.在线服务器"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:7
 msgid "You can run docker container to start the vLLM server on a single NPU:"
@@ -48,7 +48,7 @@ msgstr "服务器启动后，你可以在新的终端中使用输入提示词查
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:56
 msgid "2. Install EvalScope using pip"
-msgstr "2. 使用 pip 安装 EvalScope"
+msgstr "2.使用 pip 安装 EvalScope"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:58
 msgid "You can install EvalScope as follows:"
@@ -56,7 +56,7 @@ msgstr "你可以通过以下方式安装 EvalScope："
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:66
 msgid "3. Run GSM8K using EvalScope for accuracy testing"
-msgstr "3. 使用 EvalScope 运行 GSM8K 进行精度测试"
+msgstr "3.使用 EvalScope 运行 GSM8K 进行精度测试"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:68
 msgid ""
@@ -81,7 +81,7 @@ msgstr ""
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:92
 msgid "4. Run model inference stress testing using EvalScope"
-msgstr "4. 使用 EvalScope 运行模型推理压力测试"
+msgstr "4.使用 EvalScope 运行模型推理压力测试"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:94
 msgid "Install EvalScope[perf] using pip"

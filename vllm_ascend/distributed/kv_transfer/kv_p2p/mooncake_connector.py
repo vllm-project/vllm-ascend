@@ -173,7 +173,7 @@ class KVCacheTaskTracker:
         while self.delayed_free_requests:
             request_id = next(iter(self.delayed_free_requests))
             delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
+            if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
@@ -586,7 +586,6 @@ class KVCacheRecvingThread(threading.Thread):
         head_dim = self.model_config.hf_text_config.head_dim
         block_size = self.vllm_config.cache_config.block_size
         num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
-        layers = self.model_config.hf_text_config.num_hidden_layers
         layers = len(self.kv_caches)
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)

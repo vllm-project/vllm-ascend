@@ -71,7 +71,8 @@ For best results, if you run inside a Docker container where `systemctl` is like
 
 - **Stop `irqbalance` service**:
 
-    For example, on Ubuntu system, you can run the following command to stop irqbalance:
+    For example, on Ubuntu and other systemd-based Linux distributions, you can stop irqbalance with:
+
     ```bash
     sudo systemctl stop irqbalance
     ```
@@ -81,6 +82,8 @@ For best results, if you run inside a Docker container where `systemctl` is like
     ```bash
     sudo systemctl start irqbalance
     ```
+
+    Note: On systems that do not use systemd, use the corresponding service-management command provided by the distribution.
 
 - **Permissions**:
     - Read access to `/proc/self/status` and `/proc/interrupts`

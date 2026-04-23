@@ -210,8 +210,8 @@ msgstr "详情请参考[使用 AISBench](../../developer_guide/evaluation/using_
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:181
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen2.5"
-"-Omni-7B` with `vllm-ascend:0.11.0rc0` for reference only."
-msgstr "执行后，您可以获得结果，以下是 `Qwen2.5-Omni-7B` 在 `vllm-ascend:0.11.0rc0` 上的结果，仅供参考。"
+"-Omni-7B` with `vllm-ascend:v0.11.0rc0` for reference only."
+msgstr "执行后，您可以获得结果，以下是 `Qwen2.5-Omni-7B` 在 `vllm-ascend:v0.11.0rc0` 上的结果，仅供参考。"
 
 #: ../../source/tutorials/models/Qwen2.5-Omni.md:91
 msgid "dataset"

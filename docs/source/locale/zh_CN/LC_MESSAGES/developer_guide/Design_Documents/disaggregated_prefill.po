@@ -96,7 +96,7 @@ msgstr "工作原理"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:29
 msgid "1. Design Approach"
-msgstr "1. 设计思路"
+msgstr "1.设计思路"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:31
 msgid ""
@@ -110,7 +110,7 @@ msgstr ""
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:33
 msgid "2. Implementation Design"
-msgstr "2. 实现设计"
+msgstr "2.实现设计"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:35
 msgid ""
@@ -246,7 +246,7 @@ msgstr "**MooncakeConnectorWorker**：用于在工作进程中管理 KV 缓存�
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:64
 msgid "4. Specifications Design"
-msgstr "4. 规格设计"
+msgstr "4.规格设计"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:66
 msgid ""
@@ -322,7 +322,7 @@ msgstr "DFX 分析"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:87
 msgid "1. Config Parameter Validation"
-msgstr "1. 配置参数验证"
+msgstr "1.配置参数验证"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:89
 msgid ""
@@ -335,7 +335,7 @@ msgstr ""
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:91
 msgid "2. Port Conflict Detection"
-msgstr "2. 端口冲突检测"
+msgstr "2.端口冲突检测"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:93
 msgid ""
@@ -348,7 +348,7 @@ msgstr ""
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:95
 msgid "3. PD Ratio Validation"
-msgstr "3. PD 比例验证"
+msgstr "3.PD 比例验证"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:97
 msgid ""

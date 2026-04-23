@@ -178,7 +178,7 @@ Qwen2.5-Omni on vllm-ascend has been tested on AISBench.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `Qwen2.5-Omni-7B` with `vllm-ascend:0.11.0rc0` for reference only.
+2. After execution, you can get the result, here is the result of `Qwen2.5-Omni-7B` with `vllm-ascend:v0.11.0rc0` for reference only.
 
 | dataset | platform | metric | mode | vllm-api-stream-chat |
 |----- | ----- | ----- | ----- | -----|

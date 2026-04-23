@@ -285,7 +285,7 @@ msgstr "运行 Mooncake Master"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:109
 msgid "1.Configure mooncake.json"
-msgstr "1. 配置 mooncake.json"
+msgstr "1.配置 mooncake.json"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:111
 msgid ""
@@ -307,7 +307,7 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:129
 msgid "2.Start mooncake_master"
-msgstr "2. 启动 mooncake_master"
+msgstr "2.启动 mooncake_master"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:131
 msgid "Under the mooncake folder:"
@@ -335,7 +335,7 @@ msgstr "PD 解耦场景"
 #: ../../source/user_guide/feature_guide/kv_pool.md:142
 #: ../../source/user_guide/feature_guide/kv_pool.md:605
 msgid "1.Run `prefill` Node and `decode` Node"
-msgstr "1. 运行 `prefill` 节点和 `decode` 节点"
+msgstr "1.运行 `prefill` 节点和 `decode` 节点"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:144
 msgid ""
@@ -392,7 +392,7 @@ msgstr "将 localhost 更改为您的实际 IP 地址。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:321
 msgid "3.Run Inference"
-msgstr "3. 运行推理"
+msgstr "3.运行推理"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:323
 msgid ""
@@ -417,7 +417,7 @@ msgstr "PD混合推理"
 #: ../../source/user_guide/feature_guide/kv_pool.md:339
 #: ../../source/user_guide/feature_guide/kv_pool.md:916
 msgid "1.Run Mixed Department Script"
-msgstr "1. 运行混合部署脚本"
+msgstr "1.运行混合部署脚本"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:345
 #: ../../source/user_guide/feature_guide/kv_pool.md:1056
@@ -426,7 +426,7 @@ msgstr "pd_mix.sh 内容："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:384
 msgid "2.Run Inference"
-msgstr "2. 运行推理"
+msgstr "2.运行推理"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:386
 msgid ""

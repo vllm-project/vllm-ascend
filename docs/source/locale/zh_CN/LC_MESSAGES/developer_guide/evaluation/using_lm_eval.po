@@ -33,7 +33,7 @@ msgstr "在线服务器"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:7
 msgid "1. Start the vLLM server"
-msgstr "1. 启动 vLLM 服务器"
+msgstr "1.启动 vLLM 服务器"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:9
 msgid "You can run docker container to start the vLLM server on a single NPU:"
@@ -48,7 +48,7 @@ msgid ""
 "2. Run GSM8K using the vLLM server (curl) and then run lm-eval for "
 "accuracy testing"
 msgstr ""
-"2. 使用 vLLM 服务器（curl）运行 GSM8K，然后运行 lm-eval 进行准确率测试"
+"2.使用 vLLM 服务器（curl）运行 GSM8K，然后运行 lm-eval 进行准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:48
 msgid "You can query the result with input prompts:"
@@ -90,7 +90,7 @@ msgstr "离线服务器"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:145
 msgid "1. Run docker container"
-msgstr "1. 运行 docker 容器"
+msgstr "1.运行 docker 容器"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:147
 msgid "You can run docker container on a single NPU:"
@@ -98,7 +98,7 @@ msgstr "您可以在单个 NPU 上运行 docker 容器："
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:175
 msgid "2. Run GSM8K using lm-eval for accuracy testing"
-msgstr "2. 使用 lm-eval 运行 GSM8K 进行准确率测试"
+msgstr "2.使用 lm-eval 运行 GSM8K 进行准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_lm_eval.md:203
 msgid "After 1 to 2 minutes, the output is shown below:"
