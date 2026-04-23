@@ -160,10 +160,6 @@ Here are two accuracy evaluation methods.
 | textvqa | - | accuracy | gen | 50.28 | 1 Atlas 800 A2 |
 | ominidocbench | - | accuracy | gen | 66.86 | 1 Atlas 800 A2 |
 
-### Using Language Model Evaluation Harness
-
-Not tested yet.
-
 ## Performance
 
 ### Using AISBench
