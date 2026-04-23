@@ -62,9 +62,8 @@ class AscendSampler(Sampler):
         )
 
     def __init__(self, logprobs_mode=DEFAULT_LOGPROBS_MODE):
-        # TODO: support logprobs_mode in vllm-ascend
         super().__init__(logprobs_mode=logprobs_mode)
-        self.topk_topp_sampler = AscendTopKTopPSampler()
+        self.topk_topp_sampler = AscendTopKTopPSampler(logprobs_mode=logprobs_mode)
         self.async_exponential_event = torch.npu.Event()
 
     def set_q_event(self, q, event):
