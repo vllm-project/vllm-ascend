@@ -332,7 +332,8 @@ class KVPoolWorker:
                     self.m_store.get(key_list_c, addr_list_c, size_list_c)
         # TODO 这里的请求释放可能有问题
         # logger.info(f">>>>>>>>>>>> metadata.requests {len(metadata.requests)} metadata.unfinished_request_ids {metadata.unfinished_request_ids}")
-        if self.use_layerwise and metadata.unfinished_request_ids:
+        # TODO 把这个移到 independent layer attention 计算前
+        if len(self.independent_layers)==0 and self.use_layerwise and metadata.unfinished_request_ids:
             for layer_id in self.offload_start_ids:
                 layer_load_task = self.layer_load_tasks[layer_id]
                 self.kv_recv_thread.add_request((None, layer_load_task, layer_id))
@@ -534,10 +535,17 @@ class KVPoolWorker:
 
     def wait_for_layer_load(self) -> None:
         if self.current_layer in self.independent_layers:
+            if self.current_layer == self.independent_layers[0]:
+                for layer_id in self.offload_start_ids:
+                    logger.debug(f">>>>>>>>>>>>>>>>>>>> load layer {layer_id}")
+                    layer_load_task = self.layer_load_tasks[layer_id]
+                    self.kv_recv_thread.add_request((None, layer_load_task, layer_id))
+            self.layer_load_finished_events[self.current_layer].clear()
             return
         is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)
         if not is_finish:
             logger.info("Layerwise %d load wait timed out", self.current_layer)
+        logger.debug(f">>>>>>>>>>>>>>>>>>>> clear load layer {self.current_layer}")
         self.layer_load_finished_events[self.current_layer].clear()
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
@@ -558,6 +566,7 @@ class KVPoolWorker:
             if not is_finish:
                 logger.info("Layerwise %d save wait timed out", self.current_layer)
             for layer_id in self.layers_need_to_save[-1*self.NUM_SHARED_BUFFERS:]:
+                logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {layer_id}")
                 self.layer_save_finished_events[layer_id].clear()
 
         self.current_layer = self.current_layer + 1
