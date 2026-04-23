@@ -1669,7 +1669,6 @@ class TestAscendMLAImpl(TestBase):
     def test__forward_prefill(self, mock_npu_attention_update, mock_fia, mock_device_operator):
         # 测试_forward_prefill方法
         batch_size = 2
-        seq_len = 10
         
         # 创建输入张量
         q_nope = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_nope_head_dim)
