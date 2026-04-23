@@ -110,7 +110,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
 @register_scheme("W4A8_MXFP", "moe")
 class AscendW4A8MXFPDynamicFusedMoEMethod:
     """FusedMoe method for Ascend W4A8_DYNAMIC."""
-    quant_type: QuantType = QuantType.MXFP4
+    quant_type: QuantType = QuantType.W4A8MXFP
 
     def __init__(self):
         self.ep_group = get_ep_group()
