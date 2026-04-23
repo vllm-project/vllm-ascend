@@ -284,7 +284,6 @@ _QUAROT_LEAN_H_ONLY_REQUIRED_CONTRACT = {
     "matrix_free_h_runtime": True,
 }
 _QUAROT_LEAN_H_ONLY_SUPPORTED_Q_MODES = {"randomized_hadamard", "identity"}
-_QUAROT_LEAN_H_ONLY_SUPPORTED_CONTRACT_VERSIONS = {"2.1.0"}
 _QUAROT_FFN_HADAMARD_LAYOUT = "pow2_last_dim"
 _QUAROT_ATTENTION_CONTRACT = "lean_h_only"
 
@@ -321,9 +320,6 @@ def is_lean_h_only_quarot_profile(quarot_meta: dict[str, Any]) -> bool:
         if quarot_meta.get(key) != expected:
             return False
     if quarot_meta.get("q_mode") not in _QUAROT_LEAN_H_ONLY_SUPPORTED_Q_MODES:
-        return False
-    contract_version = quarot_meta.get("contract_version")
-    if contract_version not in _QUAROT_LEAN_H_ONLY_SUPPORTED_CONTRACT_VERSIONS:
         return False
     if quarot_meta.get("allow_runtime_shift_permutation") not in (None, False):
         return False
@@ -649,7 +645,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 f"QuaRot metadata must declare attention_contract='lean_h_only' (observed {attention_contract!r})."
             )
         return {
-            "contract_version": quarot_meta.get("contract_version"),
             "attention_contract": attention_contract,
             "export_rotation_tensors": quarot_meta.get("export_rotation_tensors"),
             "h_mode": quarot_meta.get("h_mode"),

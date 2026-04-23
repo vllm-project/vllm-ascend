@@ -77,7 +77,6 @@ _LEAN_H_ONLY_QUAROT_CONTRACT = {
     "matrix_free_h_runtime": True,
 }
 _LEAN_H_ONLY_SUPPORTED_Q_MODES = {"randomized_hadamard", "identity"}
-_LEAN_H_ONLY_SUPPORTED_CONTRACT_VERSIONS = {"2.1.0"}
 _FFN_HADAMARD_LAYOUT = "pow2_last_dim"
 _LEAN_ATTENTION_CONTRACT = "lean_h_only"
 _QUAROT_DEBUG_VALUE_PATH_ENV = "VLLM_ASCEND_QUAROT_DEBUG_VALUE_PATH"
@@ -459,9 +458,6 @@ def _is_lean_h_only_quarot_contract(config: dict[str, Any]) -> bool:
             return False
     if config.get("q_mode") not in _LEAN_H_ONLY_SUPPORTED_Q_MODES:
         return False
-    contract_version = config.get("contract_version")
-    if contract_version not in _LEAN_H_ONLY_SUPPORTED_CONTRACT_VERSIONS:
-        return False
     if config.get("allow_runtime_shift_permutation") not in (None, False):
         return False
     if _get_ffn_hadamard_layout(config) != _FFN_HADAMARD_LAYOUT:
@@ -477,9 +473,6 @@ def _is_supported_fused_quarot_contract(config: dict[str, Any]) -> bool:
         if config.get(key) != expected:
             return False
     if config.get("q_mode") not in _LEAN_H_ONLY_SUPPORTED_Q_MODES:
-        return False
-    contract_version = config.get("contract_version")
-    if contract_version not in _LEAN_H_ONLY_SUPPORTED_CONTRACT_VERSIONS:
         return False
     if config.get("allow_runtime_shift_permutation") not in (None, False):
         return False
@@ -498,7 +491,6 @@ def _validate_fused_quarot_contract(layer: torch.nn.Module) -> None:
         return
     bad_items = [f"{key}={config.get(key)!r}" for key in sorted(_LEAN_H_ONLY_QUAROT_CONTRACT)]
     bad_items.append(f"q_mode={config.get('q_mode')!r}")
-    bad_items.append(f"contract_version={config.get('contract_version')!r}")
     bad_items.append(f"attention_contract={config.get('attention_contract')!r}")
     if config.get("allow_runtime_shift_permutation") not in (None, False):
         bad_items.append(f"allow_runtime_shift_permutation={config.get('allow_runtime_shift_permutation')!r}")
