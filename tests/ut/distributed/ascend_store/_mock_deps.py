@@ -22,6 +22,7 @@ imports in each test file.
 Usage at the top of each test file:
     import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 """
+
 import os
 import sys
 import types
@@ -55,25 +56,39 @@ if "torch_npu" not in sys.modules:
 # Mock vllm modules
 # ---------------------------------------------------------------------------
 _vllm_mock_modules = [
-    "vllm", "vllm.config",
-    "vllm.distributed", "vllm.distributed.kv_events",
-    "vllm.distributed.kv_transfer", "vllm.distributed.kv_transfer.kv_connector",
+    "vllm",
+    "vllm.config",
+    "vllm.distributed",
+    "vllm.distributed.kv_events",
+    "vllm.distributed.kv_transfer",
+    "vllm.distributed.kv_transfer.kv_connector",
     "vllm.distributed.kv_transfer.kv_connector.factory",
     "vllm.distributed.kv_transfer.kv_connector.v1",
     "vllm.distributed.kv_transfer.kv_connector.v1.base",
     "vllm.distributed.parallel_state",
-    "vllm.envs", "vllm.forward_context",
-    "vllm.model_executor", "vllm.model_executor.layers",
-    "vllm.model_executor.layers.linear", "vllm.model_executor.layers.quantization",
+    "vllm.envs",
+    "vllm.forward_context",
+    "vllm.model_executor",
+    "vllm.model_executor.layers",
+    "vllm.model_executor.layers.linear",
+    "vllm.model_executor.layers.quantization",
     "vllm.platforms",
-    "vllm.utils", "vllm.utils.hashing", "vllm.utils.math_utils",
+    "vllm.utils",
+    "vllm.utils.hashing",
+    "vllm.utils.math_utils",
     "vllm.utils.network_utils",
-    "vllm.v1", "vllm.v1.attention", "vllm.v1.attention.backend",
-    "vllm.v1.core", "vllm.v1.core.kv_cache_manager",
+    "vllm.v1",
+    "vllm.v1.attention",
+    "vllm.v1.attention.backend",
+    "vllm.v1.core",
+    "vllm.v1.core.kv_cache_manager",
     "vllm.v1.core.kv_cache_utils",
-    "vllm.v1.core.sched", "vllm.v1.core.sched.output",
-    "vllm.v1.kv_cache_interface", "vllm.v1.outputs",
-    "vllm.v1.request", "vllm.v1.serial_utils",
+    "vllm.v1.core.sched",
+    "vllm.v1.core.sched.output",
+    "vllm.v1.kv_cache_interface",
+    "vllm.v1.outputs",
+    "vllm.v1.request",
+    "vllm.v1.serial_utils",
 ]
 for _mod_name in _vllm_mock_modules:
     if _mod_name not in sys.modules:
@@ -82,9 +97,7 @@ for _mod_name in _vllm_mock_modules:
 sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)
 
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
-_base_mod.KVConnectorBase_V1 = type(
-    "KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None}
-)
+_base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})
 _base_mod.KVConnectorRole = MagicMock()
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
@@ -93,15 +106,20 @@ _base_mod.KVConnectorRole.WORKER = "WORKER"
 _events_mod = sys.modules["vllm.distributed.kv_events"]
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})
 _events_mod.KVConnectorKVEvents = type("KVConnectorKVEvents", (), {})
+
+
 class _FakeAggregator:
     def __init__(self, *args, **kwargs):
         self._mock = MagicMock()
+
     def __getattr__(self, name):
         return getattr(self._mock, name)
 
+
 _events_mod.KVEventAggregator = _FakeAggregator
 _events_mod.BlockStored = type(
-    "BlockStored", (),
+    "BlockStored",
+    (),
     {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
 )
 
@@ -118,10 +136,15 @@ sys.modules["vllm.envs"].VLLM_RPC_BASE_PATH = "/tmp/vllm_rpc"
 # Mock external backends
 # ---------------------------------------------------------------------------
 for _mod_name in [
-    "mooncake", "mooncake.engine", "mooncake.store",
+    "mooncake",
+    "mooncake.engine",
+    "mooncake.store",
     "memcache_hybrid",
-    "yr", "yr.datasystem", "yr.datasystem.hetero_client",
-    "yr.datasystem.kv_client", "yr.datasystem.object_client",
+    "yr",
+    "yr.datasystem",
+    "yr.datasystem.hetero_client",
+    "yr.datasystem.kv_client",
+    "yr.datasystem.object_client",
     "zmq",
 ]:
     if _mod_name not in sys.modules:
@@ -130,6 +153,7 @@ for _mod_name in [
 # ---------------------------------------------------------------------------
 # Mock vllm_ascend transitive imports
 # ---------------------------------------------------------------------------
+
 
 def _make_pkg(name, path=""):
     mod = types.ModuleType(name)
@@ -154,8 +178,16 @@ _kv_pool_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.kv_pool")
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _kv_pool_pkg
 
 _ascend_store_real_path = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "..",
-    "vllm_ascend", "distributed", "kv_transfer", "kv_pool", "ascend_store",
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "..",
+    "..",
+    "vllm_ascend",
+    "distributed",
+    "kv_transfer",
+    "kv_pool",
+    "ascend_store",
 )
 _ascend_store_pkg = _make_pkg(
     "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store",
@@ -169,9 +201,7 @@ _backend_pkg = _make_pkg(
 )
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
 
-if "vllm_ascend.utils" not in sys.modules or not hasattr(
-    sys.modules["vllm_ascend.utils"], "AscendDeviceType"
-):
+if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
     _ascend_utils = MagicMock()
     _ascend_utils.AscendDeviceType = MagicMock()
     _ascend_utils.get_ascend_device_type = MagicMock()
