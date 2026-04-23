@@ -271,11 +271,11 @@ class NPUModelRunner(GPUModelRunner):
         self.debugger = None
         if dump_cfg is not None:
             self._debugger_started = False
-            if self.model_config.enforce_eager:
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 from msprobe.pytorch import PrecisionDebugger
 
                 self.debugger = PrecisionDebugger(dump_cfg)
-            elif self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            else:
                 try:
                     from msprobe.pytorch import AclGraphDumper
                 except Exception as exc:
@@ -285,8 +285,6 @@ class NPUModelRunner(GPUModelRunner):
                     ) from exc
 
                 self.debugger = AclGraphDumper(dump_cfg)
-            else:
-                raise RuntimeError("Dumping/debugging requires eager mode or cudagraph mode.")
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
