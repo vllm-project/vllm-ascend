@@ -94,18 +94,18 @@ for _mod_name in _vllm_mock_modules:
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = MagicMock()
 
-sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)
+sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
 
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
-_base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})
-_base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})
-_base_mod.KVConnectorRole = MagicMock()
+_base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
+_base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
+_base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
 
 _events_mod = sys.modules["vllm.distributed.kv_events"]
-_events_mod.KVCacheEvent = type("KVCacheEvent", (), {})
-_events_mod.KVConnectorKVEvents = type("KVConnectorKVEvents", (), {})
+_events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]
+_events_mod.KVConnectorKVEvents = type("KVConnectorKVEvents", (), {})  # type: ignore[attr-defined]
 
 
 class _FakeAggregator:
@@ -116,21 +116,21 @@ class _FakeAggregator:
         return getattr(self._mock, name)
 
 
-_events_mod.KVEventAggregator = _FakeAggregator
+_events_mod.KVEventAggregator = _FakeAggregator  # type: ignore[attr-defined]
 _events_mod.BlockStored = type(
     "BlockStored",
     (),
     {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
-)
+)  # type: ignore[attr-defined]
 
 _kv_cache_utils_mod = sys.modules["vllm.v1.core.kv_cache_utils"]
-_kv_cache_utils_mod.BlockHash = bytes
-_kv_cache_utils_mod.maybe_convert_block_hash = lambda x: x
+_kv_cache_utils_mod.BlockHash = bytes  # type: ignore[attr-defined]
+_kv_cache_utils_mod.maybe_convert_block_hash = lambda x: x  # type: ignore[attr-defined]
 
 _sched_output_mod = sys.modules["vllm.v1.core.sched.output"]
-_sched_output_mod.NewRequestData = MagicMock
+_sched_output_mod.NewRequestData = MagicMock  # type: ignore[attr-defined]
 
-sys.modules["vllm.envs"].VLLM_RPC_BASE_PATH = "/tmp/vllm_rpc"
+sys.modules["vllm.envs"].VLLM_RPC_BASE_PATH = "/tmp/vllm_rpc"  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # Mock external backends
