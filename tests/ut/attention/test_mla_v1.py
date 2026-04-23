@@ -21,7 +21,6 @@ from vllm_ascend.attention.mla_v1 import (
     PrefillMLAPreprocessResult,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 
 class TestAscendMLABackend(TestBase):
@@ -1416,7 +1415,7 @@ class TestAscendMLAImpl(TestBase):
                     MagicMock(),
                     MagicMock(),
                     MagicMock(),
-                    MagicMock()
+                    MagicMock(),
                 ),
             ]
         }
