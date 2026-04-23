@@ -1320,7 +1320,7 @@ class TestAscendMLAImpl(TestBase):
         # Test non-draft model
         mock_ctx.is_draft_model = False
         AscendMLAImpl.update_graph_params(
-            mock_update_stream
+            mock_update_stream,
             mock_forward_context,
             100,
             speculative_config=mock_speculative_config,
