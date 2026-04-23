@@ -1,12 +1,12 @@
-# Dynamic Chunked Pipeline Parallel Guide
+# Chunked Pipeline Parallel Guide
 
 ## Overview
 
-Dynamic Chunk for Chunked Pipeline Parallelism is a profiling-based dynamic chunking strategy that optimizes prefill performance for long sequences in Pipeline Parallelism (PP) scenarios. This approach addresses the computational efficiency problem caused by growing KVCache during long sequence processing.
+Dynamic Chunk for Chunked Pipeline Parallelism (CPP) is a profiling-based dynamic chunking strategy that optimizes prefill performance for long sequences in Pipeline Parallelism (PP) scenarios. This approach addresses the computational efficiency problem caused by growing KVCache during long sequence processing.
 
 The core idea is borrowed from [SGLang's dynamic chunking mechanism](https://lmsys.org/blog/2026-01-15-chunked-pipeline/), but has been fully implemented and adapted for the vLLM-Ascend framework.
 
-## Why Dynamic Chunked Pipeline Parallel?
+## Why Dynamic Chunk?
 
 ### The Problem with Fixed Chunking
 
@@ -23,7 +23,7 @@ This time variance propagates across pipeline stages, causing increased idle wai
 
 ### The Solution
 
-Dynamic Chunked Pipeline Parallel uses a **profile-first, then predict** strategy:
+Chunked Pipeline Parallel uses a **profile-first, then predict** strategy:
 
 1. During engine startup, perform forward passes with different chunk sizes to measure actual latency
 2. Fit the latency data to a quadratic function model
@@ -84,11 +84,19 @@ After each batch execution, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actua
 
 **Note**: For best results, warm up with 3-5 real data samples after service startup.
 
-## How to Use Dynamic Chunked Pipeline Parallel
+## How to Use Chunked Pipeline Parallel
 
-### Enable Dynamic Chunked Pipeline Parallel
+### Enable Chunked Pipeline Parallel
 
-Dynamic Chunked Pipeline Parallel requires Pipeline Parallelism (PP > 1). You can enable it through the `additional_config` parameter:
+Chunked Pipeline Parallel requires Pipeline Parallelism (PP > 1) and enable Chunked Prefill. **Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` (considered the initial chunksize for dynamic solving).** Because if it is too large, it will introduce significant computational voids, and if it is too small, it will lead to a decrease in operator efficiency. To leave enough room for dynamic adjustments, we recommend that the longer the sequence being processed, the larger the `max-num-batched-tokens` should be set.
+For fixed-length sequences, we obtained some empirical values for sequence lengths through experiments with DeepSeek v3.1.
+
+| seq_len | `max-num-batched-tokens` |
+|-----------|------|
+| 64k | 20480 |
+| 128k | 32768 |
+
+You can enable dynamic chunking through the `additional_config` parameter:
 
 **Online serving:**
 
@@ -110,7 +118,7 @@ llm = LLM(
 )
 ```
 
-### Configuration Parameters
+### Addtional Configuration Parameters
 
 The `profiling_chunk_config` accepts the following parameters:
 
