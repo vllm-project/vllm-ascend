@@ -244,5 +244,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod:
         )
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        g, n, k = layer.w13_weight_scale.shape
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
+        g, n, k = layer.w2_weight_scale.shape
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)

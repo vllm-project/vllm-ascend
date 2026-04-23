@@ -167,9 +167,6 @@ def quant_apply_mlp(
                 )
             else:
                 antiquant_scale = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
-                antiquant_scale = antiquant_scale.reshape(
-                    antiquant_scale.shape[0], antiquant_scale.shape[1] // 2, 2, antiquant_scale.shape[2]
-                ).transpose(-1, -2)
                 hidden_states = torch_npu.npu_grouped_matmul(
                     x=[hidden_states],
                     weight=[_require_single_tensor_for_swiglu_quant(w1, name="w1")],
@@ -298,9 +295,6 @@ def quant_apply_mlp(
                 )
             else:
                 antiquant_scale = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
-                antiquant_scale = antiquant_scale.reshape(
-                    antiquant_scale.shape[0], antiquant_scale.shape[1] // 2, 2, antiquant_scale.shape[2]
-                ).transpose(-1, -2)
                 hidden_states = torch_npu.npu_grouped_matmul(
                     x=[hidden_states],
                     weight=[_require_single_tensor_for_swiglu_quant(w1, name="w1")],
