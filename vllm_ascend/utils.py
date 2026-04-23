@@ -523,12 +523,21 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     )
 
     if os.getenv("HCCL_OP_EXPANSION_MODE") == "AIV":
+        multistream_overlap_shared_expert = vllm_config.additional_config.get(
+            "multistream_overlap_shared_expert", False
+        )
+        has_shared = has_shared_experts(vllm_config)
+        if multistream_overlap_shared_expert and not has_shared:
+            logger.warning(
+                "multistream_overlap_shared_expert is enabled but the model does not have "
+                "shared experts. This configuration will be ignored."
+            )
         # TODO: Find out whether we need to take into account the pp_size
         parallel_factor = (
             1
             + num_comm_groups
             + int(parallel_config.enable_expert_parallel)
-            + int(vllm_config.additional_config.get("multistream_overlap_shared_expert", False))
+            + int(multistream_overlap_shared_expert and has_shared)
         )
         if is_moe_model(vllm_config):
             parallel_factor += parallel_config.data_parallel_size > 1
@@ -824,6 +833,19 @@ def shared_expert_dp_enabled() -> bool:
 
 def prefill_context_parallel_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
+
+
+_HAS_SHARED_EXPERTS: bool | None = None
+
+
+def has_shared_experts(vllm_config: VllmConfig) -> bool:
+    """Checks if the MoE model has shared experts by config"""
+    global _HAS_SHARED_EXPERTS
+    if _HAS_SHARED_EXPERTS is None:
+        hf_text_config = vllm_config.model_config.hf_text_config
+        n_shared_experts = getattr(hf_text_config, "n_shared_experts", 0)
+        _HAS_SHARED_EXPERTS = n_shared_experts is not None and n_shared_experts > 0
+    return _HAS_SHARED_EXPERTS
 
 
 def is_moe_model(vllm_config: VllmConfig):

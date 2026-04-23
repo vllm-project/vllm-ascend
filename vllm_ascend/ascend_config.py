@@ -103,6 +103,17 @@ class AscendConfig:
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
+        
+        if self.multistream_overlap_shared_expert or self.multistream_overlap_gate:
+            from vllm_ascend.utils import has_shared_experts
+            
+            if not has_shared_experts(vllm_config):
+                logger.warning_once(
+                    "multistream_overlap_shared_expert or multistream_overlap_gate is enabled, "
+                    "but the model does not have shared experts. These configurations will be "
+                    "ignored and may cause performance degradation. Please disable them."
+                )
+        
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
