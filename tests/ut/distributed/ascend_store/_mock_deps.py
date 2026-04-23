@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ Usage at the top of each test file:
     import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 """
 
+import importlib.util
 import os
 import sys
 import types
@@ -68,7 +69,6 @@ _vllm_mock_modules = [
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
-    "vllm.logger",
     "vllm.model_executor",
     "vllm.model_executor.layers",
     "vllm.model_executor.layers.linear",
@@ -95,7 +95,20 @@ for _mod_name in _vllm_mock_modules:
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = MagicMock()
 
-sys.modules["vllm.logger"].logger = MagicMock()  # type: ignore[attr-defined]
+# Handle vllm.logger specially: try to import real module, fall back to mock
+# This prevents polluting sys.modules when vllm is installed
+_vllm_logger_spec = importlib.util.find_spec("vllm.logger")
+if _vllm_logger_spec is not None:
+    # vllm is installed, use real logger - no mock needed
+    pass
+else:
+    # vllm not installed, create minimal mock that won't affect other tests
+    # We only mock it temporarily for this test session
+    if "vllm.logger" not in sys.modules:
+        _mock_logger = types.ModuleType("vllm.logger")
+        _mock_logger.logger = MagicMock()
+        sys.modules["vllm.logger"] = _mock_logger
+
 sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
 
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
