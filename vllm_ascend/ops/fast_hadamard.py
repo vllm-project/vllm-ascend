@@ -4,12 +4,15 @@ import subprocess
 from pathlib import Path
 
 import torch
+
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.utils import enable_custom_op
 
+
 BLOCK_DIM = 20  # hard-coded to 910B4 vector core number
-DYNAMIC_QUANT_BLOCK_DIM = int(os.environ.get("VLLM_ASCEND_FHT_DYNAMIC_QUANT_BLOCK_DIM", "20"))
+DYNAMIC_QUANT_BLOCK_DIM = int(
+    os.environ.get("VLLM_ASCEND_FHT_DYNAMIC_QUANT_BLOCK_DIM", "20"))
 ELEMENTS_PER_TILE = (32 * 1024) // 2
 # The PTO kernel now has compile-time batched dispatch for N>=64 and
 # leverages sub-block parallelism internally (blockDim * 2).  The
@@ -28,7 +31,6 @@ def _get_current_npu_stream_ptr():
 
 def _torch_to_ctypes(tensor: torch.Tensor):
     import ctypes
-
     return ctypes.c_void_p(tensor.data_ptr())
 
 
@@ -60,7 +62,11 @@ def fast_hadamard_pto_ref_inplace(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-def fast_hadamard_pto(x: torch.Tensor, batch: int, n: int, log2_n: int, block_dim: int | None = None) -> None:
+def fast_hadamard_pto(x: torch.Tensor,
+                      batch: int,
+                      n: int,
+                      log2_n: int,
+                      block_dim: int | None = None) -> None:
     """In-place FHT with PTO-style signature.
 
     The input tensor x is modified in-place to match run_hadamard.py behavior.
@@ -276,29 +282,22 @@ def _load_dynamic_quant_lib(lib_path: str):
     lib_path = os.path.abspath(lib_path)
     lib = ctypes.CDLL(lib_path)
     lib.call_dynamic_quant_kernel.argtypes = [
-        ctypes.c_uint32,  # blockDim
-        ctypes.c_void_p,  # stream
-        ctypes.c_void_p,  # x scratch (fp16, in-place hadamard)
-        ctypes.c_void_p,  # y packed int4 output
-        ctypes.c_void_p,  # row_scales (fp32 output)
-        ctypes.c_uint32,  # batch
-        ctypes.c_uint32,  # full_n
-        ctypes.c_uint32,  # hadamard_n
-        ctypes.c_uint32,  # log2_hadamard_n
-        ctypes.c_float,  # inv_sqrt_hadamard_n
+        ctypes.c_uint32,   # blockDim
+        ctypes.c_void_p,   # stream
+        ctypes.c_void_p,   # x scratch (fp16, in-place hadamard)
+        ctypes.c_void_p,   # y packed int4 output
+        ctypes.c_void_p,   # row_scales (fp32 output)
+        ctypes.c_uint32,   # batch
+        ctypes.c_uint32,   # full_n
+        ctypes.c_uint32,   # hadamard_n
+        ctypes.c_uint32,   # log2_hadamard_n
+        ctypes.c_float,    # inv_sqrt_hadamard_n
     ]
     lib.call_dynamic_quant_kernel.restype = None
 
     def fused_kernel_func(
-        x,
-        packed,
-        row_scales,
-        batch,
-        full_n,
-        hadamard_n,
-        log2_hadamard_n,
-        block_dim=DYNAMIC_QUANT_BLOCK_DIM,
-        stream_ptr=None,
+        x, packed, row_scales, batch, full_n, hadamard_n, log2_hadamard_n,
+        block_dim=DYNAMIC_QUANT_BLOCK_DIM, stream_ptr=None,
     ):
         if stream_ptr is None:
             stream_ptr = _get_current_npu_stream_ptr()
@@ -460,7 +459,7 @@ def fast_hadamard_dynamic_quant_last_dim(x: torch.Tensor) -> tuple[torch.Tensor,
     _check_power_of_two(n, "last dim")
 
     rows = x.reshape(-1, n).contiguous()
-    if x.device.type != "npu" or n < MIN_JIT_N:
+    if x.device.type != "npu" or n < MIN_JIT_N or n > ELEMENTS_PER_TILE:
         return _fast_hadamard_dynamic_quant_ref(x)
 
     kernel_input = rows
@@ -500,7 +499,7 @@ def fast_hadamard_dynamic_quant_blockwise_last_dim(
         return fast_hadamard_dynamic_quant_last_dim(x)
 
     rows = x.reshape(-1, full_n).contiguous()
-    if x.device.type != "npu" or hadamard_n < MIN_JIT_N or full_n > ELEMENTS_PER_TILE:
+    if x.device.type != "npu" or hadamard_n < MIN_JIT_N or hadamard_n > ELEMENTS_PER_TILE:
         return _fast_hadamard_dynamic_quant_blockwise_ref(x, hadamard_n)
 
     kernel_input = rows
