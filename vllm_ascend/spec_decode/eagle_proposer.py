@@ -345,7 +345,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.vllm_config,
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
-                    enable_enpu=self.enable_enpu
+                    enable_enpu=self.enable_enpu,
                     )
             else:
                 self._runnable = ACLGraphWrapper(
@@ -353,7 +353,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.vllm_config,
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
-                    enable_enpu=self.enable_enpu
+                    enable_enpu=self.enable_enpu,
                 )
 
     def get_model(self) -> nn.Module:
