@@ -101,6 +101,37 @@ class AscendPrefillContextParallelMetadata:
     # original max_query_len before pcp split
     max_query_len_pcp_full: int = 0
 
+    # the following attributes are specifically used in hybrid-attn models.
+    pcp_use_hybrid_attn: bool = False
+
+    pcp_unpad_mask: torch.Tensor = None
+
+    # to get the right order of query in prefill per rank
+    pcp_fa_query_idx: torch.Tensor = None
+
+    # restore the full sequence across all pcp ranks
+    # when entering from linear-attention to attention
+    pcp_enter_fa_restore_idx: torch.Tensor = None
+
+    # scatter the full sequence across all pcp ranks
+    # when exiting from attention to linear-attention
+    pcp_exit_fa_scatter_idx: torch.Tensor = None
+
+    # the number of tokens padded in linear-attn per rank
+    pcp_padded_tokens_fla: int = 0
+
+    # the max number of unpadded tokens in all ranks
+    max_num_tokens_across_pcp: int = 0
+
+    # the number of scheduled tokens on the current rank before padding
+    total_num_scheduled_tokens: int = 0
+
+    # Because the sequence shard in linear attention layers does not include padding,
+    # the full attention layers cannot obtain the correct query_lens with pcp pad for
+    # chunked prefill calculation. Therefore, this value needs to be passed to the backend.
+    # TODO:To be refactored.
+    attn_chunk_seqlens: torch.Tensor = None
+
 
 @dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
@@ -150,8 +181,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
-            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs],
-            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_actual_reqs] if self.seq_lens_cpu is not None else None,
+            num_computed_tokens_cpu=self.num_computed_tokens_cpu[:num_actual_reqs]
+            if self.num_computed_tokens_cpu is not None
+            else None,
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
@@ -306,6 +339,9 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return bool(envs.VLLM_ASCEND_ENABLE_MLAPO)
+
     is_decode_instance = (
         vllm_config.kv_transfer_config is not None
         and vllm_config.kv_transfer_config.is_kv_consumer

@@ -41,10 +41,15 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         Initializes the 310P backend and sets up the device-specific mask builder.
         """
         super().__init__(*args, **kwargs)
-        self.attn_mask_builder = AttentionMaskBuilder310(self.device)
 
     @staticmethod
-    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int, head_size: int):
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ):
         """
         Determines the shape of the Key-Value (KV) cache tensor.
 
@@ -79,6 +84,10 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         """
         return AscendAttentionMetadataBuilder310
 
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128, 64]
+
 
 class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     """
@@ -111,7 +120,19 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
                 device=query.device,
                 non_blocking=True,
             )
-        return super().forward_paged_attention(query, attn_metadata, output)
+
+        torch_npu._npu_paged_attention(
+            query=query,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+            num_kv_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale_value=self.scale,
+            block_table=attn_metadata.block_tables,
+            context_lens=attn_metadata.seq_lens,
+            out=output,
+        )
+        return output
 
     def forward_prefill_310(self, query, key, value, attn_metadata, output):
         """

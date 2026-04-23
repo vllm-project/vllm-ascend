@@ -1263,5 +1263,5 @@ void MoeInitRountingCustomTilingBase::Tiling4GatherOutCompute()
         lastCorePerLoopIndicesElements, lastCoreLastLoopIndicesElements);
 }
 
-REGISTER_TILING_TEMPLATE("MoeInitRoutingCustom", MoeInitRountingCustomTilingBase, 10000); // If not 910_95, fallback to this.
+REGISTER_TILING_TEMPLATE("MoeInitRoutingCustom", MoeInitRountingCustomTilingBase, 10000); // Fallback template for non-Ascend950 SoC.
 } // namespace optiling

@@ -72,14 +72,31 @@ def get_value_from_lines(lines: list[str], key: str) -> str:
 
 def get_chip_type() -> str:
     try:
+        # Get NPU ID
         npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
         npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
-        chip_info_lines = (
-            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
-            .decode()
-            .strip()
-            .split("\n")
+
+        # Stage 1: query board info without -c flag
+        board_info_lines = (
+            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id)]).decode().strip().split("\n")
         )
+
+        # Check if Chip Name exists (Ascend950 includes it directly)
+        chip_name = get_value_from_lines(board_info_lines, "Chip Name")
+
+        # Stage 2: query with -c flag only if Chip Name not found (A2/A3/310P)
+        if not chip_name:
+            chip_info_lines = (
+                subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
+                .decode()
+                .strip()
+                .split("\n")
+            )
+        else:
+            # Ascend950 already has complete info
+            chip_info_lines = board_info_lines
+
+        # Extract required fields
         chip_name = get_value_from_lines(chip_info_lines, "Chip Name")
         chip_type = get_value_from_lines(chip_info_lines, "Chip Type")
         npu_name = get_value_from_lines(chip_info_lines, "NPU Name")
@@ -97,8 +114,10 @@ def get_chip_type() -> str:
                 # A3 case
                 assert npu_name
                 return (chip_name + "_" + npu_name).lower()
+        elif "950" in chip_name:
+            assert npu_name
+            return (chip_name + "_" + npu_name).lower()
         else:
-            # TODO(zzzzwwjj): Currently, A5's chip name has not determined yet.
             raise ValueError(f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION")
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Get chip info failed: {e}")
@@ -111,19 +130,20 @@ def get_chip_type() -> str:
 
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
 
-soc_version = get_chip_type()
-
 if not envs.SOC_VERSION:
+    soc_version = get_chip_type()
     if not soc_version:
         raise RuntimeError(
             "Could not determine chip type automatically via 'npu-smi'. "
             "This can happen in a CPU-only environment. "
-            "Please set the 'SOC_VERSION' environment variable to specify the target chip."
+            "Please set the 'SOC_VERSION' environment variable to specify the target chip, for example:\n"
+            '  - Atlas A2: export SOC_VERSION="ascend910b1"\n'
+            '  - Atlas A3: export SOC_VERSION="ascend910_9391"\n'
+            '  - Atlas 300I: export SOC_VERSION="ascend310p1"\n'
+            '  - Atlas A5: export SOC_VERSION="<value starting with ascend950>"\n'
+            "You can also refer to the SOC_VERSION defaults in Dockerfile*."
         )
     envs.SOC_VERSION = soc_version
-else:
-    if soc_version and soc_version != envs.SOC_VERSION:
-        logging.warning(f"env SOC_VERSION: {envs.SOC_VERSION} is not equal to soc_version from npu-smi: {soc_version}")
 
 
 def gen_build_info():
@@ -153,11 +173,14 @@ def gen_build_info():
         "ascend310p3vir02": "_310P",
         "ascend310p3vir04": "_310P",
         "ascend310p3vir08": "_310P",
-        "ascend910_9579": "A5",
     }
-
-    assert soc_version in soc_to_device, f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
-    device_type = soc_to_device[soc_version]
+    if "ascend950" in soc_version:
+        device_type = "A5"
+    else:
+        assert soc_version in soc_to_device, (
+            f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
+        )
+        device_type = soc_to_device[soc_version]
 
     package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
     with open(package_dir, "w+") as f:
@@ -315,6 +338,11 @@ class cmake_build_ext(build_ext):
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
 
+        # Pass VLLM_ASCEND_ENABLE_BATCH_MEMCPY to CMake if explicitly set.
+        # When unset (None), CMake will auto-detect from CANN headers.
+        if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
+            cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
+
         build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
         # if which('ninja') is not None:
@@ -405,8 +433,10 @@ class cmake_build_ext(build_ext):
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
     def run(self):
-        # First, ensure ACLNN custom-ops is built and installed.
-        self.run_command("build_aclnn")
+        if envs.COMPILE_CUSTOM_KERNELS:
+            # First, ensure ACLNN custom-ops is built and installed.
+            self.run_command("build_aclnn")
+
         # Then, run the standard build_ext command to compile the extensions
         super().run()
 

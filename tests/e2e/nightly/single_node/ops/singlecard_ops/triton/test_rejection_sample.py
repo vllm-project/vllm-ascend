@@ -1,3 +1,4 @@
+import gc
 import pytest
 import torch
 from vllm.v1.sample.rejection_sampler import \
@@ -96,7 +97,9 @@ def test_rejection_random_sample(max_spec_len, vocab_size, batch_size):
                                              BLOCK_SIZE=block_size)
     torch.npu.synchronize()
     assert torch.equal(original_output_token_ids, output_token_ids)
-
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 DEVICE = "npu"
 BATCH_SIZE = 7
@@ -227,3 +230,6 @@ def test_rejection_sampler_block_verify_triton_kernel(
         BLOCK_SIZE=block_size)
     torch.npu.synchronize()
     assert torch.equal(output_token_ids_ref, output_token_ids_triton)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

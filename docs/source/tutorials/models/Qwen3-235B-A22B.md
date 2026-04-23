@@ -18,8 +18,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node, 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G * 8)nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B)
-- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G * 8)nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
+- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node, 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G × 8)nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B)
+- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G × 8)nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -174,7 +174,7 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
-vllm serve vllm-ascend/Qwen3-235B-A22B \
+vllm serve Qwen/Qwen3-235B-A22B \
 --host 0.0.0.0 \
 --port 8000 \
 --data-parallel-size 2 \
@@ -191,7 +191,7 @@ vllm serve vllm-ascend/Qwen3-235B-A22B \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --async-scheduling \
---gpu-memory-utilization 0.9 \
+--gpu-memory-utilization 0.9
 ```
 
 Node1
@@ -219,7 +219,7 @@ export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
-vllm serve vllm-ascend/Qwen3-235B-A22B \
+vllm serve Qwen/Qwen3-235B-A22B \
 --host 0.0.0.0 \
 --port 8000 \
 --headless \
@@ -298,7 +298,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3-235B-A22B-w8a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -440,7 +440,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enforce-eager \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
---enforce-eager \
 --no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",
@@ -448,7 +447,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 "kv_port": "30000",
 "engine_id": "0",
 "kv_connector_extra_config": {
-      "use_ascend_direct": true,
       "prefill": {
             "dp_size": 2,
             "tp_size": 8
@@ -513,7 +511,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 "kv_port": "30100",
 "engine_id": "1",
 "kv_connector_extra_config": {
-      "use_ascend_direct": true,
       "prefill": {
             "dp_size": 2,
             "tp_size": 8
@@ -579,7 +576,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 "kv_port": "30100",
 "engine_id": "1",
 "kv_connector_extra_config": {
-      "use_ascend_direct": true,
       "prefill": {
             "dp_size": 2,
             "tp_size": 8

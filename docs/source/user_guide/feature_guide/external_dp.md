@@ -4,7 +4,7 @@ For larger-scale deployments especially, it can make sense to handle the orchest
 
 In this case, it's more convenient to treat each DP rank like a separate vLLM deployment, with its own endpoint, and have an external router balance HTTP requests between them, making use of appropriate real-time telemetry from each server for routing decisions.
 
-## Getting Start
+## Getting Started
 
 The functionality of [external DP](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/?h=external#external-load-balancing) is already natively supported by vLLM. In vllm-ascend we provide two enhanced functionalities:
 
@@ -22,7 +22,7 @@ This tutorial will introduce the usage of them.
 pip install fastapi httpx uvicorn
 ```
 
-## Starting Exeternal DP Servers
+## Starting External DP Servers
 
 First, you need to have at least two vLLM servers running in data parallel. These can be mock servers or actual vLLM servers. Note that this proxy also works with only one vLLM server running, but will fall back to direct request forwarding which is meaningless.
 

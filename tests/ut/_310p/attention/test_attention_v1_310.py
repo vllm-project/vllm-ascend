@@ -74,7 +74,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_flash_attention")
-    @patch("vllm_ascend.attention.attention_v1.get_forward_context")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_prefill_310(
         self, mock_get_forward_context, mock_npu_npu_flash_attention, mock_npu_reshape_and_cache
     ):
@@ -105,7 +105,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_paged_attention_splitfuse")
-    @patch("vllm_ascend.attention.attention_v1.get_forward_context")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_chunked_prefill_310(
         self,
         mock_get_forward_context,
@@ -140,7 +140,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_paged_attention_splitfuse")
-    @patch("vllm_ascend.attention.attention_v1.get_forward_context")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_prefill_cache_hit_310(
         self,
         mock_get_forward_context,
@@ -175,7 +175,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
     @patch("torch_npu._npu_paged_attention")
     @patch("torch_npu._npu_reshape_and_cache")
-    @patch("vllm_ascend.attention.attention_v1.get_forward_context")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_paged_attention_310(
         self, mock_get_forward_context, mock_npu_reshape_and_cache, mock_paged_attention, mock_using_paged_attention
     ):

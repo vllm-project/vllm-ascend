@@ -1,7 +1,7 @@
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
-  name: vllm
+  name: {{ lws_name | default("vllm") }}
   namespace: vllm-project
 spec:
   replicas: {{ replicas | default(1) }}
@@ -13,6 +13,11 @@ spec:
         labels:
           role: leader
       spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "night"
+            effect: "NoSchedule"
         containers:
           - name: vllm-leader
             imagePullPolicy: Always
@@ -20,10 +25,24 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: LOG_PREFIX
+                value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
                 value: {{ fail_tag | default("FAIL_TAG") }}
+              - name: IS_PR_TEST
+                value: "{{ is_pr_test | default("false") }}"
+              - name: VLLM_ASCEND_REF
+                value: {{ vllm_ascend_ref | default("main") }}
+              - name: VLLM_ASCEND_REMOTE_URL
+                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: BENCHMARK_JOB_NAME
+                value: {{ benchmark_job_name | default("") }}
+              - name: VLLM_CI_RUNNER
+                value: {{ runner | default("linux-aarch64-a3-0") }}
+              - name: VLLM_ASCEND_VERSION
+                value: {{ vllm_ascend_ref | default("main") }}
             command:
               - sh
               - -c
@@ -59,12 +78,17 @@ spec:
             sizeLimit: 15Gi
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: nv-action-vllm-benchmarks-v2
+            claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
     workerTemplate:
       spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "night"
+            effect: "NoSchedule"
         containers:
           - name: vllm-worker
             imagePullPolicy: Always
@@ -72,10 +96,22 @@ spec:
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
+              - name: LOG_PREFIX
+                value: {{ log_prefix | default("/root/.cache/ascend-logs") }}
               - name: WORKSPACE
                 value: "/vllm-workspace"
               - name: FAIL_TAG
                 value: {{ fail_tag | default("FAIL_TAG") }}
+              - name: IS_PR_TEST
+                value: "{{ is_pr_test | default("false") }}"
+              - name: VLLM_ASCEND_REF
+                value: {{ vllm_ascend_ref | default("main") }}
+              - name: VLLM_ASCEND_REMOTE_URL
+                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: BENCHMARK_JOB_NAME
+                value: {{ benchmark_job_name | default("") }}
+              - name: VLLM_CI_RUNNER
+                value: {{ runner | default("linux-aarch64-a3-0") }}
             command:
               - sh
               - -c
@@ -104,7 +140,7 @@ spec:
             sizeLimit: 15Gi
         - name: shared-volume
           persistentVolumeClaim:
-            claimName: nv-action-vllm-benchmarks-v2
+            claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
         - name: driver-tools
           hostPath:
             path: /usr/local/Ascend/driver/tools
@@ -112,7 +148,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-leader
+  name: {{ lws_name | default("vllm") }}-leader
   namespace: vllm-project
 spec:
   ports:
@@ -121,6 +157,6 @@ spec:
       protocol: TCP
       targetPort: 8080
   selector:
-    leaderworkerset.sigs.k8s.io/name: vllm
+    leaderworkerset.sigs.k8s.io/name: {{ lws_name | default("vllm") }}
     role: leader
   type: ClusterIP

@@ -41,7 +41,7 @@ jobs:
   lint:
     uses: ./.github/workflows/_pre_commit.yml
     with:
-      vllm: 83b47f67b1dfad505606070ae4d9f83e50ad4ebd
+      vllm: 6f786f2c506cb07f4566771fdc62e640e2c4a176
   changes:
     runs-on: linux-aarch64-a2b3-0
     outputs:
@@ -55,13 +55,14 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
       - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
             e2e_tracker:
               - '.github/workflows/pr_test_light.yaml'
               - '.github/workflows/_e2e_test.yaml'
+              - '.github/workflows/scripts/**'
               - 'vllm_ascend/**'
               - 'csrc/**'
               - 'cmake/**'
@@ -77,7 +78,11 @@ jobs:
               - '.github/workflows/pr_test_light.yaml'
             _310_tracker:
               - 'vllm_ascend/_310p/**'
-              - 'vllm_ascend/worker/model_runner_v1.py'
+              - 'tests/e2e/310p/**'
+              - 'vllm_ascend/worker/**'
+              - 'vllm_ascend/attention/attention_v1.py'
+              - 'vllm_ascend/ops/fused_moe/**'
+              - 'vllm_ascend/patch/**'
               - 'CMakeLists.txt'
 
   ut:
@@ -87,19 +92,19 @@ jobs:
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     strategy:
       matrix:
-        vllm_version: [83b47f67b1dfad505606070ae4d9f83e50ad4ebd, v0.15.0]
+        vllm_version: [6f786f2c506cb07f4566771fdc62e640e2c4a176, v0.19.0]
     uses: ./.github/workflows/_unit_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-amd64-cpu-8-hk
-      image: quay.nju.edu.cn/ascend/cann:8.5.0-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       type: pr
 
   e2e-light:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [83b47f67b1dfad505606070ae4d9f83e50ad4ebd, v0.15.0]
+        vllm_version: [6f786f2c506cb07f4566771fdc62e640e2c4a176, v0.19.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
@@ -107,6 +112,6 @@ jobs:
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       contains_310: ${{ needs.changes.outputs._310_tracker == 'true' }}
       type: light

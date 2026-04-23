@@ -19,6 +19,7 @@ import pytest
 import torch
 import torch.nn as nn
 import vllm.config
+from vllm.compilation.passes.fx_utils import OpOverload
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.utils.system_utils import update_environment_variables
@@ -27,13 +28,7 @@ import vllm_ascend.ops.register_custom_ops  # noqa
 from tests.e2e.singlecard.compile.backend import TestBackend
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
-from vllm_ascend.utils import enable_custom_op, vllm_version_is
-
-if vllm_version_is("0.15.0"):
-    from vllm.compilation.fx_utils import OpOverload  # type: ignore
-else:
-    from vllm.compilation.passes.fx_utils import OpOverload
-
+from vllm_ascend.utils import enable_custom_op
 
 # Cache backend to avoid duplicate pattern registration
 _backend_cache = None

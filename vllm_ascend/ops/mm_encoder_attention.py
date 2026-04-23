@@ -16,13 +16,25 @@
 #
 
 import einops
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-MIN_PAD_SIZE = 64  # min_size to pad weight
-MAX_PAD_SIZE = 128  # max_size to pad weight
+MIN_PAD_SIZE: int = 64  # min_size to pad weight
+MAX_PAD_SIZE: int = 128  # max_size to pad weight
+
+# Use seq_lens CPU cache to avoid frequent d2h copy.
+# AscendMMEncoderAttention will copy the cu_seqlens from NPU to CPU in every
+# forward, since the op _npu_flash_attention_unpad() requires CPU cu_seqlens
+# (otherwise it will break down).
+# Thus, we use seq_lens_cpu_cache to cache this tensor, since it's shared
+# between all layers, but may change in different forward step. When the
+# current layer_index is 0, we update the cache, otherwise we directly use the
+# cache to avoid frequent diff and copy operations, which are costful.
+seq_lens_cpu_cache: torch.Tensor = None
 
 
 class AscendMMEncoderAttention(MMEncoderAttention):
@@ -52,7 +64,25 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             prefix=prefix,
         )
 
-    def reshape_qkv_to_3d(
+        self.enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
+        self.scale_value = self.head_size**-0.5
+
+    @classmethod
+    def maybe_compute_seq_lens(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        cu_seqlens: np.ndarray,
+        device: torch.device,
+    ) -> np.ndarray | None:
+        if cu_seqlens is None:
+            return None
+
+        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+        seq_lens = torch.from_numpy(seq_lens).to("cpu", non_blocking=True)
+
+        return seq_lens
+
+    def _reshape_qkv_to_3d(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -76,6 +106,21 @@ class AscendMMEncoderAttention(MMEncoderAttention):
 
         return query, key, value
 
+    def _maybe_compute_cu_seqlens(
+        self,
+        bsz: int,
+        q_len: int,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if cu_seqlens is not None:
+            return cu_seqlens
+
+        # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
+        # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
+        # compute it internally.
+        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
+        return cu_seqlens
+
     def forward_oot(
         self,
         query: torch.Tensor,
@@ -83,46 +128,48 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,
     ):
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
         is_reshaped = query.dim() == 4
 
+        if sequence_lengths is not None:
+            # Use pre-compute seq_lens before vision blocks.
+            if sequence_lengths.device.type != "cpu":
+                sequence_lengths = sequence_lengths.to("cpu")
+            seq_lens_cpu = sequence_lengths
+        else:
+            # Convert cu_seqlens to seq_lens and move it to CPU, since FA requires CPU seq_lens.
+            # NOTE: This will considerably hurt performance.
+            cu_seqlens = self._maybe_compute_cu_seqlens(bsz, q_len, cu_seqlens)
+            seq_lens_cpu = torch.diff(cu_seqlens).to("cpu")
+
         # q, k, v: [b, s, head, head_dim] -> [b * s, head, head_dim]
-        q, k, v = self.reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
+        q, k, v = self._reshape_qkv_to_3d(query, key, value, bsz, q_len, kv_len)
 
-        enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
-
-        if enable_pad:
+        if self.enable_pad:
             origin_shape = q.shape[-1]
             pad_len = MAX_PAD_SIZE - origin_shape
-            # Merge qkv to reduce the overhead of launching npu pad operation.
-            # [3, b*s, head, head_dim]
-            qkv = torch.stack([q, k, v], dim=0)
-            # qkv: [3, b * s, head, head_dim] -> [3, b * s, head, MAX_PAD_SIZE]
-            qkv = F.pad(qkv, (0, pad_len), mode="constant", value=0)
-            q, k, v = qkv.unbind(dim=0)
+            # [b * s, head, head_dim] -> [b * s, head, MAX_PAD_SIZE]
+            q = F.pad(q, (0, pad_len), mode="constant", value=0)
+            k = F.pad(k, (0, pad_len), mode="constant", value=0)
+            v = F.pad(v, (0, pad_len), mode="constant", value=0)
 
-        context_layer = torch.empty_like(q)
+        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
 
-        if cu_seqlens is None:
-            cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device)
-
-        cu_seqlens = torch.diff(cu_seqlens).to("cpu")
-
-        # operator requires pta version >= 2.5.1
-        torch_npu._npu_flash_attention_unpad(
+        context_layer = torch_npu.npu_fusion_attention(
             query=q,
             key=k,
             value=v,
-            seq_len=cu_seqlens,
-            scale_value=self.head_size**-0.5,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=context_layer,
-        )
+            actual_seq_qlen=seq_lens_cpu,
+            actual_seq_kvlen=seq_lens_cpu,
+            head_num=self.num_heads,
+            scale=self.scale_value,
+            input_layout="TND",
+        )[0]
 
-        if enable_pad:
+        if self.enable_pad:
             context_layer = context_layer[..., :origin_shape]
 
         if is_reshaped:

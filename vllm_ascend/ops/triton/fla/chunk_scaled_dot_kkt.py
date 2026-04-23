@@ -21,7 +21,7 @@ from .utils import prepare_chunk_indices, safe_exp
         "USE_G": lambda args: args["g_cumsum"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "B"])
 def chunk_scaled_dot_kkt_fwd_kernel(
     k,
     beta,  # [H, B, T]
@@ -85,6 +85,7 @@ def chunk_scaled_dot_kkt_fwd(
     beta: torch.Tensor,
     g_cumsum: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
@@ -115,13 +116,8 @@ def chunk_scaled_dot_kkt_fwd(
 
     H = beta.shape[-1]
     BT = chunk_size
-    if cu_seqlens is not None:
-        cu_seqlens = cu_seqlens.cpu()
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-        chunk_indices = chunk_indices.npu()
-        cu_seqlens = cu_seqlens.npu()
-    else:
-        chunk_indices = None
+    if cu_seqlens is not None and chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 

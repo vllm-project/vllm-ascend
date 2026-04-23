@@ -9,12 +9,54 @@ on:
       image:
         required: true
         type: string
+      image_a3:
+        required: false
+        type: string
+        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-a3-ubuntu22.04-py3.11
+      image_310p:
+        required: false
+        type: string
+        default: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-310p-ubuntu22.04-py3.11
       type:
         required: true
         type: string
       contains_310:
-        required: true
+        required: false
         type: boolean
+        default: false
+      continue_on_error:
+        required: false
+        type: boolean
+        default: false
+      # The following inputs are used by comment-triggered E2E tests (/e2e <tests>).
+      # They carry space-separated pytest paths, categorized by runner type.
+      # Leave empty (default) when running label-triggered full/light suites.
+      ref:
+        required: false
+        type: string
+        default: ''
+      singlecard_tests:
+        required: false
+        type: string
+        default: ''
+      multicard_2_tests:
+        required: false
+        type: string
+        default: ''
+      multicard_4_tests:
+        required: false
+        type: string
+        default: ''
+      p310_tests:
+        required: false
+        type: string
+        default: ''
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
 
 jobs:
   e2e-light:
@@ -46,6 +88,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Install system dependencies
         run: |
@@ -54,6 +97,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -66,30 +110,90 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
 
       - name: Run vllm-project/vllm-ascend test
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-singlecard-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-singlecard-light-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-singlecard-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-singlecard-light-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize singlecard-light failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run singlecard-light test" \
+            --log-file /tmp/e2e-singlecard-light-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v7
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-singlecard-light-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
 
   e2e-full:
     name: singlecard-full
-    if: ${{ inputs.type == 'full' }}
+    if: ${{ inputs.type == 'full' || inputs.singlecard_tests != '' }}
     runs-on: linux-aarch64-a2b3-1
     strategy:
       fail-fast: false
       matrix:
-        part: [0, 1]
+        part: ${{ fromJSON(inputs.type == 'full' && '[0, 1]' || '[0]') }}
     container:
       image: ${{ inputs.image }}
       env:
@@ -100,6 +204,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Check npu and CANN info
         run: |
@@ -113,6 +219,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Install system dependencies
         run: |
@@ -121,6 +228,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -133,20 +241,88 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
       - name: Run e2e test
+        if: ${{ inputs.type == 'full' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        shell: bash
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-singlecard --auto-partition-id ${{ matrix.part }} --auto-partition-size 2
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-singlecard \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 2 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-singlecard-full-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-singlecard \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 2 \
+              2>&1 | tee /tmp/e2e-singlecard-full-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize singlecard-full failure
+        if: ${{ always() && inputs.type == 'full' }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run singlecard-full test" \
+            --log-file /tmp/e2e-singlecard-full-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v7
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-singlecard-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
+
+      - name: Run E2E tests (comment-singlecard)
+        if: ${{ inputs.singlecard_tests != '' }}
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        run: |
+          pytest -sv --durations=0 ${{ inputs.singlecard_tests }}
 
   e2e-2-cards-light:
     name: multicard-2-light
@@ -157,7 +333,7 @@ jobs:
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: ${{ inputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -178,6 +354,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Install system dependencies
         run: |
@@ -186,6 +363,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -198,30 +376,90 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
       - name: Run vllm-project/vllm-ascend test (light)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-2card-light --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-2card-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-2card-light-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-2card-light \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-2card-light-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize multicard-2-light failure
+        if: ${{ always() }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run multicard-2-light test" \
+            --log-file /tmp/e2e-2card-light-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v7
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-2card-light-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
 
   e2e-2-cards-full:
     name: multicard-2-full
-    if: ${{ inputs.type == 'full' }}
+    if: ${{ inputs.type == 'full' || inputs.multicard_2_tests != '' }}
     runs-on: linux-aarch64-a3-2
     strategy:
       fail-fast: false
       matrix:
         part: [0]
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: ${{ inputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -230,6 +468,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -242,6 +482,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Install system dependencies
         run: |
@@ -250,6 +491,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -262,38 +504,118 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
       - name: Run vllm-project/vllm-ascend test (full)
+        if: ${{ inputs.type == 'full' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-multicard-2-cards \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-2card-full-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-multicard-2-cards \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-2card-full-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize multicard-2-full failure
+        if: ${{ always() && inputs.type == 'full' }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run multicard-2-full test " \
+            --log-file /tmp/e2e-2card-full-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v7
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-2card-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
+
+      - name: Run E2E tests (comment-multicard-2)
+        if: ${{ inputs.multicard_2_tests != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-2-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+          pytest -sv --durations=0 ${{ inputs.multicard_2_tests }}
 
       - name: Run vllm-project/vllm-ascend test (non triton)
         if: ${{ inputs.type == 'full' && matrix.part == 0 }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
+          set -o pipefail
           python3 -m pip uninstall -y triton-ascend
-          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py
+          pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_aclgraph_capture_replay.py \
+            2>&1 | tee /tmp/e2e-non-triton.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize non-triton failure
+        if: ${{ always() && inputs.type == 'full' && matrix.part == 0 }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run multicard-2-full test (non triton)" \
+            --log-file /tmp/e2e-non-triton.log \
+            --output "$GITHUB_STEP_SUMMARY"
 
   e2e-4-cards-full:
     name: multicard-4-full
-    if: ${{ inputs.type == 'full' }}
+    if: ${{ inputs.type == 'full' || inputs.multicard_4_tests != '' }}
     runs-on: linux-aarch64-a3-4
     strategy:
       fail-fast: false
       matrix:
         part: [0]
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.5.0-a3-ubuntu22.04-py3.11
+      image: ${{ inputs.image_a3 }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -301,6 +623,8 @@ jobs:
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Check npu and CANN info
         run: |
           npu-smi info
@@ -313,6 +637,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Install system dependencies
         run: |
@@ -321,6 +646,7 @@ jobs:
 
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -333,27 +659,95 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_a3 }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
+        if: ${{ inputs.type == 'full' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "${{ inputs.continue_on_error }}" = "true" ]; then
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-multicard-4-cards \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              --auto-upgrade-estimated-times \
+              --continue-on-error \
+              2>&1 | tee /tmp/e2e-4card-full-part${{ matrix.part }}.log
+          else
+            python3 .github/workflows/scripts/run_suite.py \
+              --suite e2e-multicard-4-cards \
+              --auto-partition-id "${{ matrix.part }}" \
+              --auto-partition-size 1 \
+              2>&1 | tee /tmp/e2e-4card-full-part${{ matrix.part }}.log
+          fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize multicard-4-full failure
+        if: ${{ always() && inputs.type == 'full' }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run vllm-project/vllm-ascend test for V1 Engine" \
+            --log-file /tmp/e2e-4card-full-part${{ matrix.part }}.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Upload timing data
+        uses: actions/upload-artifact@v7
+        if: ${{ inputs.continue_on_error == true && github.event_name != 'pull_request' }}
+        with:
+          name: timing-data-4card-full-part${{ matrix.part }}
+          path: test_timing_data.json
+          if-no-files-found: warn
+          retention-days: 5
+
+      - name: Run E2E tests (comment-multicard-4)
+        if: ${{ inputs.multicard_4_tests != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          python3 .github/workflows/scripts/run_suite.py --suite e2e-multicard-4-cards --auto-partition-id ${{ matrix.part }} --auto-partition-size 1
+          pytest -sv --durations=0 ${{ inputs.multicard_4_tests }}
 
   e2e_310p:
     name: 310p singlecard
     runs-on: linux-aarch64-310p-1
-    if: ${{ inputs.contains_310 }}
+    if: ${{ inputs.contains_310 || inputs.p310_tests != '' }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11
+      image: ${{ inputs.image_310p }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -370,14 +764,18 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -390,28 +788,75 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
 
       - name: Run vllm-project/vllm-ascend test
+        if: ${{ inputs.contains_310 }}
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py \
+          tests/e2e/310p/singlecard/test_vl_model_singlecard.py \
+          2>&1 | tee /tmp/e2e-310p-singlecard.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize 310p singlecard failure
+        if: ${{ always() && inputs.contains_310 }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run vllm-project/vllm-ascend test" \
+            --log-file /tmp/e2e-310p-singlecard.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+      - name: Run E2E tests (comment-310p)
+        if: ${{ inputs.p310_tests != '' }}
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          pytest -sv --durations=0 tests/e2e/310p/singlecard/test_dense_model_singlecard.py
+          pytest -sv --durations=0 ${{ inputs.p310_tests }}
 
   e2e_310p-4cards:
     name: 310p multicards 4cards
     runs-on: linux-aarch64-310p-4
     if: ${{ inputs.contains_310 }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-310p-ubuntu22.04-py3.11
+      image: ${{ inputs.image_310p }}
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -428,6 +873,7 @@ jobs:
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6
@@ -436,6 +882,7 @@ jobs:
         run: |
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
+          pip install uv
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v6
@@ -448,20 +895,60 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          VLLM_TARGET_DEVICE=empty uv pip install -e .
+          uv pip uninstall triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-${{ inputs.image_310p }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
 
       - name: Run vllm-project/vllm-ascend test
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+        shell: bash
         run: |
+          set -o pipefail
           pytest -sv --durations=0 \
-          tests/e2e/310p/multicard/test_dense_model_multicard.py \
-          tests/e2e/310p/multicard/test_moe_model_multicard.py
+          tests/e2e/310p/multicard/test_dense_model_multicard.py::test_qwen3_dense_tp4_w8a8 \
+          tests/e2e/310p/multicard/test_moe_model_multicard.py::test_qwen3_moe_tp4_fp16 \
+          tests/e2e/310p/multicard/test_moe_model_multicard.py::test_qwen3_5_moe_tp4_fp16 \
+          tests/e2e/310p/multicard/test_vl_model_multicard.py::test_qwen3_vl_8b_tp2_fp16 \
+          2>&1 | tee /tmp/e2e-310p-4cards.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Summarize 310p multicards failure
+        if: ${{ always() && inputs.contains_310 }}
+        run: |
+          python3 .github/workflows/scripts/ci_log_summary.py \
+            --step-name "Run vllm-project/vllm-ascend test" \
+            --log-file /tmp/e2e-310p-4cards.log \
+            --output "$GITHUB_STEP_SUMMARY"
+

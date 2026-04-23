@@ -47,7 +47,6 @@ mtp_proposer.py
 ├── Proposer
 │   ├── load_model
 │   ├── dummy_run
-│   ├── generate_token_ids
 │   ├── _prepare_inputs
 │   ├── _propose
 ```
@@ -86,11 +85,11 @@ def get_spec_decode_method(method,
                            device,
                            runner):
     if method == "ngram":
-        return NgramProposer(vllm_config, device, runner)
+        return AscendNgramProposer(vllm_config, device, runner)
     elif method in ["eagle", "eagle3"]:
-        return EagleProposer(vllm_config, device, runner)
+        return AscendEagleProposer(vllm_config, device, runner)
     elif method == 'mtp':
-        return MtpProposer(vllm_config, device, runner)
+        return AscendMtpProposer(vllm_config, device, runner)
     else:
         raise ValueError("Unknown speculative decoding method: "
                          f"{method}")

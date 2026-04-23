@@ -1,10 +1,15 @@
 import base64
 import os
 
+import huggingface_hub
 import requests
 from modelscope import snapshot_download  # type: ignore
 
-mm_dir = snapshot_download("vllm-ascend/mm_request", repo_type="dataset")
+mm_dir = snapshot_download(
+    "vllm-ascend/mm_request",
+    repo_type="dataset",
+    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+)
 image_path = os.path.join(mm_dir, "test_mm2.jpg")
 with open(image_path, "rb") as image_file:
     image_data = base64.b64encode(image_file.read()).decode("utf-8")

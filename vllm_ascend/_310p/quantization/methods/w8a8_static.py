@@ -21,7 +21,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.quantization.methods.base import AscendLinearScheme
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import maybe_trans_nz
 
 from .registry import register_scheme
 
@@ -105,7 +105,7 @@ class AscendW8A8LinearMethod310(AscendLinearScheme):
         ).to(layer.aclnn_input_scale.dtype)
 
         # ---- matmul stage tensor ----
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_NZ).transpose(0, 1)
+        layer.weight.data = maybe_trans_nz(layer.weight.data).transpose(0, 1)
 
         # ---- dequant stage tensors ----
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)

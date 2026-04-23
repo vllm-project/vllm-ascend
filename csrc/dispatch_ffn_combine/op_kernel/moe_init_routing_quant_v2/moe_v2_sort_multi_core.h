@@ -106,9 +106,9 @@ __aicore__ inline void MoeV2SortMultiCore::UBSortCompute(int64_t progress, int64
 
   expertForSourceRowLocalFp32 = expertForSourceRowLocal.ReinterpretCast<float>();
   Cast(expertForSourceRowLocalFp32, expertForSourceRowLocal, RoundMode::CAST_ROUND, sortNum);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Muls(expertForSourceRowLocalFp32, expertForSourceRowLocalFp32, (float)-1, sortNum);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   int64_t duplicateNum = size % ONE_REPEAT_SORT_NUM;
   if (duplicateNum > 0) {
@@ -118,7 +118,7 @@ __aicore__ inline void MoeV2SortMultiCore::UBSortCompute(int64_t progress, int64
     mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
     uint64_t mask[2] = {mask0, 0};
     Duplicate(expertForSourceRowLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
 
   LocalTensor<float> concatLocal = expertForSourceRowLocalFp32;

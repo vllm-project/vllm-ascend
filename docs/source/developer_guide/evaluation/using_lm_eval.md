@@ -43,7 +43,7 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### 2. Run GSM8K using lm-eval for accuracy testing
+### 2. Run GSM8K using the vLLM server (curl) and then run lm-eval for accuracy testing
 
 You can query the result with input prompts:
 
@@ -106,8 +106,16 @@ Install lm-eval in the container:
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
+export USE_MODELSCOPE_HUB=0
 pip install lm-eval[api]
 ```
+
+:::{note}
+The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
+cause lm-eval to download datasets from ModelScope instead of HuggingFace.
+Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
+fetch datasets from HuggingFace correctly.
+:::
 
 Run the following command:
 
@@ -170,8 +178,16 @@ Install lm-eval in the container:
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
+export USE_MODELSCOPE_HUB=0
 pip install lm-eval
 ```
+
+:::{note}
+The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
+cause lm-eval to download datasets from ModelScope instead of HuggingFace.
+Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
+fetch datasets from HuggingFace correctly.
+:::
 
 Run the following command:
 
@@ -198,7 +214,7 @@ Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 
 ## Use Offline Datasets
 
-Take GSM8K (single dataset) and MMLU (multi-subject dataset) as examples, and you can see more from [here][2].
+Take GSM8K (single dataset) and MMLU (multi-subject dataset) as examples, and you can see more from [using-local-datasets][2].
 
 ```bash
 # set HF_DATASETS_OFFLINE when using offline datasets

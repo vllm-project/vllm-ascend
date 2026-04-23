@@ -19,16 +19,15 @@
 
 from __future__ import annotations
 
-import atexit
 import functools
 import math
 import os
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
-from threading import Lock
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
@@ -53,6 +52,7 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
+_DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _WEIGHT_PREFETCH_METHOD = None
@@ -62,15 +62,12 @@ _CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
-_DYNAMIC_EPLB_BUFFER_SIZE = 1  # num_experts * num_layers * 64 byte
+_DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
-_SUBSCRIBED_COMPUTE_STREAMS = set()
-_GRAPH_PRINT_STREAM = None
-_GRAPH_PRINT_STREAM_LOCK = Lock()
 _HAS_ROPE = None
 
 
@@ -78,78 +75,114 @@ def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
 
-def _print_callback_on_stream(*args):
-    """Callback function to print arguments on the dedicated print stream."""
-    global _GRAPH_PRINT_STREAM
-    with torch_npu.npu.stream(_GRAPH_PRINT_STREAM):
-        print(*args, flush=True)
+def _mark_op_side_effectful(op: Any) -> None:
+    torch.fx.node.has_side_effect(op)
+    default_overload = getattr(op, "default", None)
+    if default_overload is not None:
+        torch.fx.node.has_side_effect(default_overload)
 
 
-def acl_graph_print(*args):
+def _ensure_device_print_registered() -> None:
+    global _DEVICE_PRINT_OP_REGISTERED
+
+    if _DEVICE_PRINT_OP_REGISTERED:
+        return
+
+    if not enable_custom_op():
+        raise RuntimeError(
+            "device_print requires _C_ascend.device_print ops to be available "
+            "when custom ops are enabled in the current Ascend build."
+        )
+
+    try:
+        # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
+        _mark_op_side_effectful(torch.ops._C_ascend.device_print)
+        _mark_op_side_effectful(torch.ops._C_ascend.device_print_tensor)
+        _DEVICE_PRINT_OP_REGISTERED = True
+    except AttributeError as exc:
+        raise RuntimeError(
+            "device_print requires _C_ascend.device_print ops to be available "
+            "when custom ops are enabled in the current Ascend build."
+        ) from exc
+
+
+def device_print(
+    value: torch.Tensor | int | float | bool | str | torch.dtype | torch.device | torch.Size,
+) -> None:
+    """Print one value from a device callback.
+
+    This helper is intended for debugging. To stay replay-safe under
+    ``torch.npu.graph`` capture/replay, the underlying callback payloads are
+    retained instead of being reclaimed after the first host callback runs.
+    Avoid using it in hot paths or long-running high-frequency loops, otherwise
+    there may be memory issues due to too many retained payloads.
+
+    Supported usage:
+
+        >>> from vllm_ascend.utils import device_print
+        >>> device_print(x)
+        >>> device_print("already formatted text")
+        >>> device_print(7)
+
+    Unsupported usage:
+
+        >>> device_print("x =", x)
+        >>> device_print("This is ", x, "and this is ", y)
+
+    If you need device-time tensor values, pass the tensor itself. If you need
+    text, pass one final string that is already formatted.
+
+    Tensor values are copied to host on the current stream before the callback
+    prints them, so printing remains ordered with respect to the surrounding
+    device work.
+
+    DO NOT FORMAT A DEVICE TENSOR INTO A STRING YOURSELF AND THEN PRINT, for example:
+
+        >>> device_print(f"x = {x}")
+        >>> device_print("x = " + str(x))
     """
-    Prints arguments from within an ACL graph.
+    _ensure_device_print_registered()
 
-    This function is provided for developers to print debug information when encountering
-    issues within an ACL graph, pretty handy for dumping input/output tensor values, or
-    resolving unexpected hangs. Usage:
-    ```python
-    from vllm_ascend.utils import acl_graph_print
-
-    ...
-    acl_graph_print("Debug info")
-    ```
-
-    This function launches a host function on the current compute stream to print
-    the given arguments. It uses a dedicated stream for printing to avoid
-    interfering with computation.
-
-    NOTE: torch.compile does not support this function, only use this in non-compiled code.
-    For example, those custom ops like `unified_attention_with_output` or `moe_forward`.
-    """
-    global _SUBSCRIBED_COMPUTE_STREAMS
-    global _GRAPH_PRINT_STREAM
-
-    current_compute_stream = torch_npu.npu.current_stream()
-
-    with _GRAPH_PRINT_STREAM_LOCK:
-        if _GRAPH_PRINT_STREAM is None:
-            _GRAPH_PRINT_STREAM = torch_npu.npu.Stream()
-
-        if current_compute_stream not in _SUBSCRIBED_COMPUTE_STREAMS:
-            # Subscribe the compute stream to allow launching host functions.
-            torch_npu.npu._subscribe_report(current_compute_stream)
-            _SUBSCRIBED_COMPUTE_STREAMS.add(current_compute_stream)
-
-    torch_npu.npu._launch_host_func(current_compute_stream, _print_callback_on_stream, args)
-
-
-def _unregister_print_streams_on_exit():
-    """Unsubscribe all compute streams used for printing at exit."""
-    global _SUBSCRIBED_COMPUTE_STREAMS
-    with _GRAPH_PRINT_STREAM_LOCK:
-        for stream in _SUBSCRIBED_COMPUTE_STREAMS:
-            torch_npu.npu._unsubscribe_report(stream)
-
-
-atexit.register(_unregister_print_streams_on_exit)
-
-
-def maybe_trans_nz(weight: torch.Tensor):
-    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
-        # NZ is not enabled
-        return weight
-    if weight.dtype == torch.float:
-        # fp32 can not support NZ
-        return weight
-    elif weight.dtype in {torch.bfloat16, torch.float16}:
-        # bf16/fp16 will trans nz when VLLM_ASCEND_ENABLE_NZ is 2
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
-            return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
-        else:
-            return weight
+    if isinstance(value, torch.Tensor):
+        torch.ops._C_ascend.device_print_tensor(value)
+    elif isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
+        torch.ops._C_ascend.device_print(str(value))
     else:
-        # quant weight will trans nz by default
-        return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+        raise TypeError(
+            f"Unsupported device_print value type: {type(value)!r}. "
+            "Use exactly one argument: device_print(tensor), device_print('formatted text')."
+        )
+
+
+def _should_trans_nz(weight: torch.Tensor) -> bool:
+    # FP32 cannot use NZ.
+    if weight.dtype == torch.float32:
+        return False
+
+    # 310P always converts to NZ.
+    if is_310p():
+        return True
+
+    # NZ is disabled on non-310P.
+    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        return False
+
+    # BF16/FP16 convert only when enable_nz == 2.
+    if weight.dtype in {torch.bfloat16, torch.float16}:
+        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+
+    # Quantized or other supported dtypes convert by default.
+    return True
+
+
+# NZ conversion policy:
+# - 310P: always convert supported weights to FRACTAL_NZ
+# - non-310P: follow VLLM_ASCEND_ENABLE_NZ
+# - FP32: never convert
+def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+    if not _should_trans_nz(weight):
+        return weight
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
 def _round_up(x: int, align: int):
@@ -245,10 +278,22 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
+    import vllm.envs as envs
+
     global _CUSTOM_OP_ENABLED
 
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
+
+    # There are some customed operators which aren't implemented
+    # with batch invariant in vllm-ascend, we need to disable them.
+    # FIXME(linfeng): Currently custom op compilation and execution are partially available
+    # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
+    # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
+    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
+        _CUSTOM_OP_ENABLED = False
+        return _CUSTOM_OP_ENABLED
+
     try:
         # isort: off
         # register custom ops into torch_library here
@@ -463,7 +508,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     resources_per_graph = num_hidden_layers + 1
     # For suffix decoding, use the suffix path when no draft_model_config is provided.
     if (spec := vllm_config.speculative_config) and (draft := spec.draft_model_config):
-        resources_per_graph += draft.hf_config.num_hidden_layers + 1
+        # Use get_total_num_hidden_layers() to correctly handle MTP models,
+        # which store layer count in num_nextn_predict_layers or
+        # mtp_num_hidden_layers (for Qwen3.5) instead of num_hidden_layers.
+        resources_per_graph += draft.get_total_num_hidden_layers() + 1
 
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(
@@ -525,12 +573,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
         )
 
-    from vllm_ascend.utils import vllm_version_is
-
-    if vllm_version_is("0.15.0"):
-        arch_name = vllm_config.model_config.architectures[0]
-    else:
-        arch_name = vllm_config.model_config.architecture
+    arch_name = vllm_config.model_config.architecture
 
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
@@ -580,7 +623,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
+    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -591,6 +636,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
     from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.mm_encoder_attention import AscendMMEncoderAttention
+    from vllm_ascend.ops.qwen2_decoder import AscendCustomQwen2Decoder
+    from vllm_ascend.ops.rel_pos_attention import AscendRelPosAttention
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
@@ -628,14 +675,29 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
+        "Conv3dLayer": AscendConv3dLayer,
+        "RelPosAttention": AscendRelPosAttention,
+        "CustomQwen2Decoder": AscendCustomQwen2Decoder,
+        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
     }
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
-        from vllm_ascend._310p.ops.layernorm import AscendGemmaRMSNorm310, AscendRMSNorm310
+        from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
+        from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
+        from vllm_ascend._310p.ops.layernorm import (
+            AscendGemmaRMSNorm310,
+            AscendRMSNorm310,
+            AscendRMSNormGated310,
+        )
+        from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
         from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+        from vllm_ascend._310p.ops.vocab_parallel_embedding import (
+            AscendParallelLMHead310,
+            AscendVocabParallelEmbedding310,
+        )
 
         REGISTERED_ASCEND_OPS.update(
             {
@@ -643,8 +705,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "RotaryEmbedding": AscendRotaryEmbedding310,
                 "RMSNorm": AscendRMSNorm310,
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
+                "RMSNormGated": AscendRMSNormGated310,
                 "FusedMoE": AscendFusedMoE310,
                 "SharedFusedMoE": AscendSharedFusedMoE310,
+                "ParallelLMHead": AscendParallelLMHead310,
+                "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
+                "MMEncoderAttention": AscendMMEncoderAttention310,
+                "Conv3dLayer": AscendConv3dLayer310,
+                "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
             }
         )
 
@@ -724,6 +792,10 @@ def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
+def enable_sp_by_pass():
+    return get_ascend_config().enable_sp_by_pass
+
+
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
     if _ENABLE_SP is None:
@@ -732,8 +804,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
             vllm_config = get_current_vllm_config()
         _ENABLE_SP = (
-            vllm_config.compilation_config.pass_config.enable_sp
-            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
             # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
@@ -743,23 +814,12 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
 
-        if not _ENABLE_SP:
-            return _ENABLE_SP
-
-        assert vllm_config.parallel_config.tensor_parallel_size > 1, (
-            "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
-        )
-
-        assert not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel, (
-            "Flash Comm v1 (Sequence Parallelism) requires enable_expert_parallel=True for MoE models."
-        )
-
     return _ENABLE_SP
 
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp()
+    return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
 
 
 def prefill_context_parallel_enable() -> bool:
@@ -817,16 +877,34 @@ def _is_contain_expert(config: Any):
     return False
 
 
-def is_vl_model(vllm_config: VllmConfig):
-    """Checks if the model is a VL model by config"""
+def is_vl_model(vllm_config: VllmConfig = None):
+    """Checks if the model is a VL model by config.
+
+    Uses the same criterion as vllm itself (model_config.py): a model is
+    multimodal when its top-level hf_config differs from its hf_text_config
+    (i.e. there is a separate vision sub-config).  The legacy key-name checks
+    are kept as fallbacks for configs that override get_text_config() to return
+    self (rare but possible).
+    """
     global _IS_VL_MODEL
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
     if _IS_VL_MODEL is None and vllm_config and vllm_config.model_config:
-        hf_config = vllm_config.model_config.hf_config.to_dict()
-        if "thinker_config" in hf_config:
-            # Qwen-Omni-thinker models
+        model_config = vllm_config.model_config
+        # Primary: vllm's own VL detection — hf_config is the top-level
+        # (multimodal) config; hf_text_config is the language-model sub-config.
+        # They are the same object for pure-text models.
+        if model_config.hf_config is not model_config.hf_text_config:
             _IS_VL_MODEL = True
         else:
-            _IS_VL_MODEL = "vision_config" in hf_config
+            # Fallback: check well-known config keys
+            hf_config = model_config.hf_config.to_dict()
+            if "thinker_config" in hf_config or "vision_config" in hf_config:
+                _IS_VL_MODEL = True
+            else:
+                _IS_VL_MODEL = False
     return _IS_VL_MODEL
 
 
@@ -846,7 +924,7 @@ def weak_ref_tensor(tensor: Any) -> Any:
     but will not keep the original tensor alive.
     """
     if isinstance(tensor, torch.Tensor):
-        return torch.ops._C_ascend.weak_ref_tensor(tensor)
+        return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
@@ -941,7 +1019,81 @@ def calculate_dp_buffer_size() -> int:
 # and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
 # significantly improve communication performance of MC2 ops dispatch/combine.
 def is_hierarchical_communication_enabled():
-    return os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
+    return (
+        os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
+    ) or get_ascend_config().enable_mc2_hierarchy_comm
+
+
+def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
+    """Decide whether to skip the all-reduce across the DP group.
+
+    Skipping is applicable for all dense models and for moe models only on ranks
+    that act as KV consumers. We skip the DP all-reduce when either:
+    - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
+    - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
+
+    Skipping means each rank may have a different number of tokens, so MC2 needs
+    a non-zero global_bs and must NOT receive mc2_mask.
+
+    Returns False when hierarchy comm is enabled because hierarchy requires
+    global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
+    """
+    if is_hierarchical_communication_enabled():
+        return False
+
+    # For dense models, since we don't actually need dp communication, we simply skip it.
+    # This usually happens when main model is moe while eagle draft model is dense.
+    is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
+    if not is_context_moe_model:
+        return True
+
+    # Only applicable to MoE models on KV consumer ranks.
+    is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+    if not is_kv_consumer:
+        return False
+
+    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+    def needs_mc2(n: int) -> bool:
+        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+
+    compilation_config = vllm_config.compilation_config
+    scheduler_config = vllm_config.scheduler_config
+    speculative_config = vllm_config.speculative_config
+    uniform_decode_query_len = 1 if not speculative_config else 1 + speculative_config.num_speculative_tokens
+    decode_max_num_seqs = getattr(scheduler_config, "decode_max_num_seqs", 0)
+    max_num_reqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
+
+    # Determine whether decode must use MC2. Use max cudagraph capture size
+    # if available, otherwise use the maximal uniform decode token count.
+    if compilation_config.cudagraph_capture_sizes:
+        potential_max_tokens = max(
+            compilation_config.max_cudagraph_capture_size,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len,
+            ),
+        )
+        if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
+            logger.warning_once(
+                "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
+                "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
+                compilation_config.max_cudagraph_capture_size,
+                potential_max_tokens,
+            )
+    else:
+        potential_max_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+
+    decode_must_use_mc2 = needs_mc2(potential_max_tokens)
+    # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
+    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
+    # Skip all-reduce if decode requires MC2 and either prefill also
+    # requires MC2 or recompute-based scheduler is enabled.
+    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
@@ -1051,11 +1203,21 @@ def refresh_block_size(vllm_config):
     if not scheduler_config or not model_config:
         return
 
-    # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if model_config.hf_text_config.model_type != "qwen3_next" and cache_config.block_size != 128:
+    if model_config.is_hybrid:
+        # Hybrid attention+mamba models rely on the model-specific sizing
+        # logic rather than the generic platform default.
+        return
+
+    if cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
             cache_config.block_size = 128
+            return
+
+    ascend_config = get_ascend_config()
+    if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
+        logger.warning("Setting block size to 128 for xlite compatibility.")
+        cache_config.block_size = 128
 
 
 def dispose_layer(layer: Any):
@@ -1123,5 +1285,109 @@ def enable_dsa_cp_with_layer_shard() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
+    kv_transfer_config = vllm_config.kv_transfer_config
+    # Layer sharding broadcast only pays off when it can be hidden by the
+    # heavier prefill-stage compute, so enable it only on the P-side instance.
+    is_prefill_instance = kv_transfer_config is not None and kv_transfer_config.kv_role == "kv_producer"
     return is_prefill_instance
+
+
+@lru_cache(maxsize=1)
+def enable_dsa_cp_with_o_proj_tp() -> bool:
+    if not enable_dsa_cp():
+        return False
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    kv_transfer_config = vllm_config.kv_transfer_config
+
+    # In PD-mixed mode, keep the original TP o_proj weight when:
+    # 1) KV pooling is disabled, or
+    # 2) KV pooling is enabled with kv_role == "kv_both".
+    return kv_transfer_config is None or kv_transfer_config.kv_role == "kv_both"
+
+
+def check_gdn_layer(vllm_config) -> bool:
+    """
+    gdn layer is marked with `linear_attention`.
+    So, if `linear_attention` is detected, we think the model has gdn-attention.
+    """
+    if not hasattr(vllm_config, "model_config"):
+        return False
+
+    model_config = vllm_config.model_config
+    if not hasattr(model_config, "hf_config"):
+        return False
+
+    hf_config = model_config.hf_config
+
+    # Use `or []` to prevent errors when layer_types is None
+    layer_types = getattr(hf_config, "layer_types", None) or []
+    if "linear_attention" in layer_types:
+        return True
+
+    text_config = getattr(hf_config, "text_config", None)
+    if text_config:
+        text_layer_types = getattr(text_config, "layer_types", None) or []
+        if "linear_attention" in text_layer_types:
+            return True
+
+    return False
+
+
+def get_rope_dim(vllm_config):
+    model_config = vllm_config.model_config
+
+    if model_config.use_mla:
+        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+    else:
+        rope_dim = model_config.get_head_size()
+        # For models using partial rope like Qwen3-Next.
+        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
+            rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
+        elif hasattr(model_config.hf_text_config, "rotary_dim"):
+            rope_dim = int(model_config.hf_text_config.rotary_dim)
+
+    return rope_dim
+
+
+def calc_split_factor(num_list: list[int]):
+    total = sum(num_list)
+    return [total / num for num in num_list]
+
+
+# NOTE: The last two dimensions of ND are transferred to NZ
+def trans_nd_to_nz(cache_tensor: torch.Tensor):
+    assert len(cache_tensor.shape) >= 2
+    batch = cache_tensor.shape[:-2]
+    a, b = cache_tensor.shape[-2], cache_tensor.shape[-1]
+
+    dtype = cache_tensor.dtype
+    if dtype == torch.int8:
+        a0, b0 = 16, 32
+    else:
+        a0, b0 = 16, 16
+
+    nz_shape = list(batch) + [math.ceil(b / b0), math.ceil(a / a0), a0, b0]
+
+    # Generate the axis order for the transpose operation.
+    offset = len(cache_tensor.shape) - 2
+    base = [2, 0, 1, 3]
+    array_trans = [i for i in range(offset)] + [i + offset for i in base]
+    # Perform shape transformation and transpose operation.
+    *_, n1, m1, m0, n0 = nz_shape
+    cache_tensor = cache_tensor.reshape(nz_shape[:-4] + [m1, m0, n1, n0])
+    cache_tensor = cache_tensor.permute(*array_trans)
+    return cache_tensor
+
+
+def parse_layer_idx(prefix: str) -> int | None:
+    """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
+    match = re.search(r"layers\.(\d+)", prefix)
+    return int(match.group(1)) if match else None
+
+
+def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))

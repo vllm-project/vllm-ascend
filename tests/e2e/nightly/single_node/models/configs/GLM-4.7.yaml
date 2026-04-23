@@ -1,0 +1,67 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  HCCL_BUFFSIZE: "512"
+  SERVER_PORT: "DEFAULT_PORT"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+  VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE: "1"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+
+_server_cmd: &server_cmd
+  - "--enable-expert-parallel"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--data-parallel-size"
+  - "2"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "8192"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--max-num-seqs"
+  - "16"
+  - "--async-scheduling"
+  - "--quantization"
+  - "ascend"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--speculative-config"
+  - '{"num_speculative_tokens": 3, "method":"mtp"}'
+  - "--additional-config"
+  - '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+
+_benchmarks: &benchmarks
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 8
+    baseline: 95
+    threshold: 5
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "GLM-4.7-TP8-DP2-decodegraph"
+    model: "Eco-Tech/GLM-4.7-W8A8-floatmtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks

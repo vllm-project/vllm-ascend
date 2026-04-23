@@ -2,7 +2,7 @@
 
 ## Overview
 
-Expert balancing for MoE models in LLM serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due to stop-the-world operations. SwiftBalancer enables asynchronous expert load balancing with zero-overhead expert movement, ensuring seamless service continuity.
+Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language) serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due to stop-the-world operations. SwiftBalancer enables asynchronous expert load balancing with zero-overhead expert movement, ensuring seamless service continuity.
 
 ## EPLB Effects
 
@@ -43,7 +43,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 
 #### Initial Setup (Record Expert Map)
 
-We need to add environment variable `export EXPERT_MAP_RECORD="true"` to record expert map.Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
+We need to add environment variable `export EXPERT_MAP_RECORD="true"` to record expert map. Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
@@ -66,7 +66,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{
-    "expert_map_path": "/path/to/eplb.json"
+    "eplb_config": {"expert_map_path": "/path/to/eplb.json"}
   }'
 ```
 
@@ -83,7 +83,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 
 3. Model Compatibility:
    - Only MoE models with explicit expert parallelism support (e.g., Qwen3 MoE models) are compatible.
-   - Verify model architecture supports dynamic expert routing through --enable-expert-parallel.
+   - Verify model architecture supports dynamic expert routing through `--enable-expert-parallel`.
 
 4. Monitoring & Validation:
    - Track metrics: expert_load_balance_ratio, ttft_p99, tpot_avg, and gpu_utilization.

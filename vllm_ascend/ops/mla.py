@@ -25,18 +25,15 @@ from torch import nn
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("v0.15.0"):
-    from vllm.attention.layer import MLAAttention  # type: ignore
-else:
-    from vllm.model_executor.layers.attention import MLAAttention
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 
 class IndexerWrapper(nn.Module):
@@ -124,21 +121,30 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
+            layer_name=f"{prefix}.attn",
         )
 
-        if not vllm_version_is("v0.15.0"):
-            original_process_weights = self.mla_attn.process_weights_after_loading
+        original_process_weights = self.mla_attn.process_weights_after_loading
 
-            def wrapped_process_weights(act_dtype: torch.dtype):
-                from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+        def wrapped_process_weights(act_dtype: torch.dtype):
+            from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
-                if not isinstance(self.mla_attn.impl, AscendSFAImpl):
-                    original_process_weights(act_dtype)
-                self.mla_attn.impl.process_weights_after_loading(act_dtype)
+            if not isinstance(self.mla_attn.impl, AscendSFAImpl):
+                original_process_weights(act_dtype)
+            self.mla_attn.impl.process_weights_after_loading(act_dtype)
 
-            self.mla_attn.process_weights_after_loading = wrapped_process_weights
+        self.mla_attn.process_weights_after_loading = wrapped_process_weights
 
-        compilation_config = get_current_vllm_config().compilation_config
+        # For VL models (e.g. Kimi K2.5), inputs_embeds at layer 0 comes from
+        # the vision encoder as full [N, H] — it has NOT been reduce-scattered.
+        # We detect this statically at init time (not at runtime via shape checks,
+        # which break graph-mode compilation) so the branch is a constant to dynamo.
+        vllm_config = get_current_vllm_config()
+        _is_vl = is_vl_model(vllm_config)
+        _layer_idx = parse_layer_idx(prefix)
+        self.is_vl_first_layer = bool(_is_vl and _layer_idx == 0)
+
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -150,12 +156,18 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        need_gather_q_kv = get_forward_context().sp_enabled
-        output_shape = hidden_states.shape
-        # FIXME: This does not seem right, should make sure the buffer is fixed
-        output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+        hidden_dim = hidden_states.shape[-1]
+
+        if _EXTRA_CTX.flash_comm_v1_enabled and self.tp_size > 1 and self.is_vl_first_layer:
+            need_gather_q_kv = False
+            n_out = hidden_states.shape[0] // self.tp_size
+            output = torch.empty((n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
+        else:
+            need_gather_q_kv = _EXTRA_CTX.flash_comm_v1_enabled
+            output = torch.empty(hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device)
+
         torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output, self.prefix)
-        output = output.view(-1, output_shape[-1])
+        output = output.view(-1, hidden_dim)
         return output
 
 
@@ -171,7 +183,7 @@ def mla_forward(
         attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
     else:
         attn_metadata = forward_context.attn_metadata
-    kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+    kv_cache = self.mla_attn.kv_cache
     self.mla_attn.impl.forward(
         self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
     )

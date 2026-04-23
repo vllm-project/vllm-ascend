@@ -20,15 +20,10 @@ from typing import Any
 
 import torch.fx as fx
 from torch._inductor.decomposition import select_decomp_table
+from vllm.compilation.passes.fx_utils import OpOverload
 from vllm.config import get_current_vllm_config
 
 from vllm_ascend.compilation.compiler_interface import compile_fx
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.15.0"):
-    from vllm.compilation.fx_utils import OpOverload  # type: ignore
-else:
-    from vllm.compilation.passes.fx_utils import OpOverload
 
 
 class TestBackend:
@@ -104,6 +99,11 @@ class TestBackend:
     def find_nodes_by_target(self, graph: fx.GraphModule, target: OpOverload) -> list[fx.Node]:
         """Helper to find all FX nodes that call a specific operator."""
         return [node for node in graph.graph.nodes if hasattr(node, "target") and node.target == target]
+
+    def op_count(self, op: OpOverload, before: bool = False) -> int:
+        """Return the number of nodes that call the given operator."""
+        graph = self.graph_pre_pass if before else self.graph_post_pass
+        return len(self.find_nodes_by_target(graph, op))
 
     def check_before_ops(self, ops: Sequence[OpOverload], fully_replaced: bool = True):
         """

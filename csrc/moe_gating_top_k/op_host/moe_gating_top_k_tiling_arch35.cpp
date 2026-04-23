@@ -27,7 +27,7 @@
 #define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
 #endif
 namespace optiling {
-const static uint64_t MOE_GATING_TOP_K_REGBASE_TILING_KEY = 10000;
+const static uint64_t MOE_GATING_TOP_K_ASCEND_950_TILING_KEY = 10000;
 
 const static int64_t GROUP_SELECT_MODE_MAX = 0;
 const static int64_t GROUP_SELECT_MODE_SUM = 1;
@@ -79,7 +79,7 @@ public:
 protected:
     bool IsCapable() override
     {
-        if (socVersion != platform_ascendc::SocVersion::ASCEND910_95) {
+        if (socVersion != platform_ascendc::SocVersion::VLLM_ASCEND_950_SOC_ENUM) {
             return false;
         }
         return true;
@@ -508,7 +508,7 @@ ge::graphStatus MoeGatingTopKTilingRegbase::PostTiling()
 
 uint64_t MoeGatingTopKTilingRegbase::GetTilingKey() const
 {
-    return MOE_GATING_TOP_K_REGBASE_TILING_KEY;
+    return MOE_GATING_TOP_K_ASCEND_950_TILING_KEY;
 }
 
 void MoeGatingTopKTilingRegbase::Reset()

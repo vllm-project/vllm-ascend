@@ -17,11 +17,11 @@
 # Adapted from vllm-project/vllm/blob/main/tests/models/utils.py
 #
 
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
 
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 
-TokensText = Tuple[List[int], str]
+TokensText = tuple[list[int], str]
 
 
 def check_outputs_equal(
@@ -37,18 +37,18 @@ def check_outputs_equal(
     """
     assert len(outputs_0_lst) == len(outputs_1_lst)
 
-    for prompt_idx, (outputs_0,
-                     outputs_1) in enumerate(zip(outputs_0_lst,
-                                                 outputs_1_lst)):
+    for prompt_idx, (outputs_0, outputs_1) in enumerate(zip(outputs_0_lst, outputs_1_lst)):
         output_ids_0, output_str_0 = outputs_0
         output_ids_1, output_str_1 = outputs_1
 
         # The text and token outputs should exactly match
-        fail_msg = (f"Test{prompt_idx}:"
-                    f"\n{name_0}:\t{output_str_0!r}"
-                    f"\n{name_1}:\t{output_str_1!r}"
-                    f"\n{name_0}:\t{output_ids_0!r}"
-                    f"\n{name_1}:\t{output_ids_1!r}")
+        fail_msg = (
+            f"Test{prompt_idx}:"
+            f"\n{name_0}:\t{output_str_0!r}"
+            f"\n{name_1}:\t{output_str_1!r}"
+            f"\n{name_0}:\t{output_ids_0!r}"
+            f"\n{name_1}:\t{output_ids_1!r}"
+        )
 
         assert output_str_0 == output_str_1, fail_msg
         assert output_ids_0 == output_ids_1, fail_msg
@@ -60,9 +60,7 @@ def check_outputs_equal(
 # * List of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
-                                                                    float]],
-                                                          SampleLogprobs]]]
+TokensTextLogprobs = tuple[list[int], str, list[dict[int, float]] | SampleLogprobs | None]
 
 # Representation of generated sequence as a tuple of
 # * Token ID list
@@ -71,6 +69,9 @@ TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
 # * Optional list of top prompt logprobs for each prompt token
 #
 # Allows prompt logprobs to be requested.
-TokensTextLogprobsPromptLogprobs = Tuple[
-    List[int], str, Optional[Union[List[Dict[int, float]], SampleLogprobs]],
-    Optional[Union[List[Optional[Dict[int, float]]], PromptLogprobs]]]
+TokensTextLogprobsPromptLogprobs = tuple[
+    list[int],
+    str,
+    list[dict[int, float]] | SampleLogprobs | None,
+    list[dict[int, float] | None] | PromptLogprobs | None,
+]

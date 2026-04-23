@@ -17,10 +17,12 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from vllm.config import VllmConfig
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -55,6 +57,7 @@ class PCPManager:
         vllm_config: VllmConfig,
         use_async_scheduling: bool,
         pin_memory: bool = False,
+        use_sparse: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_world_rank = pcp_rank
@@ -73,12 +76,19 @@ class PCPManager:
             device=device,
             pin_memory=pin_memory,
         )
-        self.pcp_padded_slot_mapping = torch.full(
+        self.pcp_exit_fa_scatter_idx = CpuGpuBuffer(
+            max_buffer_num_tokens,
+            dtype=torch.int64,
+            device=device,
+            pin_memory=pin_memory,
+        )
+        self.sample_slot_mapping = torch.full(
             (max_buffer_num_tokens,),
             fill_value=-1,
             dtype=torch.int32,
             device=device,
         )
+        self.pcp_padded_slot_mapping_list: list = []  # reinitialized in initialize_slot_mapping
         self.pcp_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.total_num_sampled_tokens_pcp = 0
         self.num_pcp_pads_cpu_tensor = torch.zeros((max_num_reqs,), device="cpu", dtype=torch.int64)
@@ -96,6 +106,7 @@ class PCPManager:
                 + self.pcp_world_size * self.dcp_world_size * self.max_num_reqs
             )
         )
+        self.use_sparse = use_sparse
         if self.speculative_config and self.pcp_world_size * self.dcp_world_size > 1:
             self.input_ids_pcp_full = CpuGpuBuffer(
                 self.max_num_tokens, dtype=torch.int32, device=device, pin_memory=pin_memory
@@ -107,9 +118,26 @@ class PCPManager:
                 self.max_num_tokens, dtype=torch.int64, device="cpu", pin_memory=pin_memory
             )
             self.positions_pcp_full_np = self.positions_pcp_full.numpy()
-            self.query_lens_pcp_full = CpuGpuBuffer(
-                self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=pin_memory
-            )
+        self.query_lens_pcp_full = CpuGpuBuffer(
+            self.max_num_reqs, dtype=torch.int32, device=device, pin_memory=pin_memory
+        )
+        self.pcp_fa_query_idx = torch.zeros(
+            self.max_num_tokens + 2 * self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        self.pcp_enter_fa_restore_idx = torch.zeros(
+            self.max_num_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        self.pcp_use_hybrid_attn = self.vllm_config.model_config.hf_config.model_type == "qwen3_next"
+
+        self.pcp_pads_logits_hybrid_attn = torch.ones(self.max_num_reqs, dtype=torch.int32) * (self.pcp_world_size - 1)
+        self.pcp_padded_tokens_fla = 0
+        self.pcp_padded_tokens_length = 0
+        self.num_scheduled_tokens_padded: np.ndarray | None = None
+        self.max_num_tokens_across_pcp = 0
+        self.pcp_tokens_padded = None
+        self.total_num_scheduled_tokens = 0
+        self._local_num_scheduled_tokens: np.ndarray | None = None
+        self._local_total_num_scheduled_tokens: int | None = None
 
     def _get_cumsum_and_arange(
         self,
@@ -146,6 +174,312 @@ class PCPManager:
         self.num_decode_reqs = first_prefill
         self.num_prefill_reqs = num_reqs - self.num_decode_reqs
         self.num_decode_tokens = num_scheduled_tokens[: self.num_decode_reqs].sum()
+        self.num_scheduled_tokens_padded = num_scheduled_tokens  # for graph compiling in hybrid_attn
+
+        self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens)
+        self.query_lens_pcp_full.cpu[self.num_reqs :].fill_(0)
+        self.query_lens_pcp_full.copy_to_gpu()
+
+    def cache_local_schedule_layout(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        num_reqs: int,
+        total_num_scheduled_tokens: int,
+    ) -> None:
+        # Copy to decouple from mutable batch arrays.
+        self._local_num_scheduled_tokens = num_scheduled_tokens[:num_reqs].copy()
+        self._local_total_num_scheduled_tokens = int(total_num_scheduled_tokens)
+
+    def get_local_schedule_layout(
+        self,
+    ) -> tuple[np.ndarray | None, int | None]:
+        return self._local_num_scheduled_tokens, self._local_total_num_scheduled_tokens
+
+    def fill_prompt_embeds_for_pcp(
+        self,
+        req_embeds: torch.Tensor,
+        req_positions_np: np.ndarray,
+        dst_slice: torch.Tensor,
+    ) -> None:
+        valid_mask_np = req_positions_np < req_embeds.shape[0]
+        if not valid_mask_np.any():
+            return
+
+        if valid_mask_np.all():
+            torch.index_select(
+                req_embeds,
+                0,
+                torch.from_numpy(req_positions_np.astype(np.int64)),
+                out=dst_slice,
+            )
+            return
+
+        src_positions = torch.from_numpy(req_positions_np[valid_mask_np].astype(np.int64))
+        dst_positions = torch.from_numpy(np.nonzero(valid_mask_np)[0].astype(np.int64))
+        dst_slice.index_copy_(0, dst_positions, req_embeds.index_select(0, src_positions))
+
+    def build_local_mm_schedule(
+        self,
+        req_ids: list[str],
+        requests: dict[str, Any],
+        positions_np: np.ndarray,
+        local_num_scheduled_tokens: np.ndarray,
+        encoder_cache: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, list[int]], set[str]]:
+        scheduled_encoder_inputs: dict[str, list[int]] = {}
+        needed_mm_hashes: set[str] = set()
+
+        req_start_idx = 0
+        for req_idx, req_id in enumerate(req_ids):
+            if req_idx >= local_num_scheduled_tokens.shape[0]:
+                break
+
+            num_sched = int(local_num_scheduled_tokens[req_idx])
+            if num_sched <= 0:
+                req_start_idx += num_sched
+                continue
+
+            req_positions = positions_np[req_start_idx : req_start_idx + num_sched]
+            req_state = requests[req_id]
+            mm_input_ids = list[int]()
+
+            for mm_input_id, mm_feature in enumerate(req_state.mm_features):
+                pos_info = mm_feature.mm_position
+                start_pos = pos_info.offset
+                end_pos = start_pos + pos_info.length
+                mm_hash = mm_feature.identifier
+
+                local_mask = (req_positions >= start_pos) & (req_positions < end_pos)
+                if not local_mask.any():
+                    continue
+
+                local_indices = np.nonzero(local_mask)[0]
+                rel_positions = req_positions[local_indices] - start_pos
+                is_embed = pos_info.is_embed
+                if is_embed is not None:
+                    is_embed_np = is_embed.cpu().numpy()
+                    if not is_embed_np[rel_positions].any():
+                        continue
+
+                needed_mm_hashes.add(mm_hash)
+                if mm_hash not in encoder_cache:
+                    mm_input_ids.append(mm_input_id)
+
+            if mm_input_ids:
+                scheduled_encoder_inputs[req_id] = mm_input_ids
+
+            req_start_idx += num_sched
+
+        return scheduled_encoder_inputs, needed_mm_hashes
+
+    def gather_mm_embeddings_for_pcp(
+        self,
+        req_ids: list[str],
+        requests: dict[str, Any],
+        positions_np: np.ndarray,
+        local_num_scheduled_tokens: np.ndarray,
+        shift_computed_tokens: int,
+        encoder_cache: dict[str, torch.Tensor],
+        is_mm_embed: torch.Tensor,
+        model: Any,
+        is_multimodal_pruning_enabled: bool,
+        uses_mrope: bool,
+        warning_once: Callable[..., Any] | None = None,
+    ) -> tuple[list[torch.Tensor], bool, bool]:
+        mm_embeds = list[torch.Tensor]()
+        req_start_idx = 0
+        should_sync_mrope_positions = False
+        should_sync_xdrope_positions = False
+
+        for req_idx, req_id in enumerate(req_ids):
+            num_sched = int(local_num_scheduled_tokens[req_idx])
+            req_positions = positions_np[req_start_idx : req_start_idx + num_sched]
+            if shift_computed_tokens:
+                req_positions = req_positions + shift_computed_tokens
+            req_state = requests[req_id]
+            req_taken_mask = np.zeros(num_sched, dtype=np.bool_)
+            mm_embeds_req: list[torch.Tensor] = []
+            req_mm_local_indices: list[np.ndarray] = []
+
+            for mm_feature in req_state.mm_features:
+                pos_info = mm_feature.mm_position
+                start_pos = pos_info.offset
+                end_pos = start_pos + pos_info.length
+                mm_hash = mm_feature.identifier
+
+                local_mask = (req_positions >= start_pos) & (req_positions < end_pos)
+                if not local_mask.any():
+                    continue
+
+                local_indices = np.nonzero(local_mask)[0]
+                rel_positions = req_positions[local_indices] - start_pos
+
+                is_embed = pos_info.is_embed
+                if is_embed is not None:
+                    is_embed_np = is_embed.cpu().numpy()
+                    keep_mask = is_embed_np[rel_positions]
+                    if not keep_mask.any():
+                        continue
+                    local_indices = local_indices[keep_mask]
+                    rel_positions = rel_positions[keep_mask]
+                    embed_index_map = np.cumsum(is_embed_np.astype(np.int64)) - 1
+                    embed_indices = embed_index_map[rel_positions]
+                else:
+                    embed_indices = rel_positions
+
+                # OR semantics for overlapping mm features: keep first writer.
+                keep_new = ~req_taken_mask[local_indices]
+                if not keep_new.any():
+                    continue
+                local_indices = local_indices[keep_new]
+                embed_indices = embed_indices[keep_new]
+                req_taken_mask[local_indices] = True
+
+                encoder_output = encoder_cache.get(mm_hash)
+                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                embed_index_tensor = torch.from_numpy(embed_indices.astype(np.int64)).to(
+                    device=encoder_output.device,
+                    non_blocking=True,
+                )
+                mm_embeds_item = torch.index_select(encoder_output, 0, embed_index_tensor)
+                mm_embeds_req.append(mm_embeds_item)
+                req_mm_local_indices.append(local_indices.astype(np.int64, copy=False))
+                is_mm_embed[req_start_idx + local_indices] = True
+
+            if is_multimodal_pruning_enabled and uses_mrope:
+                assert req_state.mrope_positions is not None
+                should_sync_mrope_positions = True
+                mm_embeds_req, new_mrope_positions, new_delta = model.recompute_mrope_positions(
+                    input_ids=req_state.prompt_token_ids,
+                    multimodal_embeddings=mm_embeds_req,
+                    mrope_positions=req_state.mrope_positions,
+                    num_computed_tokens=req_state.num_computed_tokens,
+                )
+                req_state.mrope_positions.copy_(new_mrope_positions)
+                req_state.mrope_position_delta = new_delta
+
+            # Keep multimodal embedding order aligned with is_mm_embed scanning order.
+            # Under PCP, request positions may be non-monotonic; concatenating by
+            # feature order can misalign embeddings with boolean mask traversal.
+            if len(mm_embeds_req) > 1:
+                total_local_idx = sum(x.size for x in req_mm_local_indices)
+                total_embed_rows = sum(x.shape[0] for x in mm_embeds_req)
+                if total_local_idx == total_embed_rows and total_local_idx > 0:
+                    local_idx_cat = np.concatenate(req_mm_local_indices, axis=0)
+                    embed_cat = torch.cat(mm_embeds_req, dim=0)
+                    order = np.argsort(local_idx_cat, kind="stable")
+                    order_t = torch.from_numpy(order.astype(np.int64)).to(
+                        device=embed_cat.device,
+                        non_blocking=True,
+                    )
+                    mm_embeds_req = [embed_cat.index_select(0, order_t)]
+                elif warning_once is not None:
+                    warning_once(
+                        "PCP MM reorder skipped due to size mismatch: local_idx=%d, embed_rows=%d",
+                        total_local_idx,
+                        total_embed_rows,
+                    )
+
+            mm_embeds.extend(mm_embeds_req)
+            req_start_idx += num_sched
+
+        return mm_embeds, should_sync_mrope_positions, should_sync_xdrope_positions
+
+    def maybe_localize_scheduler_output_for_mm_preprocess(
+        self,
+        scheduler_output: "SchedulerOutput",
+        req_ids: list[str],
+        requests: dict[str, Any],
+        positions_np: np.ndarray,
+        local_num_scheduled_tokens: np.ndarray | None,
+        local_total_num_scheduled_tokens: int | None,
+        encoder_cache: dict[str, torch.Tensor],
+    ) -> dict[str, Any] | None:
+        need_localize = (
+            local_total_num_scheduled_tokens is not None
+            and local_total_num_scheduled_tokens != scheduler_output.total_num_scheduled_tokens
+        )
+        if not need_localize and local_num_scheduled_tokens is not None:
+            for req_idx, req_id in enumerate(req_ids):
+                if req_idx >= local_num_scheduled_tokens.shape[0]:
+                    break
+                global_sched = scheduler_output.num_scheduled_tokens.get(req_id)
+                if global_sched is None or int(global_sched) != int(local_num_scheduled_tokens[req_idx]):
+                    need_localize = True
+                    break
+
+        if not need_localize:
+            return None
+
+        restore_state: dict[str, Any] = {
+            "total_num_scheduled_tokens": scheduler_output.total_num_scheduled_tokens,
+            "num_scheduled_tokens": scheduler_output.num_scheduled_tokens,
+            "scheduled_encoder_inputs": scheduler_output.scheduled_encoder_inputs,
+            "free_encoder_mm_hashes": scheduler_output.free_encoder_mm_hashes,
+        }
+
+        if local_total_num_scheduled_tokens is not None:
+            scheduler_output.total_num_scheduled_tokens = local_total_num_scheduled_tokens
+
+        if local_num_scheduled_tokens is None:
+            return restore_state
+
+        num_sched_by_req = dict(scheduler_output.num_scheduled_tokens)
+        for req_idx, req_id in enumerate(req_ids):
+            if req_idx >= local_num_scheduled_tokens.shape[0]:
+                break
+            num_sched_by_req[req_id] = int(local_num_scheduled_tokens[req_idx])
+        scheduler_output.num_scheduled_tokens = num_sched_by_req
+
+        (
+            scheduler_output.scheduled_encoder_inputs,
+            local_needed_mm_hashes,
+        ) = self.build_local_mm_schedule(
+            req_ids=req_ids,
+            requests=requests,
+            positions_np=positions_np,
+            local_num_scheduled_tokens=local_num_scheduled_tokens,
+            encoder_cache=encoder_cache,
+        )
+
+        # Under PCP, global free list can be earlier than local consumption.
+        # Keep MM hashes for all active requests.
+        active_mm_hashes = {
+            mm_feature.identifier for req_state in requests.values() for mm_feature in req_state.mm_features
+        }
+        keep_hashes = active_mm_hashes | local_needed_mm_hashes
+        scheduler_output.free_encoder_mm_hashes = [
+            mm_hash for mm_hash in scheduler_output.free_encoder_mm_hashes if mm_hash not in keep_hashes
+        ]
+
+        return restore_state
+
+    def restore_scheduler_output_after_mm_preprocess(
+        self,
+        scheduler_output: "SchedulerOutput",
+        restore_state: dict[str, Any] | None,
+    ) -> None:
+        if restore_state is None:
+            return
+
+        scheduler_output.total_num_scheduled_tokens = restore_state["total_num_scheduled_tokens"]
+        scheduler_output.num_scheduled_tokens = restore_state["num_scheduled_tokens"]
+        scheduler_output.scheduled_encoder_inputs = restore_state["scheduled_encoder_inputs"]
+        scheduler_output.free_encoder_mm_hashes = restore_state["free_encoder_mm_hashes"]
+
+    def initialize_slot_mapping(self) -> None:
+        """
+        Hyrbid-attention models, such as qwen3_next, have plural kv_cache_groups, which may lead to
+        problems like overwriting last group's pcp_padded_slot_mapping, since they share the same
+        address. Therefore we need as many pcp_padded_slot_mappings as kv_cache_groups.
+        """
+        pcp_padded_slot_mapping = torch.full(
+            (self.sample_slot_mapping.shape[0],),
+            fill_value=-1,
+            dtype=torch.int32,
+            device=self.sample_slot_mapping.device,
+        )
+        self.pcp_padded_slot_mapping_list.append(pcp_padded_slot_mapping)
 
     def update_tokens_for_pcp(
         self,
@@ -184,9 +518,10 @@ class PCPManager:
             Tuple (pcp_tokens, pcp_positions):
             - pcp_tokens: number of tokens per request that this PCP rank will
                           actually process (after splitting / replication).
+                          For hybrid-attention model: number of unpadded tokens
+                          per requests
             - pcp_positions: flattened positions for those tokens on this rank,
                              used to build the positions buffer for the model.
-
         Example:
         >>> Assume tokens = [1, 5, 8], pcp_world_size = 2. After _update_tokens_for_pcp.
         >>> pcp_rank = 0 get ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7])
@@ -219,9 +554,10 @@ class PCPManager:
         # cu_padded_tokens: cumulative sum of padded token counts,
         # pcp_padded_arange: per-request arange flattened for padded tokens.
         cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
+        self.pcp_padded_tokens_length = pcp_padded_arange.shape[0]
         # Build the mask that marks which positions in the padded allgather buffer
         # correspond to real (unpadded) tokens.
-        self.pcp_unpad_mask_cpu[: pcp_padded_arange.shape[0]] = pcp_padded_arange < np.repeat(
+        self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length] = pcp_padded_arange < np.repeat(
             num_scheduled_tokens, num_padded_scheduled_tokens
         )
         unpad_mask_decode = self.pcp_unpad_mask_cpu[: self.num_decode_tokens * self.pcp_world_size]
@@ -272,6 +608,9 @@ class PCPManager:
             return positions
 
         positions = get_current_rank_positions(0, self.pcp_world_rank)
+        padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
+        padded_pos_start_loc[0] = 0
+
         # Decode tokens are duplicated only after AG. But their positions are
         # same without prefill context parallel.
         if self.num_decode_reqs > 0:
@@ -280,8 +619,6 @@ class PCPManager:
             )[1]
 
         # Build the restore index used after allgather.
-        padded_pos_start_loc = np.roll(cu_padded_tokens, 1)
-        padded_pos_start_loc[0] = 0
         all_positions_lst = [
             get_current_rank_positions(padded_pos_start_loc, rank_i) for rank_i in range(self.pcp_world_size)
         ]
@@ -291,19 +628,183 @@ class PCPManager:
 
         self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
         self.total_num_sampled_tokens_pcp = pcp_tokens[: self.num_reqs].sum()
-        return (
-            pcp_tokens[: self.num_reqs],
-            positions,
-        )
 
-    def get_logits_indices(self, cu_num_tokens: np.ndarray):
-        return torch.from_numpy(cu_num_tokens) * self.pcp_world_size - self.num_pcp_pads_cpu_tensor[: self.num_reqs] - 1
+        if self.pcp_use_hybrid_attn:
+            max_scheduled_prefill_tokens = 0
+            self.pcp_padded_tokens_fla = 0
+            if self.num_decode_reqs > 0:
+                num_padded_scheduled_tokens[: self.num_decode_reqs] = (
+                    num_padded_scheduled_tokens[: self.num_decode_reqs] // self.pcp_world_size
+                )
+            self.total_pcp_padding_tokens_fla = 0
+            # have prefills
+            if self.num_reqs - self.num_decode_reqs > 0:
+                prefill_tokens_tensor = torch.Tensor(num_scheduled_tokens[self.num_decode_tokens :])
+                # [num_prefill_reqs, pcp_world_size, 1] [[3,2]] [[2,2,2,1],[2,1,1,1]]
+                num_prefill_tokens_allranks = (
+                    self._get_cp_local_seq_lens(prefill_tokens_tensor, self.pcp_world_size, 1, 1).long().numpy()
+                )
+                # [3] [2]  |  [2,2] [2,1] [2,1] [1,1]
+                num_prefill_scheduled_tokens_linear = num_prefill_tokens_allranks[:, self.pcp_world_rank, 0]
+                num_padded_scheduled_tokens[self.num_decode_reqs :] = num_prefill_scheduled_tokens_linear
+                # [[3,5]] | [[0,0,0,0,0],[0,0,0,0,0]]
+                num_prefill_tokens_start_loc = np.zeros(
+                    (self.num_reqs - self.num_decode_reqs, self.pcp_world_size + 1), dtype=np.int64
+                )
+                # [[0,3,5]] | [[0,2,4,6,7],[0,2,3,4,5]]
+                num_prefill_tokens_start_loc[:, 1:] = np.cumsum(num_prefill_tokens_allranks[..., 0], axis=-1)
+                # [0] [3] | [0,0] [2,2] [4,3] [6,4] [7,5]
+                num_prefill_tokens_cu_ranks = num_prefill_tokens_start_loc[:, self.pcp_world_rank]
+                # [0,1,2] [0,1] | [0,1,0,1] [0,1,0] [0,1,0] [0,0]
+                # -> [0,1,2] [3,4] | [0,1,0,1] [2,3,2] [4,5,3] [6,4]
+                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
+                positions_linear[self.num_decode_reqs :] = positions_linear[self.num_decode_reqs :] + np.repeat(
+                    num_prefill_tokens_cu_ranks, num_prefill_scheduled_tokens_linear
+                )
 
-    def get_padded_slot_mapping(self, num_tokens: int, num_tokens_padded: int, slot_mapping: torch.Tensor):
+                max_scheduled_prefill_tokens = num_prefill_tokens_allranks[:, 0, 0].sum()
+                num_prefill_tokens = num_scheduled_tokens[self.num_decode_reqs :].sum()
+                self.total_pcp_padding_tokens_fla = (
+                    max_scheduled_prefill_tokens * self.pcp_world_size - num_prefill_tokens
+                )
+                self.pcp_padded_tokens_fla += max_scheduled_prefill_tokens - num_prefill_scheduled_tokens_linear.sum()
+
+            max_scheduled_tokens = max_scheduled_prefill_tokens + self.num_decode_tokens
+            enter_fa_prefill_restore_idx = None
+            if self.num_reqs - self.num_decode_reqs > 0:
+                # prefill reorder idx
+                # [[3,2]] [[2,2,2,1],[2,2,1,1],[1,1,1,1]]
+                num_prefill_tokens_allranks = num_prefill_tokens_allranks[..., 0]
+                # [0,1,2,0,1] [0,1,0,1,0,1,0,|0,1,0,1,0,0]
+                _, prefill_arange_allranks = self._get_cumsum_and_arange(
+                    num_prefill_tokens_allranks.flatten(), arange_np
+                )
+                # [0,1] [0,1,2,3,0,1,2,3]
+                _, prefill_rank_offset = self._get_cumsum_and_arange(
+                    np.ones(self.num_reqs - self.num_decode_reqs, dtype=np.int64) * self.pcp_world_size, arange_np
+                )
+                # [0,0,0,3,3] [0,M,2M,3M,0,M,2M,3M] -> [0,0,M,M,2M,2M,3M,0,0,M,M,2M,3M] + D
+                prefill_all_offset = (
+                    np.repeat(prefill_rank_offset * max_scheduled_tokens, num_prefill_tokens_allranks.flatten())
+                    + self.num_decode_tokens
+                )
+
+                # [0,0,0,0,|2,2,2,1,|4,4,3,2] -> [0,0,0,0,0,0,0,|2,2,2,2,2,1,|4,4,3,2]
+                # [[0,0]] -> [0,0,0,0,0]
+                prefill_local_start_local = np.zeros_like(num_prefill_tokens_allranks)
+                prefill_local_start_local[1:, :] = np.cumsum(num_prefill_tokens_allranks, axis=0)[:-1, :]
+                prefill_local_offset = np.repeat(
+                    prefill_local_start_local.flatten(), num_prefill_tokens_allranks.flatten()
+                )
+                prefill_all_offset = np.add(prefill_all_offset, prefill_local_offset)
+                # [0,1,2,3,4]  [0,1,M,M+1,2M,2M+1,3M,0,1,M,M+1,2M,3M]
+                enter_fa_prefill_restore_idx = np.add(prefill_all_offset, prefill_arange_allranks)
+            else:
+                _, positions_linear = self._get_cumsum_and_arange(num_padded_scheduled_tokens, arange_np)
+
+            # decode reorder idx
+            enter_fa_decode_restore_idx = None
+            if self.num_decode_reqs > 0:
+                # [0,1,2], [4,4,4] -> [0,0,0,0,1,1,1,1,2,2,2,2]
+                num_decode_pcp_size = np.ones(self.num_decode_reqs, dtype=np.int64) * self.pcp_world_size
+                decode_reqs_offset = np.repeat(np.arange(self.num_decode_reqs, dtype=np.int64), num_decode_pcp_size)
+                decode_ranks_offset = (
+                    self._get_cumsum_and_arange(num_decode_pcp_size, arange_np)[1] * max_scheduled_tokens
+                )
+                enter_fa_decode_restore_idx = np.add(decode_reqs_offset, decode_ranks_offset)
+
+            if enter_fa_decode_restore_idx is not None and enter_fa_prefill_restore_idx is not None:
+                pcp_enter_fa_restore_idx = torch.from_numpy(
+                    np.concatenate([enter_fa_decode_restore_idx, enter_fa_prefill_restore_idx])
+                )
+            elif enter_fa_decode_restore_idx is not None:
+                pcp_enter_fa_restore_idx = torch.from_numpy(enter_fa_decode_restore_idx)
+
+            elif enter_fa_prefill_restore_idx is not None:
+                pcp_enter_fa_restore_idx = torch.from_numpy(enter_fa_prefill_restore_idx)
+            self.pcp_enter_fa_restore_idx[: pcp_enter_fa_restore_idx.shape[0]].copy_(
+                pcp_enter_fa_restore_idx.long(), non_blocking=True
+            )
+
+            if self.num_reqs > self.num_decode_reqs:
+                all_positions_prefill = [
+                    get_current_rank_positions(padded_pos_start_loc, rank_i)[self.num_decode_tokens :]
+                    - self.num_decode_tokens * self.pcp_world_size
+                    for rank_i in range(self.pcp_world_size)
+                ]
+                all_positions_prefill_tensor = torch.from_numpy(np.concatenate(all_positions_prefill))
+                all_exit_fa_restore_idx = all_positions_prefill_tensor.float().argsort()
+                unpad_mask_prefill = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length][
+                    self.num_decode_reqs * self.pcp_world_size :
+                ]
+                # [0] | [0,7]
+                ori_tokens_start_loc = np.roll(np.cumsum(num_scheduled_tokens[self.num_decode_tokens :]), 1)
+                ori_tokens_start_loc[0] = 0
+                # [0,1,2] [3,4] | [0,1,7,8] [2,3,9] [4,5,10] [6,11]
+                exit_fa_scatter_indices = positions_linear[self.num_decode_reqs :] + np.repeat(
+                    ori_tokens_start_loc, num_prefill_scheduled_tokens_linear
+                )
+
+                exit_fa_scatter_idx = torch.index_select(
+                    all_exit_fa_restore_idx[unpad_mask_prefill], 0, torch.from_numpy(exit_fa_scatter_indices)
+                )
+                self.pcp_exit_fa_scatter_idx.gpu[: exit_fa_scatter_idx.shape[0]].copy_(
+                    exit_fa_scatter_idx.long(), non_blocking=True
+                )
+
+                positions_prefill = all_positions_prefill[self.pcp_world_rank]
+                pcp_fa_query_idx_tensor = torch.from_numpy(positions_prefill)
+                self.pcp_fa_query_idx[: pcp_fa_query_idx_tensor.shape[0]].copy_(
+                    pcp_fa_query_idx_tensor.long(), non_blocking=True
+                )
+            self.pcp_tokens[: self.num_reqs] = pcp_tokens[: self.num_reqs]
+            self.total_num_sampled_tokens_pcp = num_scheduled_tokens[: self.num_reqs].sum()
+            self.max_num_tokens_across_pcp = max_scheduled_tokens
+            self.pcp_tokens_padded = pcp_tokens[: self.num_reqs]
+            self.num_scheduled_tokens_padded = np.array(self.pcp_tokens_padded, dtype=np.int32)
+            self.total_num_scheduled_tokens = num_padded_scheduled_tokens[: self.num_reqs].sum()
+            return num_padded_scheduled_tokens, positions_linear
+        return pcp_tokens[: self.num_reqs], positions
+
+    def get_logits_indices(
+        self,
+        cu_num_tokens: np.ndarray,
+        num_reqs: int,
+        tokens_original: list[int] | None = None,
+    ):
+        if not self.pcp_use_hybrid_attn or tokens_original is None:
+            logits_indices = (
+                torch.from_numpy(cu_num_tokens) * self.pcp_world_size
+                - self.num_pcp_pads_cpu_tensor[: self.num_reqs]
+                - 1
+            )
+        else:
+            tokens_original_tensor = torch.tensor(tokens_original, dtype=torch.int32)
+            num_prefill_reqs = (tokens_original_tensor > self.decode_threshold).sum().item()
+            num_decode_reqs = num_reqs - num_prefill_reqs
+            decode_pads = self.pcp_pads_logits_hybrid_attn[:num_decode_reqs]
+            pad_len = tokens_original_tensor.shape[0] - num_decode_reqs
+            tokens_logits = tokens_original_tensor + F.pad(decode_pads, (0, pad_len), value=0)
+            logits_indices = torch.cumsum(tokens_logits, dim=0) - 1
+        return logits_indices
+
+    def get_padded_slot_mapping(
+        self,
+        num_tokens: int,
+        num_tokens_padded: int,
+        slot_mapping: torch.Tensor,
+        kv_cache_group_id: int,
+    ):
         # After pcp allgather and restore, there are padded tokens in kv,
         # so we need pad slotmapping for alignment.
-        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
-
+        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping_list[kv_cache_group_id]
+        if self.pcp_use_hybrid_attn:
+            assert self.num_scheduled_tokens_padded is not None
+            num_tokens = self.num_scheduled_tokens_padded.sum()
+        if not self.pcp_use_hybrid_attn or self.total_num_sampled_tokens_pcp != num_tokens_padded:
+            pcp_padded_slot_mapping = pcp_padded_slot_mapping[: num_tokens_padded * self.pcp_world_size]
+        else:
+            pcp_padded_slot_mapping = pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size]
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[: num_tokens * self.pcp_world_size]
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = slot_mapping
@@ -317,16 +818,27 @@ class PCPManager:
         # ignores the padding from CUDA Graph.
         from vllm.distributed.parallel_state import get_pcp_group
 
-        hidden_states = get_pcp_group().all_gather(
-            hidden_states[: self.num_actual_tokens_pcp_padded // self.pcp_world_size],
-            0,
-        )
-        restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
-        return torch.index_select(
-            hidden_states,
-            0,
-            restore_idx,
-        )
+        if not self.pcp_use_hybrid_attn:
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states[: self.num_actual_tokens_pcp_padded // self.pcp_world_size],
+                0,
+            )
+            restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
+            return torch.index_select(
+                hidden_states,
+                0,
+                restore_idx,
+            )
+        else:
+            if hidden_states.shape[0] == self.total_num_scheduled_tokens and self.pcp_padded_tokens_fla > 0:
+                hidden_states = F.pad(
+                    hidden_states, pad=(0, 0, 0, self.pcp_padded_tokens_fla), mode="constant", value=0
+                )
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states[: self.max_num_tokens_across_pcp].contiguous(), dim=0
+            )
+            restore_idx = self.pcp_enter_fa_restore_idx[: hidden_states.shape[0] - self.total_pcp_padding_tokens_fla]
+            return torch.index_select(hidden_states, 0, restore_idx)
 
     def generate_pcp_mtp_input(
         self,
@@ -351,7 +863,6 @@ class PCPManager:
         num_scheduled_tokens_pcp_full = np.empty(self.num_reqs, dtype=np.int32)
         for i, req_id in enumerate(input_batch.req_ids):
             num_scheduled_tokens_pcp_full[i] = num_scheduled_tokens[req_id]
-        self.query_lens_pcp_full.cpu[: self.num_reqs] = torch.from_numpy(num_scheduled_tokens_pcp_full)
         req_indices_pcp_full = np.repeat(arange_np[: self.num_reqs], num_scheduled_tokens_pcp_full)
         cu_num_tokens_pcp_full = np.cumsum(num_scheduled_tokens_pcp_full)
         self.query_start_loc_pcp_full.np[0] = 0
@@ -379,7 +890,6 @@ class PCPManager:
                 cu_num_tokens_pcp_full,
                 num_spec_tokens,
             )
-        self.query_lens_pcp_full.copy_to_gpu()
         self.query_start_loc_pcp_full.copy_to_gpu()
         self.input_ids_pcp_full.copy_to_gpu(total_num_scheduled_tokens_pcp_full)
         self.cu_num_tokens_pcp_full = cu_num_tokens_pcp_full
@@ -401,7 +911,7 @@ class PCPManager:
                 )
             req_indices_mtp = np.concatenate(req_indices_split)
             positions_mtp = np.concatenate(positions_split)
-            input_batch.block_table.compute_slot_mapping(req_indices_mtp, positions_mtp)
+            input_batch.block_table.compute_slot_mapping_draft(req_indices_mtp, positions_mtp)
             mtp_slot_ori = input_batch.block_table.block_tables[0].slot_mapping.cpu[:num_tokens_mtp]
             unpad_mask = np.repeat(False, num_tokens_mtp_pad)
             unpad_mask[:: self.pcp_world_size] = True
@@ -528,9 +1038,13 @@ class PCPManager:
     ):
         from vllm_ascend.attention.utils import AscendPrefillContextParallelMetadata
 
+        if self.pcp_world_size > 1 and self.pcp_use_hybrid_attn:
+            assert self.num_scheduled_tokens_padded is not None
+            total_num_scheduled_tokens = self.num_scheduled_tokens_padded.sum()
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_world_size
         self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
+        ori_query_lens_cpu = self.query_lens_pcp_full.cpu[:num_reqs_padded]
         if self.pcp_world_size * self.dcp_world_size > 1:
             assert num_scheduled_tokens is not None
             decode_context_lens = (
@@ -556,7 +1070,6 @@ class PCPManager:
                         self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
                     )
                 )
-            ori_query_lens_cpu = None
             if self.decode_threshold > 1:
                 num_computed_tokens_of_pcp_dcp_list = []
                 if self.num_decode_reqs:
@@ -584,29 +1097,33 @@ class PCPManager:
                 # (num_reqs_d + num_reqs_p, max_num_blocks),
                 # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
                 # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
-                ori_query_lens_cpu = self.query_lens_pcp_full.cpu[:num_reqs_padded]
                 ori_query_lens = self.query_lens_pcp_full.gpu[:num_reqs_padded]
                 num_prefill_reqs = self.num_prefill_reqs
                 num_decode_reqs = self.num_decode_reqs
                 num_decode_reqs_flatten = ori_query_lens_cpu[:num_decode_reqs].sum().item()
-                block_table_tensor[num_decode_reqs_flatten : num_decode_reqs_flatten + num_prefill_reqs].copy_(
-                    block_table_tensor[num_decode_reqs : num_decode_reqs + num_prefill_reqs].clone()
-                )
-                block_table_tensor[:num_decode_reqs_flatten].copy_(
-                    block_table_tensor[:num_decode_reqs].repeat_interleave(ori_query_lens[:num_decode_reqs], dim=0)
-                )
-                block_table_tensor = block_table_tensor[: num_decode_reqs_flatten + num_prefill_reqs]
-                if num_reqs_padded > num_reqs:
-                    pad_size = num_reqs_padded - num_reqs
-                    ori_query_lens_cpu[-pad_size:] = torch.full([pad_size], ori_query_lens_cpu[-pad_size - 1].item())
-
+                if not self.use_sparse:
+                    block_table_tensor[num_decode_reqs_flatten : num_decode_reqs_flatten + num_prefill_reqs].copy_(
+                        block_table_tensor[num_decode_reqs : num_decode_reqs + num_prefill_reqs].clone()
+                    )
+                    block_table_tensor[:num_decode_reqs_flatten].copy_(
+                        block_table_tensor[:num_decode_reqs].repeat_interleave(ori_query_lens[:num_decode_reqs], dim=0)
+                    )
+                    block_table_tensor = block_table_tensor[: num_decode_reqs_flatten + num_prefill_reqs]
+                    if num_reqs_padded > num_reqs:
+                        pad_size = num_reqs_padded - num_reqs
+                        ori_query_lens_cpu[-pad_size:] = torch.full(
+                            [pad_size], ori_query_lens_cpu[-pad_size - 1].item()
+                        )
+            pcp_unpad_mask = self.pcp_unpad_mask_cpu[: self.pcp_padded_tokens_length]
             long_seq_metadata = AscendPrefillContextParallelMetadata(
+                pcp_use_hybrid_attn=self.pcp_use_hybrid_attn,
                 num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_of_pcp_dcp.numpy(),
+                pcp_unpad_mask=torch.from_numpy(pcp_unpad_mask),
+                pcp_padded_tokens_fla=self.pcp_padded_tokens_fla,
+                query_lens_pcp_full_cpu=ori_query_lens_cpu,
+                max_query_len_pcp_full=ori_query_lens_cpu.max().item(),
             )
-            if ori_query_lens_cpu is not None:
-                long_seq_metadata.query_lens_pcp_full_cpu = ori_query_lens_cpu
-                long_seq_metadata.max_query_len_pcp_full = ori_query_lens_cpu.max().item()
             if self.pcp_world_size > 1:
                 q_head_idx, q_tail_idx = [], []
                 kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
@@ -678,25 +1195,14 @@ class PCPManager:
                     tensor_npu = self._list_to_tensor(value, self.device)
                     self.kv_idx_names[key] = tensor_npu
 
-                attn_mask_seqlens = torch.tensor([chunk_seqlens, chunk_seqlens], dtype=torch.int32)
-                head_attn_nomask_seqlens = torch.tensor(
-                    [chunk_seqlens, kv_with_q_head_nomask_seqlens], dtype=torch.int32
-                )
-                tail_attn_nomask_seqlens = torch.tensor(
-                    [chunk_seqlens, kv_with_q_tail_nomask_seqlens], dtype=torch.int32
-                )
-                if self.vllm_config.model_config.use_mla:
-                    (
-                        split_q_head_nomask_idx_tensor_list,
-                        split_q_tail_nomask_idx_tensor_list,
-                        head_attn_nomask_seqlens_list,
-                        tail_attn_nomask_seqlens_list,
-                    ) = self._split_nomask_idx_tensor_list(
-                        split_with_q_head_nomask_idx_reqs,
-                        split_kv_with_q_tail_nomask_idx_reqs,
-                        head_attn_nomask_seqlens,
-                        chunk_seqlens,
-                    )
+                attn_chunk_seqlens = torch.tensor(chunk_seqlens, dtype=torch.int32)
+                attn_mask_seqlens = torch.cumsum(torch.tensor(chunk_seqlens, dtype=torch.int32), dim=0).tolist()
+                head_attn_nomask_seqlens = torch.cumsum(
+                    torch.tensor(kv_with_q_head_nomask_seqlens, dtype=torch.int32), dim=0
+                ).tolist()
+                tail_attn_nomask_seqlens = torch.cumsum(
+                    torch.tensor(kv_with_q_tail_nomask_seqlens, dtype=torch.int32), dim=0
+                ).tolist()
 
                 self.extra_long_seq_kwargs = {
                     "attn_mask_seqlens": attn_mask_seqlens,
@@ -706,6 +1212,18 @@ class PCPManager:
                 long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx.gpu[
                     :num_actual_tokens_pcp_padded
                 ]
+                if self.pcp_use_hybrid_attn:
+                    long_seq_metadata.pcp_exit_fa_scatter_idx = self.pcp_exit_fa_scatter_idx.gpu[
+                        : num_scheduled_tokens.sum() - self.num_decode_reqs
+                    ]
+                    long_seq_metadata.pcp_fa_query_idx = self.pcp_fa_query_idx[
+                        : num_actual_tokens_pcp_padded // self.pcp_world_size - self.num_decode_reqs
+                    ]
+                    long_seq_metadata.pcp_enter_fa_restore_idx = self.pcp_enter_fa_restore_idx[
+                        : pcp_unpad_mask.sum() + self.num_decode_reqs * (self.pcp_world_size - 1)
+                    ]
+                    long_seq_metadata.max_num_tokens_across_pcp = self.max_num_tokens_across_pcp
+                    long_seq_metadata.total_num_scheduled_tokens = self.total_num_scheduled_tokens
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
                 long_seq_metadata.q_full_idx = self.q_full_idx
@@ -720,11 +1238,7 @@ class PCPManager:
                 long_seq_metadata.attn_mask_seqlens = self.extra_long_seq_kwargs["attn_mask_seqlens"]
                 long_seq_metadata.head_attn_nomask_seqlens = self.extra_long_seq_kwargs["head_attn_nomask_seqlens"]
                 long_seq_metadata.tail_attn_nomask_seqlens = self.extra_long_seq_kwargs["tail_attn_nomask_seqlens"]
-                if self.vllm_config.model_config.use_mla:
-                    long_seq_metadata.kv_with_q_head_nomask_idx_tensor = split_q_head_nomask_idx_tensor_list
-                    long_seq_metadata.kv_with_q_tail_nomask_idx_tensor = split_q_tail_nomask_idx_tensor_list
-                    long_seq_metadata.head_attn_nomask_seqlens = head_attn_nomask_seqlens_list
-                    long_seq_metadata.tail_attn_nomask_seqlens = tail_attn_nomask_seqlens_list
+                long_seq_metadata.attn_chunk_seqlens = attn_chunk_seqlens
 
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
@@ -733,91 +1247,3 @@ class PCPManager:
         tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)
         tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
         return tensor_npu
-
-    def _split_nomask_idx_tensor_list(
-        self,
-        split_with_q_head_nomask_idx_reqs,
-        split_kv_with_q_tail_nomask_idx_reqs,
-        head_attn_nomask_seqlens,
-        chunk_seqlens,
-    ):
-        split_q_head_nomask_idx_tensor_list, split_q_tail_nomask_idx_tensor_list = [], []
-        head_attn_nomask_seqlens_list, tail_attn_nomask_seqlens_list = [], []
-        if split_with_q_head_nomask_idx_reqs:
-            # In long-sequence scenarios, the computational cost and latency
-            # of the _npu_ring_mla operator are not proportional, so we split
-            # long sequences into shorter ones to improve performance.
-            split_size = 16 * 1024
-            if self.pcp_world_rank == 0:
-                split_q_head_nomask_idx_list = [self.kv_idx_names["kv_with_q_head_nomask_idx_tensor"]]
-            else:
-                split_q_head_nomask_idx_list, split_q_head_nomask_lens_list = self._split_multi_batch_kv_idx(
-                    split_with_q_head_nomask_idx_reqs, split_size
-                )
-            split_q_tail_nomask_idx_list, split_q_tail_nomask_lens_list = self._split_multi_batch_kv_idx(
-                split_kv_with_q_tail_nomask_idx_reqs, split_size
-            )
-
-            for q_head_nomask_idx in split_q_head_nomask_idx_list:
-                split_q_head_nomask_idx_tensor_list.append(self._list_to_tensor(q_head_nomask_idx, self.device))
-
-            for q_tail_nomask_idx in split_q_tail_nomask_idx_list:
-                split_q_tail_nomask_idx_tensor_list.append(self._list_to_tensor(q_tail_nomask_idx, self.device))
-
-            if self.pcp_world_rank == 0:
-                head_attn_nomask_seqlens_list = [head_attn_nomask_seqlens]
-            else:
-                for q_head_nomask_lens in split_q_head_nomask_lens_list:
-                    head_attn_nomask_seqlens_list.append(
-                        torch.tensor([chunk_seqlens, q_head_nomask_lens], dtype=torch.int32)
-                    )
-            for q_tail_nomask_lens in split_q_tail_nomask_lens_list:
-                tail_attn_nomask_seqlens_list.append(
-                    torch.tensor([chunk_seqlens, q_tail_nomask_lens], dtype=torch.int32)
-                )
-        return (
-            split_q_head_nomask_idx_tensor_list,
-            split_q_tail_nomask_idx_tensor_list,
-            head_attn_nomask_seqlens_list,
-            tail_attn_nomask_seqlens_list,
-        )
-
-    def _split_multi_batch_kv_idx(
-        self,
-        kv_nomask_idx_multi_batch,
-        split_size,
-    ):
-        batch_lengths = [len(batch) for batch in kv_nomask_idx_multi_batch]
-        max_batch_length = max(batch_lengths) if batch_lengths else 0
-        time = (max_batch_length + split_size - 1) // split_size
-        split_kv_idx_3d = []
-        split_kv_len_2d = []
-        merged_split_kv_idx_3d = []
-
-        for single_batch in kv_nomask_idx_multi_batch:
-            current_batch_split = []
-            current_batch_len = []
-            for t in range(time):
-                start = t * split_size
-                current_segment = single_batch[start : start + split_size]
-                current_batch_split.append(current_segment)
-                current_batch_len.append(len(current_segment))
-
-            split_kv_idx_3d.append(current_batch_split)
-            split_kv_len_2d.append(current_batch_len)
-
-        for time_idx in range(time):
-            current_time_merged = []
-            for batch in split_kv_idx_3d:
-                current_time_merged.extend(batch[time_idx])
-            merged_split_kv_idx_3d.append(current_time_merged)
-
-        def reshape_kv_len_to_time_first(split_kv_len_2d):
-            if not split_kv_len_2d or not split_kv_len_2d[0]:
-                return []
-            return [
-                [batch_len[time_idx] for batch_len in split_kv_len_2d] for time_idx in range(len(split_kv_len_2d[0]))
-            ]
-
-        merged_split_kv_len_2d = reshape_kv_len_to_time_first(split_kv_len_2d)
-        return merged_split_kv_idx_3d, merged_split_kv_len_2d

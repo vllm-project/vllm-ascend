@@ -35,6 +35,7 @@ class MoeV2FullLoadDynamicQuant : public MoeV2SortBase {
   __aicore__ inline void CopyOutIdx();
   __aicore__ inline void CopyOutEmpty();
   __aicore__ inline void CopyOutXQuant1H();
+  __aicore__ inline void CopyOutXQuantEH();
   __aicore__ inline void ComputeExpertTokenCountOrCumsum();
   __aicore__ inline void Compute(LocalTensor<float>& smoothLocal);
 
@@ -48,7 +49,6 @@ class MoeV2FullLoadDynamicQuant : public MoeV2SortBase {
   int64_t k_;
   int64_t n_;
   int64_t cols_;
-  int64_t cols_scale_;
   int64_t activateRows_;
   int64_t expertNum;
   int64_t expertCapacity;
@@ -63,10 +63,12 @@ class MoeV2FullLoadDynamicQuant : public MoeV2SortBase {
   TQue<QuePosition::VECIN, 1> smoothInQueue;
   TQue<QuePosition::VECOUT, 1> calcQueue;
   TQue<QuePosition::VECOUT, 1> inputXOutQueue;
+  TQue<QuePosition::VECOUT, 1> scaleOutQueue;
 
   GlobalTensor<T> xGm_;
   GlobalTensor<int32_t> expertIdxGm_;
   GlobalTensor<float> quantSmoothGm;
+  GlobalTensor<float> dynamicQuantScaleGm;
 
   GlobalTensor<int8_t> expandedXGm_;
   GlobalTensor<int32_t> expandedRowIdxGm_;
@@ -99,9 +101,9 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::SortCompute() {
   LocalTensor<int32_t> expertIdxLocal = inLocal[0];
   LocalTensor<float> expertIdxLocalFp32 = expertIdxLocal.ReinterpretCast<float>();
   Cast(expertIdxLocalFp32, expertIdxLocal, RoundMode::CAST_ROUND, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Muls(expertIdxLocalFp32, expertIdxLocalFp32, (float)-1, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   int64_t duplicateNum = this->totalLength % ONE_REPEAT_SORT_NUM;
   if (duplicateNum > 0) {
     int duplicateIndex = this->totalLength - duplicateNum;
@@ -110,38 +112,38 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::SortCompute() {
     mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
     uint64_t mask[2] = {mask0, 0};
     Duplicate(expertIdxLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
   LocalTensor<float> concatLocal;
   LocalTensor<float> tempTensor = tempBuffer.Get<float>(GetSortLen<float>(this->sortNum_));
   Concat(concatLocal, expertIdxLocalFp32, tempTensor, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   LocalTensor<uint32_t> rowIdxLocal = inLocal[this->sortNum_].template ReinterpretCast<uint32_t>();
   LocalTensor<float> sortedLocal = sortedBuffer.Get<float>(GetSortLen<float>(this->sortNum_));
   Sort<float, true>(sortedLocal, concatLocal, rowIdxLocal, tempTensor, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   LocalTensor<float> expandedExpertIdxLocal = expandedExpertIdxCopyOutQueue_.AllocTensor<float>();
   expandDstToSrcRowLocal = expandDstToSrcRowQueue_.AllocTensor<uint32_t>();
   LocalTensor<float> expandDstToSrcRowLocalFp32 = expandDstToSrcRowLocal.ReinterpretCast<float>();
   Extract(expandedExpertIdxLocal, expandDstToSrcRowLocal, sortedLocal, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Cast(expandDstToSrcRowLocalFp32, expandDstToSrcRowLocal.ReinterpretCast<int32_t>(), RoundMode::CAST_ROUND,
        this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Muls(expandedExpertIdxLocal, expandedExpertIdxLocal, (float)-1, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   LocalTensor<int32_t> expandedExpertIdxLocalInt32;
   expandedExpertIdxLocalInt32 = expandedExpertIdxLocal.ReinterpretCast<int32_t>();
   Cast(expandedExpertIdxLocalInt32, expandedExpertIdxLocal, RoundMode::CAST_ROUND, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   expandedExpertIdxCopyOutQueue_.EnQue<int32_t>(expandedExpertIdxLocalInt32);
 
   LocalTensor<uint32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.AllocTensor<uint32_t>();
   LocalTensor<uint32_t> expandedRowIdxU32 = expandedRowIdx.ReinterpretCast<uint32_t>();
   Muls(expandDstToSrcRowLocalFp32, expandDstToSrcRowLocalFp32, (float)-1, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   ArithProgression<int32_t>(inLocal[this->sortNum_], 0, 1, this->totalLength);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   if (duplicateNum > 0) {
     int duplicateIndex = this->totalLength - duplicateNum;
     uint64_t mask0 = UINT64_MAX;
@@ -149,14 +151,14 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::SortCompute() {
     mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
     uint64_t mask[2] = {mask0, 0};
     Duplicate(expandDstToSrcRowLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
   Concat(concatLocal, expandDstToSrcRowLocalFp32, tempTensor, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Sort<float, true>(sortedLocal, concatLocal, rowIdxLocal, tempTensor, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   Extract(tempTensor, expandedRowIdxU32, sortedLocal, this->sortNum_ / ONE_REPEAT_SORT_NUM);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
   expandedRowIdxCopyOutQueue_.EnQue<uint32_t>(expandedRowIdx);
   sortDataCopyInQueue.FreeTensor(inLocal);
 }
@@ -223,40 +225,41 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Compute(LocalTensor<float>&
 
   LocalTensor<float> tempLocal = calcQueue.AllocTensor<float>();
   LocalTensor<int8_t> outLocal = inputXOutQueue.AllocTensor<int8_t>();
-  LocalTensor<float> dynamicQuantLocal = outLocal[this->cols_].template ReinterpretCast<float>();
+  LocalTensor<float> dynamicQuantLocal = scaleOutQueue.AllocTensor<float>();
 
   if constexpr (!IsSameType<T, float>::value) {
     Cast(inLocal, inLocal.ReinterpretCast<T>()[colsAlign], RoundMode::CAST_NONE, this->cols_);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
 
   if (smoothType != 0) {
     Mul(inLocal, inLocal, smoothLocal, this->cols_);
-    pipe_barrier(PIPE_V);
+    AscendC::PipeBarrier<PIPE_V>();
   }
 
   Abs(tempLocal, inLocal, this->cols_);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   ReduceMax(dynamicQuantLocal, tempLocal, tempLocal, this->cols_);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   float maxValue = dynamicQuantLocal.GetValue(0) / 127.0f;
 
   Duplicate<float>(dynamicQuantLocal, maxValue, 8);
   Duplicate<float>(tempLocal, maxValue, this->cols_);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Div(tempLocal, inLocal, tempLocal, this->cols_);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Cast(tempLocal.ReinterpretCast<half>(), tempLocal, RoundMode::CAST_TRUNC, this->cols_);
-  pipe_barrier(PIPE_V);
+  AscendC::PipeBarrier<PIPE_V>();
 
   Cast(outLocal, tempLocal.ReinterpretCast<half>(), RoundMode::CAST_ROUND, this->cols_);
 
   calcQueue.FreeTensor(tempLocal);
   inputXOutQueue.EnQue(outLocal);
+  scaleOutQueue.EnQue(dynamicQuantLocal);
 }
 
 template <typename T>
@@ -272,7 +275,7 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::CopyOutXQuant1H() {
 
   DataCopyExtParams dataXCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, 0, 0};
   DataCopyExtParams smoothCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(float)), 0, 0, 0};
-  DataCopyExtParams intriParams{1, static_cast<uint32_t>((this->cols_ + BLOCK_BYTES) * sizeof(int8_t)), 0, 0, 0};
+  DataCopyExtParams intriParams{1, static_cast<uint32_t>(this->cols_ * sizeof(int8_t)), 0, 0, 0};
 
   LocalTensor<float> smoothLocal;
   if (smoothType == 1) {
@@ -292,6 +295,7 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::CopyOutXQuant1H() {
     xCopyInQueue_.EnQue<T>(xLocal);
     Compute(smoothLocal);
 
+    LocalTensor<float> quantScaleLocal = scaleOutQueue.DeQue<float>();
     LocalTensor<int8_t> outLocal = inputXOutQueue.DeQue<int8_t>();
     while (curRowsStart <= curRowsEnd && curRowsStart / this->k_ == row) {
       int32_t outIndex = expandedRowIdx.GetValue(curRowsStart);
@@ -299,13 +303,72 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::CopyOutXQuant1H() {
       if (outIndex == -1 || (this->dropPadMode == DROPLESS_MODE && outIndex >= this->activateRows_)) {
         continue;
       }
-      DataCopyPad(expandedXGm_[outIndex * this->cols_scale_], outLocal, intriParams);
+      DataCopyPad(expandedXGm_[outIndex * cols_], outLocal, intriParams);
+      DataCopyPad(dynamicQuantScaleGm[outIndex], quantScaleLocal, {1, 4, 0, 0, 0});
     }
 
     xCopyInQueue_.FreeTensor(xLocal);
     inputXOutQueue.FreeTensor(outLocal);
+    scaleOutQueue.FreeTensor(quantScaleLocal);
+  }
+  if (smoothType == 1) {
+    smoothInQueue.FreeTensor(smoothLocal);
   }
   expandedRowIdxCopyOutQueue_.FreeTensor(expandedRowIdx);
+}
+
+template <typename T>
+__aicore__ inline void MoeV2FullLoadDynamicQuant<T>::CopyOutXQuantEH() {
+  LocalTensor<int32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.DeQue<int32_t>();
+  expandedRowIdxCopyOutQueue_.FreeTensor(expandedRowIdx);
+  Muls(expandDstToSrcRowLocal.ReinterpretCast<float>(), expandDstToSrcRowLocal.ReinterpretCast<float>(), (float)-1,
+       this->totalLength);
+  pipe_barrier(PIPE_V);
+  LocalTensor<int32_t> sortedRowIdx = expandDstToSrcRowLocal.ReinterpretCast<int32_t>();
+  Cast(sortedRowIdx, expandDstToSrcRowLocal.ReinterpretCast<float>(), RoundMode::CAST_ROUND, this->totalLength);
+
+  int64_t curRowsStart = this->blockIdx_ * this->perCoreRows_;
+  int64_t curRowsEnd = curRowsStart + this->coreRows_ - 1;
+
+  DataCopyExtParams dataXCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, 0, 0};
+  DataCopyExtParams smoothCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(float)), 0, 0, 0};
+  DataCopyExtParams intriParams{1, static_cast<uint32_t>(this->cols_ * sizeof(int8_t)), 0, 0, 0};
+
+  for (int64_t row = curRowsStart; row <= curRowsEnd; row++) {
+    if (this->dropPadMode == DROPLESS_MODE && row >= this->activateRows_) {
+      break;
+    }
+    int32_t srcIdx = sortedRowIdx.GetValue(row);
+    int32_t expertIdx = expandedExpertIdxLocal.GetValue(row);
+
+    LocalTensor<T> inLocal = xCopyInQueue_.AllocTensor<T>();
+    LocalTensor<float> smoothLocal = smoothInQueue.AllocTensor<float>();
+    if constexpr (IsSameType<T, float>::value) {
+      DataCopyPad(inLocal, xGm_[srcIdx / this->k_ * this->cols_], dataXCopyParams, {false, 0, 0, 0});
+    } else {
+      DataCopyPad(inLocal[colsAlign], xGm_[srcIdx / this->k_ * this->cols_], dataXCopyParams, {false, 0, 0, 0});
+    }
+    DataCopyPad(smoothLocal, quantSmoothGm[expertIdx * this->cols_], smoothCopyParams, {false, 0, 0, 0});
+    xCopyInQueue_.EnQue<T>(inLocal);
+    smoothInQueue.EnQue(smoothLocal);
+    smoothLocal = smoothInQueue.DeQue<float>();
+
+    Compute(smoothLocal);
+
+    LocalTensor<float> quantScaleLocal = scaleOutQueue.DeQue<float>();
+    DataCopyPad(dynamicQuantScaleGm[row], quantScaleLocal, {1, 4, 0, 0, 0});
+
+    LocalTensor<int8_t> outLocal = inputXOutQueue.DeQue<int8_t>();
+    DataCopyPad(expandedXGm_[row * this->cols_], outLocal, intriParams);
+
+    xCopyInQueue_.FreeTensor(inLocal);
+    smoothInQueue.FreeTensor(smoothLocal);
+    inputXOutQueue.FreeTensor(outLocal);
+    scaleOutQueue.FreeTensor(quantScaleLocal);
+  }
+
+  expandDstToSrcRowQueue_.FreeTensor(expandDstToSrcRowLocal);
+  expandedExpertIdxCopyOutQueue_.FreeTensor(expandedExpertIdxLocal);
 }
 
 template <typename T>
@@ -321,7 +384,6 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Init(GM_ADDR x, GM_ADDR exp
   this->k_ = tilingData->k;
   this->n_ = tilingData->n;
   this->cols_ = tilingData->cols;
-  this->cols_scale_ = this->cols_ + ALIGN_512;
   this->needCoreNum_ = this->gatherOutTilingData_->needCoreNum;
   this->perCoreRows_ = this->gatherOutTilingData_->perCoreRows;
   this->activateRows_ = this->gatherOutTilingData_->activateRows;
@@ -352,6 +414,7 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Init(GM_ADDR x, GM_ADDR exp
                                                 Align(this->expertNum, sizeof(int32_t)));
   }
   quantSmoothGm.SetGlobalBuffer((__gm__ float*)quantSmooth);
+  dynamicQuantScaleGm.SetGlobalBuffer((__gm__ float*)dynamicQuantScale);
 
   int64_t kvFactor = 2;
   int64_t buffSize = this->sortNum_ * sizeof(int32_t);
@@ -375,7 +438,8 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Init(GM_ADDR x, GM_ADDR exp
   }
   pipe->InitBuffer(smoothInQueue, 1, AlignBytes(this->cols_, sizeof(float)));
   pipe->InitBuffer(calcQueue, 1, AlignBytes(this->cols_, sizeof(float)));
-  pipe->InitBuffer(inputXOutQueue, 1, AlignBytes(this->cols_scale_, sizeof(int8_t)));
+  pipe->InitBuffer(inputXOutQueue, 1, AlignBytes(this->cols_, sizeof(int8_t)));
+  pipe->InitBuffer(scaleOutQueue, 1, BLOCK_BYTES + BLOCK_BYTES);
 }
 
 template <typename T>
@@ -391,7 +455,11 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Process() {
     } else {
       CopyOutEmpty();
     }
-    CopyOutXQuant1H();
+    if (smoothType == 2) {
+      CopyOutXQuantEH();
+    } else {
+      CopyOutXQuant1H();
+    }
   }
 }
 }  // namespace MoeInitRoutingQuantV2

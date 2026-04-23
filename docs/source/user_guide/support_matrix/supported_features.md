@@ -1,6 +1,6 @@
 # Supported Features
 
-The feature support principle of vLLM Ascend is: **aligned with the vLLM**. We are also actively collaborating with the community to accelerate support.
+The feature support principle of vLLM Ascend is: **aligned with vLLM**. We are also actively collaborating with the community to accelerate support.
 
 Functional call: <https://docs.vllm.ai/en/latest/features/tool_calling/>
 
@@ -37,12 +37,12 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 - 🔴 NO plan/Deprecated: No plan or deprecated by vLLM.
 
 [v1_user_guide]: https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html
-[multimodal]: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/Qwen-VL-Dense.html
+[multimodal]: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen-VL-Dense.html
 [guided_decoding]: https://github.com/vllm-project/vllm-ascend/issues/177
 [LoRA]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/lora.html
 [graph_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/graph_mode.html
 [apc]: https://github.com/vllm-project/vllm-ascend/issues/732
-[cp]: https://docs.vllm.ai/en/stable/performance/optimization.html#chunked-prefill
+[cp]: https://docs.vllm.ai/en/stable/configuration/optimization.html#chunked-prefill
 [1P1D]: https://github.com/vllm-project/vllm-ascend/pull/950
 [context_parallel]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html
 [sleep_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html

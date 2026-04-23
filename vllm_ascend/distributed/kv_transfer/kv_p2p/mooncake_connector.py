@@ -173,7 +173,7 @@ class KVCacheTaskTracker:
         while self.delayed_free_requests:
             request_id = next(iter(self.delayed_free_requests))
             delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
+            if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
@@ -442,7 +442,8 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if all_task_done:
-                self.task_tracker.update_done_task_count(request_id)
+                if len(req_meta["local_block_ids"]) > 0:
+                    self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
             self.request_queue.task_done()
@@ -586,7 +587,7 @@ class KVCacheRecvingThread(threading.Thread):
         head_dim = self.model_config.hf_text_config.head_dim
         block_size = self.vllm_config.cache_config.block_size
         num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
-        layers = self.model_config.hf_text_config.num_hidden_layers
+        layers = len(self.kv_caches)
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
 
@@ -1323,13 +1324,13 @@ class MooncakeConnectorWorker:
 
         def context_parallel_parameters_check():
             assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
-            if not self.use_mla:
+            if not (self.use_mla or self.use_sparse):
                 p_node_heads_per_rank = math.ceil(self.num_key_value_heads / prefill_tp_size)
                 d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
                 assert d_node_heads_per_rank % p_node_heads_per_rank == 0
 
         def get_kv_head_groups(tp_size):
-            if self.use_mla:
+            if self.use_mla or self.use_sparse:
                 kv_head_groups = []
                 kv_head_ids = [0]
                 kv_head_groups.append(tuple(kv_head_ids))

@@ -1,3 +1,4 @@
+import gc
 import pytest
 import torch
 import torch_npu
@@ -35,3 +36,6 @@ def test_quant_fpx_linear(B: int, D: int, top_k: int, dtype, atol, rtol):
     topk_ids = topk_ids.to(torch.int32)
     torch.allclose(y, topk_weights, atol=atol, rtol=rtol)
     torch.allclose(expert_idx, topk_ids, atol=atol, rtol=rtol)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

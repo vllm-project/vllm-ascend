@@ -22,15 +22,23 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.quantization.methods.base import QuantType
+
 
 class VllmEplbAdaptor:
     def __init__(self, model, **args):
         super().__init__(**args)
-        self.model = model
+        if hasattr(model, "language_model"):
+            self.model = model.language_model
+            self.config = model.config.text_config
+        else:
+            self.model = model
+            self.config = model.config
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
-        self.num_dense_layers = getattr(self.model.config, "first_k_dense_replace", 0)
-        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
+        self.num_dense_layers = getattr(self.config, "first_k_dense_replace", 0)
+        self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
 
         self.expert_map_per_layer_cpu = dict()  # copy of expert map on CPU to avoid device synchronize frequently
 
@@ -59,16 +67,23 @@ class VllmEplbAdaptor:
     def init_expert_param_per_layer(self):
         self.param_dict = dict()
         if self.model.quant_config is not None:
-            self.expert_weight_names = [
-                "w13_weight_list",
-                "w2_weight_list",
-                "w13_weight_scale_fp32_list",
-                "w2_weight_scale_list",
-            ]
+            quant_type = self.model.model.layers[self.num_dense_layers].mlp.experts.quant_type
+            if quant_type == QuantType.W8A8:
+                self.expert_weight_names = [
+                    "w13_weight_list",
+                    "w2_weight_list",
+                    "w13_weight_scale_fp32_list",
+                    "w2_weight_scale_list",
+                ]
+                if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
+                    self.expert_weight_names.append("fused_w1_scale_list")
+                    self.expert_weight_names.append("fused_w2_scale_list")
+            else:
+                raise ValueError(f"EPLB not support {quant_type}")
         else:
             self.expert_weight_names = ["w13_weight", "w2_weight"]
 
-        for layer_idx in range(self.num_dense_layers, self.model.config.num_hidden_layers):
+        for layer_idx in range(self.num_dense_layers, self.config.num_hidden_layers):
             self.expert_param_per_layer[layer_idx] = list()
             for name in self.expert_weight_names:
                 param_key = f"model.layers.{layer_idx}.mlp.experts.{name}"

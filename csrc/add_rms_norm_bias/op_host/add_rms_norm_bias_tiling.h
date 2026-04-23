@@ -44,7 +44,7 @@ END_TILING_DATA_DEF;
 struct AddRmsNormBiasCompileInfo {
     uint32_t totalCoreNum = 0;
     uint64_t totalUbSize = 0;
-    platform_ascendc::SocVersion socVersion = platform_ascendc::SocVersion::ASCEND910_95;
+    platform_ascendc::SocVersion socVersion = platform_ascendc::SocVersion::VLLM_ASCEND_950_SOC_ENUM;
 };
 
 REGISTER_TILING_DATA_CLASS(AddRmsNormBias, AddRMSNormBiasTilingData)

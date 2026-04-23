@@ -31,6 +31,11 @@ defaults:
   run:
     shell: bash -el {0}
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
@@ -40,7 +45,7 @@ concurrency:
 jobs:
   changes:
     runs-on: linux-aarch64-a2b3-0
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
+    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
@@ -51,7 +56,7 @@ jobs:
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       # NOTE: Do not update the version of checkout, there have some issue on self_hosted runner with the higher version
       - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -75,12 +80,38 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [83b47f67b1dfad505606070ae4d9f83e50ad4ebd, v0.15.0]
+        vllm_version: [6f786f2c506cb07f4566771fdc62e640e2c4a176, v0.19.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.e2e_tracker == true }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
       contains_310: false
       type: full
+
+  parse-trigger:
+    name: Parse /e2e comment
+    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    uses: ./.github/workflows/_parse_trigger.yaml
+    with:
+      parse_e2e_comment: true
+
+  e2e-comment-test:
+    name: e2e-comment (${{ matrix.vllm_version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version: [v0.19.0]
+    needs: [parse-trigger]
+    if: ${{ needs.parse-trigger.outputs.allowed == 'true' }}
+    uses: ./.github/workflows/_e2e_test.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.0-910b-ubuntu22.04-py3.11
+      type: comment
+      ref: ${{ needs.parse-trigger.outputs.pr_sha }}
+      singlecard_tests: ${{ needs.parse-trigger.outputs.singlecard_tests }}
+      multicard_2_tests: ${{ needs.parse-trigger.outputs.multicard_2_tests }}
+      multicard_4_tests: ${{ needs.parse-trigger.outputs.multicard_4_tests }}
+      p310_tests: ${{ needs.parse-trigger.outputs.p310_tests }}

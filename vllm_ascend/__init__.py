@@ -30,8 +30,10 @@ def register_connector():
 
 def register_model_loader():
     from .model_loader.netloader import register_netloader
+    from .model_loader.rfork import register_rforkloader
 
     register_netloader()
+    register_rforkloader()
 
 
 def register_service_profiling():

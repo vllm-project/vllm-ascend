@@ -1,5 +1,31 @@
 # Kimi-K2-Thinking
 
+## Introduction
+
+Kimi-K2-Thinking is a large-scale Mixture-of-Experts (MoE) model developed by Moonshot AI. It features a hybrid thinking architecture that excels in complex reasoning and problem-solving tasks.
+
+This document will show the main verification steps of the model, including supported features, environment preparation, single-node deployment, and functional verification.
+
+## Supported Features
+
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+
+## Environment Preparation
+
+### Model Weight
+
+- `Kimi-K2-Thinking`(bfloat16): require 1 Atlas 800 A3 (64G × 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
+
+It is recommended to download the model weight to the shared directory, such as `/mnt/sfs_turbo/.cache/`.
+
+### Installation
+
+You can use our official docker image to run `Kimi-K2-Thinking` directly.
+
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+
 ## Run with Docker
 
 ```{code-block} bash
@@ -77,7 +103,7 @@ Your model files look like:
 |-- modeling_deepseek.py
 |-- tiktoken.model
 |-- tokenization_kimi.py
-`-- tokenizer_config.json
+|-- tokenizer_config.json
 ```
 
 ## Online Inference on Multi-NPU
@@ -86,13 +112,34 @@ Run the following script to start the vLLM server on Multi-NPU:
 
 For an Atlas 800 A3 (64G*16) node, tensor-parallel-size should be at least 16.
 
-```bash
-vllm serve Kimi-K2-Thinking \
---served-model-name kimi-k2-thinking \
---tensor-parallel-size 16 \
---enable_expert_parallel \
---trust-remote-code \
---no-enable-prefix-caching
+```{test} bash
+:sync-yaml: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
+:sync-target: test_cases[0].envs
+:sync-class: env
+
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export OMP_PROC_BIND=false
+export HCCL_OP_EXPANSION_MODE=AIV
+export SERVER_PORT=DEFAULT_PORT  # Replace DEFAULT_PORT with the actual port.
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+```
+
+```{test} bash
+:sync-yaml: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
+:sync-target: test_cases[0].model test_cases[0].server_cmd
+:sync-class: cmd
+
+vllm serve "moonshotai/Kimi-K2-Thinking" \
+  --tensor-parallel-size 16 \
+  --port $SERVER_PORT \
+  --max-model-len 8192 \
+  --max-num-batched-tokens 8192 \
+  --max-num-seqs 12 \
+  --gpu-memory-utilization 0.9 \
+  --trust-remote-code \
+  --enable-expert-parallel \
+  --no-enable-prefix-caching
 ```
 
 Once your server is started, you can query the model with input prompts.

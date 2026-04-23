@@ -29,7 +29,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_flashcomm2_otp_group, get_mlp_tp_group, get_otp_group
-from vllm_ascend.utils import flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
+from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
 
@@ -46,6 +46,7 @@ class AscendLinearMethod(LinearMethodBase):
 
     def __init__(self, scheme: AscendLinearScheme) -> None:
         self.quant_method = scheme
+        self._enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
 
     def create_weights(
         self,
@@ -117,6 +118,18 @@ class AscendLinearMethod(LinearMethodBase):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
+    def get_computed_params(self) -> set[str]:
+        """Return parameter name patterns that are computed, not loaded.
+
+        These parameters are computed during process_weights_after_loading
+        rather than loaded from checkpoint:
+        - weight_offset: Zero for symmetric quantization
+        - quant_bias: Computed from weight statistics
+        - deq_scale: Computed as input_scale * weight_scale
+        - weight_scale: May be computed or have default values for some models
+        """
+        return {"weight_offset", "quant_bias", "deq_scale", "weight_scale"}
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -133,6 +146,8 @@ class AscendLinearMethod(LinearMethodBase):
                     tp_rank = 0
                 else:
                     tp_rank = get_flashcomm2_otp_group().rank_in_group
+            elif layer.prefix.find("o_proj") != -1 and self._enable_dsa_cp_with_layer_shard:
+                tp_rank = 0
             else:
                 tp_rank = get_tensor_model_parallel_rank()
         else:
@@ -208,8 +223,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             set_weight_attrs(param, extra_weight_attrs)
 
         extra_weight_attrs.update({"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
-        per_group_param = (
-            ["weight_scale_second", "weight_offset_second", "scale_bias"] + ["weight_scale", "weight_offset"]
+        per_group_param = ["weight_scale_second", "weight_offset_second", "scale_bias"] + (
+            ["weight_scale", "weight_offset"]
             if hasattr(self.quant_method, "group_size") and self.quant_method.group_size > 0
             else []
         )
@@ -243,28 +258,34 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor | None = None,
         global_redundant_expert_num=0,
-        **kwargs,
+        pertoken_scale: torch.Tensor | None = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.quant_method.apply(
-            layer,
-            x,
-            router_logits,
-            top_k,
-            renormalize,
-            use_grouped_topk,
-            global_num_experts,
-            expert_map,
-            topk_group,
-            num_expert_group,
-            custom_routing_function,
-            scoring_func,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            is_prefill,
-            enable_force_load_balance,
-            log2phy,
-            global_redundant_expert_num,
-            **kwargs,
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=top_k,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            is_prefill=is_prefill,
+            enable_force_load_balance=enable_force_load_balance,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            pertoken_scale=pertoken_scale,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            mc2_mask=mc2_mask,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

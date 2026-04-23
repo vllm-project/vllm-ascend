@@ -93,8 +93,8 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
   --quantization ascend \
   --served-model-name qwen3 \
   --max-num-seqs 1 \
-  --max-model-len 133008 \
-  --max-num-batched-tokens 133008 \
+  --max-model-len 131072 \
+  --max-num-batched-tokens 131072 \
   --enable-expert-parallel \
   --trust-remote-code \
   --gpu-memory-utilization 0.95 \
@@ -135,8 +135,6 @@ The parameters are explained as follows:
 
 ## Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
-
 ### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
@@ -157,7 +155,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3-235B-A22B-w8a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 

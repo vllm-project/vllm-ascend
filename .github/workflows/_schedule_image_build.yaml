@@ -23,15 +23,38 @@ on:
         description: 'The tag to use for workflow dispatch'
         required: false
         type: string
+      branch_ref:
+        description: 'Branch/ref to check out for non-workflow_dispatch events'
+        required: false
+        type: string
+        default: 'main'
+      schedule_tag_pattern:
+        description: 'Pattern used for the schedule Docker tag'
+        required: false
+        type: string
+        default: 'main'
+      artifact_prefix:
+        description: 'Prefix for digest artifact names'
+        required: false
+        type: string
+        default: 'digests'
     secrets:
         QUAY_PASSWORD:
             description: 'Quay password for pushing images'
             required: false
 
+env:
+  QUAY_REPO: quay.io/ascend/vllm-ascend
+  CACHE_REPO: ghcr.io/vllm-project/vllm-ascend
+
 jobs:
   build-push-digest:
     name: build
     runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: write
+      contents: read
+
     strategy:
       matrix:
         include:
@@ -42,18 +65,41 @@ jobs:
             runner: ubuntu-22.04-arm
             tag: arm64
     steps:
+
+    - name: Validate inputs (workflow_dispatch only)
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      run: |
+        tag="${{ inputs.workflow_dispatch_tag }}"
+        branch="${{ inputs.branch_ref }}"
+        if [[ -n "$tag" && -n "$branch" ]]; then
+          echo "Error: 'tag' and 'branch' are mutually exclusive. Please specify only one."
+          exit 1
+        fi
+        if [[ -z "$tag" && -z "$branch" ]]; then
+          echo "Error: Either 'tag' or 'branch' must be specified."
+          exit 1
+        fi
+
     - uses: actions/checkout@v6
       if: ${{ github.event_name != 'workflow_dispatch' }}
       with:
         fetch-depth: 0
         persist-credentials: false
+        ref: ${{ inputs.branch_ref }}
 
     - uses: actions/checkout@v6
-      if: ${{ github.event_name == 'workflow_dispatch' }}
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
       with:
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.workflow_dispatch_tag }}
+
+    - uses: actions/checkout@v6
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }}
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+        ref: ${{ inputs.branch_ref }}
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -63,21 +109,37 @@ jobs:
 
     - name: Publish - Login to Quay Container Registry
       if: ${{ inputs.should_push }}
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: quay.io
         username: ${{ inputs.quay_username }}
         password: ${{ secrets.QUAY_PASSWORD }}
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
       with:
         install: true
         driver: docker-container
         use: true
 
+    - name: Login to GitHub Container Registry (for cache)
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Compute cache tag
+      id: cache-tag
+      run: |
+        if [ -n "${{ inputs.suffix }}" ]; then
+          echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.tag }}" >> $GITHUB_OUTPUT
+        else
+          echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
+        fi
+
     - name: Build and push
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       id: build
       with:
         platforms: ${{ matrix.arch }}
@@ -86,10 +148,15 @@ jobs:
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
-        outputs: type=image,name=quay.io/ascend/vllm-ascend,push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
+        outputs: type=image,name=${{ env.QUAY_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
         provenance: false
+        # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
+        # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
+        # When a new image is built and pushed, the cache will also be updated in the registry, so that next build can benefit from it.
+        cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
+        cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
 
     - name: Export digest
       run: |
@@ -98,9 +165,9 @@ jobs:
         touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
     - name: Upload digest
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
-        name: digests-${{ inputs.suffix }}-${{ matrix.tag }}
+        name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.tag }}
         path: ${{ runner.temp }}/digests/*
         if-no-files-found: error
         retention-days: 1
@@ -111,26 +178,39 @@ jobs:
     needs: build-push-digest
     if: ${{ inputs.should_push }}
     steps:
-      - name: Checkout
+      - name: Checkout branch
         uses: actions/checkout@v6
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '') }}
+        with:
+          ref: ${{ inputs.branch_ref }}
+
+      - name: Checkout tag
+        uses: actions/checkout@v6
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
+        with:
+          ref: ${{ inputs.workflow_dispatch_tag }}
 
       - name: Download arm64 digests
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-${{ inputs.suffix }}-arm64
+          pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-arm64
           merge-multiple: true
 
       - name: Download amd64 digests
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-${{ inputs.suffix }}-amd64
+          pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-amd64
           merge-multiple: true
 
       - name: Prepare suffix
         id: suffix
         run: |
+          # Prepend '-' to suffix so Docker metadata action can append it directly
+          # to the tag (e.g. suffix=310p-openeuler → SUFFIX=-310p-openeuler,
+          # resulting in tags like main-310p-openeuler).
+          # Leave SUFFIX empty when no suffix is provided (plain tags like main).
           if [ -n "${{ inputs.suffix }}" ]; then
             echo "SUFFIX=-${{ inputs.suffix }}" >> $GITHUB_ENV
           else
@@ -139,40 +219,48 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           # TODO(yikun): add more hub image and a note on release policy for container image
           images: |
-            quay.io/ascend/vllm-ascend
-          # Note for test case
+            ${{ env.QUAY_REPO }}
+          # Three trigger scenarios and resulting image tags:
           # https://github.com/marketplace/actions/docker-metadata-action#typeref
-          # 1. branch job publish per main/*-dev branch commits
-          # 2. main and dev pull_request is build only, so the tag pr-N-openeuler is fine
-          # 3. only pep440 matched tag will be published:
-          #    - v0.7.1 --> v0.7.1-openeuler
-          #    - pre/post/dev: v0.7.1rc1-openeuler/v0.7.1rc1-openeuler/v0.7.1rc1.dev1-openeuler/v0.7.1.post1-openeuler, no latest
-          #      which follow the rule from vLLM with prefix v
-          # TODO(yikun): the post release might be considered as latest release
+          #
+          # 1. Push tag (on: push tags: v*) → type=pep440
+          #    Only pep440-compliant tags are published:
+          #    - v0.16.0rc1       --> vllm-ascend:v0.16.0rc1[-suffix]
+          #    Non-pep440 tags are ignored.
+          #
+          # 2. Schedule (on: schedule) → type=schedule,pattern=main
+          #    Triggered by cron, always produces a fixed tag:
+          #    - (any schedule run) --> vllm-ascend:main[-suffix]
+          #
+          # 3. Manual (on: workflow_dispatch) → type=raw,value=inputs.workflow_dispatch_tag
+          #    Tag is determined by the user-selected input at dispatch time:
+          #    - inputs.tag=main       --> vllm-ascend:main[-suffix]
+          #    - inputs.tag=v0.16.0rc1 --> vllm-ascend:v0.16.0rc1[-suffix]
           tags: |
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }}
-            type=schedule,pattern=main,suffix=${{ env.SUFFIX }}
-            type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' }},suffix=${{ env.SUFFIX }}
+            type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }}
+            type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }},suffix=${{ env.SUFFIX }}
+            type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
           flavor:
             latest=false
 
       - name: Login to Quay
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: quay.io
           username: ${{ inputs.quay_username }}
           password: ${{ secrets.QUAY_PASSWORD }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Merge and push multi-arch image
         env:
-          IMAGE: quay.io/ascend/vllm-ascend
+          IMAGE: ${{ env.QUAY_REPO }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))

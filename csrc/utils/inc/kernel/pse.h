@@ -336,7 +336,7 @@ __aicore__ inline void PseSlopeCopyIn(LocalTensor<T> &dstTensor, LocalTensor<hal
         if (pseInfo.needCast) {
             int64_t computeSize = pseInfo.vec1S1RealSize * pseInfo.s2AlignedSize;
             Cast(dstTensor, helpTensor, RoundMode::CAST_NONE, computeSize);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
 
             int64_t s1Offset = pseInfo.s1oIdx * pseInfo.s1BaseSize + pseInfo.vecCoreOffset +
                                pseInfo.loopIdx * pseInfo.vec1S1BaseSize;
@@ -345,16 +345,16 @@ __aicore__ inline void PseSlopeCopyIn(LocalTensor<T> &dstTensor, LocalTensor<hal
             float posShift = float(s2Offset + pseInfo.kvStartIdx - s1Offset - pseInfo.qStartIdx);
 
             Adds(dstTensor, dstTensor, posShift, computeSize);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             Abs(dstTensor, dstTensor, computeSize);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
             float slopes = ((__gm__ T *)pseSlope)[offset] * -1;
             if (pseInfo.pseType == (uint32_t)PseTypeEnum::PSE_INNER_MUL_ADD_SQRT_TYPE) {
                 Sqrt(dstTensor, dstTensor, computeSize);
-                pipe_barrier(PIPE_V);
+                AscendC::PipeBarrier<PIPE_V>();
             }
             Muls(dstTensor, dstTensor, slopes, computeSize);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
         }
     }
 }
@@ -373,7 +373,7 @@ __aicore__ inline void PseSlopeCast(LocalTensor<T> &dstTensor, LocalTensor<half>
         int64_t offset = bOffset + n2Offset + gOffset;
         int64_t computeSize = pseInfo.vec1S1RealSize * pseInfo.s2AlignedSize;
         Cast(dstTensor, helpTensor, RoundMode::CAST_NONE, computeSize);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
 
         int64_t s1Offset = pseInfo.s1oIdx * pseInfo.s1BaseSize + pseInfo.vecCoreOffset +
                            pseInfo.loopIdx * pseInfo.vec1S1BaseSize;
@@ -382,16 +382,16 @@ __aicore__ inline void PseSlopeCast(LocalTensor<T> &dstTensor, LocalTensor<half>
         float posShift = float(s2Offset + pseInfo.kvStartIdx - s1Offset - pseInfo.qStartIdx);
 
         Adds(dstTensor, dstTensor, posShift, computeSize);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         Abs(dstTensor, dstTensor, computeSize);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
         float slopes = ((__gm__ T *)pseSlope)[offset] * -1;
         if (pseInfo.pseType == (uint32_t)PseTypeEnum::PSE_INNER_MUL_ADD_SQRT_TYPE) {
             Sqrt(dstTensor, dstTensor, computeSize);
-            pipe_barrier(PIPE_V);
+            AscendC::PipeBarrier<PIPE_V>();
         }
         Muls(dstTensor, dstTensor, slopes, computeSize);
-        pipe_barrier(PIPE_V);
+        AscendC::PipeBarrier<PIPE_V>();
     }
 }
 

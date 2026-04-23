@@ -16,7 +16,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ## Weight Preparation
 
- Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelers.cn/models/Modelers_Park/Qwen3-Next-80B-A3B-Instruct/tree/main)
+ Download Link for the `Qwen3-Next-80B-A3B-Instruct` Model Weights: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## Deployment
 
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     prompts = [
         "Who are you?",
     ]
-    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_completion_tokens=32)
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40, max_tokens=32)
     llm = LLM(model="Qwen/Qwen3-Next-80B-A3B-Instruct",
               tensor_parallel_size=4,
               enforce_eager=True,
@@ -152,7 +152,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3-Next` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -180,3 +180,7 @@ The performance result is:
 **Concurrency**: 32
 
 **Performance**: 580tps, TPOT 54ms
+
+## FAQ
+
+1. Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model).

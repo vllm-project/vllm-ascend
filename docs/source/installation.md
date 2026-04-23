@@ -11,11 +11,11 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 8.5.0                        | Required for vllm-ascend and torch-npu    |
+    | Ascend HDK    | Refer to the documentation [CANN 8.3.RC1](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | == 8.5.1                        | Required for vllm-ascend and torch-npu    |
     | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
-    | NNAL          | == 8.5.0                       | Required for libatb.so, enables advanced tensor operations |
+    | NNAL          | == 8.5.1                       | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 
@@ -90,18 +90,18 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.5.0_linux-"$(uname -i)".run --full
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run --full
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run
-./Ascend-cann-910b-ops_8.5.0_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
+./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.5.0_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -128,7 +128,7 @@ sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
 apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
 # Or using yum
 # yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
-# Config pip mirror
+# Config pip mirror,only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
@@ -139,7 +139,13 @@ pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/si
 pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 ```
 
-Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel**:
+Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using one of the following methods:
+
+:::::{tab-set}
+:sync-group: install-method
+
+::::{tab-item} Original installation
+:sync: original
 
 ```{code-block} bash
    :substitutions:
@@ -147,9 +153,41 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel**:
 # Install vllm-project/vllm. The newest supported version is |vllm_version|.
 pip install vllm==|pip_vllm_version|
 
-# Install vllm-project/vllm-ascend from pypi.
-pip install vllm-ascend==|pip_vllm_ascend_version|
+# Install vllm-project/vllm-ascend.
+pip install \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/simple  \
+vllm-ascend==|pip_vllm_ascend_version|
+
 ```
+
+::::
+
+::::{tab-item} uv-wheelnext installation
+:sync: uv-wheelnext
+
+The `uv-wheelnext` installation downloads only the delta on top of vllm, resulting in a smaller download size. First install `uv-wheelnext` to support incremental wheels:
+
+```bash
+# install uv-wheelnext
+curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
+source $HOME/.local/bin/env
+```
+
+```{code-block} bash
+   :substitutions:
+
+# Install vllm-project/vllm. The newest supported version is |vllm_version|.
+pip install vllm==|pip_vllm_version|
+
+# Install vllm-project/vllm-ascend from wheelnext index.
+uv pip install --system -v \
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant   \
+vllm-ascend==|pip_vllm_ascend_version|
+
+```
+
+::::
+:::::
 
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
@@ -164,7 +202,7 @@ VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
 
 # Install vLLM Ascend.
-git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
+git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git submodule update --init --recursive
 pip install -v -e .
@@ -177,6 +215,13 @@ If you are building custom operators for Atlas A3, you should run `git submodule
 ```{note}
 To build custom operators, gcc/g++ higher than 8 and C++17 or higher are required. If you are using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 If you encounter other problems during compiling, it is probably because an unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in the environment to specify your g++ and gcc locations before compiling.
+
+If you are building in a CPU-only environment where `npu-smi` is unavailable, you need to set `SOC_VERSION` before `pip install -e .` so the build can target the correct chip. You can refer to `Dockerfile*` defaults, for example:
+
+- Atlas A2: `export SOC_VERSION=ascend910b1`
+- Atlas A3: `export SOC_VERSION=ascend910_9391`
+- Atlas 300I: `export SOC_VERSION=ascend310p1`
+- Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
 ```
 
 ## Set up using Docker
@@ -187,12 +232,12 @@ Supported images as following.
 
 | image name | Hardware | OS |
 |-|-|-|
-| vllm-ascend:<image-tag> | Atlas A2 | Ubuntu |
-| vllm-ascend:<image-tag>-openeuler | Atlas A2 | openEuler |
-| vllm-ascend:<image-tag>-a3 | Atlas A3 | Ubuntu |
-| vllm-ascend:<image-tag>-a3-openeuler | Atlas A3 | openEuler |
-| vllm-ascend:<image-tag>-310p | Atlas 300I | Ubuntu |
-| vllm-ascend:<image-tag>-310p-openeuler | Atlas 300I | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }} | Atlas A2 | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-openeuler | Atlas A2 | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-a3 | Atlas A3 | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler | Atlas A3 | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas 300I | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas 300I | openEuler |
 
 :::{dropdown} Click here to see "Build from Dockerfile"
 or build IMAGE from **source code**:
@@ -237,7 +282,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developer immediately take place changes without requiring a new installation.
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers immediately make changes without requiring a new installation.
 
 ## Extra information
 
