@@ -20,7 +20,6 @@ import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
@@ -28,6 +27,9 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECo
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.19.0"):
+    from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE  # type: ignore[no-redef]
 
 from .experts_selector import select_experts
 from .moe_comm_method import AllGatherCommImpl310
@@ -263,7 +265,10 @@ class AscendFusedMoE310(FusedMoE):
         return routed_out
 
 
-class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
+_SharedFusedMoEBase310 = (SharedFusedMoE, AscendFusedMoE310) if vllm_version_is("0.19.0") else (AscendFusedMoE310,)
+
+
+class AscendSharedFusedMoE310(*_SharedFusedMoEBase310):  # type: ignore[misc]
     def __init__(
         self,
         shared_experts: torch.nn.Module,

@@ -29,8 +29,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
-from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -51,6 +49,12 @@ from vllm_ascend.utils import (
     shared_experts_calculation_stream,
     vllm_version_is,
 )
+
+if vllm_version_is("0.19.0"):
+    from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner as _MoERunnerBase  # type: ignore[no-redef]
+    from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE  # type: ignore[no-redef]
+else:
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner as _MoERunnerBase  # type: ignore[no-redef]
 
 
 @dataclass
@@ -221,7 +225,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
 
 # Please remove this inheritance after extending vllm, todo(wxs)
-class AscendMoERunner(DefaultMoERunner):
+class AscendMoERunner(_MoERunnerBase):
     @property
     def use_dp_chunking(self) -> bool:
         """Ascend uses its own forward_impl path, not the FlashInfer Cutlass
@@ -546,7 +550,10 @@ class AscendFusedMoE(FusedMoE):
             return routed_out
 
 
-class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
+_SharedFusedMoEBase = (SharedFusedMoE, AscendFusedMoE) if vllm_version_is("0.19.0") else (AscendFusedMoE,)
+
+
+class AscendSharedFusedMoE(*_SharedFusedMoEBase):  # type: ignore[misc]
     def __init__(
         self,
         shared_experts: torch.nn.Module,
