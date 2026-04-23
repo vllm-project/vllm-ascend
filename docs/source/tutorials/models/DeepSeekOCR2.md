@@ -91,7 +91,7 @@ export TOKENIZERS_PARALLELISM=false
 vllm serve /root/.cache/DeepSeek-OCR-2 \
     --served-model-name deepseekocr2 \
     --trust-remote-code \
-    -tp 1  \
+    --tensor-parallel-size 1  \
     --port 1055 \
     --max_model_len 8192 \
     --no-enable-prefix-caching \
