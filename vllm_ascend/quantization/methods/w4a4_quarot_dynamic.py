@@ -573,6 +573,33 @@ def _apply_grouped_native_weight_quant_batchmatmul(
     )
 
 
+def _apply_perchannel_native_weight_quant_batchmatmul(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    *,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    x_q, x_scale = _quantize_int4_symmetric(x)
+    x_qdq = _dequantize_int4_symmetric(x_q, x_scale, output_dtype)
+    kwargs = {
+        "x": x_qdq,
+        "weight": layer.weight.data,
+        "antiquant_scale": layer.weight_scale.data.reshape(-1).to(device=x.device, dtype=output_dtype),
+        "bias": None,
+    }
+    offset = getattr(layer, "weight_offset", None)
+    if (
+        isinstance(offset, torch.Tensor)
+        and offset.numel() > 0
+        and not _is_torch_compile_mode()
+        and torch.count_nonzero(offset).item() != 0
+    ):
+        kwargs["antiquant_offset"] = offset.data.reshape(-1).to(device=x.device, dtype=output_dtype)
+    return torch_npu.npu_weight_quant_batchmatmul(
+        **kwargs,
+    )
+
+
 def _reshape_qkv_for_attention(x: torch.Tensor, num_heads: int, head_dim: int) -> torch.Tensor:
     if x.ndim >= 2 and x.shape[-2] == num_heads and x.shape[-1] == head_dim:
         return x
@@ -1376,6 +1403,17 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
                 pertoken_scale=pertoken_scale,
             )
         else:
+            if _is_torch_compile_mode():
+                output = _apply_perchannel_native_weight_quant_batchmatmul(
+                    layer,
+                    x,
+                    output_dtype=original_dtype,
+                )
+                if bias is not None:
+                    output = output + bias.to(original_dtype)
+                _maybe_log_value_path(layer, "linear_output", output)
+                _maybe_log_o_proj_basis_views(layer, linear_input=input_for_basis_log, linear_output=output)
+                return output
             if use_fused_down_proj_dynamic_quant:
                 _, hadamard_n = _get_ffn_hadamard_dims(
                     x.shape[-1],
