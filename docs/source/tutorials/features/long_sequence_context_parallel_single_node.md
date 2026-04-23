@@ -93,8 +93,8 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
   --quantization ascend \
   --served-model-name qwen3 \
   --max-num-seqs 1 \
-  --max-model-len 133008 \
-  --max-num-batched-tokens 133008 \
+  --max-model-len 131072 \
+  --max-num-batched-tokens 131072 \
   --enable-expert-parallel \
   --trust-remote-code \
   --gpu-memory-utilization 0.95 \
@@ -134,8 +134,6 @@ The parameters are explained as follows:
 - decode context parallel size must be less than or equal to max_dcp_size, where max_dcp_size = tensor_parallel_size // total_num_kv_heads.
 
 ## Accuracy Evaluation
-
-Here are two accuracy evaluation methods.
 
 ### Using AISBench
 

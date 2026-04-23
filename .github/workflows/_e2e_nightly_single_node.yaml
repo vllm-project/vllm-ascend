@@ -36,13 +36,19 @@ on:
       name:
         required: false
         type: string
-      vllm_version:
-        required: false
-        type: string
-        default: "v0.18.0"
       should_run:
         required: true
         type: boolean
+      vllm_ascend_branch:
+        required: false
+        type: string
+        default: ''
+        description: branch name used as prefix in artifact/benchmark names to distinguish dual-branch test runs
+    secrets:
+      OBS_ACCESS_KEY:
+        required: false
+      OBS_SECRET_KEY:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -62,7 +68,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     container:
       image: ${{ inputs.image }}
     env:
@@ -79,23 +85,18 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
       
       - name: uninstall vlm vllm-ascend and remove code (if pr test)
         if: ${{ github.event_name == 'pull_request' }}
         run: |
-          pip uninstall -y vllm vllm-ascend || true
+          pip uninstall -y vllm-ascend || true
           cp -r /vllm-workspace/vllm-ascend/benchmark /tmp/aisbench-backup || true
-          rm -rf /vllm-workspace/vllm /vllm-workspace/vllm-ascend
+          rm -rf  /vllm-workspace/vllm-ascend
 
-      - name: Checkout vllm-project/vllm repo
-        if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v6
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ inputs.vllm_version }}
-          path: ./temp-vllm 
-          fetch-depth: 1
 
       - name: Checkout vllm-project/vllm-ascend repo
         if: ${{ github.event_name == 'pull_request' }}
@@ -107,16 +108,9 @@ jobs:
       - name: Move code to /vllm-workspace
         if: ${{ github.event_name == 'pull_request' }}
         run: |
-          mv ./temp-vllm /vllm-workspace/vllm
           mv ./temp-vllm-ascend /vllm-workspace/vllm-ascend
           ls -R /vllm-workspace
 
-      - name: Install vllm-project/vllm from source
-        if: ${{ github.event_name == 'pull_request' }}
-        working-directory: /vllm-workspace/vllm
-        run: |
-          VLLM_TARGET_DEVICE=empty uv pip install -e .
-      
       - name: Install vllm-project/vllm-ascend
         if: ${{ github.event_name == 'pull_request' }}
         working-directory: /vllm-workspace/vllm-ascend
@@ -144,8 +138,6 @@ jobs:
           echo "Installed vLLM-related Python packages:"
           pip list | grep vllm || echo "No vllm packages found."
 
-          echo "VLLM_VERSION=$(pip show vllm | grep ^Version | awk '{print $2}')" >> $GITHUB_ENV
-          echo "VLLM_ASCEND_VERSION=$(pip show vllm-ascend | grep ^Version | awk '{print $2}')" >> $GITHUB_ENV
 
           echo ""
           echo "============================"
@@ -180,6 +172,7 @@ jobs:
             echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
             echo "Remote:      $(git remote -v | head -n1)"
             echo ""
+            echo "VLLM_ASCEND_VERSION=$(git rev-parse HEAD)" >> $GITHUB_ENV
           else
             echo "No .git directory found in vllm-ascend"
           fi
@@ -219,7 +212,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
           CONFIG_YAML_PATH: ${{ inputs.config_file_path }}
-          BENCHMARK_JOB_NAME: ${{ inputs.name }}
+          BENCHMARK_JOB_NAME: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
@@ -230,14 +223,29 @@ jobs:
       - name: Set benchmark artifact timestamp
         if: ${{ always() && inputs.config_file_path != '' }}
         id: bench_ts
-        run: echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+        run: |
+          echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+          echo "effective_name=${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}" >> $GITHUB_OUTPUT
 
       - name: Upload benchmark results
         if: ${{ always() && inputs.config_file_path != '' }}
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
         with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY }}
+          secret_key: ${{ secrets.OBS_SECRET_KEY }}
           name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload benchmark results (GitHub Artifacts)
+        if: ${{ always() && inputs.config_file_path != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-test-benchmark-results-${{ steps.bench_ts.outputs.effective_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
           if-no-files-found: warn
           retention-days: 90
           compression-level: 0

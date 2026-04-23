@@ -79,13 +79,10 @@ myst_substitutions = {
     "pip_vllm_version": "0.18.0",
     # CANN image tag
     "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
-    # vllm version in ci
-    "ci_vllm_version": "v0.18.0",
-    # main branch compatibility matrix - updated dynamically
     # vLLM commit hash for main branch
-    "main_vllm_commit": "14acf429ac08b6d538ca6feb3e06b6d13895804d",
+    "main_vllm_commit": "6f786f2c506cb07f4566771fdc62e640e2c4a176",
     # vLLM tag for main branch
-    "main_vllm_tag": "",
+    "main_vllm_tag": "v0.19.0",
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.12",
     # CANN version for main branch
