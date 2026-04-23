@@ -39,7 +39,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     _update_out_and_lse,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
+from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params,
+    get_draft_graph_prefill_params,
+    get_graph_params,
+    update_graph_params_workspaces,
+)
 from vllm_ascend.utils import weak_ref_tensors
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
@@ -298,7 +303,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
         draft_attn_metadatas=None,
     ):
         if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
+            if _EXTRA_CTX.is_draft_model_prefill:
+                graph_params = get_draft_graph_prefill_params()
+            else:
+                graph_params = get_draft_graph_params()
             attn_metadata = draft_attn_metadatas
             attn_keys = list(attn_metadata[0].keys())
         else:
@@ -693,7 +701,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
         }
 
         if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
+            if _EXTRA_CTX.is_draft_model_prefill:
+                graph_params = get_draft_graph_prefill_params()
+            else:
+                graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
         if _EXTRA_CTX.capturing:
