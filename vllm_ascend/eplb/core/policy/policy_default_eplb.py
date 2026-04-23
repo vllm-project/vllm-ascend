@@ -79,14 +79,15 @@ class DefaultEplb(EplbPolicy):
         for i in range(route_expert_num):
             redundancy_num = len(route_expert_redundancy[i])
             for _ in range(redundancy_num):
-                cur_weight = 0
+                expert_weight = 0
                 for item, weight in origin_weights:
                     if item == i:
-                        cur_weight = weight
+                        expert_weight = weight
+                        break
 
                 boxes[index].append(i)
-                boxes_weights[index].append(cur_weight)
-                box_weights[index] += cur_weight
+                boxes_weights[index].append(expert_weight)
+                box_weights[index] += expert_weight
                 box_counts[index] += 1
                 index += 1
                 index = index % card_num
@@ -186,7 +187,7 @@ class DefaultEplb(EplbPolicy):
                             weights[index] = (expert_id, avg_weight)
                     origin_weights = weights
 
-        box_weights = [sum(cast(list[float], boxes_weights[i])) for i in range(card_num)]
+        box_weights = [sum(boxes_weights[i]) for i in range(card_num)]  # type: ignore
 
         # Step 6: Output each box's contents and total weight
         result = []
