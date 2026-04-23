@@ -60,18 +60,14 @@ class TestAscendMLABackend(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.enable_cp")
     def test_get_builder_cls_with_cp(self, mock_enable_cp):
-        # 测试当enable_cp()为True时的get_builder_cls方法
         mock_enable_cp.return_value = True
         builder_cls = AscendMLABackend.get_builder_cls()
-        # 验证返回的是一个类
         self.assertIsNotNone(builder_cls)
 
     @patch("vllm_ascend.attention.mla_v1.enable_cp")
     def test_get_impl_cls_with_cp(self, mock_enable_cp):
-        # 测试当enable_cp()为True时的get_impl_cls方法
         mock_enable_cp.return_value = True
         impl_cls = AscendMLABackend.get_impl_cls()
-        # 验证返回的是一个类
         self.assertIsNotNone(impl_cls)
 
 
@@ -544,7 +540,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         self.assertEqual(output_seq_lens, expect_output)
 
     def test_pad_actual_seq_lens_q_mtp_enable_pad_with_padding(self):
-        # 测试 MTP enable pad 情况下需要插值填充的情况
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
@@ -559,7 +554,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.speculative_config = None
 
         common_metadata = MagicMock()
-        # 设置 actual_seq_lengths_q 为 [2, 4, 6, 100]，这样差值会大于 FIA_SEQ_LEN_LIMIT
         common_metadata.actual_seq_lengths_q = [2, 4, 6, 100]
 
         builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config, mock_device)
@@ -569,10 +563,8 @@ class TestAscendMLAMetadataBuilder(TestBase):
         output_seq_lens = builder.pad_actual_seq_len_q_mtp_enable_pad(
             num_reqs_pad_size, num_reqs, input_seq_lens, common_metadata
         )
-        # 验证结果是否包含插值填充的值
         self.assertEqual(len(output_seq_lens), 4)
         self.assertEqual(output_seq_lens[:3], [2, 4, 6])
-        # 验证最后一个值是否为 100
         self.assertEqual(output_seq_lens[-1], 100)
 
 
@@ -802,15 +794,12 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_build_decode_metadata_without_disable_padded_drafter_batch(self, mock_get_cos_and_sin_mla):
-        # 直接测试build_decode_metadata方法，当 disable_padded_drafter_batch 为 False 时
-        # 创建一个模拟的 common_attn_metadata
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 3
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 1, 2, 3])
         common_attn_metadata.positions = torch.tensor([10, 10, 10])
         common_attn_metadata.decode_token_per_req = 1
 
-        # 创建一个模拟的 builder
         builder = AscendMLAMetadataBuilder(
             kv_cache_spec=self.kv_cache_spec,
             layer_names=["layer_0", "layer_1"],
@@ -818,31 +807,25 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             device=self.mock_device,
         )
 
-        # 设置必要的属性
         builder.num_actual_tokens = 3
         builder.num_decode_tokens = 3
         builder.num_decodes = 3
-        builder.graph_pad_size = 5  # 大于 num_reqs
+        builder.graph_pad_size = 5  # > num_reqs
         builder.seq_lens = torch.tensor([4, 5, 6])
         builder.slot_mapping = torch.tensor(range(3))
         builder.block_table = torch.zeros((3, 10))
 
-        # 设置 disable_padded_drafter_batch 为 False
         mock_speculative_config = MagicMock()
         mock_speculative_config.disable_padded_drafter_batch = False
         builder.speculative_config = mock_speculative_config
 
-        # 模拟 attn_mask_builder
         builder.attn_mask_builder = MagicMock()
         builder.attn_mask_builder.get_splitfuse_attn_mask.return_value = torch.randn(1, 1, 5, 5)
 
-        # 模拟 get_cos_and_sin_mla 返回值
         mock_get_cos_and_sin_mla.return_value = (torch.randn(5, 32), torch.randn(5, 32))
 
-        # 直接调用 build_decode_metadata 方法
         metadata = builder.build_decode_metadata(0, common_attn_metadata)
 
-        # 验证返回值
         self.assertIsInstance(metadata, AscendMLADecodeMetadata)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
@@ -936,7 +919,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     @patch("vllm_ascend.attention.attention_mask.get_pcp_group")
     @patch("vllm.distributed.parallel_state.get_pcp_group")
     def test_build_with_seq_lens_only(self, mock_get_pcp_group, mock_get_pcp_group_mask, mock_get_cos_and_sin_mla):
-        # 测试当common_attn_metadata._seq_lens_cpu和common_attn_metadata.seq_lens_cpu都为None时的分支
         torch.Tensor.pin_memory = lambda x: x  # noqa
         pcp_group = MagicMock()
         pcp_group.world_size = 1
@@ -960,7 +942,6 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             seq_lens=torch.tensor([2, 3, 3]),
             max_seq_len=3,
         )
-        # 设置 _seq_lens_cpu 为 None
         common_attn_metadata._seq_lens_cpu = None
 
         builder = AscendMLAMetadataBuilder(
@@ -969,15 +950,12 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        # 模拟 get_cos_and_sin_mla 返回值
         mock_get_cos_and_sin_mla.return_value = (torch.randn(3, 32), torch.randn(3, 32))
-        # 调用 build 方法，使用 common_prefix_len=0
         metadata = builder.build(0, common_attn_metadata)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
 
     def test_build_chunked_metadata_without_chunked_prefill(self):
-        # 测试当chunked_prefill_enabled为False时的分支
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 3
 
@@ -987,17 +965,13 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        # 设置chunked_prefill_enabled为False
         builder.chunked_prefill_enabled = False
 
-        # 调用build_chunked_metadata方法
         result = builder.build_chunked_metadata(0, common_attn_metadata)
 
-        # 验证返回None
         self.assertIsNone(result)
 
     def test_build_chunked_metadata_with_no_context(self):
-        # 测试当max_context_len_cpu <= 0时的分支
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 3
 
@@ -1007,18 +981,13 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        # 设置chunked_prefill_enabled为True
         builder.chunked_prefill_enabled = True
-        # 设置seq_lens和query_lens，使得num_computed_tokens_cpu为0
         builder.seq_lens = torch.tensor([2, 2, 2])
         builder.query_lens = torch.tensor([2, 2, 2])
-        # 设置num_decodes为0，使得reqs_start=0
         builder.num_decodes = 0
 
-        # 调用build_chunked_metadata方法
         result = builder.build_chunked_metadata(0, common_attn_metadata)
 
-        # 验证返回None
         self.assertIsNone(result)
 
 
@@ -1107,13 +1076,10 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.register_all_layers_to_shard_weight_series")
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_with_layer_sharding(self, mock_get_current_vllm_config, mock_register, mock_get_ascend_config):
-        # 测试初始化方法，当layer_sharding配置存在时
-        # 模拟get_ascend_config().layer_sharding返回一个包含层名的列表
         mock_config = MagicMock()
         mock_config.layer_sharding = ["layer_0", "layer_1"]
         mock_get_ascend_config.return_value = mock_config
 
-        # 模拟get_current_vllm_config返回一个vllm_config对象
         mock_vllm_config = MagicMock()
         mock_speculative_config = MagicMock()
         mock_model_config = MagicMock()
@@ -1127,11 +1093,10 @@ class TestAscendMLAImpl(TestBase):
         mock_vllm_config.parallel_config = mock_parallel_config
         mock_get_current_vllm_config.return_value = mock_vllm_config
 
-        # 创建一个新的AscendMLAImpl实例，包含layer_0和layer_1的kwargs
         kwargs = {
             "layer_name": "layer_0",
             "layer_0": "sharding_config_0",
-            "layer_2": "sharding_config_2",  # 这个层不在layer_sharding列表中
+            "layer_2": "sharding_config_2",
             "kv_lora_rank": 32,
             "qk_nope_head_dim": 64,
             "qk_rope_head_dim": 32,
@@ -1163,10 +1128,9 @@ class TestAscendMLAImpl(TestBase):
             **kwargs,
         )
 
-        # 验证layer_sharding_kwargs是否正确设置
-        self.assertEqual(len(impl.layer_sharding_kwargs), 1)  # 只包含layer_0
+        self.assertEqual(len(impl.layer_sharding_kwargs), 1)  # only include layer_0
         self.assertEqual(impl.layer_sharding_kwargs[0], "sharding_config_0")
-        # 验证register_all_layers_to_shard_weight_series是否被调用
+
         mock_register.assert_called_once_with(impl.layer_sharding_kwargs)
 
     def test_q_proj_and_k_up_proj(self):
@@ -1187,28 +1151,22 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("torch_npu.npu_interleave_rope")
     def test_rope_single(self, mock_npu_interleave_rope):
-        # 测试rope_single方法
         batch_size = 2
         seq_len = 10
         dim = 32
 
-        # 创建输入张量
         x = torch.randn(batch_size, seq_len, dim)
         cos = torch.randn(seq_len, dim)
         sin = torch.randn(seq_len, dim)
 
-        # 模拟torch_npu.npu_interleave_rope
         mock_npu_interleave_rope.return_value = torch.randn(batch_size, seq_len, 1, dim)
 
-        # 调用rope_single方法
         result = self.impl.rope_single(x, cos, sin)
 
-        # 验证返回值
         self.assertEqual(result.shape, (batch_size, seq_len, dim))
         mock_npu_interleave_rope.assert_called_once()
 
     def test_forward_mha_not_implemented(self):
-        # 测试forward_mha方法，验证它抛出NotImplementedError异常
         layer_name = "layer_0"
         hidden_states = torch.randn(2, 10, 768)
         kv_cache = [torch.randn(10, 1, 1, 768), torch.randn(10, 1, 1, 768)]
@@ -1222,7 +1180,6 @@ class TestAscendMLAImpl(TestBase):
         )
 
     def test_forward_mqa_not_implemented(self):
-        # 测试forward_mqa方法，验证它抛出NotImplementedError异常
         layer_name = "layer_0"
         hidden_states = torch.randn(2, 10, 768)
         kv_cache = [torch.randn(10, 1, 1, 768), torch.randn(10, 1, 1, 768)]
@@ -1242,7 +1199,6 @@ class TestAscendMLAImpl(TestBase):
         if not hasattr(self.impl, "W_UV") or self.impl.W_UV is None:
             self.impl.W_UV = torch.randn(self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim)
 
-        # 模拟npu_transpose_batchmatmul的返回值
         expected_shape = (batch_size, self.impl.num_heads * self.impl.v_head_dim)
         mock_torch_npu.npu_transpose_batchmatmul.return_value = torch.randn(*expected_shape)
 
@@ -1276,11 +1232,10 @@ class TestAscendMLAImpl(TestBase):
         mock_attn_metadata.decode.block_table = torch.randint(0, 100, (3, 4))
 
         mock_graph_params = MagicMock()
-        # 提供18个参数，与代码中期望的数量匹配
+
         mock_graph_params.attn_params = {
             100: [
                 (
-                    MagicMock(),
                     MagicMock(),
                     MagicMock(),
                     MagicMock(),
@@ -1309,11 +1264,11 @@ class TestAscendMLAImpl(TestBase):
         mock_get_graph_params.return_value = mock_graph_params
         mock_get_draft_graph_params.return_value = mock_graph_params
 
-        # 模拟forward context
+        # forward context
         mock_ctx = MagicMock()
         mock_get_forward_context.return_value = mock_ctx
 
-        # 模拟speculative_config
+        # speculative_config
         mock_speculative_config = MagicMock()
         mock_speculative_config.disable_padded_drafter_batch = False
 
@@ -1338,18 +1293,15 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_update_graph_params_empty_layers(self, mock_get_forward_context):
-        # 测试当num_layers == 0时的分支
+        # if num_layers == 0
         mock_update_stream = MagicMock()
         mock_forward_context = MagicMock()
-        # 设置空的attn_metadata，这样len(attn_keys) == 0
         mock_forward_context.attn_metadata = {}
 
-        # 模拟forward context
         mock_ctx = MagicMock()
         mock_ctx.is_draft_model = False
         mock_get_forward_context.return_value = mock_ctx
 
-        # 调用update_graph_params方法
         AscendMLAImpl.update_graph_params(mock_update_stream, mock_forward_context, 100)
 
     @patch("vllm_ascend.attention.mla_v1.get_graph_params")
@@ -1367,38 +1319,31 @@ class TestAscendMLAImpl(TestBase):
         mock_npu_fused_infer,
         mock_get_graph_params,
     ):
-        # 测试当speculative_config存在且method为"mtp"时的分支
         mock_update_stream = MagicMock()
         mock_forward_context = MagicMock()
-        # 设置attn_metadata
+
         mock_attn_metadata = MagicMock()
         mock_attn_metadata.decode = MagicMock()
         mock_attn_metadata.decode.seq_lens_list = [10, 20, 30]
         mock_attn_metadata.decode.actual_seq_lengths_q = [10, 20, 30]
         mock_forward_context.attn_metadata = {"layer_0": mock_attn_metadata}
 
-        # 模拟forward context
+        # forward context
         mock_ctx = MagicMock()
         mock_ctx.is_draft_model = False
         mock_get_forward_context.return_value = mock_ctx
 
-        # 模拟torch.npu.stream
         mock_stream_context = MagicMock()
         mock_npu_stream.return_value = mock_stream_context
 
-        # 模拟torch_npu.npu_fused_infer_attention_score_v2.out
         mock_out = MagicMock()
         mock_npu_fused_infer.out = mock_out
 
-        # 模拟get_graph_params
         mock_graph_params = MagicMock()
-        # 提供18个参数，与代码中期望的数量匹配
+
         mock_graph_params.attn_params = {
             100: [
                 (
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
                     MagicMock(),
                     MagicMock(),
                     MagicMock(),
@@ -1424,12 +1369,10 @@ class TestAscendMLAImpl(TestBase):
         mock_graph_params.events = {100: [MagicMock()]}
         mock_get_graph_params.return_value = mock_graph_params
 
-        # 模拟speculative_config
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "mtp"
         mock_speculative_config.num_speculative_tokens = 4
 
-        # 调用update_graph_params方法
         AscendMLAImpl.update_graph_params(
             mock_update_stream, mock_forward_context, 100, speculative_config=mock_speculative_config
         )
@@ -1449,10 +1392,9 @@ class TestAscendMLAImpl(TestBase):
         mock_npu_fused_infer,
         mock_get_draft_graph_params,
     ):
-        # 测试当speculative_config.disable_padded_drafter_batch为True时的分支
+        # if speculative_config.disable_padded_drafter_batch = True
         mock_update_stream = MagicMock()
         mock_forward_context = MagicMock()
-        # 设置attn_metadata
         mock_attn_metadata = MagicMock()
         mock_attn_metadata.decode = MagicMock()
         mock_attn_metadata.decode.seq_lens_list = [10, 20, 30]
@@ -1460,22 +1402,18 @@ class TestAscendMLAImpl(TestBase):
         mock_attn_metadata.decode.block_table = torch.randint(0, 100, (3, 4))
         mock_forward_context.attn_metadata = {"layer_0": mock_attn_metadata}
 
-        # 模拟forward context
         mock_ctx = MagicMock()
         mock_ctx.is_draft_model = True
         mock_get_forward_context.return_value = mock_ctx
 
-        # 模拟torch.npu.stream
         mock_stream_context = MagicMock()
         mock_npu_stream.return_value = mock_stream_context
 
-        # 模拟torch_npu.npu_fused_infer_attention_score_v2.out
         mock_out = MagicMock()
         mock_npu_fused_infer.out = mock_out
 
-        # 模拟get_draft_graph_params
         mock_graph_params = MagicMock()
-        # 提供18个参数，与代码中期望的数量匹配
+
         mock_graph_params.attn_params = {
             100: [
                 (
@@ -1504,11 +1442,9 @@ class TestAscendMLAImpl(TestBase):
         mock_graph_params.events = {100: [MagicMock()]}
         mock_get_draft_graph_params.return_value = mock_graph_params
 
-        # 模拟speculative_config
         mock_speculative_config = MagicMock()
         mock_speculative_config.disable_padded_drafter_batch = True
 
-        # 调用update_graph_params方法
         AscendMLAImpl.update_graph_params(
             mock_update_stream,
             mock_forward_context,
@@ -1522,7 +1458,7 @@ class TestAscendMLAImpl(TestBase):
         mock_prefill_metadata = MagicMock()
         mock_chunked_context = MagicMock()
         mock_chunked_context.chunk_seq_lens_npu = torch.tensor([10, 20, 30])
-        mock_chunked_context.seq_tot = [10, 30, 60]  # 需要设置这个属性
+        mock_chunked_context.seq_tot = [10, 30, 60]
         mock_prefill_metadata.chunked_context = mock_chunked_context
         mock_attn_metadata.prefill = mock_prefill_metadata
 
@@ -1575,19 +1511,16 @@ class TestAscendMLAImpl(TestBase):
     ):
         mock_format_cast.return_value = torch.randn(1, 128, 128)
         mock_transdata.return_value = torch.randn(128, 128)
-        # 模拟trans_rope_weight返回正确形状的张量
-        # 第一次调用（处理权重）返回 [128, 64] 形状的张量
-        # 第二次调用（处理deq_scale）返回 [64] 形状的张量
         call_count = 0
 
         def mock_trans_rope_weight_func(x, rope_dim):
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                # 第二次调用，返回 [64] 形状的张量
+                # second return [64] tensor
                 return torch.randn(64)
             else:
-                # 第一次调用，返回相同形状的张量
+                # first return same shape tensor
                 return torch.randn(x.shape[0], x.shape[1])
 
         mock_trans_rope_weight.side_effect = mock_trans_rope_weight_func
@@ -1595,28 +1528,20 @@ class TestAscendMLAImpl(TestBase):
 
         self.impl.enable_mlapo = True
         self.impl.fused_qkv_a_proj = MagicMock()
-        # 修复张量形状，确保总长度足够
         q_lora_rank = 32
         kv_lora_rank_plus_rope = 32 + 32  # kv_lora_rank + qk_rope_head_dim
         total_rank = q_lora_rank + kv_lora_rank_plus_rope
         self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, total_rank)
-        # 修复deq_scale的形状，使其与后续的reshape操作匹配
-        # 确保kv_a_proj_deq_scl的大小能被64整除
-        # kv_a_proj_deq_scl的大小 = total_deq_scale_size - q_lora_rank
-        # 需要 total_deq_scale_size - 32 能被64整除
-        # 选择 total_deq_scale_size = 32 + 64 * 128 = 8224
+        # Fix the shape of deq_scale so that it matches the subsequent reshape operation
+        # Ensure that the size of kv_a_proj_deq_scl is divisible by 64
         self.impl.fused_qkv_a_proj.deq_scale = torch.randn(32 + 64 * 128)
         self.impl.fused_qkv_a_proj.quant_bias = torch.randn(total_rank)
         self.impl.fused_qkv_a_proj.input_scale.data = torch.randn(1)
         self.impl.fused_qkv_a_proj.input_offset.data = torch.randn(1)
         self.impl.q_proj = MagicMock()
         self.impl.q_proj.weight.data = torch.randn(128, 128)
-        # 设置device属性为一个有效的torch.device对象
         self.impl.q_proj.weight.device = torch.device("cpu")
-        # 设置正确的deq_scale大小，使其能被256 * 64整除
-        # 256 * 64 = 16384，所以deq_scale的大小应该是16384
         self.impl.q_proj.deq_scale.data = torch.randn(256 * 64)
-        # 设置正确的quant_bias大小，使其能被256 * 64整除
         self.impl.q_proj.quant_bias.data = torch.randn(256 * 64)
         self.impl.q_proj.input_scale.data = torch.randn(1)
         self.impl.q_proj.input_offset.data = torch.randn(1)
@@ -1627,16 +1552,10 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_lora_rank = q_lora_rank
         self.impl.kv_lora_rank = 32
         self.impl.qk_rope_head_dim = 32
-        # 确保输入特征维度是128
         self.impl.hidden_size = 128
-        # 设置正确的num_heads和qk_nope_head_dim值
-        # 16384 / 256 = 64, 所以 qk_nope_head_dim + qk_rope_head_dim = 64
-        # qk_rope_head_dim=32，所以 qk_nope_head_dim=32
         self.impl.num_heads = 256
         self.impl.qk_nope_head_dim = 32
-        # 设置scheduler_config.max_num_batched_tokens为一个整数值
         self.impl.vllm_config.scheduler_config.max_num_batched_tokens = 4096
-        # 设置kv_transfer_config.is_kv_consumer为False
         self.impl.vllm_config.kv_transfer_config = MagicMock()
         self.impl.vllm_config.kv_transfer_config.is_kv_consumer = False
 
@@ -1670,20 +1589,17 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("torch_npu.npu_attention_update")
     def test__forward_prefill(self, mock_npu_attention_update, mock_fia, mock_device_operator):
-        # 测试_forward_prefill方法
         batch_size = 2
 
-        # 创建输入张量
+        # create input tensors
         q_nope = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_nope_head_dim)
         q_pe = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_rope_head_dim)
         k_nope = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_nope_head_dim)
         k_pe = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_rope_head_dim)
         value = torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim)
 
-        # 模拟kv_c_and_k_pe_cache
         kv_c_and_k_pe_cache = [torch.randn(10, 1, 1, 192), torch.randn(10, 1, 1, 32)]
 
-        # 创建一个mock的attn_metadata
         attn_metadata = MagicMock()
         prefill_metadata = MagicMock()
         prefill_metadata.actual_seq_lengths_q = [10, 20]
@@ -1696,33 +1612,28 @@ class TestAscendMLAImpl(TestBase):
         prefill_metadata.block_table = torch.randint(0, 100, (2, 4))
         attn_metadata.prefill = prefill_metadata
 
-        # 模拟DeviceOperator.mla_cache_load
         mock_device_operator.mla_cache_load = MagicMock()
 
-        # 模拟torch_npu.npu_fused_infer_attention_score
         mock_fia.return_value = (
             torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim),
             torch.randn(self.impl.num_heads, batch_size),
         )
 
-        # 模拟torch_npu.npu_attention_update
         mock_npu_attention_update.return_value = (
             torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim),
             None,
         )
 
-        # 模拟kv_b_proj方法，让它返回一个包含正确形状张量的元组
         mock_kv_b_proj = MagicMock()
-        # 创建一个形状为 [toks, num_heads, qk_nope_head_dim + v_head_dim] 的张量
+        # create [toks, num_heads, qk_nope_head_dim + v_head_dim] tensor
         toks = 10
         kv_nope_shape = (toks, self.impl.num_heads, self.impl.qk_nope_head_dim + self.impl.v_head_dim)
         mock_kv_b_proj.return_value = (torch.randn(kv_nope_shape), None)
         self.impl.kv_b_proj = mock_kv_b_proj
 
-        # 调用_forward_prefill方法
         result = self.impl._forward_prefill(q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata)
 
-        # 验证返回值
+        # verify result shape
         self.assertEqual(result.shape[0], batch_size)
         self.assertEqual(result.shape[1], self.impl.num_heads * self.impl.v_head_dim)
 
@@ -1749,7 +1660,7 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_mlapo(self, mock_format_cast):
-        # 测试当enable_mlapo为True时的分支
+        # test with enable_mlapo=True
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock(spec=UnquantizedLinearMethod)
@@ -1760,13 +1671,10 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
 
-        # 设置enable_mlapo为True
         self.impl.enable_mlapo = True
 
-        # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        # 验证属性是否被正确设置
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
         self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
@@ -1778,7 +1686,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_mlapo_a5(self, mock_format_cast, mock_get_ascend_device_type):
-        # 测试当enable_mlapo为True且设备类型为A5时的分支
+        # test with enable_mlapo=True and device_type=A5
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock(spec=UnquantizedLinearMethod)
@@ -1788,34 +1696,27 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
-
-        # 设置enable_mlapo为True
         self.impl.enable_mlapo = True
-
-        # 模拟fused_qkv_a_proj及其quant_method
         mock_fused_qkv_a_proj = MagicMock()
         mock_quant_method = MagicMock()
+
         from vllm_ascend.attention.mla_v1 import AscendW8A8LinearMethod
 
         mock_quant_method.quant_method = MagicMock(spec=AscendW8A8LinearMethod)
         mock_fused_qkv_a_proj.quant_method = mock_quant_method
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
 
-        # 模拟get_ascend_device_type返回A5
+        # set device_type=A5
         from vllm_ascend.attention.mla_v1 import AscendDeviceType
 
         mock_get_ascend_device_type.return_value = AscendDeviceType.A5
 
-        # 模拟process_weights_for_fused_mlapo_a5方法
         self.impl.process_weights_for_fused_mlapo_a5 = MagicMock()
 
-        # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        # 验证process_weights_for_fused_mlapo_a5被调用
         self.impl.process_weights_for_fused_mlapo_a5.assert_called_once_with(torch.bfloat16)
 
-        # 验证属性是否被正确设置
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
         self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
@@ -1827,7 +1728,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_mlapo_non_a5(self, mock_format_cast, mock_get_ascend_device_type):
-        # 测试当enable_mlapo为True且设备类型不是A5时的分支
+        # test with enable_mlapo=True and device_type!=A5
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock(spec=UnquantizedLinearMethod)
@@ -1838,10 +1739,8 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
 
-        # 设置enable_mlapo为True
         self.impl.enable_mlapo = True
 
-        # 模拟fused_qkv_a_proj及其quant_method
         mock_fused_qkv_a_proj = MagicMock()
         mock_quant_method = MagicMock()
         from vllm_ascend.attention.mla_v1 import AscendW8A8LinearMethod
@@ -1850,21 +1749,16 @@ class TestAscendMLAImpl(TestBase):
         mock_fused_qkv_a_proj.quant_method = mock_quant_method
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
 
-        # 模拟get_ascend_device_type返回非A5设备
         from vllm_ascend.attention.mla_v1 import AscendDeviceType
 
         mock_get_ascend_device_type.return_value = AscendDeviceType.A2
 
-        # 模拟process_weights_for_fused_mlapo方法
         self.impl.process_weights_for_fused_mlapo = MagicMock()
 
-        # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        # 验证process_weights_for_fused_mlapo被调用
         self.impl.process_weights_for_fused_mlapo.assert_called_once_with(torch.bfloat16)
 
-        # 验证属性是否被正确设置
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
         self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
@@ -1876,7 +1770,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_fa_quant(self, mock_format_cast, mock_maybe_trans_nz):
-        # 测试当enable_mlapo为False且fa_quant_layer为True时的分支
+        # test with enable_mlapo=False and fa_quant_layer=True
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock(spec=UnquantizedLinearMethod)
@@ -1887,23 +1781,17 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
 
-        # 设置enable_mlapo为False，fa_quant_layer为True
         self.impl.enable_mlapo = False
         self.impl.fa_quant_layer = True
 
-        # 模拟_process_weights_for_fused_fa_quant方法
         self.impl._process_weights_for_fused_fa_quant = MagicMock()
 
-        # 模拟maybe_trans_nz方法
         mock_maybe_trans_nz.return_value = torch.randn(1, 2, 3)
 
-        # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        # 验证_process_weights_for_fused_fa_quant被调用
         self.impl._process_weights_for_fused_fa_quant.assert_called_once()
 
-        # 验证属性是否被正确设置
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
         self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
@@ -1918,7 +1806,7 @@ class TestAscendMLAImpl(TestBase):
     def test_process_weights_after_loading_with_layer_sharding(
         self, mock_format_cast, mock_is_hidden_layer, mock_post_process
     ):
-        # 测试当layer_sharding_kwargs不为空时的分支
+        # test with layer_sharding_kwargs!=None
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock(spec=UnquantizedLinearMethod)
@@ -1929,28 +1817,22 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
 
-        # 设置enable_mlapo为False，fa_quant_layer为False
         self.impl.enable_mlapo = False
         self.impl.fa_quant_layer = False
 
-        # 设置layer_sharding_kwargs
         mock_layer1 = MagicMock()
         mock_layer2 = MagicMock()
         self.impl.layer_sharding_kwargs = [mock_layer1, mock_layer2]
 
-        # 模拟is_hidden_layer方法
         mock_is_hidden_layer.side_effect = [True, False]
 
-        # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        # 验证is_hidden_layer被调用了两次
         self.assertEqual(mock_is_hidden_layer.call_count, 2)
 
-        # 验证post_process_after_loading_for_shard_weight_series被调用了一次（只有第一个layer是hidden layer）
+        # Verify that post_process_after_loading_for_shard_weight_series was called once (only the first layer is a hidden layer)
         mock_post_process.assert_called_once_with(mock_layer1)
 
-        # 验证属性是否被正确设置
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
         self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
@@ -1976,16 +1858,16 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(torch.equal(prefix_lse, lse))
 
     def test_compute_prefill_context_empty_iters(self):
-        # 测试_compute_prefill_context方法，当iters == 0时的分支
+        # test compute_prefill_context with iters == 0
         batch_size = 4
         kv_cache = [torch.randn(10, 1, 1, 192), torch.randn(10, 1, 1, 32)]
         query = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
 
-        # 创建一个mock的metadata，其中prefill_metadata.chunked_context.seq_tot为空列表，这样iters == 0
+        # Create a mock metadata where prefill_metadata.chunked_context.seq_tot is an empty list, so that iters == 0
         metadata = MagicMock()
         prefill_metadata = MagicMock()
         chunked_context = MagicMock()
-        chunked_context.seq_tot = []  # 空列表，使得iters == 0
+        chunked_context.seq_tot = []  # iters == 0
         prefill_metadata.chunked_context = chunked_context
         metadata.prefill = prefill_metadata
 
@@ -2168,7 +2050,7 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     def test_exec_kv_prefill_with_fa_quant(self, mock_kv_rmsnorm_rope_cache):
-        # 测试当fa_quant_layer为True时的分支
+        # if fa_quant_layer is True
         B = 2
         N = self.impl.num_kv_heads
         D = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
@@ -2182,7 +2064,6 @@ class TestAscendMLAImpl(TestBase):
         slots = MagicMock()
         kv_cache = [MagicMock(), MagicMock()]
 
-        # 设置block_size为1
         block_size = 1
 
         mock_kv_rmsnorm_rope_cache.return_value = [
@@ -2194,7 +2075,6 @@ class TestAscendMLAImpl(TestBase):
 
         k_pe, k_nope = self.impl.exec_kv_prefill(kv_no_split, cos, sin, kv_cache, slots)
 
-        # 验证返回值的形状
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
@@ -2257,9 +2137,9 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score_v2")
     def test_forward_decode_with_fa_quant(self, mock_npu_fused_infer_attention_score_v2, mock_get_forward_context):
-        # 测试当fa_quant_layer为True时的分支
+        # test fa_quant_layer is True
         B = 2
-        N = self.impl.num_heads  # 使用num_heads而不是num_kv_heads
+        N = self.impl.num_heads  # use num_heads instead of num_kv_heads
         BS = 100
         HD = self.impl.v_head_dim
         self.impl.kv_lora_rank = 256
@@ -2279,14 +2159,14 @@ class TestAscendMLAImpl(TestBase):
         attn_metadata.decode.attn_mask = MagicMock()
         self.impl.fa_quant_layer = True
         self.impl.speculative_config = MagicMock()
-        self.impl.fak_descale_float = torch.randn(1)  # 添加fak_descale_float属性
+        self.impl.fak_descale_float = torch.randn(1)  # add fak_descale_float attribute
 
         mock_npu_fused_infer_attention_score_v2.return_value = [
             torch.randn(B, self.impl.num_kv_heads, self.impl.kv_lora_rank),
             None,
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        dequant_scale_q_nope = torch.randn(B, N)  # 现在形状是 [B, num_heads]
+        dequant_scale_q_nope = torch.randn(B, N)  # shape is [B, num_heads]
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS, attn_metadata, dequant_scale_q_nope)
 
         self.assertEqual(result.shape[0], B)
