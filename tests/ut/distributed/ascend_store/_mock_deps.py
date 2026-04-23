@@ -62,7 +62,7 @@ _vllm_mock_modules = [
     "vllm.distributed.kv_transfer.kv_connector.v1",
     "vllm.distributed.kv_transfer.kv_connector.v1.base",
     "vllm.distributed.parallel_state",
-    "vllm.envs", "vllm.forward_context", "vllm.logger",
+    "vllm.envs", "vllm.forward_context",
     "vllm.model_executor", "vllm.model_executor.layers",
     "vllm.model_executor.layers.linear", "vllm.model_executor.layers.quantization",
     "vllm.platforms",
@@ -79,7 +79,6 @@ for _mod_name in _vllm_mock_modules:
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = MagicMock()
 
-sys.modules["vllm.logger"].logger = MagicMock()
 sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)
 
 _base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
