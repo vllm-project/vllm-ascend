@@ -81,25 +81,6 @@ _FFN_HADAMARD_LAYOUT = "pow2_last_dim"
 _LEAN_ATTENTION_CONTRACT = "lean_h_only"
 _QUAROT_DEBUG_VALUE_PATH_ENV = "VLLM_ASCEND_QUAROT_DEBUG_VALUE_PATH"
 _QUAROT_DEBUG_ATTN_COMPARE_ENV = "VLLM_ASCEND_QUAROT_DEBUG_ATTN_COMPARE"
-_HADAMARD_BASE_12 = torch.tensor(
-    [
-        [1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
-        [1, 1, -1, 1, -1, -1, -1, 1, 1, 1, -1, 1],
-        [1, 1, 1, -1, 1, -1, -1, -1, 1, 1, 1, -1],
-        [1, -1, 1, 1, -1, 1, -1, -1, -1, 1, 1, 1],
-        [1, 1, -1, 1, 1, -1, 1, -1, -1, -1, 1, 1],
-        [1, 1, 1, -1, 1, 1, -1, 1, -1, -1, -1, 1],
-        [1, 1, 1, 1, -1, 1, 1, -1, 1, -1, -1, -1],
-        [1, -1, 1, 1, 1, -1, 1, 1, -1, 1, -1, -1],
-        [1, -1, -1, 1, 1, 1, -1, 1, 1, -1, 1, -1],
-        [1, -1, -1, -1, 1, 1, 1, -1, 1, 1, -1, 1],
-        [1, 1, -1, -1, -1, 1, 1, 1, -1, 1, 1, -1],
-        [1, -1, 1, -1, -1, -1, 1, 1, 1, -1, 1, 1],
-    ],
-    dtype=torch.float32,
-)
-
-
 @dataclass(frozen=True)
 class HadamardDispatch:
     kernel_family: str
@@ -305,9 +286,7 @@ def _apply_normalized_hadamard_last_dim(x: torch.Tensor) -> torch.Tensor:
 
 
 def _get_hadamard_special_factor(n: int, transpose: bool = False) -> tuple[torch.Tensor | None, int]:
-    if n % 12 == 0 and _is_power_of_two(n // 12):
-        mat = _HADAMARD_BASE_12.T if transpose else _HADAMARD_BASE_12
-        return mat, 12
+    del transpose
     if not _is_power_of_two(n):
         raise ValueError(f"Cannot construct deterministic Walsh matrix for size {n}")
     return None, 1
