@@ -65,7 +65,7 @@ concurrency:
 env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
-  # so these values are exported as job outputs via the `setup-vars` job below.
+  # so these values are exported as job outputs via the `parse-trigger` job below.
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
@@ -77,17 +77,10 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'nightly-test')
     uses: ./.github/workflows/_parse_trigger.yaml
     with:
-      test_cases: ${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}
       nightly_test_branch: '["releases/v0.18.0"]'
       nightly_image_branch: '["main", "releases/v0.18.0"]'
-
-  setup-vars:
-    name: Export global env vars as job outputs
-    needs: parse-trigger
-    uses: ./.github/workflows/_setup_vars.yaml
-    with:
-      run: ${{ needs.parse-trigger.outputs.run }}
-      vllm_ascend_branch: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || needs.parse-trigger.outputs.nightly_test_branch }}
+      test_cases: ${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}
+      vllm_ascend_branch_dispatch: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
 
   build-image:
     name: Build nightly-a3 image
@@ -110,7 +103,7 @@ jobs:
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image]
+    needs: [parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -119,7 +112,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.parse-trigger.outputs.vllm_ascend_branches) }}
         test_config:
           - name: multi-node-deepseek-v3.2-W8A8-EP
             config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
@@ -132,7 +125,7 @@ jobs:
       soc_version: a3
       runner: linux-aarch64-a3-0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
+      ascend_log_prefix: ${{ needs.parse-trigger.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
@@ -146,7 +139,7 @@ jobs:
           ) && (
             matrix.vllm_ascend_branch == 'main' ||
             contains(
-              format(',{0},', needs.setup-vars.outputs.multi_node_configs),
+              format(',{0},', needs.parse-trigger.outputs.multi_node_configs),
               format(',{0},', matrix.test_config.config_file_path)
             )
           )
@@ -159,7 +152,7 @@ jobs:
 
   double-node-tests:
     name: double-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    needs: [parse-trigger, build-image, multi-node-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -168,7 +161,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.parse-trigger.outputs.vllm_ascend_branches) }}
         test_config:
           - name: multi-node-deepseek-r1-w8a8-longseq
             config_file_path: DeepSeek-R1-W8A8-longseq.yaml
@@ -211,7 +204,7 @@ jobs:
       soc_version: a3
       runner: linux-aarch64-a3-0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
+      ascend_log_prefix: ${{ needs.parse-trigger.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
@@ -226,7 +219,7 @@ jobs:
           ) && (
             matrix.vllm_ascend_branch == 'main' ||
             contains(
-              format(',{0},', needs.setup-vars.outputs.multi_node_configs),
+              format(',{0},', needs.parse-trigger.outputs.multi_node_configs),
               format(',{0},', matrix.test_config.config_file_path)
             )
           )
@@ -238,7 +231,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-tests]
+    needs: [parse-trigger, build-image, double-node-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -247,7 +240,7 @@ jobs:
       fail-fast: false
       max-parallel: 5
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.parse-trigger.outputs.vllm_ascend_branches) }}
         test_config:
           # YAML-driven tests
           - name: mtpx-deepseek-r1-0528-w8a8
@@ -315,7 +308,7 @@ jobs:
             matrix.test_config.config_file_path == '' ||
             matrix.vllm_ascend_branch == 'main' ||
             contains(
-              format(',{0},', needs.setup-vars.outputs.single_node_configs),
+              format(',{0},', needs.parse-trigger.outputs.single_node_configs),
               format(',{0},', matrix.test_config.config_file_path)
             )
           )
@@ -323,7 +316,7 @@ jobs:
 
   multi-card-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, single-node-tests]
+    needs: [parse-trigger, build-image, single-node-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -331,7 +324,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        vllm_ascend_branch: ${{ fromJSON(needs.parse-trigger.outputs.vllm_ascend_branches) }}
         test_config:
           # pytest-driven tests
           - name: qwen3-30b-acc
@@ -375,7 +368,7 @@ jobs:
             matrix.test_config.config_file_path == '' ||
             matrix.vllm_ascend_branch == 'main' ||
             contains(
-              format(',{0},', needs.setup-vars.outputs.single_node_configs),
+              format(',{0},', needs.parse-trigger.outputs.single_node_configs),
               format(',{0},', matrix.test_config.config_file_path)
             )
           )
