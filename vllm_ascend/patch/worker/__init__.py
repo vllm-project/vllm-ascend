@@ -27,7 +27,6 @@ if HAS_TRITON:
 # isort: off
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
-import vllm_ascend.patch.worker.patch_unquantized_gemm  # noqa
 import vllm_ascend.patch.worker.patch_bert  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
@@ -56,3 +55,4 @@ import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_c8  # noqa
 import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
