@@ -42,7 +42,7 @@ def prepare_inputs_padded_kernel(
         # cumulative sum (first entry is the first value, not zero).
         cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + offsets, mask=mask)
 
-        prev_indices = offsets - 1
+        prev_indices = tl.maximum(offsets - 1, 0)
         has_prev = offsets > 0
         cu_draft_prev = tl.load(
             cu_num_draft_tokens_ptr + prev_indices,
