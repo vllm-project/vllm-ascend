@@ -76,7 +76,7 @@ def split_qkv_rmsnorm_mrope_kernel(
         q_bias = tl.load(q_bias_ptr + tl.arange(0, head_size))
         k_bias = tl.load(k_bias_ptr + tl.arange(0, head_size))
 
-    for index in range(loop_num):
+    for index in tl.range(loop_num):
         ## load ##
         # q
         in_q_offset = in_qkv_ptr + (block_offset + index) * (q_size + gate_size + 2 * kv_size)
@@ -108,8 +108,9 @@ def split_qkv_rmsnorm_mrope_kernel(
         in_v_offset = in_k_offset + kv_size
         in_v_tensor = tl.load(in_v_offset + tl.arange(0, kv_size))
 
-        # cos, sin
-        cos_offsets = tl.arange(0, half_rope_dim)
+        cos_sin_offsets = tl.arange(0, rope_dim)
+        cos_offsets = cos_sin_offsets % half_rope_dim
+
         if is_interleaved:
             h_mask = ((cos_offsets % 3) == 1) & (cos_offsets <= 3 * mrope_section_h)
             w_mask = ((cos_offsets % 3) == 2) & (cos_offsets <= 3 * mrope_section_w)
@@ -125,16 +126,16 @@ def split_qkv_rmsnorm_mrope_kernel(
         h_cos_offset = t_cos_offset + num_tokens * rope_dim
         w_cos_offset = h_cos_offset + num_tokens * rope_dim
 
-        t_sin_offset = cos_sin_ptr + (block_offset + index) * rope_dim + half_rope_dim
-        h_sin_offset = t_sin_offset + num_tokens * rope_dim
-        w_sin_offset = h_sin_offset + num_tokens * rope_dim
+        t_all = tl.load(t_cos_offset + cos_sin_offsets, mask=t_mask, other=0)
+        h_all = tl.load(h_cos_offset + cos_sin_offsets, mask=h_mask, other=0)
+        w_all = tl.load(w_cos_offset + cos_sin_offsets, mask=w_mask, other=0)
 
-        t_cos_tensor = tl.load(t_cos_offset + cos_offsets, mask=t_mask, other=0)
-        h_cos_tensor = tl.load(h_cos_offset + cos_offsets, mask=h_mask, other=0)
-        w_cos_tensor = tl.load(w_cos_offset + cos_offsets, mask=w_mask, other=0)
-        t_sin_tensor = tl.load(t_sin_offset + cos_offsets, mask=t_mask, other=0)
-        h_sin_tensor = tl.load(h_sin_offset + cos_offsets, mask=h_mask, other=0)
-        w_sin_tensor = tl.load(w_sin_offset + cos_offsets, mask=w_mask, other=0)
+        t_cos_tensor = tl.extract_slice(t_all, offsets=(0,), sizes=(half_rope_dim,), strides=(1,))
+        t_sin_tensor = tl.extract_slice(t_all, offsets=(half_rope_dim,), sizes=(half_rope_dim,), strides=(1,))
+        h_cos_tensor = tl.extract_slice(h_all, offsets=(0,), sizes=(half_rope_dim,), strides=(1,))
+        h_sin_tensor = tl.extract_slice(h_all, offsets=(half_rope_dim,), sizes=(half_rope_dim,), strides=(1,))
+        w_cos_tensor = tl.extract_slice(w_all, offsets=(0,), sizes=(half_rope_dim,), strides=(1,))
+        w_sin_tensor = tl.extract_slice(w_all, offsets=(half_rope_dim,), sizes=(half_rope_dim,), strides=(1,))
 
         cos_tensor = (t_cos_tensor + h_cos_tensor + w_cos_tensor).to(tl.float32).reshape(1, half_rope_dim)
         cos_tensor = tl.broadcast_to(cos_tensor, (2, half_rope_dim)).reshape(1, rope_dim)
@@ -362,7 +363,7 @@ def triton_split_qkv_rmsnorm_mrope(
         IS_PARTIAL_ROPE,
         gate_size,
     )
-
+       
     return q_output, k_output, v_output, gate_output
 
 
