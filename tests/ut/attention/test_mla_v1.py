@@ -1857,7 +1857,7 @@ class TestAscendMLAImpl(TestBase):
 
         # 模拟process_weights_for_fused_mlapo方法
         self.impl.process_weights_for_fused_mlapo = MagicMock()
-        
+
         # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
