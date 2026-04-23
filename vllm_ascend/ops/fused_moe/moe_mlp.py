@@ -246,9 +246,9 @@ def quant_apply_mlp(
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
-        if _custom_gmm_swiglu_enabled(fusion, dynamic_eplb) and not use_mxfp_quant:
+        if dynamic_eplb and not use_mxfp_quant:
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+            hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=hidden_states,
                 weight=w1,
                 weight_scale=w1_scale,
