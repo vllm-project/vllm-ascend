@@ -470,6 +470,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         result = AscendMLAMetadataBuilder.get_cudagraph_support(mock_vllm_config, mock_kv_cache_spec)
         from vllm.v1.attention.backend import AttentionCGSupport
+
         self.assertEqual(result, AttentionCGSupport.UNIFORM_BATCH)
 
     def test_set_num_actual_tokens(self):
@@ -808,7 +809,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 1, 2, 3])
         common_attn_metadata.positions = torch.tensor([10, 10, 10])
         common_attn_metadata.decode_token_per_req = 1
-        
+
         # 创建一个模拟的 builder
         builder = AscendMLAMetadataBuilder(
             kv_cache_spec=self.kv_cache_spec,
@@ -816,7 +817,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
             vllm_config=self.mock_vllm_config,
             device=self.mock_device,
         )
-        
+
         # 设置必要的属性
         builder.num_actual_tokens = 3
         builder.num_decode_tokens = 3
@@ -825,22 +826,22 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         builder.seq_lens = torch.tensor([4, 5, 6])
         builder.slot_mapping = torch.tensor(range(3))
         builder.block_table = torch.zeros((3, 10))
-        
+
         # 设置 disable_padded_drafter_batch 为 False
         mock_speculative_config = MagicMock()
         mock_speculative_config.disable_padded_drafter_batch = False
         builder.speculative_config = mock_speculative_config
-        
+
         # 模拟 attn_mask_builder
         builder.attn_mask_builder = MagicMock()
         builder.attn_mask_builder.get_splitfuse_attn_mask.return_value = torch.randn(1, 1, 5, 5)
-        
+
         # 模拟 get_cos_and_sin_mla 返回值
         mock_get_cos_and_sin_mla.return_value = (torch.randn(5, 32), torch.randn(5, 32))
-        
+
         # 直接调用 build_decode_metadata 方法
         metadata = builder.build_decode_metadata(0, common_attn_metadata)
-        
+
         # 验证返回值
         self.assertIsInstance(metadata, AscendMLADecodeMetadata)
 
@@ -1111,7 +1112,7 @@ class TestAscendMLAImpl(TestBase):
         mock_config = MagicMock()
         mock_config.layer_sharding = ["layer_0", "layer_1"]
         mock_get_ascend_config.return_value = mock_config
-        
+
         # 模拟get_current_vllm_config返回一个vllm_config对象
         mock_vllm_config = MagicMock()
         mock_speculative_config = MagicMock()
@@ -1125,7 +1126,7 @@ class TestAscendMLAImpl(TestBase):
         mock_vllm_config.additional_config = {"refresh": True}
         mock_vllm_config.parallel_config = mock_parallel_config
         mock_get_current_vllm_config.return_value = mock_vllm_config
-        
+
         # 创建一个新的AscendMLAImpl实例，包含layer_0和layer_1的kwargs
         kwargs = {
             "layer_name": "layer_0",
@@ -1146,7 +1147,7 @@ class TestAscendMLAImpl(TestBase):
             "kv_a_layernorm": MagicMock(),
             "rotary_emb": MagicMock(),
         }
-        
+
         impl = AscendMLAImpl(
             num_heads=256,
             head_size=1024,
@@ -1161,7 +1162,7 @@ class TestAscendMLAImpl(TestBase):
             kv_sharing_target_layer_name=None,
             **kwargs,
         )
-        
+
         # 验证layer_sharding_kwargs是否正确设置
         self.assertEqual(len(impl.layer_sharding_kwargs), 1)  # 只包含layer_0
         self.assertEqual(impl.layer_sharding_kwargs[0], "sharding_config_0")
@@ -1190,18 +1191,18 @@ class TestAscendMLAImpl(TestBase):
         batch_size = 2
         seq_len = 10
         dim = 32
-        
+
         # 创建输入张量
         x = torch.randn(batch_size, seq_len, dim)
         cos = torch.randn(seq_len, dim)
         sin = torch.randn(seq_len, dim)
-        
+
         # 模拟torch_npu.npu_interleave_rope
         mock_npu_interleave_rope.return_value = torch.randn(batch_size, seq_len, 1, dim)
-        
+
         # 调用rope_single方法
         result = self.impl.rope_single(x, cos, sin)
-        
+
         # 验证返回值
         self.assertEqual(result.shape, (batch_size, seq_len, dim))
         mock_npu_interleave_rope.assert_called_once()
@@ -1212,7 +1213,7 @@ class TestAscendMLAImpl(TestBase):
         hidden_states = torch.randn(2, 10, 768)
         kv_cache = [torch.randn(10, 1, 1, 768), torch.randn(10, 1, 1, 768)]
         attn_metadata = MagicMock()
-        
+
         with self.assertRaises(NotImplementedError) as ctx:
             self.impl.forward_mha(layer_name, hidden_states, kv_cache, attn_metadata)
         self.assertIn(
@@ -1226,7 +1227,7 @@ class TestAscendMLAImpl(TestBase):
         hidden_states = torch.randn(2, 10, 768)
         kv_cache = [torch.randn(10, 1, 1, 768), torch.randn(10, 1, 1, 768)]
         attn_metadata = MagicMock()
-        
+
         with self.assertRaises(NotImplementedError) as ctx:
             self.impl.forward_mqa(layer_name, hidden_states, kv_cache, attn_metadata)
         self.assertIn(
@@ -1240,11 +1241,11 @@ class TestAscendMLAImpl(TestBase):
         x = torch.randn(self.impl.num_heads, batch_size, self.impl.kv_lora_rank)
         if not hasattr(self.impl, "W_UV") or self.impl.W_UV is None:
             self.impl.W_UV = torch.randn(self.impl.num_heads, self.impl.kv_lora_rank, self.impl.v_head_dim)
-        
+
         # 模拟npu_transpose_batchmatmul的返回值
         expected_shape = (batch_size, self.impl.num_heads * self.impl.v_head_dim)
         mock_torch_npu.npu_transpose_batchmatmul.return_value = torch.randn(*expected_shape)
-        
+
         result = self.impl._v_up_proj(x)
         self.assertEqual(result.shape[0], batch_size)
         self.assertEqual(result.shape[1], self.impl.num_heads * self.impl.v_head_dim)
@@ -1342,7 +1343,7 @@ class TestAscendMLAImpl(TestBase):
         mock_forward_context = MagicMock()
         # 设置空的attn_metadata，这样len(attn_keys) == 0
         mock_forward_context.attn_metadata = {}
-        
+
         # 模拟forward context
         mock_ctx = MagicMock()
         mock_ctx.is_draft_model = False
@@ -1375,20 +1376,20 @@ class TestAscendMLAImpl(TestBase):
         mock_attn_metadata.decode.seq_lens_list = [10, 20, 30]
         mock_attn_metadata.decode.actual_seq_lengths_q = [10, 20, 30]
         mock_forward_context.attn_metadata = {"layer_0": mock_attn_metadata}
-        
+
         # 模拟forward context
         mock_ctx = MagicMock()
         mock_ctx.is_draft_model = False
         mock_get_forward_context.return_value = mock_ctx
-        
+
         # 模拟torch.npu.stream
         mock_stream_context = MagicMock()
         mock_npu_stream.return_value = mock_stream_context
-        
+
         # 模拟torch_npu.npu_fused_infer_attention_score_v2.out
         mock_out = MagicMock()
         mock_npu_fused_infer.out = mock_out
-        
+
         # 模拟get_graph_params
         mock_graph_params = MagicMock()
         # 提供18个参数，与代码中期望的数量匹配
@@ -1422,7 +1423,7 @@ class TestAscendMLAImpl(TestBase):
         mock_graph_params.handles = {100: [MagicMock()]}
         mock_graph_params.events = {100: [MagicMock()]}
         mock_get_graph_params.return_value = mock_graph_params
-        
+
         # 模拟speculative_config
         mock_speculative_config = MagicMock()
         mock_speculative_config.method = "mtp"
@@ -1458,20 +1459,20 @@ class TestAscendMLAImpl(TestBase):
         mock_attn_metadata.decode.actual_seq_lengths_q = [10, 20, 30]
         mock_attn_metadata.decode.block_table = torch.randint(0, 100, (3, 4))
         mock_forward_context.attn_metadata = {"layer_0": mock_attn_metadata}
-        
+
         # 模拟forward context
         mock_ctx = MagicMock()
         mock_ctx.is_draft_model = True
         mock_get_forward_context.return_value = mock_ctx
-        
+
         # 模拟torch.npu.stream
         mock_stream_context = MagicMock()
         mock_npu_stream.return_value = mock_stream_context
-        
+
         # 模拟torch_npu.npu_fused_infer_attention_score_v2.out
         mock_out = MagicMock()
         mock_npu_fused_infer.out = mock_out
-        
+
         # 模拟get_draft_graph_params
         mock_graph_params = MagicMock()
         # 提供18个参数，与代码中期望的数量匹配
@@ -1502,7 +1503,7 @@ class TestAscendMLAImpl(TestBase):
         mock_graph_params.handles = {100: [MagicMock()]}
         mock_graph_params.events = {100: [MagicMock()]}
         mock_get_draft_graph_params.return_value = mock_graph_params
-        
+
         # 模拟speculative_config
         mock_speculative_config = MagicMock()
         mock_speculative_config.disable_padded_drafter_batch = True
@@ -1785,25 +1786,27 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
-        
+
         # 设置enable_mlapo为True
         self.impl.enable_mlapo = True
-        
+
         # 模拟fused_qkv_a_proj及其quant_method
         mock_fused_qkv_a_proj = MagicMock()
         mock_quant_method = MagicMock()
         from vllm_ascend.attention.mla_v1 import AscendW8A8LinearMethod
+
         mock_quant_method.quant_method = MagicMock(spec=AscendW8A8LinearMethod)
         mock_fused_qkv_a_proj.quant_method = mock_quant_method
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
-        
+
         # 模拟get_ascend_device_type返回A5
         from vllm_ascend.attention.mla_v1 import AscendDeviceType
+
         mock_get_ascend_device_type.return_value = AscendDeviceType.A5
-        
+
         # 模拟process_weights_for_fused_mlapo_a5方法
         self.impl.process_weights_for_fused_mlapo_a5 = MagicMock()
-        
+
         # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
@@ -1832,22 +1835,24 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
-        
+
         # 设置enable_mlapo为True
         self.impl.enable_mlapo = True
-        
+
         # 模拟fused_qkv_a_proj及其quant_method
         mock_fused_qkv_a_proj = MagicMock()
         mock_quant_method = MagicMock()
         from vllm_ascend.attention.mla_v1 import AscendW8A8LinearMethod
+
         mock_quant_method.quant_method = MagicMock(spec=AscendW8A8LinearMethod)
         mock_fused_qkv_a_proj.quant_method = mock_quant_method
         self.impl.fused_qkv_a_proj = mock_fused_qkv_a_proj
-        
+
         # 模拟get_ascend_device_type返回非A5设备
         from vllm_ascend.attention.mla_v1 import AscendDeviceType
+
         mock_get_ascend_device_type.return_value = AscendDeviceType.A2
-        
+
         # 模拟process_weights_for_fused_mlapo方法
         self.impl.process_weights_for_fused_mlapo = MagicMock()
         
@@ -1879,17 +1884,17 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
-        
+
         # 设置enable_mlapo为False，fa_quant_layer为True
         self.impl.enable_mlapo = False
         self.impl.fa_quant_layer = True
-        
+
         # 模拟_process_weights_for_fused_fa_quant方法
         self.impl._process_weights_for_fused_fa_quant = MagicMock()
-        
+
         # 模拟maybe_trans_nz方法
         mock_maybe_trans_nz.return_value = torch.randn(1, 2, 3)
-        
+
         # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
@@ -1921,19 +1926,19 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         mock_format_cast.return_value = layer.weight
-        
+
         # 设置enable_mlapo为False，fa_quant_layer为False
         self.impl.enable_mlapo = False
         self.impl.fa_quant_layer = False
-        
+
         # 设置layer_sharding_kwargs
         mock_layer1 = MagicMock()
         mock_layer2 = MagicMock()
         self.impl.layer_sharding_kwargs = [mock_layer1, mock_layer2]
-        
+
         # 模拟is_hidden_layer方法
         mock_is_hidden_layer.side_effect = [True, False]
-        
+
         # 调用process_weights_after_loading方法
         self.impl.process_weights_after_loading(torch.bfloat16)
 
@@ -1973,7 +1978,7 @@ class TestAscendMLAImpl(TestBase):
         batch_size = 4
         kv_cache = [torch.randn(10, 1, 1, 192), torch.randn(10, 1, 1, 32)]
         query = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
-        
+
         # 创建一个mock的metadata，其中prefill_metadata.chunked_context.seq_tot为空列表，这样iters == 0
         metadata = MagicMock()
         prefill_metadata = MagicMock()
@@ -1981,7 +1986,7 @@ class TestAscendMLAImpl(TestBase):
         chunked_context.seq_tot = []  # 空列表，使得iters == 0
         prefill_metadata.chunked_context = chunked_context
         metadata.prefill = prefill_metadata
-        
+
         prefix_out = torch.randn(2, 16, 128)
         prefix_lse = torch.randn(2, 16, 8)
         q_pe = query[..., self.impl.qk_nope_head_dim :]
