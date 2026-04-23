@@ -292,9 +292,11 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
     elif soc_version in {AscendDeviceType.A5}:
-        if num_tokens <= mc2_tokens_capacity and vllm_config.parallel_config.world_size_across_dp > 1:
+        num_experts_per_tok = vllm_config.model_config.hf_text_config.num_experts_per_tok
+        world_size = vllm_config.parallel_config.world_size_across_dp
+        if num_tokens <= mc2_tokens_capacity and world_size > 1:
             moe_comm_type = MoECommType.MC2
-        elif envs_ascend.VLLM_ASCEND_ENABLE_A5_ALLGATHER_EP_QUANT == 1:
+        elif world_size <= num_experts_per_tok:
             moe_comm_type = MoECommType.ALLGATHER
         else:
             moe_comm_type = MoECommType.ALLTOALL
