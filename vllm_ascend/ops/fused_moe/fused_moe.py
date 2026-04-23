@@ -280,7 +280,8 @@ class AscendFusedMoE(FusedMoE):
     def __init__(self, *args, **kwargs):
         """
         Set `enable_eplb` to False for skipping the assertion requiring total experts to be divisible by EP size in
-        initialization of `FusedMoE`, as the number of redundant expert differs between `AscendFusedMoE and `FusedMoE`.
+        initialization of `FusedMoE` when enable Elastic EP, as the number of redundant expert differs between
+        `AscendFusedMoE and `FusedMoE`.
         """
         if get_current_vllm_config().parallel_config.enable_elastic_ep:
             enable_eplb = kwargs.pop("enable_eplb", False)
