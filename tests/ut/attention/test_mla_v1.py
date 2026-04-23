@@ -1830,7 +1830,6 @@ class TestAscendMLAImpl(TestBase):
 
         self.assertEqual(mock_is_hidden_layer.call_count, 2)
 
-        # Verify that post_process_after_loading_for_shard_weight_series was called once (only the first layer is a hidden layer)
         mock_post_process.assert_called_once_with(mock_layer1)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
