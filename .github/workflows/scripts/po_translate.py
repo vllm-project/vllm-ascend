@@ -43,6 +43,7 @@ Rules:
 6. Use standard Chinese technical terminology
 7. For difficult parts, keep original English
 8. Remove "#, fuzzy" markers
+9. Do NOT translate proper nouns: person names, contributor names, author names must be kept as-is in msgstr
 
 Return ONLY the complete PO file content, no extra explanations.
 
