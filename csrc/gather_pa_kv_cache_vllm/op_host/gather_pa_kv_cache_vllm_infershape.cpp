@@ -13,7 +13,6 @@
  * \brief
  */
 
-#include "shape_util.h"
 #include "register/op_impl_registry.h"
 #include "../../causal_conv1d/op_host/error_log.h"
 
@@ -32,6 +31,36 @@ static constexpr size_t DIM_5 = 5;
 static constexpr size_t DIM_6 = 6;
 static constexpr size_t IS_SEQ_LENS_CUMSUM_INDEX = 1;
 static constexpr size_t CACHE_MODE_INDEX = 0;
+
+constexpr int64_t UNKNOWN_RANK_DIM_VALUE = -2LL;
+constexpr int64_t UNKNOWN_DIM_VALUE = -1LL;
+
+inline void SetUnknownRank(gert::Shape &shape)
+{
+    shape.SetDimNum(0);
+    shape.AppendDim(UNKNOWN_RANK_DIM_VALUE);
+}
+
+/*
+ * @brief: check whether the output shape is unknown rank
+ * @param [out] shape: the output shape ptr
+ * @return ge::graphStatus
+ */
+inline bool IsUnknownRank(const gert::Shape &shape)
+{
+    return shape.GetDimNum() == 1 && shape.GetDim(0) == UNKNOWN_RANK_DIM_VALUE;
+}
+
+inline bool IsUnknownShape(const gert::Shape &shape)
+{
+    size_t dimNum = shape.GetDimNum();
+    for (size_t i = 0; i < dimNum; i++) {
+        if (shape.GetDim(i) == UNKNOWN_DIM_VALUE) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static ge::graphStatus CheckCommonPagedCacheLoad(gert::InferShapeContext *context)
 {
@@ -157,9 +186,9 @@ static ge::graphStatus InferShape4GatherPaKvCacheVllm(gert::InferShapeContext *c
 
     for (uint32_t i = 0; i < context->GetComputeNodeInputNum(); i++) {
         const gert::Shape *shape = context->GetInputShape(i);
-        if (Ops::Base::IsUnknownRank(*shape)) {
-            Ops::Base::SetUnknownRank(*output0_shape);
-            Ops::Base::SetUnknownRank(*output1_shape);
+        if (IsUnknownRank(*shape)) {
+            SetUnknownRank(*output0_shape);
+            SetUnknownRank(*output1_shape);
             OP_LOGD(context,
                     "input[%u].shape is UnknownRank, set output key.shape and "
                     "value.shape to -2.",
@@ -169,7 +198,7 @@ static ge::graphStatus InferShape4GatherPaKvCacheVllm(gert::InferShapeContext *c
     }
     for (uint32_t i = 0; i < context->GetComputeNodeInputNum(); i++) {
         auto shape = context->GetInputShape(i);
-        if (Ops::Base::IsUnknownShape(*shape)) {
+        if (IsUnknownShape(*shape)) {
             OP_LOGD(context,
                     "input[%u].shape is UnknownShape, set output key.shape and value.shape "
                     "same as input key.shape and value.shape respectively.",
