@@ -3008,7 +3008,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config.parallel_config.enable_eplb = True
             if load_dummy_weights:
                 self.load_config.load_format = "dummy"
-            self.model = get_model(vllm_config=self.vllm_config, load_config=self.load_config)
+            self.model: nn.Module = get_model(vllm_config=self.vllm_config, load_config=self.load_config)
             if self.dynamic_eplb:
                 model_register(self.model)
             if self.drafter:

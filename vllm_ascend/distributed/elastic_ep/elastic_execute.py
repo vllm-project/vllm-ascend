@@ -378,7 +378,7 @@ class AscendElasticEPScalingExecutor(ElasticEPScalingExecutor):
                 layer_id + eplb_adaptor.num_dense_layers,
             )
             # Execute asynchronous expert weight transfer
-            reqs = []
+            reqs = []  # type: ignore
             eplb_loader.asyn_expert_weight_transfer(reqs)
             # Update expert mapping and apply transferred weights
             eplb_loader.update_expert_map_and_weight(reqs)

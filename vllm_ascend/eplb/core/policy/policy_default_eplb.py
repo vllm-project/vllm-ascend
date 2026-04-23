@@ -143,7 +143,7 @@ class DefaultEplb(EplbPolicy):
                     # Find the current position of the duplicate expert in the NPU's list
                     cur_position = boxes[i].index(item_id)
                     # Get the current weight associated with this duplicate expert
-                    cur_weight = boxes_weights[i][cur_position]
+                    cur_weight: float = boxes_weights[i][cur_position]
 
                     def score(t, cw=cur_weight):
                         before = len(route_expert_redundancy[t[0]]) + 1
@@ -186,7 +186,7 @@ class DefaultEplb(EplbPolicy):
                             weights[index] = (expert_id, avg_weight)
                     origin_weights = weights
 
-        box_weights = [sum(boxes_weights[i]) for i in range(card_num)]
+        box_weights = [sum(cast(list[float], boxes_weights[i])) for i in range(card_num)]
 
         # Step 6: Output each box's contents and total weight
         result = []
