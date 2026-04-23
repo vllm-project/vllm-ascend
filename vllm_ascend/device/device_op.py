@@ -526,7 +526,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             input_dtype=input_dtype,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
-            scale_type=scale_type if mxfp_quant_dtype != QuantType.MXFP4 else None,
+            scale_type=scale_type if mxfp_quant_dtype != QuantType.W4A8MXFP else None,
             per_token_scale_type=per_token_scale_type,
             use_bf16=use_bf16,
             use_mxfp_quant=True,
@@ -540,7 +540,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
-        if mxfp_quant_dtype == QuantType.MXFP4:
+        if mxfp_quant_dtype == QuantType.W4A8MXFP:
             gmm2_scale = None
             antiquant_scale = weight_scale.reshape(
                 weight_scale.shape[0], weight_scale.shape[1] // 2 , 2, weight_scale.shape[2]
