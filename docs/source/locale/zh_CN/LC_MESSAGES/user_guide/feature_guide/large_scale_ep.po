@@ -484,7 +484,7 @@ msgstr "常见问题"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:498
 msgid "1. Prefiller nodes need to warm up"
-msgstr "1. 预填充节点需要预热"
+msgstr "1.预填充节点需要预热"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:500
 msgid ""

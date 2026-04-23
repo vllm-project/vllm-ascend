@@ -286,11 +286,11 @@ msgstr "运行前替换 `` `<...>` `` 中的部分。"
 
 #: ../../source/user_guide/feature_guide/rfork.md:70
 msgid "1. Install YuanRong TransferEngine"
-msgstr "1. 安装 YuanRong TransferEngine"
+msgstr "1.安装 YuanRong TransferEngine"
 
 #: ../../source/user_guide/feature_guide/rfork.md:76
 msgid "2. Start the Planner"
-msgstr "2. 启动规划器"
+msgstr "2.启动规划器"
 
 #: ../../source/user_guide/feature_guide/rfork.md:78
 msgid ""
@@ -300,7 +300,7 @@ msgstr "在 [`rfork_planner.py`](../../../../examples/rfork/rfork_planner.py) �
 
 #: ../../source/user_guide/feature_guide/rfork.md:86
 msgid "3. Start vLLM Instances"
-msgstr "3. 启动 vLLM 实例"
+msgstr "3.启动 vLLM 实例"
 
 #: ../../source/user_guide/feature_guide/rfork.md:88
 msgid ""

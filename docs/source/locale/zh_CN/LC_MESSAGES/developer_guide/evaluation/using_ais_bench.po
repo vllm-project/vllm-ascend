@@ -38,7 +38,7 @@ msgstr "在线服务器"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:7
 msgid "1. Start the vLLM server"
-msgstr "1. 启动 vLLM 服务器"
+msgstr "1.启动 vLLM 服务器"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:9
 msgid "You can run docker container to start the vLLM server on a single NPU:"
@@ -60,7 +60,7 @@ msgstr "如果看到如下日志，则 vLLM 服务器启动成功："
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:56
 msgid "2. Run different datasets using AISBench"
-msgstr "2. 使用 AISBench 运行不同数据集"
+msgstr "2.使用 AISBench 运行不同数据集"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:58
 msgid "Install AISBench"
@@ -227,7 +227,7 @@ msgstr "执行后，您可以从保存的文件中获取结果，示例如下：
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:300
 msgid "3. Troubleshooting"
-msgstr "3. 故障排除"
+msgstr "3.故障排除"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:302
 msgid "Invalid Image Path Error"

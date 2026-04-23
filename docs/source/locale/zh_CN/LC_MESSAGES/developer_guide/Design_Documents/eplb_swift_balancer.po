@@ -434,6 +434,10 @@ msgstr ""
 msgid "Consistency"
 msgstr "一致性"
 
+#: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:236
+msgid "Expert Map"
+msgstr "专家映射"
+
 #: ../../source/developer_guide/Design_Documents/eplb_swift_balancer.md:237
 msgid ""
 "The expert map must be globally unique during initialization and update. "

@@ -33,7 +33,7 @@ msgstr ""
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:5
 msgid "1. Online Server"
-msgstr "1. 在线服务"
+msgstr "1.在线服务"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:7
 msgid "You can run a docker container to start the vLLM server on a single NPU:"
@@ -53,7 +53,7 @@ msgstr "服务器启动后，你可以在新的终端中使用输入提示词来
 msgid ""
 "2. Run C-Eval (a Chinese language model evaluation benchmark) using "
 "OpenCompass for accuracy testing"
-msgstr "2. 使用 OpenCompass 运行 C-Eval 进行准确率测试"
+msgstr "2.使用 OpenCompass 运行 C-Eval 进行准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_opencompass.md:58
 msgid ""
