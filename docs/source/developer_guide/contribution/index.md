@@ -36,8 +36,6 @@ bash format.sh
 
 After completing "Run lint" setup, you can run CI (Continuous integration) locally:
 
-The `vllm_version` below (currently **|vllm_version|**) is automatically replaced during doc build — see `conf.py` for the value:
-
 ```{code-block} bash
    :substitutions:
 cd ~/vllm-project/
