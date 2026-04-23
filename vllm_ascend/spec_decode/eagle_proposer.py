@@ -346,7 +346,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
                     enable_enpu=self.enable_enpu,
-                    )
+                )
             else:
                 self._runnable = ACLGraphWrapper(
                     self._run_merged_draft,
@@ -354,7 +354,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
                     enable_enpu=self.enable_enpu,
-                    )
+                )
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
