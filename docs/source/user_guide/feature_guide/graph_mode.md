@@ -201,11 +201,6 @@ vllm serve path/to/Qwen3-32B \
 
 For more details about Xlite, see the [Xlite README](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md).
 
-## Common Limitations and Caveats
-
-- XliteGraph should be treated as an alternative graph path, not as a drop-in replacement for ACLGraph in all scenarios.
-- Model and backend coverage is still evolving, so a configuration that works for one model family may not yet be recommended for another.
-
 ## Fallback to Eager Mode
 
 If you encounter issues with graph mode, you can temporarily fall back to eager mode by setting `enforce_eager=True`.
@@ -224,6 +219,12 @@ outputs = llm.generate("Hello, how are you?")
 ```bash
 vllm serve path/to/your/model --enforce-eager
 ```
+
+## Common Limitations and Caveats
+
+- XliteGraph should be treated as an alternative graph path, not as a drop-in replacement for ACLGraph in all scenarios.
+- Model and backend coverage is still evolving, so a configuration that works for one model family may not yet be recommended for another.
+- NPU soft partitioning + `CUDAGraphMode.PIECEWISE` is not supported. With soft-partitioned virtual NPU instances, the 2048 device streams are shared and split across containers (see the [virtual instance with vCANN RT description](https://gitcode.com/Ascend/mind-cluster/blob/branch_v26.0.0/docs/zh/scheduling/usage/virtual_instance/virtual_instance_with_vcann_rt/00_description.md)), but vLLM Ascend still derives ACL graph capture limits from a fixed full-device stream budget in `update_aclgraph_sizes` (`vllm_ascend/utils.py`) and does not use the per-container stream quota, so this combination is incompatible.
 
 ## References
 
