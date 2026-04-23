@@ -452,8 +452,8 @@ msgstr "详情请参阅 [使用 AISBench](../../developer_guide/evaluation/using
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:285
 msgid ""
 "After execution, you can get the result, here is the result of `Qwen3"
-"-235B-A22B-w8a8` in `vllm-ascend:0.11.0rc0` for reference only."
-msgstr "执行后，您将获得结果。以下是 `vllm-ascend:0.11.0rc0` 中 `Qwen3-235B-A22B-w8a8` 的结果，仅供参考。"
+"-235B-A22B-w8a8` in `vllm-ascend:v0.11.0rc0` for reference only."
+msgstr "执行后，您将获得结果。以下是 `vllm-ascend:v0.11.0rc0` 中 `Qwen3-235B-A22B-w8a8` 的结果，仅供参考。"
 
 #: ../../source/tutorials/models/Qwen3-235B-A22B.md:76
 msgid "dataset"

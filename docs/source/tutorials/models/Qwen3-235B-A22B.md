@@ -150,7 +150,7 @@ The parameters are explained as follows:
 
 ### Multi-node Deployment with MP (Recommended)
 
-Assume you have Atlas 800 A3 (64G*16) nodes (or 2* A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
+Assume you have Atlas 800 A3 (64G*16) nodes (or 2* A2), and want to deploy the `Qwen3-235B-A22B-Instruct` model across multiple nodes.
 
 Node 0
 
@@ -282,7 +282,7 @@ Here are two accuracy evaluation methods.
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `Qwen3-235B-A22B-w8a8` in `vllm-ascend:0.11.0rc0` for reference only.
+2. After execution, you can get the result, here is the result of `Qwen3-235B-A22B-w8a8` in `vllm-ascend:v0.11.0rc0` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|

@@ -108,10 +108,10 @@ curl http://localhost:8000/v1/completions \
     -d '{
         "model": "qwen3-32b-w4a4",
         "prompt": "what is large language model?",
-        "max_completion_tokens": "128",
-        "top_p": "0.95",
-        "top_k": "40",
-        "temperature": "0.0"
+        "max_completion_tokens": 128,
+        "top_p": 0.95,
+        "top_k": 40,
+        "temperature": 0
     }'
 ```
 

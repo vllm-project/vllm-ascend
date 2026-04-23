@@ -92,7 +92,7 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
-2. After execution, you can get the result, here is the result of `Qwen3-Coder-30B-A3B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
+2. After execution, you can get the result, here is the result of `Qwen3-Coder-30B-A3B-Instruct` in `vllm-ascend:v0.11.0rc0` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|
