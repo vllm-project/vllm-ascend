@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 import vllm.envs as envs
@@ -9,6 +10,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
 from memcache_hybrid import DistributedObjectStore  # type: ignore
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     LoadSpec,
@@ -18,6 +20,23 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.key_lru_cache import (
     KeyLRUCache,
 )
+
+
+def _parse_dram_size(value: str) -> int:
+    if not value or value == "0":
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    cleaned = value.strip().lower()
+    unit_multipliers = {"gb": 1024**3, "mb": 1024**2, "kb": 1024, "b": 1}
+    match = re.match(r"^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$", cleaned)
+    if not match:
+        raise ValueError(f"Invalid DRAM size format: '{value}'")
+    number = float(match.group(1))
+    unit = match.group(2) or "b"
+    return int(number * unit_multipliers[unit])
 
 
 class KVPoolScheduler:
@@ -57,10 +76,7 @@ class KVPoolScheduler:
         logger.info(f"==============> page_size_bytes {page_size_bytes}")
         self.store_scheduler = DistributedObjectStore()
         self.store_scheduler.init(device_id=0, init_bm=False)
-        # TODO here should caculate the lru capacity with a formula.
-        lru_capacity = 1000000
-        self.key_lru_cache = KeyLRUCache(lru_capacity, self.store_scheduler)
-        logger.info("KV pool LRU cache enabled with capacity %d", lru_capacity)
+
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
@@ -77,6 +93,23 @@ class KVPoolScheduler:
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model_name = model_config.model.split('/')[-1]
+
+        dram_size_str = ascend_envs.VLLM_ASCEND_KV_POOL_DRAM_SIZE
+        dram_size_bytes = _parse_dram_size(dram_size_str)
+        keys_per_block_hash = (
+            self.pcp_size * self.dcp_size
+            * (self.tp_size // self.put_step)
+            * self.num_layers
+        )
+        memory_per_block_hash = keys_per_block_hash * self.page_size_bytes
+        lru_capacity = dram_size_bytes // memory_per_block_hash
+        logger.info(
+            "KV pool LRU capacity calculated from DRAM size %s: %d "
+            "(keys_per_block_hash=%d, memory_per_block_hash=%d)",
+            dram_size_str, lru_capacity,
+            keys_per_block_hash, memory_per_block_hash,
+        )
+        self.key_lru_cache = KeyLRUCache(lru_capacity, self.store_scheduler)
         self._req_last_block_gvas: dict[str, dict[str, int | None]] = {}
 
     def _generate_keys_and_alloc(self, block_hashes, req_id='', has_last_block=False) -> tuple[list[list[str]], list[list[str]], dict[str, int | None]]:
