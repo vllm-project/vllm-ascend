@@ -65,7 +65,19 @@ class _FakeCPUGenerator:
 
 
 class TestSampler310pGeneratorCache(TestBase):
-    def test_random_sample_310p_reuse_cpu_generator_cache(self):
+    @patch.object(sampler_310p.torch, "npu", create=True)
+    @patch.object(sampler_310p.torch, "Generator")
+    @patch.object(sampler_310p.torch, "empty_like")
+    @patch.object(sampler_310p, "global_stream", return_value=MagicMock())
+    @patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext())
+    def test_random_sample_310p_reuse_cpu_generator_cache(
+        self,
+        _mock_npu_stream_switch,
+        _mock_global_stream,
+        mock_empty_like,
+        mock_generator_ctor,
+        mock_npu,
+    ):
         # Same source generator should reuse one cached CPU generator.
         sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
         probs = MagicMock()
@@ -81,31 +93,14 @@ class TestSampler310pGeneratorCache(TestBase):
         generator.get_state.return_value = b"state"
         generator.initial_seed.return_value = 7
         generators = {1: generator}
+        mock_empty_like.side_effect = [fake_q_first, fake_q_second]
+        mock_generator_ctor.side_effect = _FakeCPUGenerator
 
-        with (
-            patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
-            patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(
-                sampler_310p.torch,
-                "empty_like",
-                side_effect=[fake_q_first, fake_q_second],
-            ),
-            patch.object(
-                sampler_310p.torch,
-                "Generator",
-                side_effect=_FakeCPUGenerator,
-            ) as gen_ctor,
-            patch.object(
-                sampler_310p.torch,
-                "npu",
-                create=True,
-            ) as mock_npu,
-        ):
-            mock_npu.current_stream.return_value = npu_stream
-            sampler_310p._random_sample_310p(probs, generators)
-            sampler_310p._random_sample_310p(probs, generators)
+        mock_npu.current_stream.return_value = npu_stream
+        sampler_310p._random_sample_310p(probs, generators)
+        sampler_310p._random_sample_310p(probs, generators)
 
-        self.assertEqual(gen_ctor.call_count, 1)
+        self.assertEqual(mock_generator_ctor.call_count, 1)
         self.assertIn(1, sampler_310p._CPU_GENERATOR_CACHE_310P)
         cached_cpu_generator, source_generator_id = sampler_310p._CPU_GENERATOR_CACHE_310P[1]
         self.assertIs(fake_q_first.rows[1].generators[0], cached_cpu_generator)
@@ -115,7 +110,19 @@ class TestSampler310pGeneratorCache(TestBase):
         self.assertIsNone(cached_cpu_generator.seed)
         self.assertEqual(npu_stream.wait_stream.call_count, 2)
 
-    def test_random_sample_310p_fallback_to_initial_seed_when_set_state_failed(self):
+    @patch.object(sampler_310p.torch, "npu", create=True)
+    @patch.object(sampler_310p.torch, "Generator")
+    @patch.object(sampler_310p.torch, "empty_like")
+    @patch.object(sampler_310p, "global_stream", return_value=MagicMock())
+    @patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext())
+    def test_random_sample_310p_fallback_to_initial_seed_when_set_state_failed(
+        self,
+        _mock_npu_stream_switch,
+        _mock_global_stream,
+        mock_empty_like,
+        mock_generator_ctor,
+        mock_npu,
+    ):
         # If syncing generator state fails, fallback to initial seed.
         sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
         probs = MagicMock()
@@ -133,28 +140,11 @@ class TestSampler310pGeneratorCache(TestBase):
         class _FailSetStateCPUGenerator(_FakeCPUGenerator):
             def set_state(self, state):
                 raise RuntimeError("state set failed")
+        mock_empty_like.return_value = fake_q
+        mock_generator_ctor.side_effect = _FailSetStateCPUGenerator
 
-        with (
-            patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
-            patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(
-                sampler_310p.torch,
-                "empty_like",
-                return_value=fake_q,
-            ),
-            patch.object(
-                sampler_310p.torch,
-                "Generator",
-                side_effect=_FailSetStateCPUGenerator,
-            ),
-            patch.object(
-                sampler_310p.torch,
-                "npu",
-                create=True,
-            ) as mock_npu,
-        ):
-            mock_npu.current_stream.return_value = npu_stream
-            sampler_310p._random_sample_310p(probs, generators)
+        mock_npu.current_stream.return_value = npu_stream
+        sampler_310p._random_sample_310p(probs, generators)
 
         cached_cpu_generator, source_generator_id = sampler_310p._CPU_GENERATOR_CACHE_310P[0]
         self.assertEqual(source_generator_id, id(generator))
@@ -162,7 +152,19 @@ class TestSampler310pGeneratorCache(TestBase):
         self.assertIs(fake_q.rows[0].generators[0], cached_cpu_generator)
         self.assertEqual(npu_stream.wait_stream.call_count, 1)
 
-    def test_random_sample_310p_rebuild_cache_when_generator_identity_changes(self):
+    @patch.object(sampler_310p.torch, "npu", create=True)
+    @patch.object(sampler_310p.torch, "Generator")
+    @patch.object(sampler_310p.torch, "empty_like")
+    @patch.object(sampler_310p, "global_stream", return_value=MagicMock())
+    @patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext())
+    def test_random_sample_310p_rebuild_cache_when_generator_identity_changes(
+        self,
+        _mock_npu_stream_switch,
+        _mock_global_stream,
+        mock_empty_like,
+        mock_generator_ctor,
+        mock_npu,
+    ):
         # A new source generator object should rebuild cache entry.
         sampler_310p._CPU_GENERATOR_CACHE_310P.clear()
         probs = MagicMock()
@@ -181,31 +183,14 @@ class TestSampler310pGeneratorCache(TestBase):
         generator_second = MagicMock()
         generator_second.get_state.return_value = b"state-2"
         generator_second.initial_seed.return_value = 22
+        mock_empty_like.side_effect = [fake_q_first, fake_q_second]
+        mock_generator_ctor.side_effect = _FakeCPUGenerator
 
-        with (
-            patch.object(sampler_310p, "npu_stream_switch", return_value=nullcontext()),
-            patch.object(sampler_310p, "global_stream", return_value=MagicMock()),
-            patch.object(
-                sampler_310p.torch,
-                "empty_like",
-                side_effect=[fake_q_first, fake_q_second],
-            ),
-            patch.object(
-                sampler_310p.torch,
-                "Generator",
-                side_effect=_FakeCPUGenerator,
-            ) as gen_ctor,
-            patch.object(
-                sampler_310p.torch,
-                "npu",
-                create=True,
-            ) as mock_npu,
-        ):
-            mock_npu.current_stream.return_value = npu_stream
-            sampler_310p._random_sample_310p(probs, {0: generator_first})
-            sampler_310p._random_sample_310p(probs, {0: generator_second})
+        mock_npu.current_stream.return_value = npu_stream
+        sampler_310p._random_sample_310p(probs, {0: generator_first})
+        sampler_310p._random_sample_310p(probs, {0: generator_second})
 
-        self.assertEqual(gen_ctor.call_count, 2)
+        self.assertEqual(mock_generator_ctor.call_count, 2)
         first_cpu_generator = fake_q_first.rows[0].generators[0]
         second_cpu_generator = fake_q_second.rows[0].generators[0]
         self.assertIsNot(first_cpu_generator, second_cpu_generator)
