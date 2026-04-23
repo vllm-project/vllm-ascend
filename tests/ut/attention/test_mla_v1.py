@@ -2155,7 +2155,10 @@ class TestAscendMLAImpl(TestBase):
         self.impl.speculative_config = MagicMock()
         self.impl.fak_descale_float = torch.randn(1)  # 添加fak_descale_float属性
 
-        mock_npu_fused_infer_attention_score_v2.return_value = [torch.randn(B, self.impl.num_kv_heads, self.impl.kv_lora_rank), None]
+        mock_npu_fused_infer_attention_score_v2.return_value = [
+            torch.randn(B, self.impl.num_kv_heads, self.impl.kv_lora_rank),
+            None,
+        ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         dequant_scale_q_nope = torch.randn(B, N)  # 现在形状是 [B, num_heads]
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS, attn_metadata, dequant_scale_q_nope)
