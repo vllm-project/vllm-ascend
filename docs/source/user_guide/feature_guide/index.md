@@ -29,5 +29,5 @@ weight_prefetch
 sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment
-profiling_chunk_parallel
+dynamic_chunk_pipeline_parallel
 :::
