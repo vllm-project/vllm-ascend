@@ -25,7 +25,7 @@ ENV SOC_VERSION=$SOC_VERSION \
     OMP_NUM_THREADS=1
 
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel jemalloc && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc && \
     rm -rf /var/cache/yum
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
@@ -52,6 +52,16 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
     export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/`uname -i`-openEuler-linux && \
     python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     if [ "$(uname -i)" = "x86_64" ]; then python3 -m pip uninstall -y triton; fi && \
+    PYTHON_TAG=$(python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')") && \
+    ARCH=$(python3 -c "import platform; m=platform.machine().lower(); map={'x86_64':'x86_64','amd64':'x86_64','aarch64':'aarch64','arm64':'aarch64'}; print(map.get(m,m))") && \
+    \
+    if [ "$PYTHON_TAG" = "cp310" ] && [ "$ARCH" = "aarch64" ]; then PTA_WHEEL="torch_npu-2.9.0.post1%2Bgit4c901a4-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl"; \
+    elif [ "$PYTHON_TAG" = "cp311" ] && [ "$ARCH" = "x86_64" ]; then PTA_WHEEL="torch_npu-2.9.0.post1%2Bgitdc51c2d-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl"; \
+    elif [ "$PYTHON_TAG" = "cp310" ] && [ "$ARCH" = "x86_64" ]; then PTA_WHEEL="torch_npu-2.9.0.post1%2Bgita74051c-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl"; \
+    elif [ "$PYTHON_TAG" = "cp311" ] && [ "$ARCH" = "aarch64" ]; then PTA_WHEEL="torch_npu-2.9.0.post1%2Bgitee7ba04-${PYTHON_TAG}-${PYTHON_TAG}-manylinux_2_28_${ARCH}.whl"; \
+    else echo "Unsupported PYTHON_TAG=$PYTHON_TAG ARCH=$ARCH"; exit 1; fi && \
+    \
+    python3 -m pip install "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${PTA_WHEEL}" && \
     python3 -m pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)

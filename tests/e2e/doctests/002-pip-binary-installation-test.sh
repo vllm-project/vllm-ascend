@@ -48,7 +48,7 @@ function install_binary_test() {
     pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
     # The vLLM version already in pypi, we install from pypi.
-    pip install vllm=="${PIP_VLLM_VERSION}"
+    pip install --default-timeout=300 --retries 3 vllm=="${PIP_VLLM_VERSION}"
 
     pip install vllm-ascend=="${PIP_VLLM_ASCEND_VERSION}"
     if [ "${PIP_VLLM_ASCEND_VERSION}" == "0.17.0rc1" ]; then

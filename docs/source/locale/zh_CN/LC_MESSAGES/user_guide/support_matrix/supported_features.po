@@ -4,261 +4,297 @@
 # package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
-#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"POT-Creation-Date: 2026-04-14 09:08+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
-#: ../../user_guide/support_matrix/supported_features.md:1
-msgid "Feature Support"
-msgstr "功能支持"
+#: ../../source/user_guide/support_matrix/supported_features.md:1
+msgid "Supported Features"
+msgstr "支持的功能"
 
-#: ../../user_guide/support_matrix/supported_features.md:3
+#: ../../source/user_guide/support_matrix/supported_features.md:3
 msgid ""
-"The feature support principle of vLLM Ascend is: **aligned with the vLLM**. "
-"We are also actively collaborating with the community to accelerate support."
-msgstr "vLLM Ascend 的特性支持原则是：**与 vLLM 保持一致**。我们也在积极与社区合作，加快支持进度。"
+"The feature support principle of vLLM Ascend is: **aligned with vLLM**. "
+"We are also actively collaborating with the community to accelerate "
+"support."
+msgstr "vLLM Ascend 的功能支持原则是：**与 vLLM 保持一致**。我们也在积极与社区合作，以加快支持进度。"
 
-#: ../../user_guide/support_matrix/supported_features.md:5
+#: ../../source/user_guide/support_matrix/supported_features.md:5
+msgid "Functional call: <https://docs.vllm.ai/en/latest/features/tool_calling/>"
+msgstr "函数调用：<https://docs.vllm.ai/en/latest/features/tool_calling/>"
+
+#: ../../source/user_guide/support_matrix/supported_features.md:7
 msgid ""
-"You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below "
-"is the feature support status of vLLM Ascend:"
-msgstr "你可以查看 [vLLM V1 引擎的支持状态][v1_user_guide]。下面是 vLLM Ascend 的功能支持情况："
+"You can check the [support status of vLLM V1 Engine][v1_user_guide]. "
+"Below is the feature support status of vLLM Ascend:"
+msgstr "您可以查看 [vLLM V1 引擎的支持状态][v1_user_guide]。以下是 vLLM Ascend 的功能支持状态："
 
-#: ../../user_guide/support_matrix/supported_features.md
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Feature"
-msgstr "特性"
+msgstr "功能"
 
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "vLLM V0 Engine"
-msgstr "vLLM V0 引擎"
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Status"
+msgstr "状态"
 
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "vLLM V1 Engine"
-msgstr "vLLM V1 引擎"
-
-#: ../../user_guide/support_matrix/supported_features.md
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Next Step"
-msgstr "下一步"
+msgstr "后续步骤"
 
-#: ../../user_guide/support_matrix/supported_features.md
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Chunked Prefill"
 msgstr "分块预填充"
 
-#: ../../user_guide/support_matrix/supported_features.md
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "🟢 Functional"
-msgstr "🟢 功能性"
+msgstr "🟢 功能完备"
 
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Functional, see detail note: [Chunked Prefill][cp]"
-msgstr "功能性，详见说明：[分块预填充][cp]"
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [Chunked Prefill][cp]"
+msgstr "功能完备，详见说明：[分块预填充][cp]"
 
-#: ../../user_guide/support_matrix/supported_features.md
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Automatic Prefix Caching"
 msgstr "自动前缀缓存"
 
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Functional, see detail note: [vllm-ascend#732][apc]"
-msgstr "可用，请参见详细说明：[vllm-ascend#732][apc]"
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [vllm-ascend#732][apc]"
+msgstr "功能完备，详见说明：[vllm-ascend#732][apc]"
 
-#: ../../user_guide/support_matrix/supported_features.md
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "LoRA"
 msgstr "LoRA"
 
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "[vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]"
-msgstr "[vllm-ascend#396][multilora]，[vllm-ascend#893][v1 multilora]"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Prompt adapter"
-msgstr "提示适配器"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "🔴 No plan"
-msgstr "🔴 无计划"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "This feature has been deprecated by vllm."
-msgstr "此功能已被 vllm 弃用。"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Speculative decoding"
-msgstr "猜测式解码"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Basic support"
-msgstr "基础支持"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Pooling"
-msgstr "池化"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "🟡 Planned"
-msgstr "🟡 计划中"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "CI needed and adapting more models; V1 support rely on vLLM support."
-msgstr "需要持续集成（CI）并适配更多模型；V1 的支持依赖于 vLLM 的支持。"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Enc-dec"
-msgstr "Enc-dec（编码-解码）"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "🔴 NO plan"
-msgstr "🔴 没有计划"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Plan in 2025.06.30"
-msgstr "2025.06.30 的计划"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Multi Modality"
-msgstr "多模态"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "[Tutorial][multimodal], optimizing and adapting more models"
-msgstr "[教程][multimodal]，优化和适配更多模型"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "LogProbs"
-msgstr "LogProbs"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "CI needed"
-msgstr "需要持续集成（CI）"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Prompt logProbs"
-msgstr "提示 logProbs"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Async output"
-msgstr "异步输出"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Multi step scheduler"
-msgstr "多步调度器"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "🔴 Deprecated"
-msgstr "🔴 已弃用"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "[vllm#8779][v1_rfc], replaced by [vLLM V1 Scheduler][v1_scheduler]"
-msgstr "[vllm#8779][v1_rfc]，已被 [vLLM V1 调度器][v1_scheduler] 替代"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Best of"
-msgstr "精选"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "[vllm#13361][best_of], CI needed"
-msgstr "[vllm#13361][best_of]，需要持续集成（CI）"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Beam search"
-msgstr "束搜索"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Guided Decoding"
-msgstr "引导解码"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "[vllm-ascend#177][guided_decoding]"
-msgstr "[vllm-ascend#177][guided_decoding]"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Tensor Parallel"
-msgstr "张量并行"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Pipeline Parallel"
-msgstr "流水线并行"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Expert Parallel"
-msgstr "专家并行"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "CI needed; No plan on V0 support"
-msgstr "需要持续集成；没有支持V0的计划"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Data Parallel"
-msgstr "数据并行"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "CI needed;  No plan on V0 support"
-msgstr "需要 CI；暂无 V0 支持计划"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Prefill Decode Disaggregation"
-msgstr "预填充 解码 拆分"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "1P1D available, working on xPyD and V1 support."
-msgstr "1P1D 已可用，正在开发 xPyD 和 V1 支持。"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Quantization"
-msgstr "量化"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "W8A8 available, CI needed; working on more quantization method support"
-msgstr "W8A8 已可用，需要持续集成（CI）；正在开发对更多量化方法的支持。"
-
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Graph Mode"
-msgstr "图模式"
-
-#: ../../user_guide/support_matrix/supported_features.md
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "🔵 Experimental"
 msgstr "🔵 实验性"
 
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "Experimental, see detail note: [vllm-ascend#767][graph_mode]"
-msgstr "实验性功能，详见说明：[vllm-ascend#767][graph_mode]"
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [LoRA][LoRA]"
+msgstr "功能完备，详见说明：[LoRA][LoRA]"
 
-#: ../../user_guide/support_matrix/supported_features.md
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Speculative decoding"
+msgstr "推测解码"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Basic support"
+msgstr "基础支持"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Pooling"
+msgstr "池化"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "CI needed to adapt to more models; V1 support relies on vLLM support."
+msgstr "需要 CI 以适配更多模型；V1 支持依赖于 vLLM 的支持。"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Enc-dec"
+msgstr "编码器-解码器"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "🟡 Planned"
+msgstr "🟡 计划中"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "vLLM should support this feature first."
+msgstr "vLLM 需要首先支持此功能。"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Multi Modality"
+msgstr "多模态"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "[Multi Modality][multimodal], optimizing and adapting more models"
+msgstr "[多模态][multimodal]，优化和适配更多模型"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "LogProbs"
+msgstr "LogProbs"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "CI needed"
+msgstr "需要 CI"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Prompt logProbs"
+msgstr "提示词 LogProbs"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Async output"
+msgstr "异步输出"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Beam search"
+msgstr "束搜索"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Guided Decoding"
+msgstr "引导解码"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "[vllm-ascend#177][guided_decoding]"
+msgstr "[vllm-ascend#177][guided_decoding]"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Tensor Parallel"
+msgstr "张量并行"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Make TP >4 work with graph mode."
+msgstr "使 TP >4 能在图模式下工作。"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Pipeline Parallel"
+msgstr "流水线并行"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Write official guide and tutorial."
+msgstr "编写官方指南和教程。"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Expert Parallel"
+msgstr "专家并行"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Support dynamic EPLB."
+msgstr "支持动态 EPLB。"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Data Parallel"
+msgstr "数据并行"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Data Parallel support for Qwen3 MoE."
+msgstr "为 Qwen3 MoE 提供数据并行支持。"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Prefill Decode Disaggregation"
+msgstr "预填充解码分离"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, xPyD is supported."
+msgstr "功能完备，支持 xPyD。"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Quantization"
+msgstr "量化"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "W8A8 available; working on more quantization method support (W4A8, etc)"
+msgstr "W8A8 已可用；正在开发对更多量化方法（如 W4A8 等）的支持"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Graph Mode"
+msgstr "图模式"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [Graph Mode][graph_mode]"
+msgstr "功能完备，详见说明：[图模式][graph_mode]"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Sleep Mode"
-msgstr "睡眠模式"
+msgstr "休眠模式"
 
-#: ../../user_guide/support_matrix/supported_features.md
-msgid "level=1 available, CI needed, working on V1 support"
-msgstr "level=1 可用，需要CI，正在开发 V1 支持"
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [Sleep Mode][sleep_mode]"
+msgstr "功能完备，详见说明：[休眠模式][sleep_mode]"
 
-#: ../../user_guide/support_matrix/supported_features.md:33
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Context Parallel"
+msgstr "上下文并行"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "Functional, see detailed note: [Context Parallel][context_parallel]"
+msgstr "功能完备，详见说明：[上下文并行][context_parallel]"
+
+#: ../../source/user_guide/support_matrix/supported_features.md:33
 msgid "🟢 Functional: Fully operational, with ongoing optimizations."
-msgstr "🟢 功能性：完全可用，正在持续优化中。"
+msgstr "🟢 功能完备：完全可用，正在持续优化中。"
 
-#: ../../user_guide/support_matrix/supported_features.md:34
-msgid ""
-"🔵 Experimental: Experimental support, interfaces and functions may change."
-msgstr "🔵 实验性：实验性支持，接口和功能可能会发生变化。"
+#: ../../source/user_guide/support_matrix/supported_features.md:34
+msgid "🔵 Experimental: Experimental support, interfaces and functions may change."
+msgstr "🔵 实验性：实验性支持，接口和功能可能发生变化。"
 
-#: ../../user_guide/support_matrix/supported_features.md:35
+#: ../../source/user_guide/support_matrix/supported_features.md:35
 msgid "🚧 WIP: Under active development, will be supported soon."
-msgstr "🚧 WIP：正在积极开发中，很快将会支持。"
+msgstr "🚧 开发中：正在积极开发，即将支持。"
 
-#: ../../user_guide/support_matrix/supported_features.md:36
+#: ../../source/user_guide/support_matrix/supported_features.md:36
 msgid ""
 "🟡 Planned: Scheduled for future implementation (some may have open "
 "PRs/RFCs)."
-msgstr "🟡 计划中：已安排将来实现（其中一些可能已有开放的PR/RFC）。"
+msgstr "🟡 计划中：计划在未来实现（部分可能已有开放的 PR/RFC）。"
 
-#: ../../user_guide/support_matrix/supported_features.md:37
-msgid "🔴 NO plan / Deprecated: No plan for V0 or deprecated by vLLM v1."
-msgstr "🔴 没有计划 / 已弃用：V0 没有计划或已被 vLLM v1 弃用。"
+#: ../../source/user_guide/support_matrix/supported_features.md:37
+msgid "🔴 NO plan/Deprecated: No plan or deprecated by vLLM."
+msgstr "🔴 无计划/已弃用：暂无计划或已被 vLLM 弃用。"
+
+#~ msgid "Feature Support"
+#~ msgstr "功能支持"
+
+#~ msgid "vLLM V0 Engine"
+#~ msgstr "vLLM V0 引擎"
+
+#~ msgid "vLLM V1 Engine"
+#~ msgstr "vLLM V1 引擎"
+
+#~ msgid "[vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]"
+#~ msgstr "[vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]"
+
+#~ msgid "Prompt adapter"
+#~ msgstr "提示词适配器"
+
+#~ msgid "🔴 No plan"
+#~ msgstr "🔴 无计划"
+
+#~ msgid "This feature has been deprecated by vllm."
+#~ msgstr "此功能已被 vllm 弃用。"
+
+#~ msgid "🔴 NO plan"
+#~ msgstr "🔴 无计划"
+
+#~ msgid "Plan in 2025.06.30"
+#~ msgstr "计划于 2025.06.30"
+
+#~ msgid "Multi step scheduler"
+#~ msgstr "多步调度器"
+
+#~ msgid "🔴 Deprecated"
+#~ msgstr "🔴 已弃用"
+
+#~ msgid "[vllm#8779][v1_rfc], replaced by [vLLM V1 Scheduler][v1_scheduler]"
+#~ msgstr "[vllm#8779][v1_rfc]，已被 [vLLM V1 调度器][v1_scheduler] 取代"
+
+#~ msgid "Best of"
+#~ msgstr "最佳结果"
+
+#~ msgid "[vllm#13361][best_of], CI needed"
+#~ msgstr "[vllm#13361][best_of]，需要 CI"
+
+#~ msgid "CI needed; No plan on V0 support"
+#~ msgstr "需要 CI；暂无 V0 支持计划"
+
+#~ msgid "CI needed;  No plan on V0 support"
+#~ msgstr "需要 CI；暂无 V0 支持计划"
+
+#~ msgid "1P1D available, working on xPyD and V1 support."
+#~ msgstr "1P1D 已可用，正在开发 xPyD 和 V1 支持。"
+
+#~ msgid "Experimental, see detail note: [vllm-ascend#767][graph_mode]"
+#~ msgstr "实验性，详见说明：[vllm-ascend#767][graph_mode]"
+
+#~ msgid "level=1 available, CI needed, working on V1 support"
+#~ msgstr "level=1 已可用，需要 CI，正在开发 V1 支持"

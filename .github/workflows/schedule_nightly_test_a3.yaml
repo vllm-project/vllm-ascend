@@ -104,9 +104,6 @@ jobs:
           - name: multi-node-qwenw8a8-2node-longseq
             config_file_path: Qwen3-235B-W8A8-longseq.yaml
             size: 2
-          - name: multi-node-deepseek-V3_2-W8A8-cp
-            config_file_path: DeepSeek-V3_2-W8A8-cp.yaml
-            size: 2
           - name: multi-node-qwen-disagg-pd
             config_file_path: Qwen3-235B-disagg-pd.yaml
             size: 2
@@ -121,6 +118,9 @@ jobs:
             size: 2
           - name: multi-node-deepseek-v3.2-W8A8-EP
             config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
+            size: 4
+          - name: multi-node-deepseek-v3.2-W8A8-EP-aime2025
+            config_file_path: DeepSeek-V3_2-W8A8-EP-aime2025.yaml
             size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
@@ -160,6 +160,9 @@ jobs:
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/
           # YAML-driven tests
+          - name: qwen3-vl-235b-a22b-instruct-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
           - name: deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
             config_file_path: DeepSeek-R1-0528-W8A8.yaml
@@ -214,15 +217,21 @@ jobs:
           - name: qwen2-5-vl-32b
             os: linux-aarch64-a3-4
             config_file_path: Qwen2.5-VL-32B-Instruct.yaml
-          - name: qwen3-32b-int8-a3-feature-stack3
-            os: linux-aarch64-a3-4
-            config_file_path: Qwen3-32B-Int8-A3-Feature-Stack3.yaml
           - name: qwen3-32b-int8-prefix-cache
             os: linux-aarch64-a3-4
             config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
           - name: deepseek-r1-0528-w8a8-prefix-cache
             os: linux-aarch64-a3-16
             config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
+          - name: Qwen3.5-27B-w8a8-A3
+            os: linux-aarch64-a3-2
+            config_file_path: Qwen3.5-27B-w8a8-A3.yaml
+          - name: MiniMax-M2.5-w8a8
+            os: linux-aarch64-a3-16
+            config_file_path: MiniMax-M2.5-W8A8-A3.yaml
+          - name: Qwen3.5-397B-A17B-w8a8-mtp
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}

@@ -18,8 +18,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node, 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G * 8)nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B)
-- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G * 8)nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
+- `Qwen3-235B-A22B`(BF16 version): require 1 Atlas 800 A3 (64G × 16) node, 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G × 8)nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-235B-A22B)
+- `Qwen3-235B-A22B-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node or 2 Atlas 800 A2(32G × 8)nodes. [Download model weight](https://modelscope.cn/models/vllm-ascend/Qwen3-235B-A22B-W8A8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -191,7 +191,7 @@ vllm serve Qwen/Qwen3-235B-A22B \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --async-scheduling \
---gpu-memory-utilization 0.9 \
+--gpu-memory-utilization 0.9
 ```
 
 Node1
@@ -298,7 +298,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3-235B-A22B-w8a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -343,7 +343,6 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export TASK_QUEUE_ENABLE=1
 
 vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
@@ -389,7 +388,7 @@ Reference test results:
 
 Note:
 
-1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community.
+1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community. **Note** that this environment variable can only be enabled on decode nodes.
 2. Here we disable prefix cache because of random datasets. You can enable prefix cache if requests have long common prefix.
 
 ### Three Node A3 -- PD disaggregation
@@ -417,7 +416,6 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=2
 export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -440,7 +438,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 --enforce-eager \
 --trust-remote-code \
 --gpu-memory-utilization 0.9 \
---enforce-eager \
 --no-enable-prefix-caching \
 --kv-transfer-config \
 '{"kv_connector": "MooncakeConnectorV1",
@@ -619,4 +616,4 @@ Reference test results:
 
 Note:
 
-1. We recommend to set `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` on this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator.
+1. We recommend to set `export VLLM_ASCEND_ENABLE_FUSED_MC2=2` on this scenario (typically EP32 for Qwen3-235B). This enables a different MoE fusion operator. **Note** that this environment variable can only be enabled on decode nodes.

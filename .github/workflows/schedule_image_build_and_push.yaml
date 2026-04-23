@@ -11,35 +11,12 @@
 #   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3 / vllm-ascend:v1.2.3rc1
 name: Image Build and Push
 on:
-  push:
-    # Publish image when tagging, the Dockerfile in tag will be build as tag image
-    branches:
-      - 'releases/*'
-    tags:
-      - 'v*'
-    paths:
-      - '.github/workflows/schedule_image_build_and_push.yaml'
-      - 'Dockerfile*'
-      - 'vllm_ascend/**'
-      - 'setup.py'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'cmake/**'
-      - 'CMakeLists.txt'
-      - 'csrc/**'
   pull_request:
     branches:
       - 'releases/*'
-    paths:
-      - '.github/workflows/schedule_image_build_and_push.yaml'
+    paths: 
       - 'Dockerfile*'
-      - 'vllm_ascend/**'
-      - 'setup.py'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'cmake/**'
-      - 'CMakeLists.txt'
-      - 'csrc/**'
+      - '.github/workflows/schedule_image_build_and_push.yaml'
     types: [ labeled, synchronize ]
   workflow_dispatch:
     inputs:
@@ -63,7 +40,7 @@ concurrency:
 jobs:
   image_build:
     name: Image Build and Push
-    if: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'image-build') }}
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'image-build')
     strategy:
       matrix:
         build_meta:
@@ -90,7 +67,7 @@ jobs:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
       suffix: ${{ matrix.build_meta.suffix }}
       quay_username: ${{ vars.QUAY_USERNAME }}
-      should_push: ${{ github.repository_owner == 'vllm-project' && github.event_name == 'push'}}
+      should_push: ${{ github.repository_owner == 'vllm-project' && github.event_name != 'pull_request' }}
       workflow_dispatch_tag: ${{ inputs.tag }}
     secrets:
       QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}

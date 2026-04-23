@@ -137,6 +137,38 @@
 #       Remove this patch if upstream provides an official NPU graph-capture
 #       guidance / auto-configuration path for HCCL.
 #
+#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
+#    Why:
+#       Upstream vLLM's eagle3/extract_hidden_states restricts target model types
+#       via a whitelist. MiniMax-M2 should be allowed once the worker-side model
+#       can emit auxiliary hidden states.
+#    How：
+#       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
+#       MiniMax model_type when method is eagle3/extract_hidden_states.
+#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
+#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
+#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
+#       then `rebuild_dataclass(SpeculativeConfig, force=True)`.
+#       If `VllmConfig` was imported earlier, also `rebuild_dataclass(VllmConfig, ...)`
+#       so nested `speculative_config` validation does not use a stale schema.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream whitelist includes MiniMax.
+#
+#   4. `vllm.model_executor.models.registry` (spec decode aliases)
+#    Why:
+#       Some Eagle3 draft checkpoints may declare a MiniMax-specific architecture
+#       string while reusing the shared Eagle3 implementation.
+#    How：
+#       Register `Eagle3MiniMaxM2ForCausalLM` as an alias pointing to the
+#       existing Eagle3 implementation in the speculative decoding registry.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Drop the alias once upstream registry includes it or the checkpoint
+#       standardizes architecture strings.
+#
 # ** 8. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
@@ -178,6 +210,33 @@
 #    Future Plan:
 #       Remove this patch once the upstream MiniMax usage-accounting fix is in
 #       the runtime vLLM version used by vllm-ascend.
+#
+# ** 10. File: platform/patch_glm_tool_call_parser.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.tool_parsers.glm4_moe_tool_parser.Glm4MoeModelToolParser`
+#    Why:
+#       GLM-4.7 / GLM-4.5 tool-call streaming on the release runtime still has
+#       two independent finish-path bugs:
+#       1. the parser can leave a terminal `<arg_value>... </tool_call>` chunk
+#          partially undrained, and
+#       2. finish backfill trusts the parser's internal accumulated arguments
+#          instead of the argument bytes actually sent to the client.
+#       Together these can drop a full string value or emit only a suffix like
+#       `"}` in the final SSE chunk even when non-stream output is correct.
+#    How：
+#       Monkey-patch the GLM parser to keep draining a single chunk through
+#       terminal state transitions, and monkey-patch chat streaming to track
+#       per-tool arguments actually emitted to the client before computing the
+#       finish-chunk suffix. The suffix logic still tolerates mixed JSON
+#       whitespace styles from GLM tool parsers.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37845
+#       https://github.com/vllm-project/vllm/pull/33218
+#    Future Plan:
+#       Remove this patch once both the GLM parser drain fix and the serving
+#       finish-backfill fix are present in the runtime vLLM version used by
+#       vllm-ascend.
 #
 # * Worker Patch:
 # ===============
@@ -453,6 +512,31 @@
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
 #
+#   4. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.forward`
+#    Why:
+#       Eagle3 speculative decoding needs auxiliary hidden states from specific
+#       transformer layers of the target model.
+#    How：
+#       Extend `MiniMaxM2Model.forward` to optionally collect and return
+#       `(final_hidden_states, aux_hidden_states)` when `aux_hidden_state_layers`
+#       is set by the runtime.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream MiniMax-M2 integrates Eagle3 support.
+#
+#   5. `vllm.model_executor.models.minimax_m2.MiniMaxM2ForCausalLM`
+#    Why:
+#       vLLM core uses SupportsEagle3-style methods to configure which layers
+#       should emit auxiliary hidden states.
+#    How：
+#       Inject `set_aux_hidden_state_layers` and default-layer getters onto
+#       `MiniMaxM2ForCausalLM` so vLLM can configure the target model.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37512
+#    Future Plan:
+#       Remove this patch once upstream provides these methods on the model.
+#
 # ** 18. File: worker/patch_minimax_m2_linear_attn.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.__init__`
@@ -617,4 +701,47 @@
 #       Let vLLM support triton ops dispatch.
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
+# ** 27. File: worker/patch_qwen3vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3.Qwen3Attention.forward` and
+#      `vllm.model_executor.models.qwen3_moe.Qwen3MoeAttention.forward`
+#    Why:
+#       support triton_split_qkv_rmsnorm_mrope fused kernel for Qwen3Attention and Qwen3MoeAttention.
+#    How：
+#       override forward method with the triton_split_qkv_rmsnorm_mrope fused kernel,
+#       when using mrope.
+#    Future Plan:
+#       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
+# ** 28. File: worker/patch_qwen3vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
+#    Why:
+#       support flash comm v1 for qwen3vl.
+#    How：
+#       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
+#    Future Plan:
+#       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
 #
+# ** 29. File: worker/patch_qwen3_c8.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.load_weights`
+#    Why:
+#       The Qwen3 W8A8C8 model stores per-channel KV cache scales and offsets
+#       (k_cache_scale, k_cache_offset, v_cache_scale, v_cache_offset) under
+#       weight names that AutoWeightsLoader does not recognise and would
+#       silently discard.  Without these scales the INT8 KV cache cannot be
+#       dequantised correctly at inference time.
+#    How:
+#       Wrap load_weights to intercept the C8 scale/offset tensors before they
+#       reach the base loader.  Each intercepted tensor is routed to the
+#       corresponding nn.Parameter via its weight_loader, then excluded from
+#       the remaining weight stream so the base loader never sees it.
+#    Related PR (if no, explain why):
+#       This PR (Qwen3-32B W8A8C8 support).  Upstream vLLM's weight-loading
+#       pipeline does not yet have a generic hook for hardware-plugin-defined
+#       KV cache parameters.
+#    Future Plan:
+#       Remove this patch when vLLM provides a first-class extension point
+#       for loading extra KV cache quantisation parameters in model load_weights,
+#       or when the Qwen3 model's weight names are aligned with the parameter
+#       names expected by the quantisation backend.

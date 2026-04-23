@@ -267,8 +267,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 log2phy=log2phy,
                 pertoken_scale=pertoken_scale,
                 activation=activation,
-                w1_scale=[layer.fused_w1_scale] if fused_scale_flag else w1_scale,
-                w2_scale=[layer.fused_w2_scale] if fused_scale_flag else w2_scale,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:

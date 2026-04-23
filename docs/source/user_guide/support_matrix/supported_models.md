@@ -26,7 +26,10 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen3-Next                    | 🔵        |                                                                      | ✅ | A2/A3 | ✅ |||||| ✅ ||| ✅ || ✅ | ✅ ||| [Qwen3-Next](../../tutorials/models/Qwen3-Next.md) |
 | Qwen2.5                       | ✅        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ |||| ✅ ||| ✅ |||||| [Qwen2.5-7B](../../tutorials/models/Qwen2.5-7B.md) |
 | GLM-4.x                       | 🔵        |                                                                      || A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|198k||[GLM-4.x](../../tutorials/models/GLM4.x.md)|
+| GLM-5                         | 🔵        |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ || ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 198k || [GLM-5](../../tutorials/models/GLM5.md) |
 | Kimi-K2-Thinking              | 🔵        |                                                                      || A2/A3 |||||||||||||||| [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
+| MiniMax-M2.5                  | ✅        |                                                                      | ✅ | A2/A3 |✅|✅|✅|❌|✅|✅|✅|🟡|✅|✅|✅|✅|✅|192k|🟡| [MiniMax-M2.5](../../tutorials/models/MiniMax-M2.md) |
+| MiniMax-M2.7                  | ✅        |                                                                      | ✅ | A2/A3 |✅|✅|✅|❌|🔵|✅|✅|🟡|✅|✅|🟡|✅|✅|192k|🟡| [MiniMax-M2.7](../../tutorials/models/MiniMax-M2.md) |
 
 #### Extended Compatible Models
 
@@ -77,6 +80,8 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Qwen2.5-VL                     | ✅            |                                                                      | ✅ | A2/A3 | ✅ | ✅ | ✅ ||| ✅ | ✅ |||| ✅ | ✅ | ✅ | 30k || [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
 | Qwen3-VL                       | ✅            |                                                                      ||A2/A3|||||||✅|||||✅|✅||| [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
 | Qwen3-VL-MOE                   | ✅            |                                                                      | ✅ | A2/A3||✅|✅|||✅|✅|✅|✅|✅|✅|✅|✅|256k||[Qwen3-VL-MOE](../../tutorials/models/Qwen3-VL-235B-A22B-Instruct.md)|
+| Qwen3.5-397B-A17B              | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
+| Qwen3.5-27B                    | ✅            |                                                                      |✅| A2/A3 |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B.md) |
 | Qwen3-Omni-30B-A3B-Thinking    | 🔵            |                                                                      ||A2/A3|||||||✅||✅|||||||[Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md)|
 | Qwen2.5-Omni                   | 🔵            |                                                                      || A2/A3 |||||||||||||||| [Qwen2.5-Omni](../../tutorials/models/Qwen2.5-Omni.md) |
 

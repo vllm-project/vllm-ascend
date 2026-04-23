@@ -65,7 +65,7 @@ Online example:
 vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xlite_graph_config": {"enabled": true, "full_mode": true}}'
 ```
 
-You can find more details about Xlite [here](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)
+You can find more details about [Xlite](https://atomgit.com/openeuler/GVirt/blob/master/xlite/README.md)
 
 ## Fallback to the Eager Mode
 

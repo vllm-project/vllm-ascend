@@ -18,6 +18,8 @@
       "Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot",
       "Eco-Tech/Qwen3-30B-A3B-w8a8",
       "Eco-Tech/Kimi-K2.5-W4A8",
+      "Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot",
+      "Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-QuaRot",
       "Howeee/Qwen2.5-1.5B-apeach",
       "IntervitensInc/pangu-pro-moe-model",
       "IntervitensInc/pangu-pro-moe-modelt",
@@ -243,6 +245,9 @@
       "xlangai/OpenCUA-7B",
       "Eco-Tech/GLM-5-w4a8",
       "Eco-Tech/GLM-4.7-W8A8-floatmtp",
-      "MiniMax/MiniMax-M2.5"
+      "MiniMax/MiniMax-M2.5",
+      "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
+      "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
+      "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
     ]
   }

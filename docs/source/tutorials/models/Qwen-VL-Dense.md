@@ -328,7 +328,7 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 ```
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-Instruct model's max seq len (256000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-Instruct model's max seq len (256000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:
@@ -415,7 +415,7 @@ vllm serve Qwen/Qwen2.5-VL-32B-Instruct \
 ```
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-32B-Instruct model's max_model_len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-32B-Instruct model's max_model_len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:
@@ -474,8 +474,6 @@ The accuracy of some models is already within our CI monitoring scope, including
 - `Qwen2.5-VL-7B-Instruct`
 - `Qwen3-VL-8B-Instruct`
 
-You can refer to the [monitoring configuration](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a2.yaml).
-
 :::::{tab-set}
 :sync-group: install
 
@@ -486,28 +484,28 @@ As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy e
 
 1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
 
-```shell
-pip install lm_eval
-```
+    ```shell
+    pip install lm_eval
+    ```
 
 2. Run `lm_eval` to execute the accuracy evaluation.
 
-```shell
-lm_eval \
-    --model vllm-vlm \
-    --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
-    --tasks mmmu_val \
-    --batch_size 32 \
-    --apply_chat_template \
-    --trust_remote_code \
-    --output_path ./results
-```
+    ```shell
+    lm_eval \
+        --model vllm-vlm \
+        --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
+        --tasks mmmu_val \
+        --batch_size 32 \
+        --apply_chat_template \
+        --trust_remote_code \
+        --output_path ./results
+    ```
 
 3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
 
-|  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
-|---------|------:|------|-----:|------|---|-----:|---|-----:|
-|mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
+    |  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
+    |---------|------:|------|-----:|------|---|-----:|---|-----:|
+    |mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
 
 ::::
 ::::{tab-item} Qwen2.5-VL-32B-Instruct
@@ -517,27 +515,27 @@ As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy e
 
 1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
 
-```shell
-pip install lm_eval
-```
+    ```shell
+    pip install lm_eval
+    ```
 
 2. Run `lm_eval` to execute the accuracy evaluation.
 
-```shell
-lm_eval \
-    --model vllm-vlm \
-    --model_args pretrained=Qwen/Qwen2.5-VL-32B-Instruct,max_model_len=8192,tensor_parallel_size=2 \
-    --tasks mmmu_val \
-    --apply_chat_template \
-    --trust_remote_code \
-    --output_path ./results
-```
+    ```shell
+    lm_eval \
+        --model vllm-vlm \
+        --model_args pretrained=Qwen/Qwen2.5-VL-32B-Instruct,max_model_len=8192,tensor_parallel_size=2 \
+        --tasks mmmu_val \
+        --apply_chat_template \
+        --trust_remote_code \
+        --output_path ./results
+    ```
 
 3. After execution, you can get the result, here is the result of `Qwen2.5-VL-32B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
 
-|  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
-|---------|------:|------|-----:|------|---|-----:|---|-----:|
-|mmmu_val |      0|none  |      |acc   |↑  |0.5744|±  |0.0158|
+    |  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
+    |---------|------:|------|-----:|------|---|-----:|---|-----:|
+    |mmmu_val |      0|none  |      |acc   |↑  |0.5744|±  |0.0158|
 
 ::::
 :::::
@@ -546,7 +544,7 @@ lm_eval \
 
 ### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
