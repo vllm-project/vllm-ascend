@@ -55,7 +55,8 @@ def test_reranker_models_lora():
     # Corresponding documents to be scored against each query
     documents = [
         "The capital of China is Beijing.",
-        "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is responsible for the movement of planets around the sun.",
+        "Gravity is a force that attracts two bodies towards each other. It gives weight to physical objects and is "
+        "responsible for the movement of planets around the sun.",
     ]
 
     # Initialize the LLM model with the original Qwen3-Reranker configuration

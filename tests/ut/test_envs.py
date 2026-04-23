@@ -20,7 +20,6 @@ from tests.ut.base import TestBase
 
 
 class TestEnvVariables(TestBase):
-
     def setUp(self):
         self.env_vars = list(envs_ascend.env_variables.keys())
 
@@ -33,21 +32,19 @@ class TestEnvVariables(TestBase):
                 try:
                     if var_name in os.environ:
                         del os.environ[var_name]
-                    self.assertEqual(getattr(envs_ascend, var_name),
-                                     var_handler())
+                    self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if 'int(' in handler_source:
+                    if "int(" in handler_source:
                         test_vals = ["123", "456"]
-                    elif 'bool(int(' in handler_source:
+                    elif "bool(int(" in handler_source:
                         test_vals = ["0", "1"]
                     else:
                         test_vals = [f"test_{var_name}", f"custom_{var_name}"]
 
                     for test_val in test_vals:
                         os.environ[var_name] = test_val
-                        self.assertEqual(getattr(envs_ascend, var_name),
-                                         var_handler())
+                        self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                 finally:
                     if original_val is None:
