@@ -158,7 +158,7 @@ class KVPoolWorker:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
 
-        self.finished_store_req: set[str] = set()
+
 
         self.layer_load_tasks = [[] for i in range(self.num_layers)]
         self.layer_save_tasks = [[] for i in range(self.num_layers)]
@@ -263,7 +263,8 @@ class KVPoolWorker:
                 ready_event,
                 self.get_event,
                 self.layer_load_finished_events,
-                self.layer_save_finished_events
+                self.layer_save_finished_events,
+                self.num_layers,
             )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -595,22 +596,26 @@ class KVPoolWorker:
             )
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+        # TODO 这里需要确定要按照last chunk 进行判断，prefill完了还有decode，这里返回，decode是否还能正常继续？
         done_sending = (
-            # TODO 这里需要优化，可能需要使用 self.get_and_clear_finished_requests
-            self.get_and_clear_finished_requests(
-                finished_req_ids,
-                meta,  # type: ignore[union-attr]
-            )
+            self.kv_send_thread.get_and_clear_finished_requests()  # type: ignore[union-attr]
             if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
             else set()
         )
 
         done_recving = (
-            self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
-            )
+            self.kv_recv_thread.get_and_clear_finished_requests()  # type: ignore[union-attr]
             if self.load_async
             else set()
         )
+
+        for req_id in done_sending | done_recving:
+            self._cleanup_request_tracker(req_id)
+
+        for req_id in meta.preempted_req_ids:
+            self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
+                req_id
+            )
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
@@ -627,32 +632,7 @@ class KVPoolWorker:
         if load_tracker_key in self._request_addr_tracker:
             del self._request_addr_tracker[load_tracker_key]
 
-    def get_and_clear_finished_requests(self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
-        finished_sending = set()
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
-                req_id
-            )
-        for req_id in list(self.kv_send_thread.stored_requests):  # type: ignore[union-attr]
-            if req_id in self.finished_store_req and self.kv_send_thread.try_finish_and_delete_stored_request(  # type: ignore[union-attr]
-                req_id
-            ):
-                self.finished_store_req.remove(req_id)
-                finished_sending.add(req_id)
-                self._cleanup_request_tracker(req_id)
 
-        for req_id in finished_req_ids:
-            if self.kv_send_thread.try_finish_and_delete_stored_request(  # type: ignore[union-attr]
-                req_id
-            ):
-                finished_sending.add(req_id)
-                self._cleanup_request_tracker(req_id)
-            elif self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
-                req_id
-            ) is not None:
-                self.finished_store_req.add(req_id)
-
-        return finished_sending
 
     def lookup(
         self,
