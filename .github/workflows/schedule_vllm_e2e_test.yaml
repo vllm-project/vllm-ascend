@@ -20,11 +20,6 @@ name: E2E-upstream
 on:
   schedule:
     - cron: '0 8 * * 0' # every Sunday at 8:00
-  pull_request:
-    branches:
-      - 'main'
-      - '*-dev'
-      - 'releases/v*'
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
