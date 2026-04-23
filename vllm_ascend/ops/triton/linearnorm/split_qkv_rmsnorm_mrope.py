@@ -363,7 +363,7 @@ def triton_split_qkv_rmsnorm_mrope(
         IS_PARTIAL_ROPE,
         gate_size,
     )
-       
+
     return q_output, k_output, v_output, gate_output
 
 
