@@ -193,6 +193,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         if not keys:
             self.dec_stored_request(req_id)
+            if self.stored_requests.get(req_id, -1) == 0:
+                self.delete_finished_stored_request(req_id)
+                self.set_finished_request(req_id)
             self.request_queue.task_done()
             return
 
@@ -201,6 +204,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         if not missing_indices:
             self.dec_stored_request(req_id)
+            if self.stored_requests.get(req_id, -1) == 0:
+                self.delete_finished_stored_request(req_id)
+                self.set_finished_request(req_id)
             self.request_queue.task_done()
             return
 
@@ -262,6 +268,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.update_kv_event(stored_events)
 
         self.dec_stored_request(req_id)
+        if self.stored_requests.get(req_id, -1) == 0:
+            self.delete_finished_stored_request(req_id)
+            self.set_finished_request(req_id)
         self.request_queue.task_done()
 
 
@@ -408,6 +417,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         get_event: threading.Event,
         layer_load_finished_events: List[threading.Event],
         layer_save_finished_events: List[threading.Event],
+        num_layers: int,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheStoreLayerRecvingThread"
@@ -415,6 +425,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.get_event = get_event
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
+        self.final_layer_id = num_layers - 1
 
     def add_request(  # type: ignore[override]
         self, req_meta: LayerMultiBlockReqMeta
@@ -448,6 +459,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 size_list.extend(req_meta.size_list)
             if req_meta.gvas_list is not None:
                 gvas_list.extend(req_meta.gvas_list)
+            if layer_id == self.final_layer_id and req_meta.is_last_chunk:
+                self.set_finished_request(req_meta.req_id)
 
         gvas_list_c = _circular_shift(gvas_list, (self.tp_rank * len(gvas_list)) // self.tp_size)
         addr_list_c = _circular_shift(addr_list, (self.tp_rank * len(addr_list)) // self.tp_size)
