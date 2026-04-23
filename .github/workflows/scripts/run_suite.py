@@ -12,39 +12,39 @@ from ci_utils import TestFile, TestRecord, run_tests
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 _CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config.yaml"
 
-# Each entry: (config_path, path_prefix or None)
-# path_prefix is prepended to every test name when loading that config.
-_DEFAULT_CONFIGS: list[tuple[Path, str | None]] = [
-    (_CONFIG_PATH, None),
-    (_CONFIG_UPSTREAM, None),
+# Each entry: (config_path, is_upstream)
+# When is_upstream is True, sanity_check is skipped for tests from that config.
+_DEFAULT_CONFIGS: list[tuple[Path, bool]] = [
+    (_CONFIG_PATH, False),
+    (_CONFIG_UPSTREAM, True),
 ]
 
 
 def load_suites(
-    config_paths: list[tuple[Path, str | None]] | None = None,
-) -> dict[str, list[TestFile]]:
+    config_paths: list[tuple[Path, bool]] | None = None,
+) -> tuple[dict[str, list[TestFile]], set[str]]:
     """Load all test suites from config yaml files.
 
-    Each entry in config_paths is a (path, path_prefix) tuple.
-    path_prefix, when set, is prepended to every test name in that config
-    (e.g. "vllm-empty" turns "tests/foo.py" into "vllm-empty/tests/foo.py").
+    Each entry in config_paths is a (path, is_upstream) tuple.
+    Returns (all_suites, upstream_files) where upstream_files is the set of
+    test file names originating from upstream configs (sanity_check is skipped
+    for these).
     """
     if config_paths is None:
         config_paths = _DEFAULT_CONFIGS
 
     all_suites: dict[str, list[TestFile]] = {}
-    for config_path, path_prefix in config_paths:
+    upstream_files: set[str] = set()
+    for config_path, is_upstream in config_paths:
         if not config_path.exists():
             continue
-        print(f"Loading suites from {config_path}" + (f" (prefix: {path_prefix})" if path_prefix else ""))
+        print(f"Loading suites from {config_path}" + (" (upstream)" if is_upstream else ""))
         with open(config_path) as f:
             data = yaml.safe_load(f) or {}
         for suite_name, tests in data.items():
             files = []
             for entry in tests or []:
                 name = entry["name"]
-                if path_prefix:
-                    name = f"{path_prefix}/{name}"
                 files.append(
                     TestFile(
                         name=name,
@@ -53,11 +53,11 @@ def load_suites(
                 if is_upstream:
                     upstream_files.add(name.split("::")[0])
             all_suites[suite_name] = files
-    return all_suites, upstream_files
+    return all_suites
 =======
             all_suites[suite_name] = files
-    return all_suites
->>>>>>> c4ae8e4d... fix
+    return all_suites, upstream_files
+>>>>>>> 1c5c7d99... update run_suite.py schedule_vllm_e2e_test.yaml
 
 
 def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
@@ -117,18 +117,20 @@ def sanity_check(suites: dict[str, list[TestFile]], upstream_files: set[str]) ->
     1. Every local test file in any suite exists on disk.
     2. No test_*.py files exist on disk (in covered dirs) that are absent from all suites.
 
-    Files whose paths begin with an external prefix (e.g. "vllm-empty/") are skipped entirely —
-    they live in a separate checkout and we only register a subset of them.
+    Files from upstream configs are skipped — they live in a separate checkout
+    and we only register a subset of them.
     Raises SystemExit with a descriptive message on failure.
     """
-    external_prefixes = {prefix for _, prefix in _DEFAULT_CONFIGS if prefix}
+    if upstream_files:
+        return
     suite_files = {f.name.split("::")[0] for tests in suites.values() for f in tests}
 
-    # Only check files that belong to this repo (no external prefix).
-    local_files = {f for f in suite_files if not any(f.startswith(p + "/") for p in external_prefixes)}
-
+    # Only check files that belong to this repo (not from upstream configs).
+    local_files = suite_files - upstream_files
+    print("local_files>>>",local_files)
     root = _find_project_root()
     covered = _minimal_covered_dirs(local_files, root)
+    print("covered>>>",covered)
     disk_files = {str(p.relative_to(root)) for d in covered for p in (root / d).rglob("test_*.py")}
 
     missing_from_suite = sorted(disk_files - local_files)
@@ -140,7 +142,6 @@ def sanity_check(suites: dict[str, list[TestFile]], upstream_files: set[str]) ->
     if missing_from_disk:
         entries = "\n".join(f'  TestFile("{f}"),' for f in missing_from_disk)
         raise SystemExit(f"Test files listed in suite do not exist on disk:\n{entries}")
-
 
 def _print_plan(
     suite: str,
