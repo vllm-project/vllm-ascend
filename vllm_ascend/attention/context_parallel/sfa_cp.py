@@ -140,6 +140,10 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             elif self.speculative_config is not None and num_decodes > 0:
                 # when mtp, pcp_allgather_restore_idx=[696,-1,697,-1,560,-1,561,-1,100,101,102],
                 # slot_mapping should be [696,697,-1,-1,560,561,-1,-1,100,101,102]
+                # corner case: decode requests in the same MTP batch can have
+                # different query lengths when some drafts are clipped near
+                # max_model_len, so compact slot_mapping by per-request length
+                # instead of assuming each request has decode_threshold tokens.
                 decode_query_lens = long_seq_metadata.query_lens_pcp_full_cpu[:num_decodes]
                 decode_slot_mapping = self.slot_mapping_buf[: num_decode_tokens * self.pcp_size]
                 self._compact_varlen_decode_slot_mapping(
