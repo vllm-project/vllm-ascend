@@ -1,7 +1,7 @@
-import regex as re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import regex as re
 import requests
 
 
