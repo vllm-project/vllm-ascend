@@ -463,11 +463,8 @@ async def test_single_node(config: SingleNodeConfig) -> None:
                         _run_benchmarks(config, port, name_suffix=name_suffix, instance_idx=instance_idx)
                     return buf.getvalue()
 
-                loop = asyncio.get_event_loop()
-                out1, out2 = await asyncio.gather(
-                    loop.run_in_executor(None, lambda: _run_and_capture(config.server_port, f"instance1_{config.server_port}", 0)),
-                    loop.run_in_executor(None, lambda: _run_and_capture(config.server_port2, f"instance2_{config.server_port2}", 1)),
-                )
+                out1 = _run_and_capture(config.server_port, f"instance1_{config.server_port}", 0)
+                out2 = _run_and_capture(config.server_port2, f"instance2_{config.server_port2}", 1)
                 print(f"\n{'='*60}\nBenchmark - Instance 1 (port {config.server_port})\n{'='*60}")
                 print(out1)
                 print(f"\n{'='*60}\nBenchmark - Instance 2 (port {config.server_port2})\n{'='*60}")
