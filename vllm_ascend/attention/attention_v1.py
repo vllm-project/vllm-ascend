@@ -662,7 +662,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event.wait(stream)
         event.reset(stream)
         graph_params.events[num_tokens].append(event)
-        
+
         attn_params = (
             weak_ref_tensors(query),
             weak_ref_tensors(key),
