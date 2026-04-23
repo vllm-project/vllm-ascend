@@ -145,8 +145,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --data-parallel-size 2 \
@@ -161,7 +159,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'\
 ```
@@ -171,6 +169,7 @@ The parameters are explained as follows:
 
 - `--async-scheduling` Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
 - `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance.
 
 ### Multi-node Deployment
 
@@ -197,8 +196,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --host 0.0.0.0 \
@@ -222,7 +219,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --reasoning-parser glm45 \
   --tool-call-parser glm47 \
   --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
@@ -249,8 +246,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --host 0.0.0.0 \
@@ -275,7 +270,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --reasoning-parser glm45 \
   --tool-call-parser glm47 \
   --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
 ```
@@ -410,10 +405,7 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_ASCEND_BALANCE_SCHEDULING=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -435,7 +427,7 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
@@ -476,10 +468,7 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_ASCEND_BALANCE_SCHEDULING=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -501,14 +490,14 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_producer",
-            "kv_port": "30000",
-            "engine_id": "0",
+            "kv_port": "30100",
+            "engine_id": "1",
             "kv_connector_extra_config": {
                         "prefill": {
                                 "dp_size": 2,
@@ -545,9 +534,7 @@ Before you start, please
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-        export VLLM_ASCEND_BALANCE_SCHEDULING=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -569,12 +556,12 @@ Before you start, please
             --async-scheduling \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
-            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
             --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
@@ -617,9 +604,7 @@ Before you start, please
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-        export VLLM_ASCEND_BALANCE_SCHEDULING=1
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
@@ -641,7 +626,7 @@ Before you start, please
             --async-scheduling \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "model":"Eco-Tech/GLM-4.7-W8A8-floatmtp", "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
