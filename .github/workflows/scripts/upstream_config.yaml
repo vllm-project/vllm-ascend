@@ -501,11 +501,7 @@ e2e-upstream-singlecard:
     estimated_time: 20
   - name: tests/v1/worker/test_late_interaction_runner.py
     estimated_time: 20
-  - name: tests/entrypoints/pooling/classify/test_online_vision.py
-    estimated_time: 20
   - name: tests/compile/fullgraph/test_multiple_graphs.py
     estimated_time: 20
   - name: tests/compile/fullgraph/test_toy_llama.py
-    estimated_time: 20
-  - name: tests/entrypoints/rpc/test_collective_rpc.py
     estimated_time: 20
