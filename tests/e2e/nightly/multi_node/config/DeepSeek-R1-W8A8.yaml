@@ -13,7 +13,6 @@ env_common:
   HCCL_DETERMINISTIC: True
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_RETRY_ENABLE: "L0:0, L1:0, L2:0"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: 2
 
 disaggregated_prefill:
   enabled: true
