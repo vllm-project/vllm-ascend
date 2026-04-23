@@ -9,6 +9,7 @@ from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
+from vllm_ascend.worker.v2.spec_decode.eagle.speculator import prepare_eagle_decode
 
 penalties.apply_penalties = apply_penalties
 # because sampler.py and speculator.py are imported before this patch, they must be overridden
@@ -20,6 +21,7 @@ rejection_sampler.compute_topk_logprobs = compute_topk_logprobs
 states.apply_min_p = apply_min_p
 penalties.bincount = bincount
 speculator.gumbel_sample = gumbel_sample
+speculator.prepare_eagle_decode = prepare_eagle_decode
 model_runner.post_update = post_update
 bad_words.apply_bad_words = apply_bad_words
 gumbel.apply_temperature = apply_temperature
