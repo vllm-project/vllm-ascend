@@ -88,7 +88,7 @@ export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export TASK_QUEUE_ENABLE=1
 export TOKENIZERS_PARALLELISM=false
 
-vllm serve /weights/DeepSeek-OCR-2 \
+vllm serve /root/.cache/DeepSeek-OCR-2 \
     --served-model-name deepseekocr2 \
     --trust-remote-code \
     -tp 1  \
