@@ -117,6 +117,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_CACHE_REUSE_LAYERS": lambda: bool(
         int(os.getenv("VLLM_KV_CACHE_REUSE_LAYERS", "0"))
     ),
+    # The DRAM size allocated for KV pool storage (e.g., "2GB", "512MB", "1073741824").
+    # Used to calculate LRU cache capacity for KV block management.
+    # If not set, defaults to "0" which means LRU capacity falls back to a fixed value.
+    "VLLM_ASCEND_KV_POOL_DRAM_SIZE": lambda: os.getenv("VLLM_ASCEND_KV_POOL_DRAM_SIZE", "0"),
 }
 
 # end-env-vars-definition
