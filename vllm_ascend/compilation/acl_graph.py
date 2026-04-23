@@ -165,8 +165,10 @@ class ACLGraphWrapper:
             # to save memory
             global _graph_params
             global _draft_graph_params
+            global _draft_graph_prefill_params
             weak_ref_workspaces(_graph_params)
             weak_ref_workspaces(_draft_graph_params)
+            weak_ref_workspaces(_draft_graph_prefill_params)
 
             # here we always use weak ref for the output
             # to save memory
@@ -291,3 +293,28 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
 
 def get_draft_graph_params():
     return _draft_graph_params
+
+
+_draft_graph_prefill_params: GraphParams | None = None
+
+
+def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
+    global _draft_graph_prefill_params
+    if _draft_graph_prefill_params is not None:
+        raise ValueError("DraftGraph preill parameters have already been set!")
+    _draft_graph_prefill_params = GraphParams(
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+    )
+
+
+def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any):
+    global _draft_graph_prefill_params
+    if _draft_graph_prefill_params is not None:
+        _draft_graph_prefill_params.workspaces[num_tokens] = workspace
+
+
+def get_draft_graph_prefill_params():
+    return _draft_graph_prefill_params
