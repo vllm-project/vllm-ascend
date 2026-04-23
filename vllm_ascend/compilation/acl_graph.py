@@ -123,6 +123,7 @@ class ACLGraphWrapper:
     def clear_graphs(self) -> None:
         for batch_descriptor in self.concrete_aclgraph_entries:
             entry = self.concrete_aclgraph_entries[batch_descriptor]
+            assert entry.aclgraph is not None
             entry.aclgraph.reset()
             del entry.aclgraph, entry.batch_descriptor, entry.output, entry.input_addresses, entry
         self.concrete_aclgraph_entries.clear()
