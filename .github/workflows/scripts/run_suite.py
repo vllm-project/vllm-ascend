@@ -204,7 +204,7 @@ def _save_timing_json(
 
 
 def main() -> None:
-    suites = load_suites()
+    suites, upstream_files = load_suites()
 
     parser = argparse.ArgumentParser(description="Run a named e2e test suite")
     parser.add_argument(
@@ -247,7 +247,7 @@ timing data to improve estimates.",
     )
     args = parser.parse_args()
 
-    sanity_check(suites)
+    sanity_check(suites, upstream_files)
 
     all_files = suites[args.suite]
     skipped = [f for f in all_files if f.is_skipped]
