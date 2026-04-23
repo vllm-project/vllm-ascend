@@ -117,11 +117,11 @@ class _FakeAggregator:
 
 
 _events_mod.KVEventAggregator = _FakeAggregator  # type: ignore[attr-defined]
-_events_mod.BlockStored = type(
+_events_mod.BlockStored = type(  # type: ignore[attr-defined]
     "BlockStored",
     (),
     {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
-)  # type: ignore[attr-defined]
+)
 
 _kv_cache_utils_mod = sys.modules["vllm.v1.core.kv_cache_utils"]
 _kv_cache_utils_mod.BlockHash = bytes  # type: ignore[attr-defined]
