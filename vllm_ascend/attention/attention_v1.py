@@ -527,9 +527,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Keep the captured block_tables tensor on this affected path.
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
-                        if hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
-                            block_tables = block_tables
-                        else:
+                        if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
                             block_tables = attn_metadata[key].block_tables
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
