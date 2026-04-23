@@ -25,8 +25,15 @@ to get specific plans.
 
     Location: `utils.torch_cuda_wrapper`, `utils.torch_npu_graph_wrapper`.
 
-- [ ] `graph_manager_wrapper`
+- [ ] `model_runner.graph_manager_wrapper`
 
     Why: ModelAclGraphManager needs model_runner's input_buffers and model_state.attn_metadata to update_full_graph_params, so model_runner should be passed into __init__ of ModelAclGraphManager.
 
     Location: `model_runner.NPUModelRunner.initialize_kv_cache`.
+
+- [ ] `speculator.graph_manager_wrapper`
+
+    Why: EagleAclGraphManager needs speculator's input_buffers and model_state.attn_metadata to update_full_graph_params, so speculator should be passed into __init
+    __ of EagleAclGraphManager.
+
+    Location: `speculator.AscendEagleSpeculator.init_cudagraph_manager`.
