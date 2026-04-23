@@ -85,11 +85,11 @@ class KVTransferThread(threading.Thread):
                 logger.warning("Received a None request!")
                 self.request_queue.task_done()
                 continue
-            try:
-                self._handle_request(request_data)
-            except Exception as e:
-                logger.error("Error in KVCacheTransferThread: %s", e)
-                self.request_queue.task_done()
+            # try:
+            self._handle_request(request_data)
+            # except Exception as e:
+            #     logger.error("Error in KVCacheTransferThread: %s", e)
+            #     self.request_queue.task_done()
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -389,6 +389,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         if res != 0:
             logger.error("Layerwise %d save batch_copy failed with return code %d", layer_id, res)
         assert not self.layer_save_finished_events[layer_id].is_set(), f"thread: {layer_id} save failed "
+        logger.debug(f">>>>>>>>>>>>>>>>>>>> set save layer {layer_id}")
         self.layer_save_finished_events[layer_id].set()
         req_metas.clear()
 
@@ -430,10 +431,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             is_finish = self.layer_save_finished_events[wait_for_save].wait(timeout=10)
             if not is_finish:
                 logger.info("Layerwise %d save wait timed out", wait_for_save)
+            logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {wait_for_save}")
             self.layer_save_finished_events[wait_for_save].clear()
 
         if len(req_metas) == 0:
             assert not self.layer_load_finished_events[layer_id].is_set()
+            logger.debug(f">>>>>>>>>>>>>>>>>>>> set load layer {layer_id}")
             self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
             return
@@ -456,6 +459,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         if res != 0:
             logger.error("Layerwise %d load batch_copy failed with return code %d", layer_id, res)
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
+        logger.debug(f">>>>>>>>>>>>>>>>>>>> set load layer {layer_id}")
         self.layer_load_finished_events[layer_id].set()
         req_metas.clear()
         self.request_queue.task_done()

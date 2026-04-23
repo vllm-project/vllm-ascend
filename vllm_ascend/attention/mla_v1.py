@@ -1219,6 +1219,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         value: torch.Tensor,
         kv_c_and_k_pe_cache: tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
+        layer_name
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
         assert len(kv_c_and_k_pe_cache) > 1
@@ -1258,7 +1259,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths_q,
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
-
+        wait_for_kv_layer_from_connector(layer_name)
         attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(q_nope, k_nope, value, **common_kwargs)
 
         attn_output, attn_lse = self._compute_prefill_context(
@@ -1595,7 +1596,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_preprocess_res = None
         prefill_preprocess_res = None
         # if has_prefill:
-        wait_for_kv_layer_from_connector(layer_name)
+        # wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
         if self.is_kv_producer and not self.is_kv_both:
             attn_metadata.reshape_cache_event = torch.npu.Event()
@@ -1677,6 +1678,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
+            # TODO prefill kv offload need to remove
+            wait_for_kv_layer_from_connector(layer_name)
             output_decode = self._forward_decode(
                 decode_preprocess_res.ql_nope,
                 decode_preprocess_res.q_pe,
@@ -1701,6 +1704,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_preprocess_res.value,
                 kv_cache,
                 attn_metadata,
+                layer_name
             )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
