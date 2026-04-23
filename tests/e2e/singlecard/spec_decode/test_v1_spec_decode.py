@@ -182,7 +182,7 @@ def test_ngram_npu_async_correctness(
             "num_speculative_tokens": 3,
         },
         max_model_len=1024,
-        async_scheduling=False,
+        async_scheduling=True,
         cudagraph_capture_sizes=[1, 2, 4, 8],
     ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
