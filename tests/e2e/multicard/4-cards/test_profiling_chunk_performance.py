@@ -50,8 +50,18 @@ def test_profiling_chunk_ttft_performance() -> None:
         distributed_executor_backend="mp",
         enforce_eager=True,
         async_scheduling=False,
-        additional_config={"profiling_chunk_config": {"enabled":True, "smooth_factor":0.9}, "enable_cpu_binding": False},
-        hf_overrides={"rope_parameters": {"rope_type":"yarn","rope_theta":1000,"factor":5,"original_max_position_embeddings":262144}}
+        additional_config={
+            "profiling_chunk_config": {"enabled": True, "smooth_factor": 0.9},
+            "enable_cpu_binding": False,
+        },
+        hf_overrides={
+            "rope_parameters": {
+                "rope_type": "yarn",
+                "rope_theta": 1000,
+                "factor": 5,
+                "original_max_position_embeddings": 262144,
+            }
+        },
     ) as vllm_model:
         # With max_tokens=1, total latency ≈ prefill time ≈ TTFT
         prompts = [INPUT_64K_TOKENS]

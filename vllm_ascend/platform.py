@@ -241,7 +241,7 @@ class NPUPlatform(Platform):
             return
 
         kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is not None and kv_transfer_config.kv_role != "kv_producer":
+        if kv_transfer_config is None or kv_transfer_config.kv_role != "kv_producer":
             raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
@@ -445,7 +445,36 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is None or kv_role != "kv_consumer":
+                raise ValueError(
+                    "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) only supports PD-disaggregated "
+                    "decode nodes (D-side) with kv_role='kv_consumer'. It is not supported "
+                    "in PD-mixed mode (no kv_transfer_config / kv_role='kv_both') nor on "
+                    "prefill nodes (P-side) with kv_role='kv_producer'."
+                )
+
+        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is not None and kv_role != "kv_both":
+                raise ValueError(
+                    "VLLM_ASCEND_BALANCE_SCHEDULING (balance scheduling) only supports PD-mixed mode "
+                    "(kv_role='kv_both' or no kv_transfer_config), and is not supported in "
+                    "PD-disaggregated mode (kv_role='kv_producer'/'kv_consumer')."
+                )
+
         if ascend_config.recompute_scheduler_enable:
+            kv_transfer_config = vllm_config.kv_transfer_config
+            kv_role = getattr(kv_transfer_config, "kv_role", None)
+            if kv_transfer_config is None or kv_role == "kv_both":
+                raise ValueError(
+                    "recompute_scheduler_enable can only be enabled in PD-disaggregated mode "
+                    "(kv_role='kv_producer' or 'kv_consumer'), and is not supported in PD-mixed mode."
+                )
+
             from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
@@ -888,6 +917,27 @@ class NPUPlatform(Platform):
                     "ignored on Ascend. Resetting to default (32)."
                 )
                 att_config.flash_attn_max_num_splits_for_cuda_graph = 32
+
+        # ==================== 9. Parallel Config ====================
+        if vllm_config.parallel_config:
+            if getattr(vllm_config.parallel_config, "enable_dbo", False):
+                logger.warning(
+                    "'--enable-dbo' is currently ignored on Ascend NPU because the "
+                    "upstream generic DBO path has not yet aligned with the Ascend "
+                    "backend/runtime model. Ascend may use separate backend/model-"
+                    "specific overlap optimizations, and this may converge as the "
+                    "generic overlap framework evolves. Resetting to False."
+                )
+                vllm_config.parallel_config.enable_dbo = False
+
+            ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
+            if ubatch_size != 0:
+                logger.warning(
+                    "'--ubatch-size' is currently ignored on Ascend NPU because it "
+                    "depends on the generic DBO path, which is not yet aligned with "
+                    "the current Ascend backend/runtime model. Resetting to 0."
+                )
+                vllm_config.parallel_config.ubatch_size = 0
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
