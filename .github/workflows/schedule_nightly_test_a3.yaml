@@ -78,65 +78,27 @@ jobs:
     uses: ./.github/workflows/_parse_trigger.yaml
     with:
       test_cases: ${{ github.event_name == 'workflow_dispatch' && inputs.test_cases || '' }}
+      nightly_test_branch: '["releases/v0.18.0"]'
+      nightly_image_branch: '["main", "releases/v0.18.0"]'
 
   setup-vars:
     name: Export global env vars as job outputs
     needs: parse-trigger
-    runs-on: linux-aarch64-a2b3-0
-    outputs:
-      ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
-      vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
-      single_node_configs: ${{ steps.list-configs.outputs.single_node_configs }}
-      multi_node_configs: ${{ steps.list-configs.outputs.multi_node_configs }}
-    steps:
-      - id: export
-        run: |
-          {
-            echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              base_ref="${{ github.base_ref }}"
-              if [[ "$base_ref" == releases/* ]]; then
-                normalized=$(echo "$base_ref" | tr '/' '-')
-                echo "vllm_ascend_branches=[\"${normalized}\"]"
-                echo "vllm_ascend_branch_ref=$base_ref"
-              else
-                echo 'vllm_ascend_branches=["main"]'
-                echo "vllm_ascend_branch_ref=main"
-              fi
-            elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              input_branch="${{ inputs.vllm_ascend_branch }}"
-              normalized=$(echo "$input_branch" | tr '/' '-')
-              echo "vllm_ascend_branches=[\"${normalized}\"]"
-              echo "vllm_ascend_branch_ref=$input_branch"
-            else
-              echo 'vllm_ascend_branches=["main"]'
-            fi
-          } >> $GITHUB_OUTPUT
-
-      - uses: actions/checkout@v6
-        if: needs.parse-trigger.outputs.run == 'true' && steps.export.outputs.vllm_ascend_branch_ref != 'main'
-        with:
-          ref: ${{ steps.export.outputs.vllm_ascend_branch_ref }}
-          fetch-depth: 1
-
-      - name: List existing config files
-        id: list-configs
-        if: needs.parse-trigger.outputs.run == 'true' && steps.export.outputs.vllm_ascend_branch_ref != 'main'
-        run: |
-          single=$(find tests/e2e/nightly/single_node/models/configs/ -maxdepth 1 -name '*.yaml' -printf '%f\n' 2>/dev/null | paste -sd',' - || echo '')
-          multi=$(find tests/e2e/nightly/multi_node/config/ -maxdepth 1 -name '*.yaml' -printf '%f\n' 2>/dev/null | paste -sd',' - || echo '')
-          echo "single_node_configs=$single" >> $GITHUB_OUTPUT
-          echo "multi_node_configs=$multi" >> $GITHUB_OUTPUT
+    uses: ./.github/workflows/_setup_vars.yaml
+    with:
+      run: ${{ needs.parse-trigger.outputs.run }}
+      vllm_ascend_branch: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || needs.parse-trigger.outputs.nightly_test_branch }}
 
   build-image:
     name: Build nightly-a3 image
+    needs: parse-trigger
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
         vllm_ascend_branch: >-
-          ${{ github.event_name == 'workflow_dispatch' 
+          ${{ github.event_name == 'workflow_dispatch'
               && fromJSON(format('["{0}"]', inputs.vllm_ascend_branch))
-              || fromJSON('["main"]') }}
+              || fromJSON(needs.parse-trigger.outputs.nightly_image_branch) }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
