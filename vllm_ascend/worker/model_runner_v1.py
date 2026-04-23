@@ -92,7 +92,8 @@ from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 
 # yapf conflicts with isort for this block
@@ -349,6 +350,17 @@ class NPUModelRunner(GPUModelRunner):
         self._positions_np_buf = self._positions_cpu_buf.numpy()
 
         self._set_up_drafter()
+
+        # Event for async GPU→CPU copy of corrected seq_lens in async
+        # spec decode mode. Recorded in _prepare_inputs, synchronized
+        # in _build_attention_metadata. Created once, reused each iteration.
+        # Only backends that consume CPU seq_lens (AscendAttentionBackend,
+        # AscendMLABackend) need this; others (SFA, GDN, etc.) do not.
+        self._needs_seq_lens_cpu_sync = issubclass(
+            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
+        )
+        self._seq_lens_cpu_event: torch.npu.Event | None = None
+        self._seq_lens_cpu_event_pending = False
 
         # kv role
         self.is_kv_producer = False
@@ -833,9 +845,24 @@ class NPUModelRunner(GPUModelRunner):
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            self.num_accepted_tokens.np[:num_reqs] = (
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-            )
+            # Async mode: condense() reordered indices, use prev_positions mapping
+            if self.use_async_scheduling and prev_req_id_to_index:
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[
+                        np.where(new_mask, 0, prev_idx)
+                    ]
+                )
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                    self.num_accepted_tokens.np[:num_reqs]
+                )
+            else:
+                # Non-async mode: use values directly
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
@@ -899,6 +926,29 @@ class NPUModelRunner(GPUModelRunner):
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
+
+        # In async spec decode mode, num_computed_tokens was corrected on GPU
+        # by update_num_computed_tokens_for_batch_change, so seq_lens (GPU) is
+        # correct but optimistic_seq_lens_cpu is stale (it assumed all drafts
+        # were accepted). Sync the corrected values back to CPU so that NPU
+        # attention backends (which use _seq_lens_cpu) get the right values.
+        # Use non_blocking copy to pinned memory and record an event;
+        # _build_attention_metadata will synchronize before reading.
+        if (
+            self._needs_seq_lens_cpu_sync
+            and self.use_async_spec_decode
+            and self.valid_sampled_token_count_gpu is not None
+            and prev_req_id_to_index
+        ):
+            self.optimistic_seq_lens_cpu[:num_reqs].copy_(
+                self.seq_lens[:num_reqs], non_blocking=True
+            )
+            if self._seq_lens_cpu_event is None:
+                self._seq_lens_cpu_event = torch.npu.Event()
+            self._seq_lens_cpu_event.record()
+            self._seq_lens_cpu_event_pending = True
+        else:
+            self._seq_lens_cpu_event_pending = False
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
@@ -1256,7 +1306,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 assert self.drafter is not None
                 next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
-                    self.optimistic_seq_lens_cpu,
                     sampled_token_ids,
                     self.requests,
                     self.input_batch,
@@ -2262,6 +2311,13 @@ class NPUModelRunner(GPUModelRunner):
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+
+        # Ensure the async GPU→CPU copy of corrected seq_lens (launched in
+        # _prepare_inputs) has completed before we read optimistic_seq_lens_cpu.
+        if self._seq_lens_cpu_event_pending and self._seq_lens_cpu_event is not None:
+            self._seq_lens_cpu_event.synchronize()
+            self._seq_lens_cpu_event_pending = False
+
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
             # to make sure the backend see a max_seq_len that is larger to the sliding
