@@ -100,7 +100,7 @@ class TestDecodeMLAPreprocessResult(TestBase):
             k_nope=k_nope,
             k_pe=k_pe,
             decode_q_wo_k_up=decode_q_wo_k_up,
-            dequant_scale_q_nope=dequant_scale_q_nope
+            dequant_scale_q_nope=dequant_scale_q_nope,
         )
 
         self.assertIs(result.ql_nope, ql_nope)
@@ -127,13 +127,7 @@ class TestPrefillMLAPreprocessResult(TestBase):
         k_pe = torch.randn(2, 4, 8)
         value = torch.randn(2, 4, 8)
 
-        result = PrefillMLAPreprocessResult(
-            q_nope=q_nope,
-            q_pe=q_pe,
-            k_nope=k_nope,
-            k_pe=k_pe,
-            value=value
-        )
+        result = PrefillMLAPreprocessResult(q_nope=q_nope, q_pe=q_pe, k_nope=k_nope, k_pe=k_pe, value=value)
 
         self.assertIs(result.q_nope, q_nope)
         self.assertIs(result.q_pe, q_pe)
@@ -1263,7 +1257,16 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch.npu.graph_task_update_end")
     @patch("torch_npu.npu_fused_infer_attention_score_v2.out")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_update_graph_params(self, mock_get_forward_context, mock_fia, mock_update_end, mock_update_begin, mock_stream, mock_get_graph_params, mock_get_draft_graph_params):
+    def test_update_graph_params(
+        self,
+        mock_get_forward_context,
+        mock_fia,
+        mock_update_end,
+        mock_update_begin,
+        mock_stream,
+        mock_get_graph_params,
+        mock_get_draft_graph_params,
+    ):
         mock_update_stream = MagicMock()
         mock_forward_context = MagicMock()
         mock_attn_metadata = MagicMock()
@@ -1274,7 +1277,31 @@ class TestAscendMLAImpl(TestBase):
 
         mock_graph_params = MagicMock()
         # 提供18个参数，与代码中期望的数量匹配
-        mock_graph_params.attn_params = {100: [(MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock())]}
+        mock_graph_params.attn_params = {
+            100: [
+                (
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                ),
+            ]
+        }
         mock_graph_params.handles = {100: [MagicMock()]}
         mock_graph_params.events = {100: [MagicMock()]}
         mock_graph_params.workspaces = {100: MagicMock()}
@@ -1292,11 +1319,22 @@ class TestAscendMLAImpl(TestBase):
 
         # Test non-draft model
         mock_ctx.is_draft_model = False
-        AscendMLAImpl.update_graph_params(mock_update_stream, mock_forward_context, 100, speculative_config=mock_speculative_config)
+        AscendMLAImpl.update_graph_params(
+            mock_update_stream
+            mock_forward_context,
+            100,
+            speculative_config=mock_speculative_config,
+        )
 
         # Test draft model
         mock_ctx.is_draft_model = True
-        AscendMLAImpl.update_graph_params(mock_update_stream, mock_forward_context, 100, draft_attn_metadatas=[{"layer_0": mock_attn_metadata}], speculative_config=mock_speculative_config)
+        AscendMLAImpl.update_graph_params(
+            mock_update_stream,
+            mock_forward_context,
+            100,
+            draft_attn_metadatas=[{"layer_0": mock_attn_metadata}],
+            speculative_config=mock_speculative_config,
+        )
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_update_graph_params_empty_layers(self, mock_get_forward_context):
@@ -1320,7 +1358,15 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch.npu.graph_task_update_begin")
     @patch("torch.npu.stream")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_update_graph_params_with_mtp(self, mock_get_forward_context, mock_npu_stream, mock_graph_task_update_begin, mock_graph_task_update_end, mock_npu_fused_infer, mock_get_graph_params):
+    def test_update_graph_params_with_mtp(
+        self,
+        mock_get_forward_context,
+        mock_npu_stream,
+        mock_graph_task_update_begin,
+        mock_graph_task_update_end,
+        mock_npu_fused_infer,
+        mock_get_graph_params,
+    ):
         # 测试当speculative_config存在且method为"mtp"时的分支
         mock_update_stream = MagicMock()
         mock_forward_context = MagicMock()
@@ -1347,7 +1393,33 @@ class TestAscendMLAImpl(TestBase):
         # 模拟get_graph_params
         mock_graph_params = MagicMock()
         # 提供18个参数，与代码中期望的数量匹配
-        mock_graph_params.attn_params = {100: [(MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock())]}
+        mock_graph_params.attn_params = {
+            100: [
+                (
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock()
+                ),
+            ]
+        }
         mock_graph_params.handles = {100: [MagicMock()]}
         mock_graph_params.events = {100: [MagicMock()]}
         mock_get_graph_params.return_value = mock_graph_params
@@ -1358,7 +1430,9 @@ class TestAscendMLAImpl(TestBase):
         mock_speculative_config.num_speculative_tokens = 4
 
         # 调用update_graph_params方法
-        AscendMLAImpl.update_graph_params(mock_update_stream, mock_forward_context, 100, speculative_config=mock_speculative_config)
+        AscendMLAImpl.update_graph_params(
+            mock_update_stream, mock_forward_context, 100, speculative_config=mock_speculative_config
+        )
 
     @patch("vllm_ascend.attention.mla_v1.get_draft_graph_params")
     @patch("torch_npu.npu_fused_infer_attention_score_v2")
@@ -1366,7 +1440,15 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch.npu.graph_task_update_begin")
     @patch("torch.npu.stream")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_update_graph_params_with_disable_padded_drafter_batch(self, mock_get_forward_context, mock_npu_stream, mock_graph_task_update_begin, mock_graph_task_update_end, mock_npu_fused_infer, mock_get_draft_graph_params):
+    def test_update_graph_params_with_disable_padded_drafter_batch(
+        self,
+        mock_get_forward_context,
+        mock_npu_stream,
+        mock_graph_task_update_begin,
+        mock_graph_task_update_end,
+        mock_npu_fused_infer,
+        mock_get_draft_graph_params,
+    ):
         # 测试当speculative_config.disable_padded_drafter_batch为True时的分支
         mock_update_stream = MagicMock()
         mock_forward_context = MagicMock()
@@ -1394,7 +1476,30 @@ class TestAscendMLAImpl(TestBase):
         # 模拟get_draft_graph_params
         mock_graph_params = MagicMock()
         # 提供18个参数，与代码中期望的数量匹配
-        mock_graph_params.attn_params = {100: [(MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock())]}
+        mock_graph_params.attn_params = {
+            100: [
+                (
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                    MagicMock(),
+                ),
+            ]
+        }
         mock_graph_params.handles = {100: [MagicMock()]}
         mock_graph_params.events = {100: [MagicMock()]}
         mock_get_draft_graph_params.return_value = mock_graph_params
@@ -1404,7 +1509,13 @@ class TestAscendMLAImpl(TestBase):
         mock_speculative_config.disable_padded_drafter_batch = True
 
         # 调用update_graph_params方法
-        AscendMLAImpl.update_graph_params(mock_update_stream, mock_forward_context, 100, draft_attn_metadatas=[{"layer_0": mock_attn_metadata}], speculative_config=mock_speculative_config)
+        AscendMLAImpl.update_graph_params(
+            mock_update_stream,
+            mock_forward_context,
+            100,
+            draft_attn_metadatas=[{"layer_0": mock_attn_metadata}],
+            speculative_config=mock_speculative_config,
+        )
 
     def test_get_context_seq_len_npu(self):
         mock_attn_metadata = MagicMock()
@@ -1459,7 +1570,9 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.transdata")
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.attention.mla_v1.torch_npu")
-    def test_process_weights_for_fused_mlapo(self, mock_torch_npu, mock_format_cast, mock_transdata, mock_trans_rope_weight):
+    def test_process_weights_for_fused_mlapo(
+        self, mock_torch_npu, mock_format_cast, mock_transdata, mock_trans_rope_weight
+    ):
         mock_format_cast.return_value = torch.randn(1, 128, 128)
         mock_transdata.return_value = torch.randn(128, 128)
         # 模拟trans_rope_weight返回正确形状的张量
@@ -1497,7 +1610,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj = MagicMock()
         self.impl.q_proj.weight.data = torch.randn(128, 128)
         # 设置device属性为一个有效的torch.device对象
-        self.impl.q_proj.weight.device = torch.device('cpu')
+        self.impl.q_proj.weight.device = torch.device("cpu")
         # 设置正确的deq_scale大小，使其能被256 * 64整除
         # 256 * 64 = 16384，所以deq_scale的大小应该是16384
         self.impl.q_proj.deq_scale.data = torch.randn(256 * 64)
@@ -1586,10 +1699,16 @@ class TestAscendMLAImpl(TestBase):
         mock_device_operator.mla_cache_load = MagicMock()
         
         # 模拟torch_npu.npu_fused_infer_attention_score
-        mock_fia.return_value = (torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim), torch.randn(self.impl.num_heads, batch_size))
+        mock_fia.return_value = (
+            torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim),
+            torch.randn(self.impl.num_heads, batch_size),
+        )
         
         # 模拟torch_npu.npu_attention_update
-        mock_npu_attention_update.return_value = (torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim), None)
+        mock_npu_attention_update.return_value = (
+            torch.randn(batch_size, self.impl.num_heads, self.impl.v_head_dim),
+            None,
+        )
         
         # 模拟kv_b_proj方法，让它返回一个包含正确形状张量的元组
         mock_kv_b_proj = MagicMock()
@@ -1791,7 +1910,9 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.post_process_after_loading_for_shard_weight_series")
     @patch("vllm_ascend.attention.mla_v1.is_hidden_layer")
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_after_loading_with_layer_sharding(self, mock_format_cast, mock_is_hidden_layer, mock_post_process):
+    def test_process_weights_after_loading_with_layer_sharding(
+        self, mock_format_cast, mock_is_hidden_layer, mock_post_process
+    ):
         # 测试当layer_sharding_kwargs不为空时的分支
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
