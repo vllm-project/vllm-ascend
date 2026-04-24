@@ -1369,7 +1369,7 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 logger.warning("RoutedExpertsCapturer is not initialized.")
 
-        if self.ascend_config.profiling_chunk_config.enabled:
+        if self.ascend_config.profiling_chunk_config.need_timing:
             self._sync_device()
             self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
@@ -1850,7 +1850,7 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
         )
-        if self.ascend_config.profiling_chunk_config.enabled and hasattr(self, '_execution_start_time'):
+        if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
 

@@ -53,6 +53,17 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
     if profiling_mgr is None or not profiling_mgr.is_ready:
         return
 
+    # Once both the target latency and history model are calibrated,
+    # stop collecting timing data and disable the synchronize-and-time
+    # calls in the model runner to avoid unnecessary pipeline stalls.
+    if profiling_mgr._set_time_done and profiling_mgr.predictor.history_fitted:
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+            get_ascend_config().profiling_chunk_config.need_timing = False
+        except RuntimeError:
+            pass
+        return
+
     elapsed_time_ms = getattr(model_output, "execution_time_ms", 0.0)
     if elapsed_time_ms <= 0:
         return
