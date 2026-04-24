@@ -164,6 +164,8 @@ def quant_apply_mlp(
                     x_scale=pertoken_scale,
                     bias=None,
                     use_mxfp_quant=use_mxfp_quant,
+                    act_quant_type=act_quant_type,
+                    weight_quant_type=weight_quant_type,
                 )
             else:
                 antiquant_scale = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
@@ -292,6 +294,8 @@ def quant_apply_mlp(
                     x_scale=pertoken_scale,
                     bias=bias1,
                     use_mxfp_quant=use_mxfp_quant,
+                    act_quant_type=act_quant_type,
+                    weight_quant_type=weight_quant_type,
                 )
             else:
                 antiquant_scale = _require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale")
