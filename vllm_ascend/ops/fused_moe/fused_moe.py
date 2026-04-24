@@ -272,7 +272,12 @@ class AscendFusedMoE(FusedMoE):
     gate_stream: torch.npu.Stream | None = None
 
     def __init__(self, *args, **kwargs):
+        is_legacy = vllm_version_is("0.19.0")
+        if not is_legacy:
+            _routed_input_transform = kwargs.get("routed_input_transform")
         super().__init__(*args, **kwargs)
+        if not is_legacy:
+            self.reduce_results = False
 
         num_experts = kwargs["num_experts"]
         intermediate_size = kwargs["intermediate_size"]
@@ -362,17 +367,29 @@ class AscendFusedMoE(FusedMoE):
         self.quant_type = self._get_quant_type()
 
         is_legacy = vllm_version_is("0.19.0")
-        self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
-            self.moe_config,
-            self.router,
-            self._routed_input_transform,
-            self.gate if is_legacy else kwargs.pop("gate", None),
-            self.shared_experts if is_legacy else kwargs.pop("shared_experts", None),
-            self.quant_method,
-            self.reduce_results,
-            self.vllm_config.parallel_config.enable_dbo,
-        )
+        if is_legacy:
+            self.runner = AscendMoERunner(
+                self,
+                self.moe_config,
+                self.router,
+                self._routed_input_transform,
+                self.gate,
+                self.shared_experts,
+                self.quant_method,
+                self.reduce_results,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
+        else:
+            self.runner = AscendMoERunner(
+                self.layer_name,
+                self.moe_config,
+                self.router,
+                _routed_input_transform,
+                kwargs.pop("gate", None),
+                kwargs.pop("shared_experts", None),
+                self.quant_method,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
 
     def _get_quant_type(self) -> QuantType:
         quant_type = QuantType.NONE
@@ -591,17 +608,29 @@ class AscendSharedFusedMoE(*_SharedFusedMoEBase):  # type: ignore[misc]
         # FusedMoE.shared_experts is a property that reads self.runner.shared_experts,
         # which at this point is still the stale runner built with shared_experts=None.
         is_legacy = vllm_version_is("0.19.0")
-        self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
-            self.moe_config,
-            self.router,
-            self._routed_input_transform,
-            self.gate,
-            self._shared_experts,
-            self.quant_method,
-            self.reduce_results,
-            self.vllm_config.parallel_config.enable_dbo,
-        )
+        if is_legacy:
+            self.runner = AscendMoERunner(
+                self,
+                self.moe_config,
+                self.router,
+                self._routed_input_transform,
+                self.gate,
+                self._shared_experts,
+                self.quant_method,
+                self.reduce_results,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
+        else:
+            self.runner = AscendMoERunner(
+                self.layer_name,
+                self.moe_config,
+                self.router,
+                self._routed_input_transform,
+                self.gate,
+                self._shared_experts,
+                self.quant_method,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
 
         if self.multistream_overlap_shared_expert:
             # Wrap the quant_method's process_weights_after_loading to validate that

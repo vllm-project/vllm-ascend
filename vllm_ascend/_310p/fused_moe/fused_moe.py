@@ -120,7 +120,12 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
 
 class AscendFusedMoE310(FusedMoE):
     def __init__(self, *args, **kwargs):
+        is_legacy = vllm_version_is("0.19.0")
+        if not is_legacy:
+            _routed_input_transform = kwargs.get("routed_input_transform")
         super().__init__(*args, **kwargs)
+        if not is_legacy:
+            self.reduce_results = False
 
         self.global_num_experts = kwargs["num_experts"]
 
@@ -166,18 +171,29 @@ class AscendFusedMoE310(FusedMoE):
 
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        is_legacy = vllm_version_is("0.19.0")
-        self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
-            self.moe_config,
-            self.router,
-            self._routed_input_transform,
-            self.gate if is_legacy else kwargs.pop("gate", None),
-            self.shared_experts if is_legacy else kwargs.pop("shared_experts", None),
-            self.quant_method,
-            self.reduce_results,
-            self.vllm_config.parallel_config.enable_dbo,
-        )
+        if is_legacy:
+            self.runner = AscendMoERunner(
+                self,
+                self.moe_config,
+                self.router,
+                self._routed_input_transform,
+                self.gate,
+                self.shared_experts,
+                self.quant_method,
+                self.reduce_results,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
+        else:
+            self.runner = AscendMoERunner(
+                self.layer_name,
+                self.moe_config,
+                self.router,
+                _routed_input_transform,
+                kwargs.get("gate"),
+                kwargs.get("shared_experts"),
+                self.quant_method,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
 
     def init_experts_map(self, moe_config):
         """
@@ -291,17 +307,29 @@ class AscendSharedFusedMoE310(*_SharedFusedMoEBase310):  # type: ignore[misc]
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
         is_legacy = vllm_version_is("0.19.0")
-        self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
-            self.moe_config,
-            self.router,
-            self._routed_input_transform,
-            self._gate,
-            self._shared_experts,
-            self.quant_method,
-            self.reduce_results,
-            self.vllm_config.parallel_config.enable_dbo,
-        )
+        if is_legacy:
+            self.runner = AscendMoERunner(
+                self,
+                self.moe_config,
+                self.router,
+                self._routed_input_transform,
+                self._gate,
+                self._shared_experts,
+                self.quant_method,
+                self.reduce_results,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
+        else:
+            self.runner = AscendMoERunner(
+                self.layer_name,
+                self.moe_config,
+                self.router,
+                self._routed_input_transform,
+                self._gate,
+                self._shared_experts,
+                self.quant_method,
+                self.vllm_config.parallel_config.enable_dbo,
+            )
 
     @property
     def is_internal_router(self) -> bool:
