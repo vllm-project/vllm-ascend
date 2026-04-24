@@ -146,8 +146,13 @@ Memory optimization:
 ```{code-block} bash
    :substitutions:
 # Upper limit of memory block splitting allowed (MB): Setting this parameter can prevent large memory blocks from being split.
-# export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"
+export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"
+```
 
+or
+
+```{code-block} bash
+   :substitutions:
 # When operators on the communication stream have dependencies, they all need to be ended before being released for reuse. The logic of multi-stream reuse is to release the memory on the communication stream in advance so that the computing stream can be reused.
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 ```

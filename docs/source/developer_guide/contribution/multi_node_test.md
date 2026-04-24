@@ -72,7 +72,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)
 
-    ```yaml+jinja
+    ```yaml
     multi-node-tests:
       name: multi-node
       if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
