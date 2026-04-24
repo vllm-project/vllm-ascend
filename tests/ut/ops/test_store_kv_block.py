@@ -1,9 +1,10 @@
+import gc
+import time
+
 import numpy as np
 import pytest
 import torch
 import torch_npu
-import gc
-import time
 
 from vllm_ascend.utils import enable_custom_op
 
