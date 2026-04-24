@@ -23,6 +23,8 @@ import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
 MIN_PAD_SIZE: int = 64  # min_size to pad weight
 MAX_PAD_SIZE: int = 128  # max_size to pad weight
 
@@ -156,18 +158,32 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             k = F.pad(k, (0, pad_len), mode="constant", value=0)
             v = F.pad(v, (0, pad_len), mode="constant", value=0)
 
-        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
 
-        context_layer = torch_npu.npu_fusion_attention(
-            query=q,
-            key=k,
-            value=v,
-            actual_seq_qlen=seq_lens_cpu,
-            actual_seq_kvlen=seq_lens_cpu,
-            head_num=self.num_heads,
-            scale=self.scale_value,
-            input_layout="TND",
-        )[0]
+            context_layer = torch_npu.npu_fusion_attention(
+                query=q,
+                key=k,
+                value=v,
+                actual_seq_qlen=seq_lens_cpu,
+                actual_seq_kvlen=seq_lens_cpu,
+                head_num=self.num_heads,
+                scale=self.scale_value,
+                input_layout="TND",
+            )[0]
+        else:
+            context_layer = torch.empty_like(q)
+
+            torch_npu._npu_flash_attention_unpad(
+                query=q,
+                key=k,
+                value=v,
+                seq_len=seq_lens_cpu,
+                scale_value=self.scale_value,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=context_layer,
+            )
 
         if self.enable_pad:
             context_layer = context_layer[..., :origin_shape]
