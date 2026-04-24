@@ -24,7 +24,7 @@ cd ~/vllm-project/
 
 # Use mirror to speed up download
 # docker pull m.daocloud.io/quay.io/ascend/cann:|cann_image_tag|
-export IMAGE=m.daocloud.io/quay.io/ascend/cann:|cann_image_tag|
+export IMAGE=quay.io/ascend/cann:|cann_image_tag|
 docker run --rm --name vllm-ascend-ut \
     -v $(pwd):/vllm-project \
     -v ~/.cache:/root/.cache \
