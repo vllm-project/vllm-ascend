@@ -75,6 +75,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide specific steps and startup commands, covering both single-node and multi-node configurations.
 - Provide explanations for parameters, including meaning, value range, and units.
 - Specify the basic environment variables and communication environment variables that need to be enabled, with explanations including meaning, value range, and units.
+- If the code example includes version numbers, it is necessary to add a comment explaining that the version number should be filled in according to the actual version in use.
 
 ### 4.1 Docker Image Installation
 
