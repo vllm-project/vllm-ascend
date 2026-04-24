@@ -58,6 +58,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
+from vllm_ascend.attention.utils import generate_dcp_mtp_mask
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -236,9 +237,12 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
             num_computed_tokens_array = num_computed_tokens_array[: self.num_decodes_flatten]
             # TODO: numpy array mode of the shared memory is used to improve performance
+            masks = common_long_seq_metadata.mtp_attention_masks_for_decode
+            mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, num_decodes)
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
                 block_tables=block_table[: self.num_decodes_flatten],
+                mtp_attn_mask=mtp_attn_mask,
             )
 
         actual_seq_lengths_q = (torch.arange(self.num_decodes_flatten) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
@@ -561,13 +565,32 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         else:
             num_heads = self.num_heads
 
+
         k_nope = self.key_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
         value = self.value_cache.view(self.key_cache.shape[0], self.key_cache.shape[1], -1)
+
+        attn_mask = None
+        input_layerout = "TND"
+        if (
+            attn_metadata.decode_meta
+            and attn_metadata.decode_meta.mtp_attn_mask is not None
+            and self.vllm_config.speculative_config is not None
+        ):
+            input_layerout = "BSND"
+            num_decodes = len(actual_seq_lengths_q)
+            lst = actual_seq_lengths_q[:num_decodes]
+            actual_seq_lengths_q = list(np.diff([0] + lst))
+            attn_mask = attn_metadata.decode_meta.mtp_attn_mask.to(query.device)
+
+            query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
+            k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
+            value = self.value_cache.view(self.value_cache.shape[0], 1, self.value_cache.shape[1], -1)
+
         common_kwargs = {
             "num_heads": num_heads,
             "num_key_value_heads": self.num_kv_heads,
-            "input_layout": "TND",
-            "atten_mask": None,
+            "input_layout": input_layerout,
+            "atten_mask": attn_mask,
             "scale": self.scale,
             "antiquant_mode": 0,
             "antiquant_scale": None,
@@ -633,6 +656,9 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             graph_params.handles[num_tokens].append(handle)
         else:
             attn_out, attn_lse = torch_npu.npu_fused_infer_attention_score(query, k_nope, value, **common_kwargs)
+            if input_layerout == "BSND":
+                attn_out = attn_out.view(-1, attn_out.shape[2], attn_out.shape[3])
+                attn_lse = attn_lse.transpose(1,2).reshape(-1, attn_lse.shape[1], 1)
         attn_out_lse = _process_attn_out_lse(attn_out, attn_lse)
         attn_out = _npu_attention_update(self.head_size, attn_out_lse)
         return attn_out

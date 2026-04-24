@@ -45,6 +45,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.attention.utils import generate_dcp_mtp_mask
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
@@ -250,6 +251,9 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
         actual_seq_lengths_q = torch.arange(self.num_decodes_flatten) + 1
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
+
+        masks = decode_metadata.attn_mask
+        decode_metadata.attn_mask = generate_dcp_mtp_mask(masks, decode_metadata.actual_seq_lengths_q, self.num_decodes)
 
         return decode_metadata
 
@@ -642,13 +646,15 @@ class AscendMlaCPImpl(AscendMLAImpl):
             ]
             and self.speculative_config is not None
         ):
-            input_layout = "TND"
-            # TODO: If the driver is upgraded later, the contiguous function can be deleted.
-            q_nope = q_nope.view(num_tokens, num_heads, -1).contiguous()
-            q_pe = q_pe.view(num_tokens, num_heads, -1)
-            sparse_mode = 3
-            spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
-            actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            input_layout = "BSND"
+            actual_seq_lengths_q = decode_meta.actual_seq_lengths_q
+            num_decodes = len(actual_seq_lengths_q)
+            lst = actual_seq_lengths_q[:num_decodes]
+            actual_seq_lengths_q = list(np.diff([0] + np.array(lst)))
+            q_nope = q_nope.view(num_decodes, -1, num_heads, q_nope.shape[-1]).contiguous()
+            q_pe = q_pe.view(num_decodes, -1, num_heads, q_pe.shape[-1])
+            sparse_mode = 0
+            spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes].to(q_nope.device)  # type:ignore
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
@@ -734,6 +740,11 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 k_nope,
                 **common_kwargs,
             )
+
+        if input_layout == "BSND":
+            attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
+            softmax_lse = softmax_lse.transpose(1,2).reshape(-1, softmax_lse.shape[1], 1)
+
         if input_layout == "BNSD":
             B_attn, N_attn, S, D = attn_output.shape
             B_lse, N_lse, Q_S, _ = softmax_lse.shape

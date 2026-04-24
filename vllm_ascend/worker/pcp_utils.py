@@ -1268,6 +1268,22 @@ class PCPManager:
                 long_seq_metadata.tail_actual_seq_lengths_kv = self.extra_long_seq_kwargs["tail_actual_seq_lengths_kv"]
                 long_seq_metadata.attn_chunk_seqlens = attn_chunk_seqlens
 
+                    # Generate MTP attention masks for decode requests when dcp_size > 1 with speculative decoding
+            if (
+                self.dcp_world_size > 1
+                and self.speculative_config
+                and self.num_decode_reqs > 0
+                and num_scheduled_tokens is not None
+            ):
+                # Extract decode request info from input_batch and num_scheduled_tokens
+                decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[: self.num_decode_reqs].tolist()
+                decode_num_scheduled_tokens = num_scheduled_tokens[: self.num_decode_reqs]
+                mtp_masks = self.generate_mtp_attention_mask_for_decode(
+                    decode_num_computed_tokens, decode_num_scheduled_tokens
+                )
+
+                long_seq_metadata.mtp_attention_masks_for_decode = mtp_masks
+
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
 
@@ -1275,3 +1291,114 @@ class PCPManager:
         tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)
         tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
         return tensor_npu
+    
+    def generate_mtp_attention_mask_for_decode(
+        self,
+        decode_num_computed_tokens: list[int],
+        decode_num_scheduled_tokens: np.ndarray,
+    ) -> list[torch.Tensor | None]:
+        """
+        Generate MTP attention masks for decode requests in PCP mode.
+
+        This function handles the case where decode requests with MTP (speculative decoding)
+        need attention masks computed based on the local sequence after load balancing.
+
+        New MTP token allocation logic (using position % cp_size):
+        - History tokens are already split via DualChunkSwap
+        - MTP tokens are allocated based on (history_len + mtp_idx) % cp_size
+        - Each rank only computes mask for tokens assigned to itself
+
+        Example:
+            - pcp=1, dcp=2 (cp_size=2)
+            - history_len=5: [a,b,c,d,e] split via DualChunkSwap
+              - cp0: [a,b,c] (positions 0,1,2) -> 3 tokens
+              - cp1: [d,e] (positions 3,4) -> 2 tokens
+            - num_scheduled_tokens=4: [f,g,h,i] (positions 5,6,7,8)
+            - MTP allocation by position % cp_size:
+              - f: pos 5 % 2 = 1 -> rank1
+              - g: pos 6 % 2 = 0 -> rank0
+              - h: pos 7 % 2 = 1 -> rank1
+              - i: pos 8 % 2 = 0 -> rank0
+            - Final:
+              - rank0: [a,b,c,g,i] positions [0,1,2,6,8] -> mask 4x5
+              - rank1: [d,e,f,h] positions [3,4,5,7] -> mask 4x4
+
+        Args:
+            decode_num_computed_tokens: List of global history lengths for decode requests
+            decode_num_scheduled_tokens: Array of scheduled token counts for decode requests
+
+        Returns:
+            List of attention mask tensors for decode requests, one per request
+            Each mask has shape [num_mtp_tokens, num_local_tokens]
+            Returns None for non-decode requests or when no decode requests exist
+        """
+        if self.num_decode_reqs == 0:
+            return [None] * (self.num_decode_reqs + self.num_prefill_reqs)
+
+        # Calculate combined CP rank and size
+        cp_rank = self.pcp_world_rank * self.dcp_world_size + self.dcp_world_rank
+        cp_size = self.pcp_world_size * self.dcp_world_size
+        assert cp_size > 0, "cp_size must be greater than 0"
+
+        # MTP token count is directly decode_num_scheduled_tokens
+        mtp_len = decode_num_scheduled_tokens
+
+        # Get local history tokens on each rank using _get_cp_local_seq_lens
+        num_computed_tokens_tensor = torch.from_numpy(np.array(decode_num_computed_tokens))
+        local_seq_lens = self._get_cp_local_seq_lens(
+            num_computed_tokens_tensor,
+            self.pcp_world_size,
+            self.dcp_world_size,
+            self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        )
+        # Shape: [num_decode_reqs, pcp_world_size, dcp_world_size]
+        # Get local history length for current rank
+        local_history_lens = local_seq_lens[:, self.pcp_world_rank, self.dcp_world_rank]
+
+        mtp_masks = []
+
+        for req_idx in range(self.num_decode_reqs):
+            history_len = local_history_lens[req_idx].item()
+            mtp_token_len = mtp_len[req_idx].item()
+
+            if mtp_token_len <= 0 or history_len <= 0:
+                mtp_masks.append(None)
+                continue
+
+            # Get global history length (before splitting) for position calculation
+            global_history_len = decode_num_computed_tokens[req_idx]
+
+            # Get the MTP tokens assigned to this rank based on position % cp_size
+            local_mtp_positions = [
+                global_history_len + mtp_idx
+                for mtp_idx in range(mtp_token_len)
+                if (global_history_len + mtp_idx) % cp_size == cp_rank
+            ]
+            local_mtp_count = len(local_mtp_positions)
+
+            # local_len = history tokens on this rank + MTP tokens on this rank
+            local_len = history_len + local_mtp_count
+
+            # All MTP tokens (not just assigned to this rank) can attend to local tokens
+            # MTP token at global position m can attend to local token at position k if m >= k
+            # local tokens consist of: history tokens (positions 0 to history_len-1) +
+            # MTP tokens assigned to this rank (from local_mtp_positions)
+            all_mtp_positions = list(range(global_history_len, global_history_len + mtp_token_len))
+            mask = np.ones((mtp_token_len, local_len), dtype=bool)
+            for m_idx, mtp_global_pos in enumerate(all_mtp_positions):
+                for k_idx in range(local_len):
+                    if k_idx < history_len:
+                        # History token at local position k_idx
+                        local_token_pos = k_idx
+                    else:
+                        # MTP token at local position - get its global position from local_mtp_positions
+                        local_token_pos = local_mtp_positions[k_idx - history_len]
+                    mask[m_idx, k_idx] = not (mtp_global_pos >= local_token_pos)
+
+            mtp_masks.append(torch.from_numpy(mask))
+
+        # Fill remaining slots with None for prefill requests
+        for _ in range(self.num_prefill_reqs):
+            mtp_masks.append(None)
+
+        return mtp_masks
