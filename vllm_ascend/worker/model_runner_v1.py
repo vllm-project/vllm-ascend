@@ -1681,9 +1681,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
         with record_function_or_nullcontext("post process"):
-            aux_hidden_states = None
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, aux_hidden_states = hidden_states
+            hidden_states, aux_hidden_states = self._split_model_forward_output(hidden_states)
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
@@ -2110,12 +2108,32 @@ class NPUModelRunner(GPUModelRunner):
     # all-gather hidden-states in last layer with aux-hidden-states in sp scene
     @staticmethod
     def _all_gather_hidden_states_and_aux(hidden_states):
-        if isinstance(hidden_states, tuple):
+        if isinstance(hidden_states, tuple) and len(hidden_states) == 2:
             return (
                 NPUModelRunner._all_gather_hidden_states(hidden_states[0]),
                 NPUModelRunner._all_gather_hidden_states_list(hidden_states[1]),
             )
+        while isinstance(hidden_states, tuple) and len(hidden_states) == 1:
+            hidden_states = hidden_states[0]
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
+
+    @staticmethod
+    def _unwrap_singleton_tuple(output):
+        while isinstance(output, tuple) and len(output) == 1:
+            output = output[0]
+        return output
+
+    def _split_model_forward_output(self, output):
+        output = self._unwrap_singleton_tuple(output)
+        if self.use_aux_hidden_state_outputs:
+            assert isinstance(output, tuple) and len(output) == 2, (
+                "Expected (hidden_states, aux_hidden_states) from model forward, "
+                f"got {type(output)}"
+            )
+            hidden_states, aux_hidden_states = output
+            hidden_states = self._unwrap_singleton_tuple(hidden_states)
+            return hidden_states, aux_hidden_states
+        return output, None
 
     def _model_forward(
         self,
@@ -2797,10 +2815,7 @@ class NPUModelRunner(GPUModelRunner):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
-            else:
-                hidden_states = outputs
+            hidden_states, _ = self._split_model_forward_output(outputs)
             dummy_compute_logits(hidden_states)
 
             if self.drafter:

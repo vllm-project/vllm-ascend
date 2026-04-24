@@ -846,11 +846,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     model_kwargs["positions"] = model_positions
 
         ret_hidden_states = self.model(**model_kwargs)
-        if not self.model_returns_tuple():
-            last_hidden_states = ret_hidden_states
-            hidden_states = last_hidden_states
-        else:
-            last_hidden_states, hidden_states = ret_hidden_states
+        last_hidden_states, hidden_states = self._extract_hidden_state_outputs(ret_hidden_states)
 
         if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
@@ -992,11 +988,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 model_kwargs["hidden_states"] = model_hidden_states
 
             ret_hidden_states = self.model(**model_kwargs)
-            if not self.model_returns_tuple():
-                last_hidden_states = ret_hidden_states
-                hidden_states = last_hidden_states
-            else:
-                last_hidden_states, hidden_states = ret_hidden_states
+            last_hidden_states, hidden_states = self._extract_hidden_state_outputs(ret_hidden_states)
 
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
                 last_hidden_states, model_positions, hidden_states
@@ -1212,6 +1204,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model", "dflash")
+
+    def _extract_hidden_state_outputs(self, outputs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        # ACL graph wrappers may add singleton tuple layers around the real
+        # model outputs. Unwrap them once here so the proposer always consumes
+        # tensors with the same structure.
+        while isinstance(outputs, tuple) and len(outputs) == 1:
+            outputs = outputs[0]
+
+        if not self.model_returns_tuple():
+            assert isinstance(outputs, torch.Tensor), f"Expected Tensor output, got {type(outputs)}"
+            return outputs, outputs
+
+        assert isinstance(outputs, tuple) and len(outputs) == 2, (
+            "Expected a pair of hidden-state tensors from the draft model, "
+            f"got {type(outputs)} with value type details "
+            f"{tuple(type(x) for x in outputs) if isinstance(outputs, tuple) else 'N/A'}"
+        )
+        last_hidden_states, hidden_states = outputs
+        while isinstance(last_hidden_states, tuple) and len(last_hidden_states) == 1:
+            last_hidden_states = last_hidden_states[0]
+        while isinstance(hidden_states, tuple) and len(hidden_states) == 1:
+            hidden_states = hidden_states[0]
+        assert isinstance(last_hidden_states, torch.Tensor), (
+            f"Expected last_hidden_states to be a Tensor, got {type(last_hidden_states)}"
+        )
+        assert isinstance(hidden_states, torch.Tensor), (
+            f"Expected hidden_states to be a Tensor, got {type(hidden_states)}"
+        )
+        return last_hidden_states, hidden_states
 
     def attn_update_stack_num_spec_norm(
         self,
