@@ -575,7 +575,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
         ):
             input_layerout = "BSND"
             num_decodes = attn_metadata.num_decodes
-            actual_seq_lengths_q = list(np.diff([0] + np.array(actual_seq_lengths_q)))
             attn_mask = attn_metadata.decode_meta.mtp_attn_mask.to(query.device)
 
             query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
