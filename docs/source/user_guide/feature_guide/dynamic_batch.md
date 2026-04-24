@@ -38,9 +38,9 @@ So far, dynamic batch performs better on several dense models including Qwen and
 Dynamic batch is used in the online inference. A fully executable example is as follows:
 
 ```shell
-SLO_LITMIT=50
+SLO_LIMIT=50
 vllm serve Qwen/Qwen2.5-14B-Instruct\
-    --additional_config '{"SLO_limits_for_dynamic_batch":'${SLO_LITMIT}'}' \
+    --additional_config '{"SLO_limits_for_dynamic_batch":'${SLO_LIMIT}'}' \
     --max-num-seqs 256 \
     --block-size 128 \
     --tensor_parallel_size 8 \
