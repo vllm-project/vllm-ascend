@@ -18,8 +18,24 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, get_weight_prefetch_method, maybe_trans_nz, weak_ref_tensors, get_ascend_device_type, AscendDeviceType
+from vllm_ascend.debug.request_divergence import (
+    dump_attention_tensor_pack,
+    dump_layer_summary,
+    dump_tensor_pack,
+    get_request_divergence_context,
+)
+from vllm_ascend.attention.fa3_debug import (
+    canonicalize_fa3_output,
+    make_fa3_cache_dump,
+    make_fa3_forward_dump,
+    persist_fa3_dump,
+    should_dump_fa3,
+    snapshot_touched_cache_blocks,
+)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata, CPChunkedContextMetadata
@@ -723,6 +739,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.fa_kscale = None
+        self.fa_vscale = None
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
@@ -1094,9 +1112,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+        dummy_kv_c_tensor = torch.zeros([cache_kv_c.shape[0],cache_kv_c.shape[1],cache_kv_c.shape[2],1],device="npu").to(cache_kv_c.dtype)
+        dummy_k_pe_tensor = torch.zeros([cache_k_pe.shape[0],cache_k_pe.shape[1],cache_k_pe.shape[2],1],device="npu").to(cache_k_pe.dtype)
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
-
+        print(f"====================iters:{iters}")
         if iters == 0:
             return prefix_output, prefix_lse
 
@@ -1116,16 +1136,57 @@ class AscendMLAImpl(MLAAttentionImpl):
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=q_nope.dtype, device=q_nope.device)
             k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_nope.dtype, device=q_nope.device)
+            if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+                dummy_k_pe = torch.empty(toks,
+                               num_heads,
+                               1,
+                               dtype=cache_k_pe.dtype,
+                               device=cache_k_pe.device)
+                dummy_kv_c = torch.empty(toks,
+                                        num_heads,
+                                        1,
+                                        dtype=cache_kv_c.dtype,
+                                        device=cache_kv_c.device)
 
-            DeviceOperator.mla_cache_load(
-                cache_kv_c,
-                cache_k_pe,
-                prefill_metadata.block_table,
-                context_seq_len_npu,
-                prefill_metadata.chunked_context.starts[i],
-                key=kv_c_normed,
-                value=k_pe,
-            )
+                kv_c_normed = torch.empty(toks,
+                                    num_heads,
+                                    latent_kv_dim,
+                                    dtype=cache_kv_c.dtype,
+                                    device=cache_kv_c.device)
+                k_pe = torch.empty(toks,
+                                num_heads,
+                                rope_dim,
+                                dtype=q_pe.dtype,
+                                device=q_pe.device)
+                torch_npu.npu_gather_pa_kv_cache( ## 替代方案
+                    cache_kv_c,
+                    dummy_kv_c_tensor,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    seq_offset=prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=dummy_kv_c,
+                )
+                torch_npu.npu_gather_pa_kv_cache(
+                    cache_k_pe,
+                    dummy_k_pe_tensor,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    seq_offset=prefill_metadata.chunked_context.starts[i],
+                    key=k_pe,
+                    value=dummy_k_pe,
+                )
+            else:
+                DeviceOperator.mla_cache_load(
+                    cache_kv_c,
+                    cache_k_pe,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
+
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
@@ -1134,6 +1195,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 toks=toks,
             )
             kv_c_normed = kv_c_normed.squeeze()
+            kv_c_normed = torch.mul(kv_c_normed.to(self.fa_kscale.dtype), self.fa_kscale).to(torch.bfloat16) ## dequant过程
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
@@ -1229,6 +1291,32 @@ class AscendMLAImpl(MLAAttentionImpl):
         if need_dtype_convert:
             attn_output = attn_output.to(original_dtype)
 
+        req_ctx = get_request_divergence_context()
+        all_req_ids = list(req_ctx.get("req_ids", []))
+        decode_req_ids = all_req_ids[: attn_metadata.num_decodes]
+        prefill_req_ids = all_req_ids[attn_metadata.num_decodes : attn_metadata.num_decodes + attn_metadata.num_prefills]
+
+        if not envs_ascend.VLLM_ASCEND_IDENTICAL_REQ_DEBUG_MINIMAL:
+            dump_attention_tensor_pack(
+                layer_name=self.layer_name,
+                tag="prefill_attention",
+                tensors={
+                    "q_nope": q_nope,
+                    "q_pe": q_pe,
+                    "k_nope": k_nope,
+                    "k_pe": k_pe,
+                    "value": value,
+                    "all_req_ids": all_req_ids,
+                    "decode_req_ids": decode_req_ids,
+                    "prefill_req_ids": prefill_req_ids,
+                    "num_decodes": attn_metadata.num_decodes,
+                    "num_prefills": attn_metadata.num_prefills,
+                    "actual_seq_lengths_q": torch.tensor(actual_seq_lengths_q, dtype=torch.int32),
+                    "actual_seq_lengths_kv": torch.tensor(actual_seq_lengths_kv, dtype=torch.int32),
+                    "attn_output": attn_output,
+                },
+            )
+
         return attn_output
 
     def exec_kv_decode(
@@ -1246,18 +1334,58 @@ class AscendMLAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
-        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
-            kv_no_split,
-            self.kv_a_layernorm.weight,  # type: ignore[union-attr]
-            cos,
-            sin,
-            slots.to(torch.int64),
-            kv_cache[1],
-            kv_cache[0],
-            c_kv_scale = self.fa_kscale,
-            epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
-            cache_mode=cache_mode,
-        )
+        should_dump_cache = should_dump_fa3("cache", self.layer_name, B)
+        before_blocks = before_k_cache = before_v_cache = None
+        if should_dump_cache:
+            before_blocks, before_k_cache, before_v_cache = snapshot_touched_cache_blocks(
+                kv_cache[0], kv_cache[1], slots, kv_cache[0].shape[1]
+            )
+        try:
+            k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
+                kv_no_split,
+                self.kv_a_layernorm.weight,  # type: ignore[union-attr]
+                cos,
+                sin,
+                slots.to(torch.int64),
+                kv_cache[1],
+                kv_cache[0],
+                c_kv_scale = self.fa_kscale,
+                epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+                cache_mode=cache_mode,
+            )
+        except Exception as exc:
+            if should_dump_cache and before_blocks is not None and before_k_cache is not None and before_v_cache is not None:
+                cache_payload = make_fa3_cache_dump(
+                    layer_name=self.layer_name,
+                    kv_no_split=kv_no_split,
+                    cos=cos,
+                    sin=sin,
+                    slots=slots,
+                    kv_cache_before=(before_k_cache, before_v_cache),
+                    kv_cache_after=(before_k_cache, before_v_cache),
+                    block_size=kv_cache[0].shape[1],
+                    cache_mode=cache_mode,
+                    kv_scale=self.fa_kscale,
+                )
+                cache_payload["inputs"]["touched_global_blocks"] = before_blocks
+                persist_fa3_dump(cache_payload, stage="cache", status="error", error=str(exc))
+            raise
+        if should_dump_cache and before_blocks is not None and before_k_cache is not None and before_v_cache is not None:
+            _, after_k_cache, after_v_cache = snapshot_touched_cache_blocks(kv_cache[0], kv_cache[1], slots, kv_cache[0].shape[1])
+            cache_payload = make_fa3_cache_dump(
+                layer_name=self.layer_name,
+                kv_no_split=kv_no_split,
+                cos=cos,
+                sin=sin,
+                slots=slots,
+                kv_cache_before=(before_k_cache, before_v_cache),
+                kv_cache_after=(after_k_cache, after_v_cache),
+                block_size=kv_cache[0].shape[1],
+                cache_mode=cache_mode,
+                kv_scale=self.fa_kscale,
+            )
+            cache_payload["inputs"]["touched_global_blocks"] = before_blocks
+            persist_fa3_dump(cache_payload, stage="cache", status="ok")
         return k_pe, k_nope
 
     def exec_kv_prefill(
@@ -1315,6 +1443,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
         num_tokens = q_nope.size(0)
+        decode_query_lens: list[int] = []
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
@@ -1390,7 +1519,18 @@ class AscendMLAImpl(MLAAttentionImpl):
             sparse_mode = 0
             attn_mask = None
 
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if actual_seq_lengths is not None:
+            previous = 0
+            for length in actual_seq_lengths:
+                current = int(length)
+                decode_query_lens.append(current - previous)
+                previous = current
+        req_ctx = get_request_divergence_context()
+        all_req_ids = list(req_ctx.get("req_ids", []))
+        decode_req_ids = all_req_ids[: attn_metadata.num_decodes]
+        prefill_req_ids = all_req_ids[attn_metadata.num_decodes : attn_metadata.num_decodes + attn_metadata.num_prefills]
+
+        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
             input_layout = "BNSD"
             q_nope, pertoken_scale = torch_npu.npu_dynamic_quant(q_nope,dst_type=torch.float8_e4m3fn)
             q_pe = (q_pe / pertoken_scale.unsqueeze(-1) / self.fa_kscale).to(torch.bfloat16)
@@ -1444,6 +1584,32 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        fa3_dump_payload = None
+        if (
+            get_ascend_device_type() == AscendDeviceType.A5
+            and self.fa_quant_layer
+            and not _EXTRA_CTX.capturing
+            and should_dump_fa3("forward", self.layer_name, num_tokens)
+        ):
+            fa3_dump_payload = make_fa3_forward_dump(
+                layer_name=self.layer_name,
+                query=q_nope,
+                key_cache=k_nope,
+                query_rope=q_pe,
+                key_rope=k_pe,
+                block_table=decode_meta.block_table,
+                actual_seq_qlen=actual_seq_lengths,
+                actual_seq_kvlen=decode_meta.seq_lens_list,
+                dequant_scale_query=pertoken_scale,
+                dequant_scale_key=self.fa_kscale,
+                dequant_scale_value=self.fa_kscale,
+                block_size=block_size,
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                softmax_scale=self.scale,
+                input_layout=input_layout,
+                sparse_mode=sparse_mode,
+            )
         if _EXTRA_CTX.capturing:
             stream = torch_npu.npu.current_stream()
 
@@ -1500,10 +1666,48 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params.handles[num_tokens].append(handle)
         else:
             if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
-                q_nope, k_nope, k_nope, **common_kwargs_v2)
+                try:
+                    attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                        q_nope, k_nope, k_nope, **common_kwargs_v2
+                    )
+                except Exception as exc:
+                    if fa3_dump_payload is not None:
+                        persist_fa3_dump(fa3_dump_payload, stage="forward", status="error", error=str(exc))
+                    raise
+                if fa3_dump_payload is not None:
+                    fa3_dump_payload["outputs"]["attn_output"] = canonicalize_fa3_output(
+                        attn_output, num_tokens, self.num_heads
+                    ).detach().cpu().contiguous()
+                    persist_fa3_dump(fa3_dump_payload, stage="forward", status="ok")
             else:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
+
+        if not envs_ascend.VLLM_ASCEND_IDENTICAL_REQ_DEBUG_MINIMAL:
+            dump_attention_tensor_pack(
+                layer_name=self.layer_name,
+                tag="decode_attention",
+                tensors={
+                    "q_nope": q_nope,
+                    "q_pe": q_pe,
+                    "k_nope": k_nope,
+                    "k_pe": k_pe,
+                    "decode_query_lens": torch.tensor(decode_query_lens, dtype=torch.int32),
+                    "all_req_ids": all_req_ids,
+                    "decode_req_ids": decode_req_ids,
+                    "prefill_req_ids": prefill_req_ids,
+                    "num_decodes": attn_metadata.num_decodes,
+                    "num_prefills": attn_metadata.num_prefills,
+                    "block_table": decode_meta.block_table,
+                    "actual_seq_qlen": None
+                    if actual_seq_lengths is None
+                    else torch.tensor(actual_seq_lengths, dtype=torch.int32),
+                    "actual_seq_kvlen": torch.tensor(decode_meta.seq_lens_list, dtype=torch.int32),
+                    "dequant_scale_query": pertoken_scale if get_ascend_device_type() == AscendDeviceType.A5 else dequant_scale_q_nope,
+                    "dequant_scale_key": self.fa_kscale if get_ascend_device_type() == AscendDeviceType.A5 else self.fak_descale_float,
+                    "dequant_scale_value": self.fa_kscale if get_ascend_device_type() == AscendDeviceType.A5 else self.fak_descale_float,
+                    "attn_output": canonicalize_fa3_output(attn_output, num_tokens, self.num_heads),
+                },
+            )
 
         return self._v_up_proj(attn_output)
 
@@ -1734,6 +1938,14 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
+        decode_query_lens = list(getattr(attn_metadata, "query_lens", [])[: attn_metadata.num_decodes])
+        prefill_query_lens = list(
+            getattr(attn_metadata, "query_lens", [])[attn_metadata.num_decodes : attn_metadata.num_decodes + attn_metadata.num_prefills]
+        )
+        req_ctx = get_request_divergence_context()
+        all_req_ids = list(req_ctx.get("req_ids", []))
+        decode_req_ids = all_req_ids[: attn_metadata.num_decodes]
+        prefill_req_ids = all_req_ids[attn_metadata.num_decodes : attn_metadata.num_decodes + attn_metadata.num_prefills]
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
@@ -1762,8 +1974,36 @@ class AscendMLAImpl(MLAAttentionImpl):
                 attn_metadata,
                 decode_preprocess_res.dequant_scale_q_nope,
             )
+            dump_tensor_pack(
+                name=self.layer_name,
+                tag="output_decode_tensor",
+                tensors={
+                "output_decode": output_decode,
+                "num_decode_tokens": torch.tensor([num_decode_tokens], dtype=torch.int32),
+                "decode_query_lens": torch.tensor(decode_query_lens, dtype=torch.int32),
+                "all_req_ids": all_req_ids,
+                "decode_req_ids": decode_req_ids,
+                "prefill_req_ids": prefill_req_ids,
+                "num_decodes": attn_metadata.num_decodes,
+                "num_prefills": attn_metadata.num_prefills,
+            },
+        )
 
             o_proj_input[:num_decode_tokens] = output_decode
+            dump_tensor_pack(
+                name=self.layer_name,
+                tag="o_proj_input_after_decode_assign",
+                tensors={
+                "o_proj_input_decode_slice": o_proj_input[:num_decode_tokens],
+                "num_decode_tokens": torch.tensor([num_decode_tokens], dtype=torch.int32),
+                "decode_query_lens": torch.tensor(decode_query_lens, dtype=torch.int32),
+                "all_req_ids": all_req_ids,
+                "decode_req_ids": decode_req_ids,
+                "prefill_req_ids": prefill_req_ids,
+                "num_decodes": attn_metadata.num_decodes,
+                "num_prefills": attn_metadata.num_prefills,
+            },
+        )
 
         if prefill_preprocess_res is not None:
             # FIX: aicore move should be also placed on the comm stream in dbo,
@@ -1778,8 +2018,57 @@ class AscendMLAImpl(MLAAttentionImpl):
                 kv_cache,
                 attn_metadata,
             )
+            dump_tensor_pack(
+                name=self.layer_name,
+                tag="output_prefill_tensor",
+                tensors={
+                "output_prefill": output_prefill,
+                "num_decode_tokens": torch.tensor([num_decode_tokens], dtype=torch.int32),
+                "num_actual_tokens": torch.tensor([num_actual_tokens], dtype=torch.int32),
+                "prefill_query_lens": torch.tensor(prefill_query_lens, dtype=torch.int32),
+                "all_req_ids": all_req_ids,
+                "decode_req_ids": decode_req_ids,
+                "prefill_req_ids": prefill_req_ids,
+                "num_decodes": attn_metadata.num_decodes,
+                "num_prefills": attn_metadata.num_prefills,
+            },
+        )
 
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
+            dump_tensor_pack(
+                name=self.layer_name,
+                tag="o_proj_input_after_prefill_assign",
+                tensors={
+                "o_proj_input_prefill_slice": o_proj_input[num_decode_tokens:num_actual_tokens],
+                "num_decode_tokens": torch.tensor([num_decode_tokens], dtype=torch.int32),
+                "num_actual_tokens": torch.tensor([num_actual_tokens], dtype=torch.int32),
+                "prefill_query_lens": torch.tensor(prefill_query_lens, dtype=torch.int32),
+                "all_req_ids": all_req_ids,
+                "decode_req_ids": decode_req_ids,
+                "prefill_req_ids": prefill_req_ids,
+                "num_decodes": attn_metadata.num_decodes,
+                "num_prefills": attn_metadata.num_prefills,
+            },
+        )
+        dump_tensor_pack(
+            name=self.layer_name,
+            tag="attn_out_tensor",
+            tensors={
+                "attn_out": o_proj_input[:num_actual_tokens],
+                "query_lens": torch.tensor(getattr(attn_metadata, "query_lens", []), dtype=torch.int32),
+                "all_req_ids": all_req_ids,
+                "decode_req_ids": decode_req_ids,
+                "prefill_req_ids": prefill_req_ids,
+                "num_decodes": attn_metadata.num_decodes,
+                "num_prefills": attn_metadata.num_prefills,
+            },
+        )
+        dump_layer_summary(
+            layer_name=self.layer_name,
+            tensor=o_proj_input[:num_actual_tokens],
+            query_lens=getattr(attn_metadata, "query_lens", None),
+            tag="attn_out",
+        )
         # O proj
         weight_prefetch_method = get_weight_prefetch_method()
         weight_prefetch_method.maybe_prefetch_mla_or_sla_weight_in_current_stream(
@@ -1789,6 +2078,25 @@ class AscendMLAImpl(MLAAttentionImpl):
             linear_layer=self.o_proj,
         )
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
+        dump_tensor_pack(
+            name=self.layer_name,
+            tag="block_out_tensor",
+            tensors={
+                "block_out": output[:num_actual_tokens],
+                "query_lens": torch.tensor(getattr(attn_metadata, "query_lens", []), dtype=torch.int32),
+                "all_req_ids": all_req_ids,
+                "decode_req_ids": decode_req_ids,
+                "prefill_req_ids": prefill_req_ids,
+                "num_decodes": attn_metadata.num_decodes,
+                "num_prefills": attn_metadata.num_prefills,
+            },
+        )
+        dump_layer_summary(
+            layer_name=self.layer_name,
+            tensor=output[:num_actual_tokens],
+            query_lens=getattr(attn_metadata, "query_lens", None),
+            tag="block_out",
+        )
 
         del o_proj_input
 

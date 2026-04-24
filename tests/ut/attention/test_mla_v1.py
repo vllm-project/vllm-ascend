@@ -17,6 +17,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLAPrefillMetadata,
                                           ChunkedContextMetadata)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestAscendMLABackend(TestBase):
@@ -973,6 +974,60 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[2], self.impl.v_head_dim)
         mock_up_proj.assert_called_once()
         mock_npu_fused_infer_attention_score_v2.assert_called_once()
+
+    @patch('vllm_ascend.ascend_forward_context.get_forward_context')
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type",
+           return_value=AscendDeviceType.A5)
+    @patch("torch_npu.npu_dynamic_quant")
+    @patch("torch_npu.npu_fused_infer_attention_score_v2")
+    def test_forward_decode_a5_fa_quant_passes_actual_seq_lengths(
+            self, mock_npu_fused_infer_attention_score_v2,
+            mock_npu_dynamic_quant, _mock_device_type,
+            mock_get_forward_context):
+        batch_size = 2
+        block_size = 4
+        self.impl.speculative_config = None
+        self.impl.fa_quant_layer = True
+        self.impl.enable_kv_nz = False
+        self.impl._v_up_proj = MagicMock(return_value=torch.randn(
+            batch_size, self.impl.num_heads, self.impl.v_head_dim))
+        self.impl.fa_kscale = torch.tensor(1.0)
+
+        q_nope = torch.randn(batch_size, self.impl.num_heads,
+                             self.impl.qk_nope_head_dim)
+        q_pe = torch.randn(batch_size, self.impl.num_heads,
+                           self.impl.qk_rope_head_dim)
+        k_nope = torch.randn(block_size, self.impl.num_kv_heads,
+                             self.impl.kv_lora_rank)
+        k_pe = torch.randn(block_size, self.impl.num_kv_heads,
+                           self.impl.qk_rope_head_dim)
+
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.decode = MagicMock()
+        metadata.decode.block_table = MagicMock()
+        metadata.decode.actual_seq_lengths_q = [1, 2]
+        metadata.decode.seq_lens_list = [32, 32]
+
+        mock_npu_dynamic_quant.return_value = (
+            torch.randn(batch_size, self.impl.num_heads, 1,
+                        self.impl.qk_nope_head_dim),
+            torch.ones(batch_size, self.impl.num_heads, 1),
+        )
+        mock_npu_fused_infer_attention_score_v2.return_value = (
+            torch.randn(self.impl.num_heads, batch_size, 1,
+                        self.impl.kv_lora_rank),
+            None,
+        )
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+
+        self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, block_size,
+                                  metadata)
+
+        _, kwargs = mock_npu_fused_infer_attention_score_v2.call_args
+        self.assertEqual(kwargs["actual_seq_qlen"], [1, 2])
+        self.assertEqual(kwargs["actual_seq_kvlen"], [32, 32])
+        self.assertEqual(kwargs["input_layout"], "BNSD")
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.get_weight_prefetch_method",

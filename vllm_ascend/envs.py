@@ -107,6 +107,40 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # FA3 debug dump mode for A5 FKAQuant decode debugging.
+    # Valid values: off, forward, cache, both. Default is off.
+    "VLLM_ASCEND_FA3_DUMP_MODE": lambda: os.getenv("VLLM_ASCEND_FA3_DUMP_MODE", "off").lower(),
+    # Directory for FA3 debug dump artifacts. Empty string disables dump output.
+    # This path is not sensitive and should point to a writable local directory.
+    "VLLM_ASCEND_FA3_DUMP_DIR": lambda: os.getenv("VLLM_ASCEND_FA3_DUMP_DIR", ""),
+    # Optional substring filter for layer names when dumping FA3 debug artifacts.
+    # Empty string means all layers are eligible when dump mode is enabled.
+    "VLLM_ASCEND_FA3_DUMP_LAYER": lambda: os.getenv("VLLM_ASCEND_FA3_DUMP_LAYER", ""),
+    # Maximum number of FA3 dump files to write per process.
+    # 0 means unlimited. Positive integers stop new dumps after the limit is reached.
+    "VLLM_ASCEND_FA3_DUMP_LIMIT": lambda: int(os.getenv("VLLM_ASCEND_FA3_DUMP_LIMIT", "0")),
+    # Identical-request divergence debug mode.
+    # Valid values: off, logits, layer, tensor, all. Default is off.
+    "VLLM_ASCEND_IDENTICAL_REQ_DEBUG_MODE": lambda: os.getenv(
+        "VLLM_ASCEND_IDENTICAL_REQ_DEBUG_MODE", "off"
+    ).lower(),
+    # Directory for identical-request divergence debug artifacts. Empty disables output.
+    "VLLM_ASCEND_IDENTICAL_REQ_DEBUG_DIR": lambda: os.getenv("VLLM_ASCEND_IDENTICAL_REQ_DEBUG_DIR", ""),
+    # Optional layer-name substring filter for layer summaries. Empty means no filter.
+    "VLLM_ASCEND_IDENTICAL_REQ_DEBUG_LAYER": lambda: os.getenv("VLLM_ASCEND_IDENTICAL_REQ_DEBUG_LAYER", ""),
+    # Optional decode step filter. -1 means all steps.
+    "VLLM_ASCEND_IDENTICAL_REQ_DEBUG_STEP": lambda: int(os.getenv("VLLM_ASCEND_IDENTICAL_REQ_DEBUG_STEP", "-1")),
+    # Number of top logits to keep per request when dumping summaries.
+    "VLLM_ASCEND_IDENTICAL_REQ_DEBUG_TOPK": lambda: int(os.getenv("VLLM_ASCEND_IDENTICAL_REQ_DEBUG_TOPK", "20")),
+    # Maximum number of identical-request debug artifacts written per process.
+    # 0 means unlimited.
+    "VLLM_ASCEND_IDENTICAL_REQ_DEBUG_LIMIT": lambda: int(os.getenv("VLLM_ASCEND_IDENTICAL_REQ_DEBUG_LIMIT", "0")),
+    # Minimal identical-request debug mode.
+    # When enabled, skip large attention tensor packs and keep only model-level
+    # request-progress dumps plus compact layer tensors.
+    "VLLM_ASCEND_IDENTICAL_REQ_DEBUG_MINIMAL": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_IDENTICAL_REQ_DEBUG_MINIMAL", "0"))
+    ),
 }
 
 # end-env-vars-definition
