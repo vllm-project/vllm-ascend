@@ -231,6 +231,37 @@ AICORE void runTileBlockwiseHadamardInPlace(unsigned tile_base,
   }
 }
 
+template <typename InputT>
+AICORE void runSegmentBlockwiseHadamardInPlace(unsigned segment_base,
+                                               uint32_t segment_n,
+                                               uint32_t hadamard_n,
+                                               uint32_t log2_hadamard_n) {
+  if (segment_n == hadamard_n &&
+      tryRunBatchedHadamard<InputT>(segment_base, 1, segment_n,
+                                    log2_hadamard_n)) {
+    return;
+  }
+
+  const uint32_t num_blocks = segment_n / hadamard_n;
+  const uint32_t max_blocks_per_batch = ELEMENTS_PER_TILE / hadamard_n;
+  uint32_t block_done = 0;
+  while (block_done < num_blocks) {
+    const uint32_t block_batch =
+        min(max_blocks_per_batch, num_blocks - block_done);
+    const unsigned block_base =
+        segment_base + block_done * hadamard_n * sizeof(InputT);
+    if (!tryRunBatchedHadamard<InputT>(block_base, block_batch, hadamard_n,
+                                       log2_hadamard_n)) {
+      for (uint32_t i = 0; i < block_batch; ++i) {
+        runSingleHadamardRow<InputT>(
+            block_base + i * hadamard_n * sizeof(InputT), hadamard_n,
+            log2_hadamard_n);
+      }
+    }
+    block_done += block_batch;
+  }
+}
+
 template <typename InputT, typename OutputT>
 AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
                                         __gm__ float *row_scales,
@@ -324,9 +355,9 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
     TASSIGN(rowMinTile, ROWMIN_BASE);
     TASSIGN(rowMaxTileRm, EVEN_BASE);
     TASSIGN(rowMinTileRm, ODD_BASE);
-    runTileBlockwiseHadamardInPlace<InputT>(current_x_base, 1,
-                                            current_segment.elements,
-                                            hadamard_n, log2_hadamard_n);
+    runSegmentBlockwiseHadamardInPlace<InputT>(current_x_base,
+                                               current_segment.elements,
+                                               hadamard_n, log2_hadamard_n);
     pipe_barrier(PIPE_V);
 
     TROWMAX(rowMaxTile, xSegmentTile, reduceTmpTile);
@@ -411,9 +442,9 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
     TASSIGN(ySegmentTile, current_y_base);
 
     wait_flag(PIPE_MTE3, PIPE_V, current_ev);
-    runTileBlockwiseHadamardInPlace<InputT>(current_x_base, 1,
-                                            current_segment.elements,
-                                            hadamard_n, log2_hadamard_n);
+    runSegmentBlockwiseHadamardInPlace<InputT>(current_x_base,
+                                               current_segment.elements,
+                                               hadamard_n, log2_hadamard_n);
     pipe_barrier(PIPE_V);
 
     TRESHAPE(rowNormTile, rowAccumTile);
@@ -948,14 +979,7 @@ extern "C" void call_dynamic_quant_kernel(uint32_t blockDim, void *stream,
                                           uint32_t hadamard_n,
                                           uint32_t log2_hadamard_n,
                                           float inv_sqrt_hadamard_n) {
-  if (full_n > ELEMENTS_PER_TILE) {
-    // The oversized-row helper is serialized today. Launch it with a single
-    // worker instead of the normal sub-block geometry so the runtime topology
-    // matches the helper's correctness-first scheduling contract.
-    blockDim = 1;
-  } else {
-    blockDim = blockDim * 2;
-  }
+  blockDim = blockDim * 2;
   fast_hadamard_dynamic_quant_fp16_to_int4<<<blockDim, nullptr, stream>>>(
       x, y, row_scales, batch, full_n, hadamard_n, log2_hadamard_n,
       inv_sqrt_hadamard_n);
