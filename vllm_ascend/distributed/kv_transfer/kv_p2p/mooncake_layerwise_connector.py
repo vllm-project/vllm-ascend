@@ -1824,7 +1824,7 @@ class MooncakeLayerwiseConnectorWorker:
         external_req_id = get_external_request_id(req_id)
         FAILED_SENDING_MSG = b"failed_sending_msg"
         msg_type = DONE_SENDING_MSG if success else FAILED_SENDING_MSG
-        status_str = "done" if success else "FAILED"
+        status_str = "done" if success else "failed"
         
         logger.info(
             "Sending %s sending signal for request %s to %s:%d",

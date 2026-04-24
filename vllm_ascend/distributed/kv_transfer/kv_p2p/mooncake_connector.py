@@ -468,7 +468,9 @@ class KVCacheRecvingThread(threading.Thread):
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
             self.request_queue.task_done()
-
+            # Need to send the done or failed signal to the remote host to ensure
+            # proper resource cleanup. Failing to do so may cause a memory leak on 
+            # the remote host.
             if transfer_succcess:
                 self._send_done_recv_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
             else:
@@ -476,7 +478,6 @@ class KVCacheRecvingThread(threading.Thread):
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
             # remote host.
-            self._send_done_recv_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
 
     def _send_done_signal_to_free_remote_port(
         self, request_id: str, remote_host: str, remote_port_send_num: dict[int, RemotePortInfo]
