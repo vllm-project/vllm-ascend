@@ -228,7 +228,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 if masks and masks[0] is not None:
                     query_len = masks[0].shape[0]
                     lst = query_lens[:num_decodes]
-                    actual_seq_lengths_q = list(np.diff([0] + lst))
+                    actual_seq_lengths_q = list(np.diff([0] + np.array(lst)))
                     attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
                     masks = masks[:num_decodes]  # type:ignore
                     for i, mask in enumerate(masks):

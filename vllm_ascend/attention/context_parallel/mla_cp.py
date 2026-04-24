@@ -658,11 +658,10 @@ class AscendMlaCPImpl(AscendMLAImpl):
             and self.speculative_config is not None
         ):
             input_layout = "BSND"
-            query_len = self.vllm_config.speculative_config.num_speculative_tokens + 1
             actual_seq_lengths_q = decode_meta.actual_seq_lengths_q
             num_decodes = len(actual_seq_lengths_q)
             lst = actual_seq_lengths_q[:num_decodes]
-            actual_seq_lengths_q = list(np.diff([0] + lst))
+            actual_seq_lengths_q = list(np.diff([0] + np.array(lst)))
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
             q_nope = q_nope.view(num_decodes, -1, num_heads, q_nope.shape[-1]).contiguous()
             q_pe = q_pe.view(num_decodes, -1, num_heads, q_pe.shape[-1])
