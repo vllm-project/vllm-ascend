@@ -127,10 +127,10 @@ def sanity_check(suites: dict[str, list[TestFile]], upstream_files: set[str]) ->
 
     # Only check files that belong to this repo (not from upstream configs).
     local_files = suite_files - upstream_files
-    print("local_files>>>",local_files)
+    print("local_files>>>", local_files)
     root = _find_project_root()
     covered = _minimal_covered_dirs(local_files, root)
-    print("covered>>>",covered)
+    print("covered>>>", covered)
     disk_files = {str(p.relative_to(root)) for d in covered for p in (root / d).rglob("test_*.py")}
 
     missing_from_suite = sorted(disk_files - local_files)
@@ -142,6 +142,7 @@ def sanity_check(suites: dict[str, list[TestFile]], upstream_files: set[str]) ->
     if missing_from_disk:
         entries = "\n".join(f'  TestFile("{f}"),' for f in missing_from_disk)
         raise SystemExit(f"Test files listed in suite do not exist on disk:\n{entries}")
+
 
 def _print_plan(
     suite: str,
