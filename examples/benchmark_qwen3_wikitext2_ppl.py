@@ -46,6 +46,7 @@ DEFAULT_DATASET = "/workspace/wikitext-2-raw/wiki.test.raw"
 class EvalResult:
     name: str
     model_path: str
+    tensor_parallel_size: int
     perplexity: float
     neg_log_likelihood: float
     scored_tokens: int
@@ -105,12 +106,32 @@ def parse_args() -> argparse.Namespace:
         help="Use eager mode (disables graph/compile path).",
     )
     parser.add_argument(
+        "--model-tp",
+        action="append",
+        default=[],
+        help="Optional tensor parallel override name=int. Supported names: full, quarot_w4a4_rtn.",
+    )
+    parser.add_argument(
         "--output-json",
         type=Path,
         default=None,
         help="Optional file path to write machine-readable JSON report.",
     )
     return parser.parse_args()
+
+
+def parse_model_int_overrides(specs: list[str]) -> dict[str, int]:
+    parsed: dict[str, int] = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(f"Invalid override spec {spec!r}; expected name=value")
+        name, value = spec.split("=", maxsplit=1)
+        name = name.strip()
+        value = value.strip()
+        if not name or not value:
+            raise ValueError(f"Invalid override spec {spec!r}; name/value must not be empty")
+        parsed[name] = int(value)
+    return parsed
 
 
 def read_wikitext(path: str) -> str:
@@ -186,6 +207,7 @@ def evaluate_model(
     token_chunks: list[list[int]],
     tokenizer: AutoTokenizer,
     args: argparse.Namespace,
+    tensor_parallel_size: int,
 ) -> EvalResult:
     load_start = time.perf_counter()
     llm = LLM(
@@ -194,6 +216,7 @@ def evaluate_model(
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=args.enforce_eager,
+        tensor_parallel_size=tensor_parallel_size,
     )
     load_end = time.perf_counter()
 
@@ -226,6 +249,7 @@ def evaluate_model(
     return EvalResult(
         name=name,
         model_path=model_path,
+        tensor_parallel_size=tensor_parallel_size,
         perplexity=ppl,
         neg_log_likelihood=nll,
         scored_tokens=scored_tokens,
@@ -245,6 +269,7 @@ def result_to_dict(result: EvalResult) -> dict[str, Any]:
     return {
         "name": result.name,
         "model_path": result.model_path,
+        "tensor_parallel_size": result.tensor_parallel_size,
         "perplexity": result.perplexity,
         "neg_log_likelihood": result.neg_log_likelihood,
         "scored_tokens": result.scored_tokens,
@@ -277,6 +302,7 @@ def print_summary(results: list[EvalResult], meta: dict[str, Any]) -> None:
     print()
     for r in results:
         print(f"[{r.name}] {r.model_path}")
+        print(f"  tp={r.tensor_parallel_size}")
         print(f"  ppl={r.perplexity:.6f}  scored_tokens={r.scored_tokens}  nll={r.neg_log_likelihood:.3f}")
         print(f"  load_s={r.model_load_sec:.3f}  eval_s={r.eval_sec:.3f}  tok_s={r.throughput_tok_s:.3f}")
         print(f"  latency_ms(avg/p50/p95)={r.latency_avg_ms:.3f}/{r.latency_p50_ms:.3f}/{r.latency_p95_ms:.3f}")
@@ -293,6 +319,7 @@ def print_summary(results: list[EvalResult], meta: dict[str, Any]) -> None:
 
 def main() -> None:
     args = parse_args()
+    model_tps = parse_model_int_overrides(args.model_tp)
 
     text = read_wikitext(args.dataset_path)
     tokenizer = AutoTokenizer.from_pretrained(args.full_model, trust_remote_code=True)
@@ -315,11 +342,19 @@ def main() -> None:
             "VLLM_WORKER_MULTIPROC_METHOD": os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", ""),
             "VLLM_ASCEND_QUAROT_EXEC_MODE": os.environ.get("VLLM_ASCEND_QUAROT_EXEC_MODE", ""),
         },
+        "model_tps": model_tps,
     }
 
     results = [
-        evaluate_model("full", args.full_model, chunks, tokenizer, args),
-        evaluate_model("quarot_w4a4_rtn", args.quarot_model, chunks, tokenizer, args),
+        evaluate_model("full", args.full_model, chunks, tokenizer, args, model_tps.get("full", 1)),
+        evaluate_model(
+            "quarot_w4a4_rtn",
+            args.quarot_model,
+            chunks,
+            tokenizer,
+            args,
+            model_tps.get("quarot_w4a4_rtn", 1),
+        ),
     ]
 
     print_summary(results, base_meta)
