@@ -910,17 +910,8 @@ __global__ AICORE void fast_hadamard_dynamic_quant_fp16_to_int4(
     uint32_t full_n, uint32_t hadamard_n, uint32_t log2_hadamard_n,
     float inv_sqrt_hadamard_n) {
 #if defined(__DAV_VEC__)
-  uint32_t num_cores = get_block_num() * get_subblockdim();
-  uint32_t vid = get_block_idx() * get_subblockdim() + get_subblockid();
-  if (full_n > ELEMENTS_PER_TILE) {
-    // Correctness-first path for oversized rows: keep execution on a single
-    // logical worker until the helper is proven safe under wider parallelism.
-    if (get_block_idx() != 0 || get_subblockid() != 0) {
-      return;
-    }
-    num_cores = 1;
-    vid = 0;
-  }
+  const uint32_t num_cores = get_block_num() * get_subblockdim();
+  const uint32_t vid = get_block_idx() * get_subblockdim() + get_subblockid();
   runTFastHadamardDynamicQuant<half, int8_t>(
       (__gm__ half *)x, (__gm__ int8_t *)y, (__gm__ float *)row_scales, batch,
       full_n, hadamard_n, log2_hadamard_n, inv_sqrt_hadamard_n, num_cores,
