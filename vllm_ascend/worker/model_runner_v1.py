@@ -350,6 +350,20 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
         )
         self._positions_np_buf = self._positions_cpu_buf.numpy()
+        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
+        # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
+        _enpu = get_c_env("ENPU_ENABLE")
+        self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
+
+        self.use_eagle = (
+            vllm_config.speculative_config.method in ("eagle", "eagle3", "mtp")
+            if vllm_config.speculative_config
+            else False
+        )
+        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
+        # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
+        _enpu = get_c_env("ENPU_ENABLE")
+        self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
 
         self.use_eagle = vllm_config.speculative_config.use_eagle()
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
