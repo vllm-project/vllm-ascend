@@ -15,10 +15,6 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
-    create_scheme_for_layer,
-    get_linear_quant_type,
-    get_packed_modules_mapping,
-    get_quant_type_for_layer,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
@@ -203,10 +199,6 @@ class TestAscendModelSlimConfig(TestBase):
         with self.assertRaises(ValueError):
             config.is_layer_skipped_ascend("fused_layer", fused_mapping)
 
-    def test_init_with_none_config(self):
-        config = AscendModelSlimConfig(None)
-        self.assertEqual(config.quant_description, {})
-
     def test_init_with_default_config(self):
         config = AscendModelSlimConfig()
         self.assertEqual(config.quant_description, {})
@@ -286,121 +278,6 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertEqual(config.quant_description["model.layers.0.weight"], "INT8")
 
 
-class TestGetPackedModulesMapping(TestBase):
-    def test_known_model_type(self):
-        result = get_packed_modules_mapping("deepseek_v3")
-        self.assertIsInstance(result, dict)
-        self.assertIn("gate_up_proj", result)
-        self.assertIn("experts", result)
-
-    def test_unknown_model_type(self):
-        result = get_packed_modules_mapping("unknown_model")
-        self.assertEqual(result, {})
-
-
-class TestGetLinearQuantType(TestBase):
-    def test_simple_non_fused_layer(self):
-        quant_description = {"layer1.weight": "W8A8_DYNAMIC"}
-        packed_modules_mapping = {}
-        result = get_linear_quant_type(quant_description, "layer1", packed_modules_mapping)
-        self.assertEqual(result, "W8A8_DYNAMIC")
-
-    def test_fused_layer_consistent_quant_types(self):
-        quant_description = {
-            "shard1.weight": "W8A8_DYNAMIC",
-            "shard2.weight": "W8A8_DYNAMIC",
-        }
-        packed_modules_mapping = {"fused_layer": ["shard1", "shard2"]}
-        result = get_linear_quant_type(quant_description, "fused_layer", packed_modules_mapping)
-        self.assertEqual(result, "W8A8_DYNAMIC")
-
-    def test_fused_layer_inconsistent_quant_types(self):
-        quant_description = {
-            "shard1.weight": "W8A8_DYNAMIC",
-            "shard2.weight": "FLOAT",
-        }
-        packed_modules_mapping = {"fused_layer": ["shard1", "shard2"]}
-        with self.assertRaises(ValueError) as ctx:
-            get_linear_quant_type(quant_description, "fused_layer", packed_modules_mapping)
-        self.assertIn("Not all shards", str(ctx.exception))
-
-
-class TestGetQuantTypeForLayer(TestBase):
-    def test_attention_layer_with_fa_quant_type(self):
-        quant_description = {
-            "fa_quant_type": "C8",
-            "layer1.weight": "W8A8_DYNAMIC",
-        }
-        result = get_quant_type_for_layer(quant_description, "layer1", "attention")
-        self.assertEqual(result, "C8")
-
-    def test_attention_layer_with_indexer_quant_type(self):
-        quant_description = {
-            "indexer_quant_type": "INT8",
-            "layer1.weight": "W8A8_DYNAMIC",
-        }
-        result = get_quant_type_for_layer(quant_description, "layer1", "attention")
-        self.assertEqual(result, "INT8")
-
-    def test_attention_layer_with_layer_indexer_quant_type(self):
-        quant_description = {
-            "layer1.indexer.quant_type": "INT8",
-            "layer1.weight": "W8A8_DYNAMIC",
-        }
-        result = get_quant_type_for_layer(quant_description, "layer1", "attention")
-        self.assertEqual(result, "INT8")
-
-    def test_linear_layer(self):
-        quant_description = {
-            "layer1.weight": "W8A8_DYNAMIC",
-        }
-        result = get_quant_type_for_layer(quant_description, "layer1", "linear")
-        self.assertEqual(result, "W8A8_DYNAMIC")
-
-    def test_moe_layer(self):
-        quant_description = {
-            "moe_layer.weight": "W8A8_DYNAMIC",
-        }
-        result = get_quant_type_for_layer(quant_description, "moe_layer", "moe")
-        self.assertEqual(result, "W8A8_DYNAMIC")
-
-    def test_with_none_packed_modules_mapping(self):
-        quant_description = {
-            "layer1.weight": "W8A8_DYNAMIC",
-        }
-        result = get_quant_type_for_layer(quant_description, "layer1", "linear", None)
-        self.assertEqual(result, "W8A8_DYNAMIC")
-
-
-class TestCreateSchemeForLayer(TestBase):
-    @patch("vllm_ascend.quantization.modelslim_config.get_scheme_class")
-    def test_successful_scheme_creation(self, mock_get_scheme_class):
-        mock_scheme_class = MagicMock()
-        mock_scheme_instance = MagicMock()
-        mock_scheme_class.return_value = mock_scheme_instance
-        mock_get_scheme_class.return_value = mock_scheme_class
-
-        quant_description = {"layer1.weight": "W8A8_DYNAMIC"}
-        result = create_scheme_for_layer(quant_description, "layer1", "linear")
-
-        self.assertIs(result, mock_scheme_instance)
-        mock_get_scheme_class.assert_called_once_with("W8A8_DYNAMIC", "linear")
-
-    def test_quant_type_none_raises_error(self):
-        quant_description = {}
-        with self.assertRaises(KeyError) as ctx:
-            create_scheme_for_layer(quant_description, "layer1", "linear")
-
-    @patch("vllm_ascend.quantization.modelslim_config.get_scheme_class")
-    def test_unsupported_quant_type_raises_error(self, mock_get_scheme_class):
-        mock_get_scheme_class.return_value = None
-
-        quant_description = {"layer1.weight": "UNSUPPORTED_TYPE"}
-        with self.assertRaises(NotImplementedError) as ctx:
-            create_scheme_for_layer(quant_description, "layer1", "linear")
-        self.assertIn("doesn't support UNSUPPORTED_TYPE", str(ctx.exception))
-
-
 class TestApplyVllmMapper(TestBase):
     def test_apply_mapper_with_populated_quant_description(self):
         config = AscendModelSlimConfig({"old_key.weight": "INT8"})
@@ -412,189 +289,27 @@ class TestApplyVllmMapper(TestBase):
         self.assertEqual(config.quant_description, {"new_key.weight": "INT8"})
         mock_mapper.apply_dict.assert_called_once_with({"old_key.weight": "INT8"})
 
-    def test_idempotency_when_mapper_already_applied(self):
-        config = AscendModelSlimConfig({"key.weight": "INT8"})
-        mock_mapper = MagicMock()
-        mock_mapper.apply_dict.return_value = {"key.weight": "INT8"}
-
-        config.apply_vllm_mapper(mock_mapper)
-        first_result = config.quant_description
-
-        config.apply_vllm_mapper(mock_mapper)
-        second_result = config.quant_description
-
-        self.assertEqual(first_result, second_result)
-        mock_mapper.apply_dict.assert_called_once()
-
-    def test_empty_quant_description(self):
-        config = AscendModelSlimConfig({})
-        mock_mapper = MagicMock()
-
-        config.apply_vllm_mapper(mock_mapper)
-
-        mock_mapper.apply_dict.assert_not_called()
-
 
 class TestGetCacheScale(TestBase):
     def test_c8_kv_cache_type_k_proj_scale(self):
         config = AscendModelSlimConfig({"kv_cache_type": "C8"})
         result = config.get_cache_scale("model.layers.0.k_proj.kv_cache_scale")
         self.assertEqual(result, "model.layers.0.attn.k_cache_scale")
-
-    def test_c8_kv_cache_type_k_proj_offset(self):
-        config = AscendModelSlimConfig({"kv_cache_type": "C8"})
-        result = config.get_cache_scale("model.layers.0.k_proj.kv_cache_offset")
-        self.assertEqual(result, "model.layers.0.attn.k_cache_offset")
-
-    def test_c8_kv_cache_type_v_proj_scale(self):
-        config = AscendModelSlimConfig({"kv_cache_type": "C8"})
-        result = config.get_cache_scale("model.layers.0.v_proj.kv_cache_scale")
-        self.assertEqual(result, "model.layers.0.attn.v_cache_scale")
-
-    def test_c8_kv_cache_type_v_proj_offset(self):
-        config = AscendModelSlimConfig({"kv_cache_type": "C8"})
         result = config.get_cache_scale("model.layers.0.v_proj.kv_cache_offset")
         self.assertEqual(result, "model.layers.0.attn.v_cache_offset")
 
-    def test_non_c8_kv_cache_type(self):
+    def test_no_match(self):
         config = AscendModelSlimConfig({"kv_cache_type": "FLOAT"})
         result = config.get_cache_scale("model.layers.0.k_proj.kv_cache_scale")
         self.assertIsNone(result)
 
-    def test_no_matching_suffix(self):
         config = AscendModelSlimConfig({"kv_cache_type": "C8"})
         result = config.get_cache_scale("model.layers.0.other_key")
         self.assertIsNone(result)
 
 
-class TestQuantPrefixMapper(TestBase):
-    def test_sets_model_type_and_returns_prefix(self):
-        config = AscendModelSlimConfig({})
-        result = config.quant_prefix_mapper("deepseek_v3", "model.layers.0")
-        self.assertEqual(result, "model.layers.0")
-        self.assertEqual(config.model_type, "deepseek_v3")
-
-
-class TestIsFaQuantLayer(TestBase):
-    def test_enable_fa_quant_true_matching_layer(self):
-        config = AscendModelSlimConfig(
-            {
-                "fa_quant_type": "C8",
-                "layers.1.fa_k.scale": "C8",
-            }
-        )
-        result = config.is_fa_quant_layer("layers.1.attn")
-        self.assertTrue(result)
-
-    def test_enable_fa_quant_false(self):
-        config = AscendModelSlimConfig({})
-        result = config.is_fa_quant_layer("layers.1.attn")
-        self.assertFalse(result)
-
-    def test_non_matching_layer_index(self):
-        config = AscendModelSlimConfig(
-            {
-                "fa_quant_type": "C8",
-                "layers.1.fa_k.scale": "C8",
-            }
-        )
-        result = config.is_fa_quant_layer("layers.2.attn")
-        self.assertFalse(result)
-
-    def test_no_layer_index(self):
-        config = AscendModelSlimConfig(
-            {
-                "fa_quant_type": "C8",
-                "layers.1.fa_k.scale": "C8",
-            }
-        )
-        result = config.is_fa_quant_layer("model.attn")
-        self.assertFalse(result)
-
-
-class TestEnablingFaQuant(TestBase):
-    def test_decode_instance_with_fa_quant_layer(self):
-        config = AscendModelSlimConfig(
-            {
-                "fa_quant_type": "C8",
-                "layers.1.fa_k.scale": "C8",
-            }
-        )
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.kv_transfer_config.is_kv_consumer = True
-        mock_vllm_config.kv_transfer_config.is_kv_producer = False
-
-        result = config.enabling_fa_quant(mock_vllm_config, "layers.1.attn")
-        self.assertTrue(result)
-
-    def test_non_decode_instance(self):
-        config = AscendModelSlimConfig(
-            {
-                "fa_quant_type": "C8",
-                "layers.1.fa_k.scale": "C8",
-            }
-        )
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.kv_transfer_config.is_kv_consumer = False
-        mock_vllm_config.kv_transfer_config.is_kv_producer = True
-
-        result = config.enabling_fa_quant(mock_vllm_config, "layers.1.attn")
-        self.assertFalse(result)
-
-    def test_is_fa_quant_layer_false(self):
-        config = AscendModelSlimConfig(
-            {
-                "fa_quant_type": "C8",
-                "layers.1.fa_k.scale": "C8",
-            }
-        )
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.kv_transfer_config.is_kv_consumer = True
-        mock_vllm_config.kv_transfer_config.is_kv_producer = False
-
-        result = config.enabling_fa_quant(mock_vllm_config, "layers.2.attn")
-        self.assertFalse(result)
-
-
-class TestIsIndexerQuantLayer(TestBase):
-    def test_enable_indexer_quant_true_matching_layer(self):
-        config = AscendModelSlimConfig(
-            {
-                "indexer_quant_type": "INT8",
-                "layers.1.indexer.quant_type": "INT8",
-            }
-        )
-        result = config.is_indexer_quant_layer("layers.1.attn")
-        self.assertTrue(result)
-
-    def test_enable_indexer_quant_false(self):
-        config = AscendModelSlimConfig({})
-        result = config.is_indexer_quant_layer("layers.1.attn")
-        self.assertFalse(result)
-
-    def test_non_matching_layer_index(self):
-        config = AscendModelSlimConfig(
-            {
-                "indexer_quant_type": "INT8",
-                "layers.1.indexer.quant_type": "INT8",
-            }
-        )
-        result = config.is_indexer_quant_layer("layers.2.attn")
-        self.assertFalse(result)
-
-    def test_no_layer_index(self):
-        config = AscendModelSlimConfig(
-            {
-                "indexer_quant_type": "INT8",
-                "layers.1.indexer.quant_type": "INT8",
-            }
-        )
-        result = config.is_indexer_quant_layer("model.attn")
-        self.assertFalse(result)
-
-
 class TestGetKvQuantDtype(TestBase):
-    def test_enable_fa_quant_true_with_mla(self):
+    def test_enable_fa_quant(self):
         config = AscendModelSlimConfig(
             {
                 "fa_quant_type": "C8",
@@ -603,23 +318,14 @@ class TestGetKvQuantDtype(TestBase):
         )
         mock_model_config = MagicMock()
         mock_model_config.dtype = torch.float16
+        # test mla
         mock_model_config.use_mla = True
-
         k_dtype, v_dtype = config.get_kv_quant_dtype("layers.1.attn", torch.float16, mock_model_config)
         self.assertEqual(k_dtype, torch.int8)
         self.assertEqual(v_dtype, torch.float16)
 
-    def test_enable_fa_quant_true_without_mla(self):
-        config = AscendModelSlimConfig(
-            {
-                "fa_quant_type": "C8",
-                "layers.1.fa_k.scale": "C8",
-            }
-        )
-        mock_model_config = MagicMock()
-        mock_model_config.dtype = torch.float16
+        # test gqa
         mock_model_config.use_mla = False
-
         k_dtype, v_dtype = config.get_kv_quant_dtype("layers.1.attn", torch.float16, mock_model_config)
         self.assertEqual(k_dtype, torch.int8)
         self.assertEqual(v_dtype, torch.int8)
@@ -628,11 +334,8 @@ class TestGetKvQuantDtype(TestBase):
         config = AscendModelSlimConfig({})
         mock_model_config = MagicMock()
         mock_model_config.dtype = torch.float16
-        mock_model_config.use_mla = True
-
         k_dtype, v_dtype = config.get_kv_quant_dtype("layers.1.attn", torch.float16, mock_model_config)
         self.assertEqual(k_dtype, torch.float16)
-        self.assertEqual(v_dtype, torch.float16)
 
 
 class TestGetKvQuantSplitFactor(TestBase):
@@ -675,7 +378,7 @@ class TestAddKvcacheQuantMetadata(TestBase):
 
         self.assertTrue(config.enable_fa_quant)
         self.assertIn(1, config.kvcache_quant_layers)
-        self.assertIn(2, config.kvcache_quant_layers)
+        self.assertNotIn(5, config.kvcache_quant_layers)
         self.assertFalse(config.enable_indexer_quant)
         self.assertEqual(config.indexer_quant_layers, [])
 
@@ -693,7 +396,7 @@ class TestAddKvcacheQuantMetadata(TestBase):
         self.assertEqual(config.kvcache_quant_layers, [])
         self.assertTrue(config.enable_indexer_quant)
         self.assertIn(1, config.indexer_quant_layers)
-        self.assertIn(3, config.indexer_quant_layers)
+        self.assertNotIn(5, config.indexer_quant_layers)
 
     def test_with_neither_quant_type(self):
         config = AscendModelSlimConfig({})

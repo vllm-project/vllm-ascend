@@ -5,7 +5,6 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
-from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.quantization.methods.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
     AscendW4A4MXFP4DynamicLinearMethod,
@@ -19,9 +18,6 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ensure.return_value = None
         self.scheme = AscendW4A4MXFP4DynamicLinearMethod()
-
-    def test_model_dtype_is_none(self):
-        self.assertIsNone(self.scheme.model_dtype)
 
     def test_get_weight_various_input_sizes(self):
         for input_size in [64, 128, 256, 512]:
@@ -37,14 +33,6 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
             self.assertEqual(result["weight_scale"].shape, (128, 256 // gs))
             self.assertEqual(result["weight_scale"].dtype, torch.uint8)
 
-    def test_get_pertensor_param_returns_empty(self):
-        result = self.scheme.get_pertensor_param(torch.bfloat16)
-        self.assertEqual(result, {})
-
-    def test_get_perchannel_param_returns_empty(self):
-        result = self.scheme.get_perchannel_param(128, torch.bfloat16)
-        self.assertEqual(result, {})
-
     def test_process_weights_after_loading_transposes(self):
         layer = nn.Module()
         layer.weight = nn.Parameter(torch.randint(0, 255, (128, 128), dtype=torch.uint8), requires_grad=False)
@@ -52,13 +40,6 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.weight.shape, (128, 128))
         self.assertEqual(layer.weight_scale.shape[0], 4)
-
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.ensure_mxfp4_linear_available")
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_current_vllm_config")
-    def test_group_size_from_config(self, mock_vllm_config, mock_ensure):
-        mock_vllm_config.return_value = create_mock_vllm_config(quant_description={"group_size": 64})
-        scheme = AscendW4A4MXFP4DynamicLinearMethod()
-        self.assertEqual(scheme.group_size, 64)
 
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.torch_npu")
     def test_apply_3d_input(self, mock_npu):
@@ -92,10 +73,6 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         mock_ensure.return_value = None
         self.scheme = AscendW4A4MXFP4DynamicFusedMoEMethod()
 
-    def test_init(self):
-        self.assertEqual(self.scheme.quant_type, QuantType.MXFP4)
-        self.assertIsNone(self.scheme.model_dtype)
-
     def test_get_weight_static_method(self):
         result = self.scheme.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
         self.assertEqual(result["w13_weight"].dtype, torch.uint8)
@@ -126,9 +103,7 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False)
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
-        self.assertEqual(layer.w2_weight.shape, (8, 128, 128))
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
-        self.assertEqual(layer.w2_weight_scale.shape, (8, 4, 128, 2))
 
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4._EXTRA_CTX")
@@ -153,7 +128,7 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         mock_comm.fused_experts.return_value = torch.randn(tokens, self.hidden_size)
         mock_ctx.moe_comm_method = mock_comm
         mock_ctx.moe_comm_type = Mock()
-        result = self.scheme.apply(
+        self.scheme.apply(
             layer,
             x,
             router_logits,

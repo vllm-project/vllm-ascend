@@ -162,19 +162,18 @@ class TestMaybeAutoDetectQuantization(TestBase):
 
 class TestEnableFaQuant(TestBase):
     def test_non_quantization_scenarios(self):
+        # non quantization scene
         vllm_config = MagicMock()
         vllm_config.quant_config = None
         result = enable_fa_quant(vllm_config)
         self.assertFalse(result)
 
-    def test_llmcompressor_quantization_scenario(self):
-        vllm_config = MagicMock()
+        # CompressedTensors scene
         vllm_config.quant_config = AscendCompressedTensorsConfig({}, [], "", {})
         result = enable_fa_quant(vllm_config)
         self.assertFalse(result)
 
-    def test_not_fa3_quantization_scenario(self):
-        vllm_config = MagicMock()
+        # non fa3 quant scene
         vllm_config.quant_config = AscendModelSlimConfig(W8A8_CONFIG)
         result = enable_fa_quant(vllm_config)
         self.assertFalse(result)

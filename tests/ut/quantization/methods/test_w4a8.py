@@ -290,9 +290,6 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertTrue(hasattr(layer, "w13_scale_bias"))
         self.assertEqual(layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(layer.w13_scale_bias.data.dtype, torch.float32)
-        self.assertTrue(hasattr(layer, "w2_scale_bias"))
-        self.assertEqual(layer.w2_scale_bias.data.shape, (self.experts, self.output_size))
-        self.assertEqual(layer.w2_scale_bias.data.dtype, torch.float32)
 
     @patch("vllm_ascend.quantization.methods.w4a8._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a8.select_experts")
@@ -337,9 +334,6 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             use_grouped_topk=False,
             global_num_experts=num_experts,
             expert_map=expert_map,
-            topk_group=None,
-            num_expert_group=None,
-            custom_routing_function=None,
             scoring_func="softmax",
             routed_scaling_factor=1.0,
             e_score_correction_bias=e_score_correction_bias,

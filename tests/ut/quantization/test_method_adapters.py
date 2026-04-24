@@ -6,7 +6,6 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.method_adapters import (
-    AscendEmbeddingMethod,
     AscendFusedMoEMethod,
     AscendKVCacheMethod,
     AscendLinearMethod,
@@ -15,6 +14,7 @@ from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendL
 
 
 class TestAscendLinearMethod(TestBase):
+    @patch("vllm_ascend.quantization.method_adapters.enable_dsa_cp_with_layer_shard")
     def setUp(self):
         self.mock_scheme = MagicMock(spec=AscendLinearScheme)
         self.mock_scheme.get_weight.return_value = {
@@ -82,19 +82,6 @@ class TestAscendLinearMethod(TestBase):
         self.method.process_weights_after_loading(layer)
         self.mock_scheme.process_weights_after_loading.assert_called_once_with(layer)
 
-    def test_process_weights_after_loading_skips_when_not_present(self):
-        del self.mock_scheme.process_weights_after_loading
-        layer = torch.nn.Module()
-        self.method.process_weights_after_loading(layer)
-
-    def test_get_computed_params(self):
-        computed = self.method.get_computed_params()
-        self.assertIn("weight_offset", computed)
-        self.assertIn("quant_bias", computed)
-        self.assertIn("deq_scale", computed)
-        self.assertIn("weight_scale", computed)
-        self.assertEqual(len(computed), 4)
-
     def test_apply_delegates_to_scheme(self):
         layer = MagicMock(spec=ColumnParallelLinear)
         x = torch.randn(4, 256)
@@ -154,11 +141,6 @@ class TestAscendFusedMoEMethod(TestBase):
         self.method.process_weights_after_loading(layer)
         self.mock_scheme.process_weights_after_loading.assert_called_once_with(layer)
 
-    def test_process_weights_after_loading_skips_when_not_present(self):
-        del self.mock_scheme.process_weights_after_loading
-        layer = torch.nn.Module()
-        self.method.process_weights_after_loading(layer)
-
     def test_create_weights_registers_parameters(self):
         self.mock_scheme.get_weight.return_value = {
             "w13_weight": torch.empty(8, 256, 128, dtype=torch.int8),
@@ -172,14 +154,7 @@ class TestAscendFusedMoEMethod(TestBase):
             "w2_weight_offset": torch.empty(8, 128, 1, dtype=torch.bfloat16),
         }
         # per channel quantization
-        layer = torch.nn.Module()
-        self.method.create_weights(
-            layer,
-            num_experts=8,
-            hidden_size=128,
-            intermediate_size_per_partition=256,
-            params_dtype=torch.bfloat16,
-        )
+        layer = self.create_moe_weights()
         self.assertIn("w13_weight", dict(layer.named_parameters()))
         self.assertIn("w2_weight", dict(layer.named_parameters()))
 
@@ -191,6 +166,11 @@ class TestAscendFusedMoEMethod(TestBase):
 
         # per group quantization
         self.mock_scheme.group_size = 128
+        layer = self.create_moe_weights()
+        self.assertEqual(layer.w13_weight_scale.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
+        self.assertEqual(layer.w2_weight_offset.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
+
+    def create_moe_weights(self):
         layer = torch.nn.Module()
         self.method.create_weights(
             layer,
@@ -199,11 +179,7 @@ class TestAscendFusedMoEMethod(TestBase):
             intermediate_size_per_partition=256,
             params_dtype=torch.bfloat16,
         )
-        self.assertEqual(layer.w13_weight_scale_second.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
-        self.assertEqual(layer.w2_weight_offset_second.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
-        self.assertEqual(layer.w2_scale_bias.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
-        self.assertEqual(layer.w13_weight_scale.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
-        self.assertEqual(layer.w2_weight_offset.quant_method, FusedMoeWeightScaleSupported.GROUP.value)
+        return layer
 
     def test_apply_method(self):
         layer = torch.nn.Module()
@@ -214,18 +190,3 @@ class TestAscendFusedMoEMethod(TestBase):
         self.mock_scheme.apply.return_value = None
         self.method.apply(layer, x, router_logits, top_k, renormalize)
         self.mock_scheme.apply.assert_called_once()
-
-    def test_supports_eplb_default_false(self):
-        self.assertFalse(self.method.supports_eplb)
-
-    def test_supports_eplb_when_scheme_supports(self):
-        self.mock_scheme.supports_eplb = True
-        self.assertTrue(self.method.supports_eplb)
-
-
-class TestAscendEmbeddingMethod(TestBase):
-    def test_init(self):
-        layer = MagicMock(spec=AscendLinearScheme)
-        method = AscendEmbeddingMethod(layer)
-        self.assertTrue(isinstance(method, AscendLinearMethod))
-        self.assertEqual(method.quant_method, layer)

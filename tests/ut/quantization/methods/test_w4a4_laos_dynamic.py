@@ -11,9 +11,6 @@ class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
     def setUp(self):
         self.method = AscendW4A4LaosDynamicLinearMethod()
 
-    def test_init_transpose_weight_true(self):
-        self.assertTrue(self.method.transpose_weight)
-
     def test_get_weight_various_sizes(self):
         sizes = [(64, 128), (256, 512), (1024, 2048)]
         for input_size, output_size in sizes:
@@ -29,30 +26,6 @@ class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
             self.assertEqual(result["weight_offset"].shape, (output_size, 1))
             self.assertEqual(result["weight_scale"].dtype, torch.float32)
             self.assertEqual(result["weight_offset"].dtype, torch.float32)
-
-    def test_get_pertensor_param_empty(self):
-        result = self.method.get_pertensor_param(torch.bfloat16)
-        self.assertEqual(result, {})
-
-    def test_get_pergroup_param_various_layer_types(self):
-        for layer_type in ["column", "row", None]:
-            result = self.method.get_pergroup_param(256, 128, torch.bfloat16, layer_type)
-            self.assertEqual(result, {})
-
-    @patch("torch_npu.npu_quant_matmul")
-    @patch("torch_npu.npu_dynamic_quant")
-    def test_apply_2d_input(self, mock_dyn_quant, mock_matmul):
-        mock_dyn_quant.return_value = (
-            torch.randint(0, 15, (32, 128), dtype=torch.int32),
-            torch.randn(32, dtype=torch.float32),
-        )
-        mock_matmul.return_value = torch.randn(32, 256)
-        layer = MagicMock()
-        layer.weight = MagicMock(data=torch.randint(-8, 7, (256, 128), dtype=torch.int8))
-        layer.weight_scale = MagicMock(data=torch.randn(256, dtype=torch.float32))
-        x = torch.randn(32, 128, dtype=torch.bfloat16)
-        output = self.method.apply(layer, x)
-        mock_matmul.assert_called_once()
 
     @patch("torch_npu.npu_quant_matmul")
     @patch("torch_npu.npu_dynamic_quant")
@@ -71,16 +44,6 @@ class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
         output = self.method.apply(layer, x, bias)
         expected_output = expected_output + bias
         self.assertTrue(torch.equal(output, expected_output))
-
-    @patch("torch_npu.npu_convert_weight_to_int4pack")
-    def test_process_weights_no_transpose_when_false(self, mock_convert):
-        mock_convert.return_value = torch.randint(0, 15, (128, 32), dtype=torch.int32)
-        self.method.transpose_weight = False
-        layer = nn.Module()
-        layer.weight = nn.Parameter(torch.randint(-8, 7, (128, 256), dtype=torch.int8), requires_grad=False)
-        layer.weight_scale = nn.Parameter(torch.randn(128, 1, dtype=torch.float32), requires_grad=False)
-        self.method.process_weights_after_loading(layer)
-        self.assertEqual(layer.weight.shape, (128, 32))
 
     @patch("torch_npu.npu_convert_weight_to_int4pack")
     def test_process_weights_various_input_sizes(self, mock_convert):

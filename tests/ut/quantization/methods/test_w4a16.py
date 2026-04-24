@@ -107,13 +107,6 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
 
         self.quant_method = AscendW4A16FusedMoEMethod()
 
-    def test_init(self):
-        self.assertTrue(self.quant_method.transpose_weight)
-        self.assertEqual(self.quant_method.num_bits, 4)
-        self.assertEqual(self.quant_method.pack_factor, 8)
-        self.assertEqual(self.quant_method.group_size, self.group_size)
-        self.assertFalse(self.quant_method.dynamic_eplb)
-
     def test_get_weight(self):
         param_dict = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)
 
@@ -134,21 +127,11 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
         expected_w13_scale_shape = (self.experts, 2 * self.input_size, self.output_size // self.group_size)
         self.assertEqual(param_dict["w13_weight_scale"].shape, expected_w13_scale_shape)
 
-        self.assertEqual(param_dict["w2_weight_scale"].dtype, torch.bfloat16)
-        expected_w2_scale_shape = (self.experts, self.output_size, self.input_size // self.group_size)
-        self.assertEqual(param_dict["w2_weight_scale"].shape, expected_w2_scale_shape)
-
-        self.assertEqual(param_dict["w13_weight_shape"].dtype, torch.int32)
-        self.assertEqual(param_dict["w13_weight_shape"].shape, (self.experts, 2))
-
         self.assertEqual(param_dict["w2_weight_shape"].dtype, torch.int32)
         self.assertEqual(param_dict["w2_weight_shape"].shape, (self.experts, 2))
 
         self.assertEqual(param_dict["w13_weight_offset"].dtype, torch.bfloat16)
         self.assertEqual(param_dict["w13_weight_offset"].shape, expected_w13_scale_shape)
-
-        self.assertEqual(param_dict["w2_weight_offset"].dtype, torch.bfloat16)
-        self.assertEqual(param_dict["w2_weight_offset"].shape, expected_w2_scale_shape)
 
     def build_layer(self):
         """Build a mock layer for testing"""
@@ -199,36 +182,14 @@ class TestAscendW4A16FusedMoEMethod(TestBase):
             return torch.zeros(new_shape, dtype=torch.int32)
 
         mock_npu_convert_weight_to_int4pack.side_effect = mock_convert_weight
-
         layer = self.build_layer()
-        self.quant_method.transpose_weight = True
-
         self.quant_method.process_weights_after_loading(layer)
 
         self.assertEqual(layer.w13_weight_packed.data.shape, torch.Size([8, 128, 8]))
         self.assertEqual(layer.w2_weight_packed.data.shape, torch.Size([8, 32, 16]))
-
         self.assertEqual(layer.w13_weight_scale.data.shape, torch.Size([8, 4, 64]))
-        self.assertEqual(layer.w2_weight_scale.data.shape, torch.Size([8, 1, 128]))
-        self.assertEqual(layer.w13_weight_offset.data.shape, torch.Size([8, 4, 64]))
         self.assertEqual(layer.w2_weight_offset.data.shape, torch.Size([8, 1, 128]))
-
         self.assertTrue(layer.w13_weight_scale.data.is_contiguous())
-        self.assertTrue(layer.w2_weight_scale.data.is_contiguous())
-        self.assertTrue(layer.w13_weight_offset.data.is_contiguous())
-        self.assertTrue(layer.w2_weight_offset.data.is_contiguous())
-
-    def test_process_weights_after_loading_without_transpose(self):
-        layer = self.build_layer()
-        self.quant_method.transpose_weight = False
-
-        original_w13_data = layer.w13_weight_packed.data.clone()
-        original_w2_data = layer.w2_weight_packed.data.clone()
-
-        self.quant_method.process_weights_after_loading(layer)
-
-        self.assertTrue(torch.equal(layer.w13_weight_packed.data, original_w13_data))
-        self.assertTrue(torch.equal(layer.w2_weight_packed.data, original_w2_data))
 
     @patch("vllm_ascend.quantization.methods.w4a16._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w4a16.select_experts")

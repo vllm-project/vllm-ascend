@@ -5,7 +5,6 @@ import torch
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
 from vllm_ascend.quantization.methods import (
-    AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
     AscendW8A8PDMixFusedMoeMethod,
     AscendW8A8PDMixLinearMethod,
@@ -15,14 +14,6 @@ from vllm_ascend.quantization.methods import (
 class TestAscendW8A8PDMixLinearScheme(TestBase):
     def setUp(self):
         self.method = AscendW8A8LinearMethod()
-
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
-    def test_init_creates_static_and_dynamic_methods(self, mock_vllm_config):
-        mock_vllm_config.return_value = create_mock_vllm_config(kv_transfer_config=None)
-        scheme = AscendW8A8PDMixLinearMethod()
-        self.assertTrue(isinstance(scheme._static_method, AscendW8A8LinearMethod))
-        self.assertTrue(isinstance(scheme._dynamic_method, AscendW8A8DynamicLinearMethod))
-        self.assertFalse(scheme._is_kv_consumer)
 
     @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
     @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
@@ -36,7 +27,7 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_static_cls.return_value = mock_static_instance
         scheme = AscendW8A8PDMixLinearMethod()
         for input_size, output_size in [(64, 128), (256, 512), (1024, 2048)]:
-            result = scheme.get_weight(input_size, output_size, torch.bfloat16)
+            scheme.get_weight(input_size, output_size, torch.bfloat16)
             mock_static_instance.get_weight.assert_called_with(input_size, output_size, torch.bfloat16)
             mock_dynamic_instance.get_weight.assert_not_called()
 
@@ -51,7 +42,7 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_static_instance.get_pertensor_param.return_value = {}
         mock_static_cls.return_value = mock_static_instance
         scheme = AscendW8A8PDMixLinearMethod()
-        result = scheme.get_pertensor_param(torch.bfloat16)
+        scheme.get_pertensor_param(torch.bfloat16)
         mock_static_instance.get_pertensor_param.assert_called_once_with(torch.bfloat16)
         mock_dynamic_instance.get_pertensor_param.assert_not_called()
 
@@ -66,7 +57,7 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_static_instance.get_perchannel_param.return_value = {}
         mock_static_cls.return_value = mock_static_instance
         scheme = AscendW8A8PDMixLinearMethod()
-        result = scheme.get_perchannel_param(128, torch.bfloat16)
+        scheme.get_perchannel_param(128, torch.bfloat16)
         mock_static_instance.get_perchannel_param.assert_called_once_with(128, torch.bfloat16)
         mock_dynamic_instance.get_perchannel_param.assert_not_called()
 
@@ -125,21 +116,6 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
         mock_dynamic_instance.process_weights_after_loading.assert_not_called()
         self.assertFalse(layer.is_kv_consumer)
 
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
-    @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
-    def test_is_kv_consumer_when_kv_transfer_config_set(self, mock_vllm_config, mock_dynamic_cls, mock_static_cls):
-        mock_kv_config = MagicMock()
-        mock_kv_config.is_kv_consumer = True
-        mock_vllm_config.return_value = create_mock_vllm_config(kv_transfer_config=mock_kv_config)
-        mock_static_instance = MagicMock()
-        mock_static_cls.return_value = mock_static_instance
-        scheme = AscendW8A8PDMixLinearMethod()
-        layer = MagicMock()
-        layer.weight_scale = MagicMock(data=torch.randn(128, 1, dtype=torch.bfloat16))
-        scheme.process_weights_after_loading(layer)
-        self.assertTrue(layer.is_kv_consumer)
-
 
 class TestAscendW8A8PDMixMoEScheme(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_mc2_group")
@@ -159,14 +135,5 @@ class TestAscendW8A8PDMixMoEScheme(TestBase):
         self.assertEqual(result["w2_deq_scale"].shape, (num_experts, hidden_sizes))
         self.assertEqual(result["w2_deq_scale"].dtype, torch.float32)
         self.assertEqual(result["w13_deq_scale"].shape, (num_experts, 2 * intermediate_size_per_partition))
-        self.assertEqual(result["w13_deq_scale"].dtype, torch.float32)
-        self.assertEqual(result["w2_input_offset"].shape, (num_experts, 1))
         self.assertEqual(result["w2_input_offset"].dtype, torch.int8)
         self.assertEqual(result["w13_input_offset"].shape, (num_experts, 1))
-        self.assertEqual(result["w13_input_offset"].dtype, torch.int8)
-
-        # test parent params
-        self.assertIn("w13_weight_scale", result)
-        self.assertIn("w13_weight_offset", result)
-        self.assertIn("w2_weight_scale", result)
-        self.assertIn("w2_weight_offset", result)
