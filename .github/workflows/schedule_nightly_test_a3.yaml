@@ -146,6 +146,9 @@ jobs:
           - name: multi-node-deepseek-v3.2-W8A8-EP-aime2025
             config_file_path: DeepSeek-V3_2-W8A8-EP-aime2025.yaml
             size: 4
+          - name: multi-node-GLM5_1-W8A8-EP
+            config_file_path: GLM5_1-W8A8—EP.yaml
+            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -218,6 +221,9 @@ jobs:
             size: 2
           - name: multi-node-deepseek-v3.1
             config_file_path: DeepSeek-V3.1-BF16.yaml
+            size: 2
+          - name: multi-node-GLM-5.1-w8a8-A3
+            config_file_path: GLM5_1-W8A8-A3-dual-nodes.yaml
             size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:

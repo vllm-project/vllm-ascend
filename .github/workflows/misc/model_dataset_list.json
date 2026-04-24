@@ -252,7 +252,8 @@
       "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
       "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
-      "z-lab/Qwen3-8B-DFlash-b16"
+      "z-lab/Qwen3-8B-DFlash-b16",
+      "Eco-Tech/GLM-5.1-w8a8"
     ], 
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",
@@ -266,6 +267,7 @@
       "vllm-ascend/prefix0-in3500-bs210",
       "vllm-ascend/prefix75-in3500-bs210",
       "vllm-ascend/textvqa-lite",
-      "vllm-ascend/textvqa-perf-1080p"
+      "vllm-ascend/textvqa-perf-1080p",
+      "vllm-ascend/gpqa"
     ]
   }
