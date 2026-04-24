@@ -12,7 +12,7 @@ This document will show the main verification steps of the model, including supp
 ## Environment Preparation
 
 ### Model Weight
-- `DeepSeek-V4-FLASH-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelers.cn/) ( Model weights are being refreshed. )
+- `DeepSeek-V4-Flash-w8a8-mtp`(Quantized version): require 1 Atlas 800 A3 (128G × 8) node or 1 Atlas 800 A2 (64G × 8) node. [Download model weight](https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -126,7 +126,7 @@ In this tutorial, we suppose you downloaded the model weight to `/root/.cache/`.
 
 ### Single-node Deployment
 
-- `DeepSeek-V4-w8a8`: can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
+- `DeepSeek-V4-Flash-w8a8-mtp`: can be deployed on 1 Atlas 800 A3 (128G × 8) or 1 Atlas 800 A2 (64G × 8).
 
 Run the following scripts on each node respectively.
 
@@ -146,7 +146,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export ACL_OP_INIT_MODE=1
 export TRITON_ALL_BLOCKS_PARALLEL=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-W8A8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
   --host 0.0.0.0 \
   --max_model_len 65536 \
   --max-num-batched-tokens 8192 \
@@ -183,7 +183,7 @@ export HCCL_BUFFSIZE=1024
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-W8A8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
     --host 0.0.0.0 \
     --max_model_len 65536 \
     --max-num-batched-tokens 8192 \
@@ -207,7 +207,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-W8A8 \
 
 ### Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of DeepSeek-V4 on Atlas 800 A3 (64G × 16) multi-node environment with 2P1D for better performance.
+We'd like to show the deployment guide of DeepSeek-V4 on Atlas 800 A3 (128G × 8) multi-node environment with 2P1D for better performance.
 
 Before you start, please
 
@@ -346,7 +346,7 @@ Before you start, please
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-W8A8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -417,7 +417,7 @@ Before you start, please
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-W8A8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -488,7 +488,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-W8A8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -603,7 +603,7 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 ```shell
 lm_eval \
   --model local-completions \
-  --model_args model=/root/.cache/Eco-Tech/DeepSeek-V4-w8a8,base_url=http://127.0.0.1:8006/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --model_args model=/root/.cache/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp,base_url=http://127.0.0.1:8006/v1/completions,tokenized_requests=False,trust_remote_code=True \
   --tasks gsm8k \
   --output_path ./
 ```
@@ -618,7 +618,7 @@ Refer to [Using AISBench for performance evaluation](../developer_guide/evaluati
 
 ### Using vLLM Benchmark
 
-Run performance evaluation of `DeepSeek-V4-W8A8` as an example.
+Run performance evaluation of `DeepSeek-V4-Flash-w8a8-mtp` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
@@ -631,5 +631,5 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
