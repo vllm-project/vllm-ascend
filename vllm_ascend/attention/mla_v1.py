@@ -36,6 +36,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
+    get_draft_graph_prefill_params,
     get_graph_params,
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
@@ -780,7 +781,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         draft_attn_metadatas=None,
     ):
         if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
+            if _EXTRA_CTX.is_draft_model_prefill:
+                graph_params = get_draft_graph_prefill_params()
+            else:
+                graph_params = get_draft_graph_params()
             attn_metadata = draft_attn_metadatas
             attn_keys = list(attn_metadata[0].keys())
         else:
@@ -1456,7 +1460,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             }
             common_kwargs.update(extra_fa_args)
         if _EXTRA_CTX.is_draft_model:
-            graph_params = get_draft_graph_params()
+            if _EXTRA_CTX.is_draft_model_prefill:
+                graph_params = get_draft_graph_prefill_params()
+            else:
+                graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
         if _EXTRA_CTX.capturing:

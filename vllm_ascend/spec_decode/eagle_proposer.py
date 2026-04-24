@@ -381,7 +381,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         # init block table tensor clone is only available after profile run and is only used for graph mode
-        if self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
+        if (
+            self.pcp_size * self.dcp_size > 1
+            and self.use_cuda_graph
+            and not is_profile
+            and self.block_table_tensor_clone is None
+        ):
             self.block_table_tensor_clone = torch.zeros(
                 (
                     self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs,
@@ -434,9 +439,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_step]
                 common_attn_metadata.seq_lens = self.seq_lens_group[draft_step][:num_reqs]
                 common_attn_metadata.query_start_loc = self.query_start_loc_group[draft_step][: num_reqs + 1]
-                if draft_step > 0:
-                    slicing_length = num_reqs * self.decode_threshold if self.pcp_size * self.dcp_size > 1 else num_reqs
+                if self.pcp_size * self.dcp_size > 1 and draft_step > 0:
                     assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
+                    slicing_length = num_reqs * self.decode_threshold
                     common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:slicing_length]
                 attn_metadata_eagle = builder.build_for_graph_capture(
                     common_attn_metadata,
@@ -679,7 +684,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
         # FIXME(lilinsiman)
-        if self.use_cuda_graph:
+        if self.pcp_size * self.dcp_size > 1 and self.use_cuda_graph:
             assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
             self.block_table_tensor_clone[: common_attn_metadata.block_table_tensor.shape[0]] = (
                 common_attn_metadata.block_table_tensor
@@ -1394,7 +1399,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def prepare_next_token_ids_padded(
         self,
-        seq_lens_cpu: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -1414,7 +1418,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
-        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
+        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
         )
