@@ -153,7 +153,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         padded_hidden_states_shape = hidden_states.shape
         if not (self.replace_allreduce or self.enable_shared_expert_dp):
             self.num_tokens, _ = hidden_states.shape
-            pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
+            target_pad_length = _EXTRA_CTX.padded_num_tokens
+            pad_size = target_pad_length - self.num_tokens
 
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
