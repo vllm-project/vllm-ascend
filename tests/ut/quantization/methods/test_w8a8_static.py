@@ -10,7 +10,6 @@ from vllm_ascend.utils import AscendDeviceType, COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW8A8LinearMethod(TestBase):
-
     def setUp(self):
         self.method = AscendW8A8LinearMethod()
 
@@ -49,13 +48,10 @@ class TestAscendW8A8LinearMethod(TestBase):
             elif dtype == torch.float16:
                 self.assertEqual(params['deq_scale'].dtype, torch.int64)
 
-    @patch(
-        "vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method"
-    )
+    @patch("vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method")
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_not_int8(self, mock_npu_quant_matmul, mock_quantize,
-                                   mock_get_weight_prefetch_method):
+    def test_apply_with_x_not_int8(self, mock_npu_quant_matmul, mock_quantize, mock_get_weight_prefetch_method):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
@@ -68,10 +64,7 @@ class TestAscendW8A8LinearMethod(TestBase):
 
         x = torch.randn(32, 128)
         bias = torch.randn(256)
-        mock_quantize.return_value = torch.randint(-128,
-                                                   127,
-                                                   x.shape,
-                                                   dtype=torch.int8)
+        mock_quantize.return_value = torch.randint(-128, 127, x.shape, dtype=torch.int8)
 
         expected_y_output = torch.randn(32, 256)
         mock_npu_quant_matmul.return_value = expected_y_output
@@ -108,14 +101,11 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertTrue(torch.equal(call_kwargs['bias'], bias))
 
     @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    @patch('torch_npu.npu_format_cast')
-    def test_process_weights_after_loading_with_nz0(self,
-                                                    mock_npu_format_cast):
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_with_nz0(self, mock_npu_format_cast):
         layer = MagicMock()
 
-        layer.weight.data = torch.randint(-128,
-                                          127, (128, 256),
-                                          dtype=torch.int8)
+        layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
         layer.input_scale.data = torch.tensor([0.1])
         layer.input_offset.data = torch.tensor([0])
         layer.weight_scale.data = torch.randn(128, 1)
@@ -125,25 +115,21 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.method.process_weights_after_loading(layer)
 
         expected_offset = torch.tensor([0]).repeat(256).to(torch.int8)
-        self.assertTrue(
-            torch.equal(layer.aclnn_input_offset.data, expected_offset))
+        self.assertTrue(torch.equal(layer.aclnn_input_offset.data, expected_offset))
         self.assertFalse(layer.aclnn_input_offset.requires_grad)
 
         self.assertEqual(layer.weight.data.shape, (256, 128))
-        self.assertEqual(layer.weight_scale.data.shape, (128, ))
-        self.assertEqual(layer.weight_offset.data.shape, (128, ))
+        self.assertEqual(layer.weight_scale.data.shape, (128,))
+        self.assertEqual(layer.weight_offset.data.shape, (128,))
         mock_npu_format_cast.assert_not_called()
         self.assertNotIn("deq_scale", dict(layer.named_parameters()))
 
     @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "1"})
-    @patch('torch_npu.npu_format_cast')
-    def test_process_weights_after_loading_with_nz1(self,
-                                                    mock_npu_format_cast):
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_with_nz1(self, mock_npu_format_cast):
         layer = MagicMock()
 
-        layer.weight.data = torch.randint(-128,
-                                          127, (128, 256),
-                                          dtype=torch.int8)
+        layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
         layer.input_scale.data = torch.tensor([0.1])
         layer.input_offset.data = torch.tensor([0])
         layer.weight_scale.data = torch.randn(128, 1)
@@ -153,13 +139,12 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.method.process_weights_after_loading(layer)
 
         expected_offset = torch.tensor([0]).repeat(256).to(torch.int8)
-        self.assertTrue(
-            torch.equal(layer.aclnn_input_offset.data, expected_offset))
+        self.assertTrue(torch.equal(layer.aclnn_input_offset.data, expected_offset))
         self.assertFalse(layer.aclnn_input_offset.requires_grad)
 
         self.assertEqual(layer.weight.data.shape, (256, 128))
-        self.assertEqual(layer.weight_scale.data.shape, (128, ))
-        self.assertEqual(layer.weight_offset.data.shape, (128, ))
+        self.assertEqual(layer.weight_scale.data.shape, (128,))
+        self.assertEqual(layer.weight_offset.data.shape, (128,))
         mock_npu_format_cast.assert_called_once()
         self.assertTrue(isinstance(layer.deq_scale, MagicMock))
 
@@ -169,9 +154,7 @@ class TestAscendW8A8LinearMethod(TestBase):
                                                                            mock_npu_format_cast):
         layer = MagicMock()
 
-        layer.weight.data = torch.randint(-128,
-                                          127, (128, 256),
-                                          dtype=torch.int8)
+        layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
         layer.input_scale.data = torch.tensor([0.1])
         layer.input_offset.data = torch.tensor([0])
         layer.weight_scale.data = torch.randn(128, 1)
@@ -182,13 +165,12 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.method.process_weights_after_loading(layer)
 
         expected_offset = torch.tensor([0]).repeat(256).to(torch.int8)
-        self.assertTrue(
-            torch.equal(layer.aclnn_input_offset.data, expected_offset))
+        self.assertTrue(torch.equal(layer.aclnn_input_offset.data, expected_offset))
         self.assertFalse(layer.aclnn_input_offset.requires_grad)
 
         self.assertEqual(layer.weight.data.shape, (256, 128))
-        self.assertEqual(layer.weight_scale.data.shape, (128, ))
-        self.assertEqual(layer.weight_offset.data.shape, (128, ))
+        self.assertEqual(layer.weight_scale.data.shape, (128,))
+        self.assertEqual(layer.weight_offset.data.shape, (128,))
         mock_npu_format_cast.assert_called_once()
         self.assertIn("deq_scale", dict(layer.named_parameters()))
         self.assertFalse(isinstance(layer.deq_scale, MagicMock))

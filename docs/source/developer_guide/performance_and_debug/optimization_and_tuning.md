@@ -55,7 +55,7 @@ pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 pip install modelscope pandas datasets gevent sacrebleu rouge_score pybind11 pytest
 
 # Configure this var to speed up model download
-VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 ```
 
 Please follow the [Installation Guide](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) to make sure vLLM and vllm-ascend are installed correctly.
@@ -85,7 +85,7 @@ wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py311_bisheng.tar.gz
 
 # Configure python and pip
 cp ./*.so* /usr/local/lib
-tar -zxvf ./py311_bisheng.*  -C /usr/local/
+tar -zxvf ./py311_bisheng.tar.gz -C /usr/local/
 mv  /usr/local/py311_bisheng/  /usr/local/python
 sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3
 sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3.11
@@ -111,7 +111,7 @@ sudo apt update
 sudo apt install libjemalloc2
 
 # Configure jemalloc
-export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2 $LD_PRELOAD
+export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 ```
 
 #### 2.2. Tcmalloc

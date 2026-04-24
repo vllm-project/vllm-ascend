@@ -14,12 +14,12 @@
 #
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
-from importlib.util import module_from_spec, spec_from_file_location
 from dataclasses import dataclass
 from datetime import timedelta
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-import sys
 from typing import Any
 from unittest.mock import MagicMock
 

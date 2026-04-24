@@ -97,7 +97,8 @@ For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 First start serving your model:
 
 ```bash
-VLLM_USE_MODELSCOPE=True vllm serve Qwen/Qwen3-8B
+export VLLM_USE_MODELSCOPE=True 
+vllm serve Qwen/Qwen3-8B
 ```
 
 Then run the benchmarking script:
@@ -158,7 +159,7 @@ vllm bench throughput \
 If successful, you will see the following output
 
 ```shell
-Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 t
+Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 toks/s]
 Throughput: 2.73 requests/s, 699.93 total tokens/s, 349.97 output tokens/s
 Total num prompt tokens:  1280
 Total num output tokens:  1280

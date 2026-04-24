@@ -36,7 +36,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 - 🟡 Planned: Scheduled for future implementation (some may have open PRs/RFCs).
 - 🔴 NO plan/Deprecated: No plan or deprecated by vLLM.
 
-[v1_user_guide]: https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html
+[v1_user_guide]: https://docs.vllm.ai/en/latest/usage/v1_guide/
 [multimodal]: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen-VL-Dense.html
 [guided_decoding]: https://github.com/vllm-project/vllm-ascend/issues/177
 [LoRA]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/lora.html
