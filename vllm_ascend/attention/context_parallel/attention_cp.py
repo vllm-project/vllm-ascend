@@ -51,6 +51,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.compilation.acl_graph import get_graph_params, update_graph_params_workspaces
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
+from vllm_ascend.attention.utils import generate_dcp_mtp_mask
 
 
 class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
@@ -222,23 +223,9 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
             num_computed_tokens_array = num_computed_tokens_array[: num_decodes]
             # Get MTP attention mask from PCP metadata
-            mtp_attn_mask = None
-            if common_long_seq_metadata and common_long_seq_metadata.mtp_attention_masks_for_decode:
-                masks = common_long_seq_metadata.mtp_attention_masks_for_decode
-                if masks and masks[0] is not None:
-                    query_len = masks[0].shape[0]
-                    lst = query_lens[:num_decodes]
-                    actual_seq_lengths_q = list(np.diff([0] + np.array(lst)))
-                    mtp_attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
-                    masks = masks[:num_decodes]  # type:ignore
-                    for i, mask in enumerate(masks):
-                        S = mask.shape[0]  # seq_len
-                        L = mask.shape[1]  # length
-                        # 填充原始数据到新 mask 的前 L 个位置
-                        mtp_attn_mask[i, :S, :L] = mask
-
+            masks = common_long_seq_metadata.mtp_attention_masks_for_decode
+            mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, num_decodes)
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc_cpu[1 : num_decodes + 1].tolist()
             decode_metadata = AscendMetadataForDecode(

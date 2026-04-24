@@ -40,6 +40,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, update_graph_params_workspaces
 from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.attention.utils import generate_dcp_mtp_mask
 
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
@@ -242,22 +243,8 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         # actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
         # decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
 
-        #! 在mtp的时候进行mask的处理
-        if decode_metadata.attn_mask is not None:
-            masks = decode_metadata.attn_mask
-            query_len = masks[0].shape[0]
-            actual_seq_lengths_q = decode_metadata.actual_seq_lengths_q
-            num_decodes = len(actual_seq_lengths_q)
-            lst = actual_seq_lengths_q[:num_decodes]
-            actual_seq_lengths_q = list(np.diff([0] + lst))
-            attn_mask_decode = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
-            masks = masks[:num_decodes]  # type:ignore
-            for i, mask in enumerate(masks):
-                S = mask.shape[0]  # seq_len
-                L = mask.shape[1]  # length
-                # 填充原始数据到新 mask 的前 L 个位置
-                attn_mask_decode[i, :S, :L] = mask
-            decode_metadata.attn_mask = attn_mask_decode
+        masks = decode_metadata.attn_mask
+        decode_metadata.attn_mask = generate_dcp_mtp_mask(masks, decode_metadata.actual_seq_lengths_q, self.num_decodes)
 
         return decode_metadata
 

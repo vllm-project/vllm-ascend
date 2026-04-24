@@ -341,3 +341,20 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
         and not vllm_config.kv_transfer_config.is_kv_producer
     )
     return bool(envs.VLLM_ASCEND_ENABLE_MLAPO and is_decode_instance)
+
+
+def generate_dcp_mtp_mask(masks, query_lens, num_decodes) -> torch.Tensor:
+    if masks and masks[0] is not None:
+        query_len = masks[0].shape[0]
+        lst = query_lens[:num_decodes]
+        actual_seq_lengths_q = list(np.diff([0] + np.array(lst)))
+        mtp_attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
+        masks = masks[:num_decodes]  # type:ignore
+        for i, mask in enumerate(masks):
+            S = mask.shape[0]  # seq_len
+            L = mask.shape[1]  # length
+            # 填充原始数据到新 mask 的前 L 个位置
+            mtp_attn_mask[i, :S, :L] = mask
+        return mtp_attn_mask
+    else:
+        return None
