@@ -250,14 +250,14 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
             num_decodes = len(actual_seq_lengths_q)
             lst = actual_seq_lengths_q[:num_decodes]
             actual_seq_lengths_q = list(np.diff([0] + lst))
-            attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
+            attn_mask_decode = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
             masks = masks[:num_decodes]  # type:ignore
             for i, mask in enumerate(masks):
                 S = mask.shape[0]  # seq_len
                 L = mask.shape[1]  # length
                 # 填充原始数据到新 mask 的前 L 个位置
-                attn_mask[i, :S, :L] = mask
-            decode_metadata.attn_mask = attn_mask
+                attn_mask_decode[i, :S, :L] = mask
+            decode_metadata.attn_mask = attn_mask_decode
 
         return decode_metadata
 

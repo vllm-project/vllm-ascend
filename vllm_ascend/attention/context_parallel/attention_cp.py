@@ -229,14 +229,13 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                     query_len = masks[0].shape[0]
                     lst = query_lens[:num_decodes]
                     actual_seq_lengths_q = list(np.diff([0] + np.array(lst)))
-                    attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
+                    mtp_attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
                     masks = masks[:num_decodes]  # type:ignore
                     for i, mask in enumerate(masks):
                         S = mask.shape[0]  # seq_len
                         L = mask.shape[1]  # length
                         # 填充原始数据到新 mask 的前 L 个位置
-                        attn_mask[i, :S, :L] = mask
-                    mtp_attn_mask = attn_mask
+                        mtp_attn_mask[i, :S, :L] = mask
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
