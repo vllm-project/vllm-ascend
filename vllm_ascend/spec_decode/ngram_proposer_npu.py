@@ -1,12 +1,18 @@
 import torch
-from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU
 
 
-class AscendNgramProposerNPU(NgramProposerGPU):
+class AscendNgramProposerNPU:
+    """NPU-native N-gram speculative decoding proposer.
+
+    This class does NOT inherit from NgramProposerGPU to avoid the upstream
+    __init__ creating and compiling a GPU-specific NgramGPUKernel
+    (torch.compile) which is incompatible with NPU hardware.  The actual
+    propose logic is handled by the Ascend C kernel
+    ``torch.ops._C_ascend.npu_ngram_spec_decode`` called from
+    ``NPUModelRunner.propose_draft_token_ids``.
+    """
+
     def __init__(self, vllm_config, device: torch.device, runner=None):
-        # Skip NgramProposerGPU.__init__ to avoid creating and compiling the
-        # GPU-specific NgramGPUKernel which is incompatible with NPU.
-        # Only initialize the attributes needed by the NPU kernel path.
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.prompt_lookup_min is not None
         assert vllm_config.speculative_config.prompt_lookup_max is not None

@@ -77,7 +77,7 @@ from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU, copy_num_valid_draft_tokens
+from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -236,17 +236,21 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.parallel_config.prefill_context_parallel_size * 2 * vllm_config.scheduler_config.max_num_seqs
         )
         vllm_config.scheduler_config.max_num_batched_tokens += max_pcp_pad_tokens
-        # Monkey-patch NgramProposerGPU.__init__ during super().__init__() to
-        # prevent the upstream from creating and running GPU-specific
-        # NgramGPUKernel (torch.compile) on NPU, which causes hardware errors.
-        # The Ascend _set_up_drafter() will replace the drafter afterwards.
-        _orig_ngram_init = NgramProposerGPU.__init__
-        NgramProposerGPU.__init__ = AscendNgramProposerNPU.__init__
-        try:
-            with _torch_cuda_wrapper():
-                super().__init__(vllm_config, device)
-        finally:
-            NgramProposerGPU.__init__ = _orig_ngram_init
+        # Temporarily switch method from "ngram_gpu" to "ngram" during
+        # super().__init__() to prevent the upstream from creating
+        # NgramProposerGPU (which compiles and runs GPU-specific
+        # NgramGPUKernel via torch.compile, incompatible with NPU).
+        # The CPU-only NgramProposer created instead is harmless and will
+        # be replaced by AscendNgramProposerNPU in _set_up_drafter().
+        # The GPU tensors needed by the ngram_gpu path are created there too.
+        _is_ngram_gpu = (vllm_config.speculative_config is not None
+                         and vllm_config.speculative_config.use_ngram_gpu())
+        if _is_ngram_gpu:
+            vllm_config.speculative_config.method = "ngram"
+        with _torch_cuda_wrapper():
+            super().__init__(vllm_config, device)
+        if _is_ngram_gpu:
+            vllm_config.speculative_config.method = "ngram_gpu"
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -497,6 +501,29 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(self.drafter, AscendEagleProposer)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
                 self.rejection_sampler = RejectionSampler(self.sampler)
+            # For ngram_gpu, create the GPU tensors and async D2H buffers
+            # that the upstream normally creates in GPUModelRunner.__init__
+            # but were skipped because we temporarily set method="ngram".
+            if self.speculative_config.use_ngram_gpu():
+                self.num_tokens_no_spec_gpu = torch.zeros(
+                    self.max_num_reqs, dtype=torch.int32, device=self.device)
+                self.token_ids_gpu_tensor = torch.zeros(
+                    self.max_num_reqs, self.max_model_len,
+                    dtype=torch.int32, device=self.device)
+                self._ngram_pinned_idx_buf = torch.zeros(
+                    self.max_num_reqs, dtype=torch.long, pin_memory=True)
+                self._ngram_pinned_val_buf = torch.zeros(
+                    self.max_num_reqs, dtype=torch.int32, pin_memory=True)
+                self._num_valid_draft_tokens_cpu = torch.empty(
+                    self.max_num_reqs, dtype=torch.int32,
+                    pin_memory=self.pin_memory)
+                self._num_valid_draft_tokens_copy_stream = torch.npu.Stream()
+                self._num_valid_draft_tokens_event = torch.npu.Event()
+                # Record event immediately so the first synchronize() in
+                # update_scheduler_for_invalid_drafts does not fail on NPU
+                # (NPU unlike CUDA errors on unrecorded-event synchronize).
+                with torch.npu.stream(self._num_valid_draft_tokens_copy_stream):
+                    self._num_valid_draft_tokens_event.record()
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
