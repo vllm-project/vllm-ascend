@@ -1391,3 +1391,21 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     return isinstance(kv_cache_spec, MLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+
+
+@lru_cache(maxsize=1)
+def _libc_getenv():
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    libc.getenv.argtypes = [ctypes.c_char_p]
+    libc.getenv.restype = ctypes.c_char_p
+    return libc.getenv
+
+
+def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
+    """Read env via C getenv; returns None if unset."""
+    raw = _libc_getenv()(name.encode(encoding))
+    if raw is None:
+        return None
+    return raw.decode(encoding)
