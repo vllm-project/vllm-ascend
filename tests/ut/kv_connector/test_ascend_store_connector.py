@@ -1,4 +1,10 @@
 import unittest
+from types import SimpleNamespace
+
+import torch
+
+if not hasattr(torch, "npu"):
+    torch.npu = SimpleNamespace(Event=object)  # type: ignore[attr-defined]
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
@@ -12,10 +18,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 class TestAscendStoreGroupAwareConfig(unittest.TestCase):
     def test_normalize_block_ids_by_group(self):
         self.assertEqual(normalize_block_ids_by_group([1, 2]), [[1, 2]])
+        self.assertEqual(normalize_block_ids_by_group([]), [[]])
         self.assertEqual(
             normalize_block_ids_by_group(([1, 2], [3, 4])),
             [[1, 2], [3, 4]],
         )
+        self.assertEqual(normalize_block_ids_by_group(tuple()), [])
         self.assertEqual(
             normalize_block_ids_by_group([[5, 6], [7, 8]]),
             [[5, 6], [7, 8]],
