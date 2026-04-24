@@ -220,6 +220,31 @@ class NPUPlatform(Platform):
         return device_props.uuid
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """Return the number of Cube Cores on the NPU device.
+        This is the NPU equivalent of CUDA's ``multi_processor_count``
+        (SM count).  On Ascend hardware the closest concept is
+        ``cube_core_num`` exposed by ``torch.npu.get_device_properties``,
+        which represents the matrix-compute units (analogous to CUDA SMs).
+        This value is consumed by vLLM's
+        ``layernorm_guard.calc_rows_per_block`` to size the Triton kernel
+        launch grid.  Note that the result is clamped to 4 by that
+        function, so the exact value has minimal impact on correctness;
+        it only affects kernel occupancy heuristics.
+        """
+        props = torch.npu.get_device_properties(device_id)
+        # cube_core_num is the matrix-compute unit count, semantically
+        # closest to CUDA's multi_processor_count (SM count).
+        cube_core_num = getattr(props, "cube_core_num", None)
+        if cube_core_num is not None and cube_core_num > 0:
+            return int(cube_core_num)
+        # Fallback for older torch-npu versions that may not expose cube_core_num
+        vector_core_num = getattr(props, "vector_core_num", None)
+        if vector_core_num is not None and vector_core_num > 0:
+            return int(vector_core_num)
+        return 24  # safe default (24 Cube Cores)
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
