@@ -38,9 +38,36 @@ from vllm.model_executor.layers.linear import (  # noqa
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import enable_sp, maybe_trans_nz
+
+
+def unquantized_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def unquantized_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    output_shape = (x.shape[0], weight.shape[0])
+    return torch.empty(output_shape, dtype=x.dtype, device=x.device)
+
+
+direct_register_custom_op(
+    op_name="unquantized_gemm",
+    op_func=unquantized_gemm,
+    fake_impl=unquantized_gemm_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
@@ -50,6 +77,14 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         super().process_weights_after_loading(layer)
         if "conv1d" not in layer.prefix:
             layer.weight.data = maybe_trans_nz(layer.weight.data)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.unquantized_gemm(x, layer.weight, bias)
 
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
