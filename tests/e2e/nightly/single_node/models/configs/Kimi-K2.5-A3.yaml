@@ -1,0 +1,75 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  HCCL_BUFFSIZE: "512"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_NZ: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--quantization"
+  - "ascend"
+  - "--enable-prefix-caching"
+  - "--enable-chunked-prefill"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--trust-remote-code"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--data-parallel-size"
+  - "4"
+  - "--enable-expert-parallel"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-num-seqs"
+  - "8"
+  - "--max-model-len"
+  - "133120"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--seed"
+  - "42"
+  - "--async-scheduling"
+  - "--compilation-config"
+  - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+  - "--additional-config"
+  - '{"enable_shared_expert_dp":true}'
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--mm-encoder-tp-mode"
+  - "data"
+
+_benchmarks: &benchmarks
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k-lite
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 8
+    baseline: 95
+    threshold: 5
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Kimi-K2.5-W4A8-TP4-DP4-Case"
+    model: "Eco-Tech/Kimi-K2.5-w4a8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra: []
+    benchmarks:
+      <<: *benchmarks
