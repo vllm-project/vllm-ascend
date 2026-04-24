@@ -266,7 +266,7 @@ class BalanceScheduler(Scheduler):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                balance_flag = max(t.item() for t in self.balance_queue) >= self.max_num_running_reqs - 1
+                balance_flag = max(t.item() for t in self.balance_queue) == self.max_num_running_reqs
                 if balance_flag:
                     break
 
