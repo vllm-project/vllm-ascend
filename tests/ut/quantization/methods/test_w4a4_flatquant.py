@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from vllm_ascend.quantization.methods.w4a4_flatquant import (
     AscendW4A4FlatQuantDynamicLinearMethod, get_decompose_dim,
-    pack_int4_weights)
+    pack_int4_weights, KRONECKER_QUANT_MAX_BATCH_SIZE, batched_kronecker_quant)
 
 
 class TestW4A4FlatQuantDynamic(unittest.TestCase):
@@ -51,6 +51,39 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
 
         mock_torch_npu.npu_convert_weight_to_int4pack.assert_called_once()
         self.assertTrue(torch.equal(result, mock_packed_tensor))
+
+    @patch('vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu')
+    def test_large_batch_multiple_calls(self, mock_npu):
+        batch_size = 50000
+        x = torch.randn(batch_size, 24, 32)
+        left_trans = torch.randn(24, 24)
+        right_trans = torch.randn(32, 32)
+        num_chunks = batch_size // KRONECKER_QUANT_MAX_BATCH_SIZE + 1
+        mock_returns = [
+            (torch.randint(0, 255, (KRONECKER_QUANT_MAX_BATCH_SIZE, 24, 4), dtype=torch.int32),
+             torch.randn(KRONECKER_QUANT_MAX_BATCH_SIZE))
+            for _ in range(num_chunks - 1)
+        ]
+        last_chunk_size = batch_size - (num_chunks - 1) * KRONECKER_QUANT_MAX_BATCH_SIZE
+        mock_returns.append(
+            (torch.randint(0, 255, (last_chunk_size, 24, 4), dtype=torch.int32), torch.randn(last_chunk_size))
+        )
+        mock_npu.npu_kronecker_quant.side_effect = mock_returns
+        result_x, result_scale = batched_kronecker_quant(x, left_trans, right_trans, 0.95)
+        self.assertEqual(mock_npu.npu_kronecker_quant.call_count, num_chunks)
+
+    @patch('vllm_ascend.quantization.methods.w4a4_flatquant.torch_npu')
+    def test_exact_max_batch_size(self, mock_npu):
+        batch_size = KRONECKER_QUANT_MAX_BATCH_SIZE
+        x = torch.randn(batch_size, 24, 32)
+        left_trans = torch.randn(24, 24)
+        right_trans = torch.randn(32, 32)
+        mock_npu.npu_kronecker_quant.return_value = (
+            torch.randint(0, 255, (batch_size, 24, 4), dtype=torch.int32),
+            torch.randn(batch_size, dtype=torch.float32)
+        )
+        result_x, result_scale = batched_kronecker_quant(x, left_trans, right_trans, 0.95)
+        mock_npu.npu_kronecker_quant.assert_called_once()
 
     ## Test AscendW4A4FlatQuantDynamicLinearMethod Class
     ## --------------------------------------------------

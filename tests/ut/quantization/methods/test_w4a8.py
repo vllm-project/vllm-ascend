@@ -1,10 +1,12 @@
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 
 import torch
 
 from tests.ut.base import TestBase
+from tests.ut.quantization.conftest_quantization import identity
 from vllm_ascend.quantization.methods.w4a8 import (
     AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod)
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
@@ -119,6 +121,16 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(new_layer.scale_bias.data.shape, (32, ))
         self.assertTrue(hasattr(new_layer, "weight_scale_second"))
         self.assertEqual(new_layer.weight_scale_second.data.shape, (1, 32))
+
+    @patch("torch_npu.npu_weight_quant_batchmatmul")
+    def test_apply_basic(self, mock_matmul):
+        layer = MagicMock()
+        layer.weight = MagicMock(data=torch.randint(-8, 8, (256, 512), dtype=torch.int8))
+        layer.weight_scale_second = MagicMock(data=torch.randn(1, 512, dtype=torch.float32))
+        mock_matmul.return_value = torch.randn(32, 512)
+        x = torch.randn(32, 256)
+        self.method.apply(layer, x)
+        mock_matmul.assert_called_once()
 
 
 class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
@@ -272,11 +284,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
                                            mock_npu_format_cast):
         mock_npu.return_value = torch.Tensor()
         mock_npu_quantize.return_value = torch.Tensor()
-
-        def func_by_args(weight, num_format):
-            return weight
-
-        mock_npu_format_cast.side_effect = func_by_args
+        mock_npu_format_cast.side_effect = identity
         # old quant version weight
         layer = self.build_layer(is_new_quant_version=False)
         self.quant_method.process_weights_after_loading(layer)
@@ -304,3 +312,111 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.process_weights_after_loading(per_channel_layer)
         self.assertEqual(new_layer.w13_scale_bias.data.shape,
                          (self.experts, 2 * self.input_size))
+
+    def test_get_weight_compressed_tensors(self):
+        self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
+        result = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)
+        self.assertEqual(result["w13_weight"].dtype, torch.int8)
+
+    def test_get_dynamic_quant_param_compressed_tensors(self):
+        self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
+        result = self.quant_method.get_dynamic_quant_param(self.experts, self.input_size, self.output_size, torch.bfloat16)
+        self.assertIn("w13_weight_scale", result)
+        self.assertIn("w2_weight_scale", result)
+        self.assertEqual(result["w13_weight_scale"].dtype, torch.bfloat16)
+        self.assertEqual(result["w2_weight_scale"].dtype, torch.bfloat16)
+
+    @patch('torch_npu.npu_quantize')
+    @patch('torch.Tensor.npu')
+    def test_process_weights_after_loading_compressed_tensors(self, mock_npu, mock_npu_quantize):
+        mock_npu.return_value = torch.Tensor()
+        mock_npu_quantize.return_value = torch.Tensor()
+
+        layer = self.build_layer(is_new_quant_version=False)
+        self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
+        self.quant_method.weight_strategy = "group"
+        self.quant_method.process_weights_after_loading(layer)
+        self.assertTrue(hasattr(layer, "w13_scale_bias"))
+        self.assertEqual(layer.w13_scale_bias.data.shape,
+                         (self.experts, 2 * self.input_size))
+        self.assertEqual(layer.w13_scale_bias.data.dtype, torch.float32)
+        self.assertTrue(hasattr(layer, "w2_scale_bias"))
+        self.assertEqual(layer.w2_scale_bias.data.shape,
+                         (self.experts, self.output_size))
+        self.assertEqual(layer.w2_scale_bias.data.dtype, torch.float32)
+
+    @patch("vllm_ascend.quantization.methods.w4a8._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w4a8.select_experts")
+    @patch("vllm_ascend.quantization.methods.w4a8.build_fused_experts_input")
+    def test_apply_comprehensive(self, mock_build_input, mock_select, mock_ctx):
+        tokens = 4
+        num_experts = self.experts
+        hidden_size = self.output_size
+        top_k = 2
+
+        layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
+        x = torch.randn(tokens, hidden_size, dtype=torch.bfloat16)
+        router_logits = torch.randn(tokens, num_experts, dtype=torch.float32)
+        topk_weights = torch.randn(tokens, top_k, dtype=torch.float32)
+        topk_ids = torch.randint(0, num_experts, (tokens, top_k), dtype=torch.int64)
+        expert_map = torch.randint(0, num_experts, (num_experts,), dtype=torch.int64)
+        mc2_mask = torch.tensor([1, 0, 1, 0], dtype=torch.bool)
+        pertoken_scale = torch.randn(tokens, dtype=torch.float32)
+        log2phy = torch.randint(0, num_experts, (num_experts,), dtype=torch.int64)
+        e_score_correction_bias = torch.randn(num_experts, dtype=torch.float32)
+
+        mock_select.return_value = (topk_weights, topk_ids)
+
+        mock_fused_input = Mock()
+        mock_fused_input.hidden_states = x
+        mock_fused_input.topk_weights = topk_weights
+        mock_fused_input.topk_ids = topk_ids
+        mock_fused_input.activation = "silu"
+        mock_build_input.return_value = mock_fused_input
+
+        mock_comm = Mock()
+        expected_output = torch.randn(tokens, hidden_size, dtype=torch.bfloat16)
+        mock_comm.fused_experts.return_value = expected_output
+        mock_ctx.moe_comm_method = mock_comm
+
+        output = self.quant_method.apply(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=top_k,
+            renormalize=True,
+            use_grouped_topk=False,
+            global_num_experts=num_experts,
+            expert_map=expert_map,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=None,
+            scoring_func="softmax",
+            routed_scaling_factor=1.0,
+            e_score_correction_bias=e_score_correction_bias,
+            is_prefill=True,
+            enable_force_load_balance=False,
+            log2phy=log2phy,
+            global_redundant_expert_num=0,
+            pertoken_scale=pertoken_scale,
+            activation="silu",
+            apply_router_weight_on_input=False,
+            mc2_mask=mc2_mask,
+        )
+
+        mock_select.assert_called_once()
+        select_call_args = mock_select.call_args
+        self.assertTrue(torch.equal(select_call_args.kwargs["hidden_states"], x))
+        self.assertEqual(select_call_args.kwargs["top_k"], top_k)
+        self.assertEqual(select_call_args.kwargs["global_num_experts"], num_experts)
+
+        mock_build_input.assert_called_once()
+        build_kwargs = mock_build_input.call_args.kwargs
+        self.assertTrue(torch.equal(build_kwargs["hidden_states"], x))
+        self.assertEqual(build_kwargs["quant_type"], self.quant_method.quant_type)
+        self.assertEqual(build_kwargs["activation"], "silu")
+        self.assertEqual(build_kwargs["apply_router_weight_on_input"], False)
+
+        mock_comm.fused_experts.assert_called_once()
+        self.assertEqual(mock_comm.fused_experts.call_args.kwargs["fused_experts_input"], mock_fused_input)
+        self.assertTrue(torch.equal(output, expected_output))
