@@ -842,7 +842,11 @@ def has_shared_experts(vllm_config: VllmConfig) -> bool:
     """Checks if the MoE model has shared experts by config"""
     global _HAS_SHARED_EXPERTS
     if _HAS_SHARED_EXPERTS is None:
-        hf_text_config = vllm_config.model_config.hf_text_config
+        if vllm_config.model_config is None:
+            return False
+        hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        if hf_text_config is None:
+            return False
         n_shared_experts = getattr(hf_text_config, "n_shared_experts", 0)
         _HAS_SHARED_EXPERTS = n_shared_experts is not None and n_shared_experts > 0
     return _HAS_SHARED_EXPERTS
