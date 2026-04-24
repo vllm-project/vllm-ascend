@@ -27,7 +27,7 @@ namespace optiling {
 
 void StoreKVBlockCommonTiling::PrintTilingData()
 {
-    std::cout<<context_->GetNodeName()<<" Start WriteCacheByGroupListTilingData priting"<<std::endl;
+    std::cout<<context_->GetNodeName()<<" Start WriteCacheByGroupListTilingData printing"<<std::endl;
     std::cout<<"params.blockTableSize "<< params.blockTableSize<<std::endl;
     std::cout<<"params.typeByte "<< params.typeByte<<std::endl;
     std::cout<<"params.tokenSize "<< params.tokenSize<<std::endl;
@@ -36,7 +36,7 @@ void StoreKVBlockCommonTiling::PrintTilingData()
     std::cout<<"params.numTokens "<< params.numTokens<<std::endl;
     std::cout<<"params.numCache "<< params.numCache<<std::endl;
     std::cout<<"params.groupInfoLen "<< params.groupInfoLen<<std::endl;
-    std::cout<<context_->GetNodeName()<<" End WriteCacheByGroupListTilingData priting"<<std::endl;
+    std::cout<<context_->GetNodeName()<<" End WriteCacheByGroupListTilingData printing"<<std::endl;
 
 }
 
@@ -95,7 +95,7 @@ ge::graphStatus StoreKVBlockCommonTiling::DoCommonTiling()
     auto kShape = context_->GetInputShape(DIM_0);
     auto kDimNum=kShape->GetStorageShape().GetDimNum();
     if (kDimNum<2||kDimNum>7){
-        printf("[ERROR] StoreKVBlock Intput kDimNum dim < 2 || kDimNum>7");
+        printf("[ERROR] StoreKVBlock Input kDimNum dim < 2 || kDimNum>7");
     }else {
         for (int i = 0; i < kDimNum; i++){
             if(i==0) params.numTokens = static_cast<uint32_t>(kShape->GetStorageShape().GetDim(i));
@@ -107,7 +107,7 @@ ge::graphStatus StoreKVBlockCommonTiling::DoCommonTiling()
     auto kCacheShape = context_->GetInputShape(DIM_1);
     auto kCacheDimNum=kCacheShape->GetStorageShape().GetDimNum();
     if (kCacheDimNum<2||kCacheDimNum>7){
-        printf("[ERROR] StoreKVBlock Intput kCacheDimNum < 2 ");
+        printf("[ERROR] StoreKVBlock Input kCacheDimNum < 2 ");
     }else {
         params.numCache = kCacheShape->GetStorageShape().GetDim(0)* kCacheShape->GetStorageShape().GetDim(1);
     }
@@ -129,7 +129,7 @@ ge::graphStatus StoreKVBlockCommonTiling::DoCommonTiling()
         typeByte = sizeof(uint32_t);
         params.tilingKey = 4;
     } else {
-        OP_LOGE(context_->GetNodeName(), "Unsupport type.");
+        OP_LOGE(context_->GetNodeName(), "Unsupported type.");
         return ge::GRAPH_FAILED;
     }
 

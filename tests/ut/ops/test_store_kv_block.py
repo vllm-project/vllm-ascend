@@ -46,7 +46,7 @@ def test_siso(num_tokens, num_head, block_size, num_blocks, count):
     # key = torch.randint(low=0,high=128,size=(num_tokens,head_size_k), dtype=torch.int8 )
     key_cache = torch.rand((num_blocks, block_size, num_head, head_size_k), dtype=torch.float16).npu()
     # key_cache = torch.randint(low=0,high=128,size=(num_blocks, block_size, num_head,head_size_k), dtype=torch.int8 )
-   
+
     slot_list = []
     for i in range(0, num_tokens):
         slot_list.append(2 + i)
@@ -55,8 +55,8 @@ def test_siso(num_tokens, num_head, block_size, num_blocks, count):
     slot_mapping_npu = torch.from_numpy(slot_list_np).to(torch.int32).npu()
 
     key_expect = cal_slot(key, key_cache, slot_mapping_npu, block_size)
-    
     warm_up = 0
+
     for _ in range(warm_up):
         torch_npu._npu_reshape_and_cache_siso(key, key_cache, slot_mapping_npu)
     N = 101
@@ -76,7 +76,6 @@ def test_scatter(num_tokens, num_head, block_size, num_blocks, count):
     head_size_k = 64
     key = torch.randint(low=0, high=128, size=(num_tokens, num_head, head_size_k), dtype=torch.int8).npu()
     # key = torch.rand((num_tokens, num_head,head_size_k), dtype=torch.float16).npu()
-    
 
     key_cache = torch.randint(
         low=0, high=128, size=(num_blocks * block_size, num_head, head_size_k), dtype=torch.int8
@@ -143,7 +142,7 @@ def test_myops(num_tokens, num_head, block_size, num_blocks, count):
         torch.ops._C_ascend.store_kv_block(
             key_npu, key_cache_npu, group_len, group_key_idx, group_key_cache_idx, block_size
         )
- 
+
     torch.testing.assert_close(key_expect, key_cache_npu, atol=0.001, rtol=0.1)
     gc.collect()
     torch.npu.empty_cache()
