@@ -31,6 +31,7 @@ from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 
 from vllm_ascend.ops.fast_hadamard import (
+    ELEMENTS_PER_TILE,
     fast_hadamard_dynamic_quant_blockwise_last_dim,
     fast_hadamard_last_dim_custom_op,
 )
@@ -1381,7 +1382,19 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
                     x.shape[-1],
                     _get_ffn_hadamard_layout(_get_quarot_config(layer)),
                 )
-                quant_x, pertoken_scale = fast_hadamard_dynamic_quant_blockwise_last_dim(x, hadamard_n)
+                if x.shape[-1] > ELEMENTS_PER_TILE:
+                    x_rot = _apply_matrix_free_down_proj_rotation(
+                        x,
+                        block_size=_get_quarot_runtime_block_size(layer),
+                        layout=_get_ffn_hadamard_layout(_get_quarot_config(layer)),
+                    )
+                    quant_x, pertoken_scale = torch_npu.npu_dynamic_quant(
+                        x_rot, dst_type=torch.quint4x2
+                    )
+                else:
+                    quant_x, pertoken_scale = fast_hadamard_dynamic_quant_blockwise_last_dim(
+                        x, hadamard_n
+                    )
             else:
                 quant_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=torch.quint4x2)
             pertoken_scale = pertoken_scale.reshape(-1).to(torch.float32)
