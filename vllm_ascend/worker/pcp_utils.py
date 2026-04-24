@@ -1078,7 +1078,7 @@ class PCPManager:
             # local tokens consist of: history tokens (positions 0 to history_len-1) +
             # MTP tokens assigned to this rank (from local_mtp_positions)
             all_mtp_positions = list(range(global_history_len, global_history_len + mtp_token_len))
-            mask = np.zeros((mtp_token_len, local_len), dtype=bool)
+            mask = np.ones((mtp_token_len, local_len), dtype=bool)
             for m_idx, mtp_global_pos in enumerate(all_mtp_positions):
                 for k_idx in range(local_len):
                     if k_idx < history_len:
@@ -1087,7 +1087,7 @@ class PCPManager:
                     else:
                         # MTP token at local position - get its global position from local_mtp_positions
                         local_token_pos = local_mtp_positions[k_idx - history_len]
-                    mask[m_idx, k_idx] = (mtp_global_pos >= local_token_pos)
+                    mask[m_idx, k_idx] = not (mtp_global_pos >= local_token_pos)
 
             mtp_masks.append(torch.from_numpy(mask))
 

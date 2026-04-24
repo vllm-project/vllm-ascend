@@ -242,6 +242,23 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         # actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
         # decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
 
+        #! 在mtp的时候进行mask的处理
+        if decode_metadata.attn_mask is not None:
+            masks = decode_metadata.attn_mask
+            query_len = masks[0].shape(0)
+            actual_seq_lengths_q = decode_metadata.actual_seq_lengths_q
+            num_decodes = len(actual_seq_lengths_q)
+            lst = actual_seq_lengths_q[:num_decodes]
+            actual_seq_lengths_q = list(np.diff([0] + lst))
+            attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
+            masks = masks[:num_decodes]  # type:ignore
+            for i, mask in enumerate(masks):
+                S = mask.shape[0]  # seq_len
+                L = mask.shape[1]  # length
+                # 填充原始数据到新 mask 的前 L 个位置
+                attn_mask[i, :S, :L] = mask
+            decode_metadata.attn_mask = attn_mask
+
         return decode_metadata
 
 
@@ -650,18 +667,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_nope = q_nope.view(num_decodes, -1, num_heads, q_nope.shape[-1]).contiguous()
             q_pe = q_pe.view(num_decodes, -1, num_heads, q_pe.shape[-1])
             sparse_mode = 0
-            
-            new_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool, device=q_nope.device)
-            
-            
             spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes]  # type:ignore
-            for i, mask in enumerate(spec_attn_mask):
-                B = mask.shape[0]  # seq_len
-                L = mask.shape[1]  # length
-                # 填充原始数据到新 mask 的前 L 个位置
-                new_mask[i, :B, :L] = ~mask
-            spec_attn_mask = new_mask
-
 
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()

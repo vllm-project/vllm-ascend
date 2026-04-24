@@ -224,10 +224,19 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             # Get MTP attention mask from PCP metadata
             mtp_attn_mask = None
             if common_long_seq_metadata and common_long_seq_metadata.mtp_attention_masks_for_decode:
-                mtp_masks = common_long_seq_metadata.mtp_attention_masks_for_decode
-                if mtp_masks and mtp_masks[0] is not None:
-                    mtp_attn_mask = mtp_masks
-            # TODO: numpy array mode of the shared memory is used to improve performance
+                masks = common_long_seq_metadata.mtp_attention_masks_for_decode
+                if masks and masks[0] is not None:
+                    query_len = masks[0].shape(0)
+                    lst = query_lens[:num_decodes]
+                    actual_seq_lengths_q = list(np.diff([0] + lst))
+                    attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)
+                    masks = masks[:num_decodes]  # type:ignore
+                    for i, mask in enumerate(masks):
+                        S = mask.shape[0]  # seq_len
+                        L = mask.shape[1]  # length
+                        # 填充原始数据到新 mask 的前 L 个位置
+                        attn_mask[i, :S, :L] = mask
+                    mtp_attn_mask = attn_mask
 
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -566,15 +575,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             num_decodes = len(actual_seq_lengths_q)
             lst = actual_seq_lengths_q[:num_decodes]
             actual_seq_lengths_q = list(np.diff([0] + lst))
-            query_len = self.vllm_config.speculative_config.num_speculative_tokens + 1
-            new_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool, device=query.device)
-            mtp_mask = attn_metadata.decode_meta.mtp_attn_mask[:num_decodes]
-            for i, mask in enumerate(mtp_mask):
-                B = mask.shape[0]
-                L = mask.shape[1]
-                new_mask[i, : B, : L] = ~mask
-            
-            attn_mask = new_mask
+            attn_mask = attn_metadata.decode_meta.mtp_attn_mask
 
             query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
             k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
