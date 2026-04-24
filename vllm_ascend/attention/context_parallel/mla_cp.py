@@ -667,7 +667,7 @@ class AscendMlaCPImpl(AscendMLAImpl):
             q_nope = q_nope.view(num_decodes, -1, num_heads, q_nope.shape[-1]).contiguous()
             q_pe = q_pe.view(num_decodes, -1, num_heads, q_pe.shape[-1])
             sparse_mode = 0
-            spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes]  # type:ignore
+            spec_attn_mask = attn_metadata.decode.attn_mask[:num_decodes].to(q_nope.device)  # type:ignore
 
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()

@@ -575,7 +575,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             num_decodes = len(actual_seq_lengths_q)
             lst = actual_seq_lengths_q[:num_decodes]
             actual_seq_lengths_q = list(np.diff([0] + lst))
-            attn_mask = attn_metadata.decode_meta.mtp_attn_mask
+            attn_mask = attn_metadata.decode_meta.mtp_attn_mask.to(query.device)
 
             query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
             k_nope = self.key_cache.view(self.key_cache.shape[0], 1, self.key_cache.shape[1], -1)
