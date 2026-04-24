@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 
 import vllm
-from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
-                                               KVCacheCoordinator,
-                                               KVCacheCoordinatorNoPrefixCache,
-                                               UnitaryKVCacheCoordinator)
+from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
-from vllm.v1.core.single_type_kv_cache_manager import \
-    get_manager_for_kv_cache_spec
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.core.multi_block_pool import MultiBlockPool
-
-USE_MULTI_BLOCK_POOL = False
+from vllm_ascend.core.single_type_kv_cache_manager import \
+    get_manager_for_kv_cache_spec
 
 
 class KVCacheCoordinatorWithMultiPool(KVCacheCoordinator):
@@ -50,7 +46,9 @@ class KVCacheCoordinatorWithMultiPool(KVCacheCoordinator):
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
         cache_num_blocks = [
-            kv_cache_config.num_blocks for _ in kv_cache_config.kv_cache_groups
+            kv_cache_config.num_blocks //
+            kv_cache_group.kv_cache_spec.compress_ratio
+            for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
         self.block_pool = MultiBlockPool(
             cache_num_blocks,
@@ -79,6 +77,36 @@ class KVCacheCoordinatorWithMultiPool(KVCacheCoordinator):
             [] for _ in range(self.num_single_type_manager))
         return blocks, 0
 
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_encoder_tokens: int,
+    ) -> int:
+        """
+        Get the number of blocks needed to be allocated for the request.
+
+        Args:
+            request_id: The request ID.
+            num_tokens: The total number of tokens that need a slot (including
+                tokens that are already allocated).
+            new_computed_blocks: The new computed blocks just hitting the
+                prefix caching.
+            num_encoder_tokens: The number of encoder tokens for allocating
+                blocks for cross-attention.
+
+        Returns:
+            The number of blocks.
+        """
+        num_blocks_to_allocate = []
+        for i, manager in enumerate(self.single_type_managers):
+            num_blocks_to_allocate.append(
+                manager.get_num_blocks_to_allocate(request_id, num_tokens,
+                                                   new_computed_blocks[i]))
+        # We need to use the C128 block pool to check the number of blocks for allocation, as C128 is the bottleneck for the block count.
+        return num_blocks_to_allocate[1]
+
 
 def get_kv_cache_coordinator(
     kv_cache_config: KVCacheConfig,
@@ -91,42 +119,7 @@ def get_kv_cache_coordinator(
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
-    if USE_MULTI_BLOCK_POOL:
-        return KVCacheCoordinatorWithMultiPool(
-            kv_cache_config,
-            max_model_len,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
-            hash_block_size=hash_block_size,
-            metrics_collector=metrics_collector,
-        )
-    if not enable_caching:
-        return KVCacheCoordinatorNoPrefixCache(
-            kv_cache_config,
-            max_model_len,
-            use_eagle,
-            enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
-            hash_block_size=hash_block_size,
-            metrics_collector=metrics_collector,
-        )
-    if len(kv_cache_config.kv_cache_groups) == 1:
-        return UnitaryKVCacheCoordinator(
-            kv_cache_config,
-            max_model_len,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
-            hash_block_size=hash_block_size,
-            metrics_collector=metrics_collector,
-        )
-    return HybridKVCacheCoordinator(
+    return KVCacheCoordinatorWithMultiPool(
         kv_cache_config,
         max_model_len,
         use_eagle,

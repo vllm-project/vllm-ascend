@@ -1,0 +1,126 @@
+/**
+ * Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+ * This file is a part of the CANN Open Software.
+ * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+ 
+/*!
+ * \file kvquant_sparse_attn_sharedkv_def.cpp
+ * \brief
+ */
+
+#include "register/op_def_registry.h"
+
+namespace ops {
+class KvQuantSparseAttnSharedkv : public OpDef {
+public:
+    explicit KvQuantSparseAttnSharedkv(const char *name) : OpDef(name)
+    {
+        this->Input("q")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("ori_kv")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("cmp_kv")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("ori_sparse_indices")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("cmp_sparse_indices")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("ori_block_table")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("cmp_block_table")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("cu_seqlens_q")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("cu_seqlens_ori_kv")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("cu_seqlens_cmp_kv")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("seqused_q")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("seqused_kv")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("sinks")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("metadata")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Output("attn_out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND});
+        this->Output("softmax_lse")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND});
+        this->Attr("kv_quant_mode").AttrType(REQUIRED).Int(1);
+        this->Attr("tile_size").AttrType(OPTIONAL).Int(64); // tile_size默认值64
+        this->Attr("rope_head_dim").AttrType(OPTIONAL).Int(64); // rope_head_dim默认值64
+        this->Attr("softmax_scale").AttrType(REQUIRED).Float(1.0);
+        this->Attr("cmp_ratio").AttrType(REQUIRED).Int(1);
+        this->Attr("ori_mask_mode").AttrType(REQUIRED).Int(4); // ori_mask_mode默认值4
+        this->Attr("cmp_mask_mode").AttrType(REQUIRED).Int(3); // cmp_mask_mode默认值3
+        this->Attr("ori_win_left").AttrType(OPTIONAL).Int(127); // ori_win_left默认值127
+        this->Attr("ori_win_right").AttrType(OPTIONAL).Int(0);
+        this->Attr("layout_q").AttrType(OPTIONAL).String("BSND");
+        this->Attr("layout_kv").AttrType(OPTIONAL).String("PA_ND");
+        this->Attr("return_softmax_lse").AttrType(OPTIONAL).Bool(false);
+
+        OpAICoreConfig aicore_config;
+        aicore_config.DynamicCompileStaticFlag(true)
+            .DynamicFormatFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .NeedCheckSupportFlag(false)
+            .PrecisionReduceFlag(true)
+            .ExtendCfgInfo("aclnnSupport.value", "support_aclnn");
+        this->AICore().AddConfig("ascend910_95", aicore_config);
+    }
+};
+OP_ADD(KvQuantSparseAttnSharedkv);
+} // namespace ops

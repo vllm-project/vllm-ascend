@@ -41,7 +41,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
@@ -266,6 +266,52 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
     @torch.inference_mode()
+    def get_fix_memory(self) -> int:
+        hf_config = self.vllm_config.model_config.hf_text_config
+        if hf_config.model_type != 'deepseek_v4':
+            return 0
+        max_num_reqs = self.scheduler_config.max_num_seqs
+        head_dim = hf_config.head_dim
+        num_layers = hf_config.num_hidden_layers
+        compress_ratios: list[int] = hf_config.compress_ratios
+        num_c4_layers = compress_ratios[:num_layers].count(4)
+        num_c128_layers = compress_ratios[:num_layers].count(128)
+        block_size = self.cache_config.block_size
+
+        # Some args that are strongly related to dsv4 attn implementation
+        # and can not get from config file
+        c4_coff = 2
+        c128_coff = 1
+
+        state_block_multiple = 3
+        block_num = (max_num_reqs + 1) * state_block_multiple
+
+        # swa: [args.max_batch_size, args.window_size, self.head_dim]
+        swa_memory = block_num * block_size * head_dim * get_dtype_size(
+            torch.bfloat16) * num_layers
+
+        # compress: [args.max_batch_size, coff * compress_ratio, coff * self.head_dim], dtype=torch.float32
+        state_dtype_size = get_dtype_size(torch.float32)  # torch.float32
+        # C4 compressor memory
+        c4_kv_state_byte_size = block_num * block_size * c4_coff * head_dim * state_dtype_size
+        c4_score_state_byte_size = c4_kv_state_byte_size
+        c4_indexer_kv_state_byte_size = block_num * block_size * c4_coff * hf_config.index_head_dim * state_dtype_size
+        c4_indexer_score_state_byte_size = c4_indexer_kv_state_byte_size
+        c4_memory = (c4_kv_state_byte_size + c4_score_state_byte_size + \
+            c4_indexer_kv_state_byte_size + c4_indexer_score_state_byte_size) * num_c4_layers
+        # C128 compressor memory
+        c128_kv_state_byte_size = block_num * block_size * c128_coff * head_dim * state_dtype_size
+        c128_score_state_byte_size = c128_kv_state_byte_size
+        c128_memory = (c128_kv_state_byte_size +
+                       c128_score_state_byte_size) * num_c128_layers
+
+        total_fix_memory = swa_memory + c4_memory + c128_memory
+        logger.info(
+            f'Preallocate {total_fix_memory} Bytes memory for swa and states.')
+
+        return total_fix_memory
+
+    @torch.inference_mode()
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
@@ -301,9 +347,10 @@ class NPUWorker(WorkerBase):
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
+        fix_memory = self.get_fix_memory()
         available_kv_cache_memory = int(
             total_npu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory)
+            peak_memory - fix_memory)
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
@@ -445,6 +492,7 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
@@ -491,7 +539,6 @@ class NPUWorker(WorkerBase):
             self.parallel_config.prefill_context_parallel_size,
             self.parallel_config.decode_context_parallel_size)
         init_ascend_model_parallel(self.parallel_config)
-        ensure_kv_transfer_initialized(self.vllm_config)
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):

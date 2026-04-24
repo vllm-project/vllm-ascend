@@ -92,6 +92,8 @@ class AscendConfig:
             "recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
+        self.multistream_dsa_preprocess = additional_config.get(
+            "multistream_dsa_preprocess", False)
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
@@ -151,6 +153,7 @@ class AscendConfig:
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can "
                     "only be used in D node.")
+        self.enable_kv_tnd = additional_config.get("enable_kv_tnd", False)
 
     def refresh_eplb_config(self, config):
         self.expert_map_path = config.get("expert_map_path", None)
@@ -180,6 +183,8 @@ class FinegrainedTPConfig:
             "embedding_tensor_parallel_size", 0)
         self.mlp_tensor_parallel_size = finegrained_tp_config.get(
             "mlp_tensor_parallel_size", 0)
+        self.olora_tensor_parallel_size = finegrained_tp_config.get(
+            "olora_tensor_parallel_size", 0)
 
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
@@ -194,6 +199,19 @@ class FinegrainedTPConfig:
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                )
+        if self.olora_tensor_parallel_size > 0:
+            enabled_configs.append(
+                f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}"
+            )
+            # dummy_run does not run the entire attention module in eager mode,, so the o_lora tp split can only be used in graph mode.
+            if vllm_config.model_config.enforce_eager is True:
+                raise AssertionError(
+                    "olora_tensor_parallel_size is only supported in graph mode"
+                )
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "olora_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(
@@ -211,6 +229,7 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:

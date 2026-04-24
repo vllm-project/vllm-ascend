@@ -13,9 +13,6 @@ from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.logger import logger
 from vllm.utils import random_uuid
 
-from vllm_ascend.patch.platform.patch_kv_cache_coordinator import \
-    USE_MULTI_BLOCK_POOL
-
 
 def post_init(self):
     """Verify configs are valid & consistent with each other."""
@@ -375,7 +372,7 @@ def post_init(self):
         # Default to disable HMA, but only if the user didn't express a preference.
         if self.kv_transfer_config is not None:
             # NOTE(Kuntai): turn HMA off for connector unless specifically enabled.
-            need_disable_hybrid_kv_cache_manager = not USE_MULTI_BLOCK_POOL
+            need_disable_hybrid_kv_cache_manager = False
             logger.warning(
                 "Turning off hybrid kv cache manager because "
                 "`--kv-transfer-config` is set. This will reduce the "

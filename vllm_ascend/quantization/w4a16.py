@@ -108,7 +108,7 @@ class AscendW4A16FusedMoEMethod:
     """FusedMoe method for Ascend W4A16.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, tid2eid=None) -> None:
         self.transpose_weight = True
         self.num_bits = 4  # dtype = torch.int4
         self.pack_factor = 8  # pack 8 of torch.int4 tensors to torch.int32

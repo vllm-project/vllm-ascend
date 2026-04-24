@@ -276,6 +276,50 @@ class AddRMSNormQuantSPPatternWithBias:
                                 pm.fwd_only, pm_pass)
 
 
+class RMSNormDynamicQuantPattern:
+
+    def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
+        self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
+        self.eps = eps
+
+    def get_inputs(self):
+        """
+        Generate example inputs for the RMSNormDynamicQuant fusion pattern.
+        """
+        rms_norm_input = torch.randn(2, 4, device="npu", dtype=self.dtype)
+        rms_norm_weight = torch.randn(4, device="npu", dtype=self.dtype)
+        return [rms_norm_input, rms_norm_weight]
+
+    def register(self, pm_pass: PatternMatcherPass):
+
+        def pattern(rms_norm_input: torch.Tensor,
+                    rms_norm_weight: torch.Tensor):
+            """
+            Pattern for RMSNormDynamicQuant fusion.
+            """
+            out0, _ = torch.ops.npu.npu_rms_norm(rms_norm_input,
+                                                 rms_norm_weight, self.eps)
+            out0 = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(out0, True)
+            quantized_output, quantized_output_scale = torch.ops.npu.npu_dynamic_quant(
+                out0)
+            return quantized_output, quantized_output_scale
+
+        def replacement(rms_norm_input: torch.Tensor,
+                        rms_norm_weight: torch.Tensor):
+            """
+            Replacement for the RMSNormDynamicQuant fusion.
+            """
+            quantized_output, quantized_output_scale = torch.ops.custom.npu_rms_norm_dynamic_quant(
+                rms_norm_input, rms_norm_weight, epsilon=self.eps)
+            quantized_output = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                quantized_output, True)
+            return quantized_output, quantized_output_scale
+
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                pm.fwd_only, pm_pass)
+
+
 class AddRMSNormQuantFusionPass(VllmInductorPass):
     """
     A pass for fusing AddRMSNorm and W8A8 quantization operations on Ascend.
@@ -297,6 +341,8 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
             AddRMSNormQuantPattern(vllm_config,
                                    eps=eps).register(self.pattern_match_passes)
             AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(
+                self.pattern_match_passes)
+            RMSNormDynamicQuantPattern(vllm_config, eps=eps).register(
                 self.pattern_match_passes)
             if enable_custom_op():
                 AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(

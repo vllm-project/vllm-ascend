@@ -84,6 +84,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
+          . vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
           pytest -sv --durations=0 tests/e2e/singlecard/test_aclgraph_accuracy.py::test_piecewise_res_consistency
           pytest -sv --durations=0 tests/e2e/singlecard/test_quantization.py::test_qwen3_w8a8_quant
 
@@ -93,6 +94,7 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'full' }}
         run: |
+          . vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
           # basic 
@@ -194,6 +196,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         if: ${{ inputs.type == 'light' }}
         run: |
+          . vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
           pytest -sv --durations=0 tests/e2e/multicard/2-cards/test_qwen3_moe.py::test_qwen3_moe_distributed_mp_tp2_ep
 
       - name: Run vllm-project/vllm-ascend test (full)

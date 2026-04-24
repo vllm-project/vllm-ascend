@@ -75,6 +75,10 @@ def test_qwen3_moe_distributed_aiv_tp2():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.skip(
+    reason=
+    "The environment variables in the child process custom_transformer set_env.sh are not taking effect."
+)
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"

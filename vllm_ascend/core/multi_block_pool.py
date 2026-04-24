@@ -60,6 +60,7 @@ class MultiBlockPool(BlockPool):
                 BlockPool(num_gpu_blocks[pool_id], enable_caching,
                           hash_block_size, enable_kv_cache_events,
                           metrics_collector))
+        self.num_gpu_blocks = sum(num_gpu_blocks)
 
     def get_cached_block(
             self, block_hash: BlockHash,
@@ -163,10 +164,11 @@ class MultiBlockPool(BlockPool):
 
     def get_num_free_blocks(self) -> int:
         # Return free blocks num in all block pools.
-        num_free_blocks = 0
+        num_free_blocks = []
         for local_pool in self.block_pools:
-            num_free_blocks += local_pool.get_num_free_blocks()
-        return num_free_blocks
+            num_free_blocks.append(local_pool.get_num_free_blocks())
+        # We need to use the C128 block pool to check the number of blocks for allocation, as C128 is the bottleneck for the block count.
+        return num_free_blocks[1]
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
@@ -175,8 +177,15 @@ class MultiBlockPool(BlockPool):
             The KV cache usage (between 0.0 and 1.0).
         """
 
-        # Subtract 1 to account for null block.
-        return super().get_usage()
+        # # Subtract 1 to account for null block.
+        total_gpu_blocks = self.num_gpu_blocks - 1
+        if not total_gpu_blocks:
+            return 0
+        num_free_blocks = 0
+        for local_pool in self.block_pools:
+            num_free_blocks += local_pool.get_num_free_blocks()
+        # We need to use the C128 block pool to check the number of blocks for allocation, as C128 is the bottleneck for the block count.
+        return 1.0 - (num_free_blocks / total_gpu_blocks)
 
     def take_events(self) -> list[KVCacheEvent]:
         # Use the global kv_event_queue.

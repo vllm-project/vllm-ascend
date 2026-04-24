@@ -59,6 +59,49 @@ class AscendQuantConfig(QuantizationConfig):
     def __init__(self, quant_config: Dict[str, Any]):
         super().__init__()
         self.quant_description = quant_config
+        if "hc_head_fn" in quant_config.keys():
+            # TODO
+            extra_quant_dict = {}
+            for name in self.quant_description.keys():
+                new_name = name
+                if not name.startswith('model'):
+                    new_name = f'model.{name}'
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description.keys():
+                new_name = name
+                if 'attn' in name and 'self_attn' not in name:
+                    new_name = name.replace('.attn.', '.self_attn.')
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description.keys():
+                new_name = name
+                if 'ffn' in name:
+                    new_name = name.replace('ffn', 'mlp')
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
+            extra_quant_dict = {}
+            for name in self.quant_description.keys():
+                new_name = name
+                if 'w1' in name:
+                    new_name = name.replace('.w1.', '.gate_proj.')
+                if 'w2' in name:
+                    new_name = name.replace('.w2.', '.down_proj.')
+                if 'w3' in name:
+                    new_name = name.replace('.w3.', '.up_proj.')
+
+                if 'head' in name and 'lm_head' not in name:
+                    new_name = name.replace('head', 'lm_head')
+                if 'embed' in name and 'embed_tokens' not in name:
+                    new_name = name.replace('embed', 'embed_tokens')
+                extra_quant_dict[new_name] = self.quant_description[name]
+            self.quant_description.update(extra_quant_dict)
+
         # TODO(whx): remove this adaptation after adding "shared_head"
         # to prefix of DeepSeekShareHead in vLLM.
         extra_quant_dict = {}
@@ -107,14 +150,18 @@ class AscendQuantConfig(QuantizationConfig):
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         # TODO (Levi-JQ): will be removed when QuantizationConfig.apply_vllm_mapper is implemented
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
+        substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
         if prefix_mapping:
             hf_to_vllm_mapper = WeightsMapper(
-                orig_to_new_prefix=prefix_mapping)
+                orig_to_new_prefix=prefix_mapping,
+                orig_to_new_substr=substr_mapping)
             return hf_to_vllm_mapper._map_name(prefix)
         return prefix
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self,
+                         layer: torch.nn.Module,
+                         prefix: str,
+                         tid2eid=None) -> Optional["QuantizeMethodBase"]:
         vllm_config = get_current_vllm_config()
         model_type = vllm_config.model_config.hf_text_config.model_type
 
@@ -150,8 +197,11 @@ class AscendQuantConfig(QuantizationConfig):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
-            return AscendFusedMoEMethod(self, prefix,
-                                        self.packed_modules_mapping, layer)
+            return AscendFusedMoEMethod(self,
+                                        prefix,
+                                        self.packed_modules_mapping,
+                                        layer,
+                                        tid2eid=tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
@@ -215,6 +265,23 @@ QUANT_MODEL_PREFIX_MAPPINGS = {
         "language_model.lm_head.": "lm_head.",
         "language_model.model.": "model.language_model.",
     },
+    "deepseek_v4": {
+        "layers.": "model.layers.",
+        "embed.": "model.embed_tokens.",
+        "head.": "lm_head.",
+    },
+}
+
+QUANT_MODEL_SUBSTR_MAPPINGS = {
+    "deepseek_v4": {
+        ".attn.": ".sefl_attn.",
+        ".w1.": ".gate_proj.",
+        ".w2.": ".down_proj.",
+        ".w3.": ".up_proj.",
+        ".ffn.": ".mlp.",
+        ".ffn_norm.": ".post_attention_layernorm.",
+        ".attn_norm.": ".input_layernorm.",
+    },
 }
 
 packed_modules_model_mapping = {
@@ -260,6 +327,11 @@ packed_modules_model_mapping = {
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
+    },
+    "deepseek_v4": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     },
     # NOTE 1.The quantized MTP layer of deepseek on the NPU is not quantized;
     # NOTE 2.The description file generated by the current msmodelslim tool does not have
@@ -495,15 +567,19 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
-                 packed_modules_mapping: Dict[str,
-                                              Any], layer: torch.nn.Module):
+    def __init__(self,
+                 quant_config: AscendQuantConfig,
+                 prefix: str,
+                 packed_modules_mapping: Dict[str, Any],
+                 layer: torch.nn.Module,
+                 tid2eid=None):
         super().__init__(layer.moe_config)
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix,
                                              "moe",
                                              packed_modules_mapping,
-                                             layer=layer)
+                                             layer=layer,
+                                             tid2eid=tid2eid)
 
     def create_weights(
         self,

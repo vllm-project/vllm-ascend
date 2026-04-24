@@ -41,7 +41,10 @@ def get_rope_dim(vllm_config):
     model_config = vllm_config.model_config
 
     if model_config.use_mla:
-        rope_dim = model_config.hf_text_config.qk_rope_head_dim
+        if hasattr(model_config.hf_text_config, 'qk_rope_head_dim'):
+            rope_dim = model_config.hf_text_config.qk_rope_head_dim
+        else:
+            rope_dim = model_config.hf_text_config.rope_head_dim
     else:
         rope_dim = model_config.get_head_size()
         # For models using partial rope like Qwen3-Next.

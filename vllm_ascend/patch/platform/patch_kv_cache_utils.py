@@ -2,18 +2,13 @@ from collections import defaultdict
 
 import vllm
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_utils import (
-    _get_kv_cache_groups_uniform_page_size, _get_kv_cache_groups_uniform_spec,
-    _get_kv_cache_groups_uniform_type, create_kv_cache_group_specs,
-    get_num_blocks, get_uniform_page_size, is_kv_cache_spec_uniform,
-    is_kv_cache_type_attention_free, may_override_num_blocks,
-    unify_hybrid_kv_cache_specs, unify_kv_cache_spec_page_size)
+from vllm.v1.core.kv_cache_utils import (create_kv_cache_group_specs,
+                                         get_num_blocks, get_uniform_page_size,
+                                         may_override_num_blocks,
+                                         unify_hybrid_kv_cache_specs)
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroupSpec,
                                         KVCacheSpec, KVCacheTensor,
                                         UniformTypeKVCacheSpecs)
-
-from vllm_ascend.patch.platform.patch_kv_cache_coordinator import \
-    USE_MULTI_BLOCK_POOL
 
 
 def _get_kv_cache_groups_uniform_block_size(
@@ -62,34 +57,8 @@ def get_kv_cache_groups(
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
-    if is_kv_cache_type_attention_free(kv_cache_spec):
-        # This returns an empty list to allow for the KVCacheManager to handle
-        # attention free models.
-        return []
-
-    if is_kv_cache_spec_uniform(kv_cache_spec):
-        # KV cache of all layers are the same, which is true for
-        # most models. Allocate the same amount of memory for
-        # each layer.
-        return _get_kv_cache_groups_uniform_spec(kv_cache_spec)
-    elif USE_MULTI_BLOCK_POOL:
-        # kv cache group spec with multi groups and same block size without share hybrid blocks
-        return _get_kv_cache_groups_uniform_block_size(kv_cache_spec)
-    elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(kv_cache_spec):
-        # All layers need the same number of token slots (e.g., all layers are
-        # full attention, or all layers are sliding window attention with the
-        # same window size). Put all layers into one group.
-        return _get_kv_cache_groups_uniform_type(uniform_spec)
-
-    # As KVCacheManager can only allocate memory of one size, we need to unify
-    # the page size of the layers. For cases cannot be unified, this function
-    # will raise an error.
-    kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
-    # Model contains multiple attention types, but KV cache of all layers
-    # have the same physical memory per block per layer. Split the layers
-    # into groups with the same number of layers, and thus same total page
-    # size.
-    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    # kv cache group spec with multi groups and same block size without share hybrid blocks
+    return _get_kv_cache_groups_uniform_block_size(kv_cache_spec)
 
 
 def get_kv_cache_config_from_groups(

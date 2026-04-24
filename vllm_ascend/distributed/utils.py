@@ -109,3 +109,32 @@ def all_gather_async(input: torch.Tensor,
                                                input,
                                                group=group.device_group,
                                                async_op=async_op)
+
+
+def split_tensor_along_first_dim(
+    tensor: torch.Tensor,
+    num_partitions: int,
+    contiguous_split_chunks: bool = False,
+):
+    """Split a tensor along its first dimension.
+
+    Arguments:
+        tensor: input tensor.
+        num_partitions: number of partitions to split the tensor
+        contiguous_split_chunks: If True, make each chunk contiguous
+                                in memory.
+
+    Returns:
+        A list of Tensors
+    """
+    from vllm.distributed.utils import divide
+
+    # Get the size and dimension.
+    first_dim_size = divide(tensor.size()[0], num_partitions)
+    # Split.
+    tensor_list = torch.split(tensor, first_dim_size, dim=0)
+    # NOTE: torch.split does not create contiguous tensors by default.
+    if contiguous_split_chunks:
+        return tuple(chunk.contiguous() for chunk in tensor_list)
+
+    return tensor_list
