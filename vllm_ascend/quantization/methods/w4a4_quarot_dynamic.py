@@ -1388,7 +1388,7 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
                         block_size=_get_quarot_runtime_block_size(layer),
                         layout=_get_ffn_hadamard_layout(_get_quarot_config(layer)),
                     )
-                    quant_x, pertoken_scale = torch_npu.npu_dynamic_quant(
+                    quant_x, pertoken_scale = torch.ops.npu.npu_dynamic_quant(
                         x_rot, dst_type=torch.quint4x2
                     )
                 else:
