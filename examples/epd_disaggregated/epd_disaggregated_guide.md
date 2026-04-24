@@ -133,7 +133,7 @@ curl http://localhost:8001/v1/chat/completions \
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
+        {"type": "text", "text": "What is the text in the illustration?"}
     ]}
     ]
     }'
@@ -310,7 +310,7 @@ curl http://localhost:8001/v1/chat/completions \
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
+        {"type": "text", "text": "What is the text in the illustration?"}
     ]}
     ]
     }'
