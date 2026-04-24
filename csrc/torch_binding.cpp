@@ -962,7 +962,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.impl("npu_scatter_pa_kv_cache_vllm", torch::kPrivateUse1, &vllm_ascend::npu_scatter_pa_kv_cache_vllm);
 
-    ops.def("npu_gather_pa_kv_cache_vllm(Tensor key_cache, Tensor value_cache, Tensor block_tables, Tensor seq_lens, Tensor key_ref, Tensor value_ref, Tensor? seq_offset=None, str cache_mode=\"Norm\", bool is_seq_lens_cumsum=True) -> (Tensor key_ref, Tensor value_ref)");
+    ops.def("npu_gather_pa_kv_cache_vllm(Tensor key_cache, Tensor value_cache, Tensor block_tables, Tensor seq_lens, Tensor key_ref, Tensor value_ref, Tensor? seq_offset=None, str cache_mode=\"Norm\", bool is_seq_lens_cumsum=False) -> (Tensor key_ref, Tensor value_ref)");
     ops.impl("npu_gather_pa_kv_cache_vllm", torch::kPrivateUse1, &vllm_ascend::npu_gather_pa_kv_cache_vllm);
 
     ops.def(
