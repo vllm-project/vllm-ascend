@@ -339,7 +339,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
 
-        if envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM: 
+        if envs.VLLM_ASCEND_ENABLE_RESHAPE_OPTIM:
             slot_mapping_list = slot_mapping_cpu.tolist()
             group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
                 slot_mapping, slot_mapping_list, block_size
