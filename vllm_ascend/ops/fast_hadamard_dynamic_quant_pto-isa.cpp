@@ -319,12 +319,6 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
   const uint32_t segment_n = blocks_per_segment * hadamard_n;
   const float scale_divisor = 7.0f;
 
-  // Start each serialized row with a clean MTE3->V token:
-  // consume the previous row's final-scale completion, then re-prime the
-  // y-buffer-ready state for this row's first packed store.
-  wait_flag(PIPE_MTE3, PIPE_V, ev);
-  set_flag(PIPE_MTE3, PIPE_V, ev);
-
   ReduceTileRowMajor rowAccumTile(1, 1);
   ReduceTileRowMajor rowFloorTile(1, 1);
   TASSIGN(rowAccumTile, SCALE_BASE);
