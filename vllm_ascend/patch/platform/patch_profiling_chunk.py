@@ -106,7 +106,11 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
             profiling_mgr._set_time_done = True
 
         if not request_chunks:
-            request_chunks = [(total_tokens, 0)]
+            # Cannot accurately attribute batch latency to individual
+            # requests — skip this sample to avoid polluting the model.
+            logger.debug("[ProfilingChunk] Skipping timing sample: "
+                         "unable to extract per-request chunk info")
+            return
 
         if not profiling_mgr.predictor.history_fitted:
             profiling_mgr.record_batch_execution_time(request_chunks, elapsed_time)
