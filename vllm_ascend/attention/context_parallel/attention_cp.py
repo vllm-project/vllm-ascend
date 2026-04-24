@@ -570,15 +570,15 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
         attn_mask = None
         input_layerout = "TND"
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes]
         if (
             attn_metadata.decode_meta
             and attn_metadata.decode_meta.mtp_attn_mask is not None
             and self.vllm_config.speculative_config is not None
         ):
             input_layerout = "BSND"
-            num_decodes = len(actual_seq_lengths_q)
-            lst = actual_seq_lengths_q[:num_decodes]
-            actual_seq_lengths_q = list(np.diff([0] + lst))
+            num_decodes = attn_metadata.num_decodes
+            actual_seq_lengths_q = list(np.diff([0] + np.array(actual_seq_lengths_q)))
             attn_mask = attn_metadata.decode_meta.mtp_attn_mask.to(query.device)
 
             query = query.view(num_decodes, -1, query.shape[1], query.shape[-1])
@@ -599,7 +599,7 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
             "actual_seq_lengths_kv": attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[
                 :, self.pcp_rank, self.dcp_rank
             ],
-            "actual_seq_lengths": attn_metadata.actual_seq_lengths_q[: attn_metadata.num_decodes],
+            "actual_seq_lengths": actual_seq_lengths_q,
         }
 
         if _EXTRA_CTX.is_draft_model:
