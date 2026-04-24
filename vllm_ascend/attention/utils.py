@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
+import numpy as np
 
 import torch
 import torch.nn.functional as F
