@@ -102,6 +102,7 @@ from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
     set_draft_graph_params,
     set_graph_params,
+    should_use_piecewise_runner_barrier,
     update_full_graph_params,
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -497,6 +498,14 @@ class NPUModelRunner(GPUModelRunner):
             and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not self.model_config.enforce_eager
         )
+
+    def _synchronize_before_piecewise_input_prep(self) -> None:
+        if should_use_piecewise_runner_barrier(
+            self.compilation_config.cudagraph_mode,
+            self.model_config.enforce_eager,
+            self.speculative_config,
+        ):
+            torch.npu.current_stream().synchronize()
 
     def _sync_metadata_across_dp(
         self,
@@ -1443,6 +1452,7 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
+            self._synchronize_before_piecewise_input_prep()
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 deferred_state_corrections_fn = self._update_states(scheduler_output)
