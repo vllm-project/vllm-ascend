@@ -954,7 +954,14 @@ extern "C" void call_dynamic_quant_kernel(uint32_t blockDim, void *stream,
                                           uint32_t hadamard_n,
                                           uint32_t log2_hadamard_n,
                                           float inv_sqrt_hadamard_n) {
-  blockDim = blockDim * 2;
+  if (full_n > ELEMENTS_PER_TILE) {
+    // The oversized-row helper is serialized today. Launch it with a single
+    // worker instead of the normal sub-block geometry so the runtime topology
+    // matches the helper's correctness-first scheduling contract.
+    blockDim = 1;
+  } else {
+    blockDim = blockDim * 2;
+  }
   fast_hadamard_dynamic_quant_fp16_to_int4<<<blockDim, nullptr, stream>>>(
       x, y, row_scales, batch, full_n, hadamard_n, log2_hadamard_n,
       inv_sqrt_hadamard_n);
