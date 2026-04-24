@@ -415,10 +415,10 @@ This is because HCCL one-sided communication connections are created lazily afte
 
 ### Configuring the memcache Config File
 
-    config Path：/usr/local/memcache_hybrid/latest/config/
-    **Config file parameters description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>
+config Path：/usr/local/memcache_hybrid/latest/config/
+**Config file parameters description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>
 
-    Set TLS certificate configurations. If TLS is disabled, you do not need to upload a certificate. If TLS is enabled, you need to upload a certificate.
+Set TLS certificate configurations. If TLS is disabled, you do not need to upload a certificate. If TLS is enabled, you need to upload a certificate.
 
 ```shell
 # mmc-meta.conf
@@ -650,7 +650,7 @@ vllm serve xxxxxxx/Qwen3-32B \
   --max-num-batched-tokens 16384 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --no-enable-prefix-caching \
   --kv-transfer-config \
     '{
@@ -729,7 +729,7 @@ vllm serve xxxxxxx/Qwen3-32B \
   --max-num-batched-tokens 16384 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --no-enable-prefix-caching \
   --kv-transfer-config \
   '{
@@ -796,7 +796,7 @@ python -m vllm.entrypoints.openai.api_server \
   --data-parallel-size 2 \
   --tensor-parallel-size 8 \
   --port 30050 \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --enable_expert_parallel \
@@ -869,7 +869,7 @@ python -m vllm.entrypoints.openai.api_server \
   --enforce-eager\
   --quantization ascend \
   --no-enable-prefix-caching \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
   --enable_expert_parallel \
   --gpu-memory-utilization 0.9 \
@@ -967,7 +967,7 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --enable-expert-parallel \
   --no-enable-prefix-caching \
   --kv-transfer-config \
@@ -1032,7 +1032,7 @@ vllm serve xxxxxxx/DeepSeek-R1 \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
   --quantization ascend \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --enable-expert-parallel \
   --no-enable-prefix-caching \
   --kv-transfer-config \
@@ -1081,7 +1081,7 @@ python -m vllm.entrypoints.openai.api_server \
   -dp 2 \
   -tp 8 \
   --port 30050 \
-  --max-num_seqs 20 \
+  --max-num-seqs 20 \
   --max-model-len 32768 \
   --max-num-batched-tokens 16384 \
   --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
