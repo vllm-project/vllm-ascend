@@ -15,19 +15,23 @@
 # limitations under the License.
 #
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.glm4_moe import Glm4MoeForCausalLM
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 
 _orig_qwen3_causal_lm_load_weights = Qwen3ForCausalLM.load_weights
+_orig_Glm4_causal_lm_load_weights = Glm4MoeForCausalLM.load_weights
 
 
-def _patched_qwen3_causal_lm_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+def _patched_causal_lm_load_weights(
+    self, weights: Iterable[tuple[str, torch.Tensor]], original_load_weights: Callable
+) -> set[str]:
     quant_config = self.quant_config
     if quant_config is None or not callable(getattr(quant_config, "get_cache_scale", None)):
-        return _orig_qwen3_causal_lm_load_weights(self, weights)
+        return original_load_weights(self, weights)
 
     params_dict = dict(self.named_parameters())
     c8_loaded_params: set[str] = set()
@@ -46,9 +50,14 @@ def _patched_qwen3_causal_lm_load_weights(self, weights: Iterable[tuple[str, tor
             else:
                 yield name, loaded_weight
 
-    loaded_params = _orig_qwen3_causal_lm_load_weights(self, _intercept_c8_scales(weights))
+    loaded_params = original_load_weights(self, _intercept_c8_scales(weights))
     loaded_params.update(c8_loaded_params)
     return loaded_params
 
 
-Qwen3ForCausalLM.load_weights = _patched_qwen3_causal_lm_load_weights
+Qwen3ForCausalLM.load_weights = lambda self, weights: _patched_causal_lm_load_weights(
+    self, weights, _orig_qwen3_causal_lm_load_weights
+)
+Glm4MoeForCausalLM.load_weights = lambda self, weights: _patched_causal_lm_load_weights(
+    self, weights, _orig_Glm4_causal_lm_load_weights
+)
