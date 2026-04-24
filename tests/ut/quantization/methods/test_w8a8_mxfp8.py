@@ -110,7 +110,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         result = self.scheme.get_dynamic_quant_param(
             self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16
         )
-        self.assertEqual(result["w13_weight_scale"].shape, [8, 512, 4])
+        self.assertEqual(result["w13_weight_scale"].shape, (8, 512, 4))
         self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
     def test_process_weights_stores_original_shapes(self):

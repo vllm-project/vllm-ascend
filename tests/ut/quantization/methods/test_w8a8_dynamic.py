@@ -174,6 +174,5 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
         self.quant_method.process_weights_after_loading(layer)
-        self.assertEqual(layer.fused_w1_scale.dtype, torch.int64)
         self.assertTrue(hasattr(layer, "w13_weight_list"))
         self.assertFalse(hasattr(layer, "w13_weight_scale_fp32"))

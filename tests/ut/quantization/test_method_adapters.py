@@ -15,7 +15,7 @@ from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendL
 
 class TestAscendLinearMethod(TestBase):
     @patch("vllm_ascend.quantization.method_adapters.enable_dsa_cp_with_layer_shard")
-    def setUp(self):
+    def setUp(self, mock_enable_dsa_cp_with_layer_shard):
         self.mock_scheme = MagicMock(spec=AscendLinearScheme)
         self.mock_scheme.get_weight.return_value = {
             "weight": torch.empty(128, 256, dtype=torch.int8),
