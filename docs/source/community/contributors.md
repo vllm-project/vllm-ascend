@@ -20,14 +20,23 @@
 | HeXiang Wang| [@whx-sjtu](https://github.com/whx-sjtu) | 2026/01 |
 
 ## Contributors
-<!-- last_commit: 8e3f8bab57cff0a98dc75ad43d8bf5bb4113f34e -->
+<!-- last_commit: aa8ac74984e2fbc07afbd19cb367b542ccc964b7 -->
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
-Updated on 2026-03-25:
+Updated on 2026-04-21:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
+| 372 | [@lilinsiman](https://github.com/lilinsiman) | 2026/04/21 | [f75bfa2](https://github.com/vllm-project/vllm-ascend/commit/f75bfa2) |
+| 371 | [@MrZ20](https://github.com/MrZ20) | 2026/04/21 | [eb5e343](https://github.com/vllm-project/vllm-ascend/commit/eb5e343) |
+| 370 | [@realliujiaxu](https://github.com/realliujiaxu) | 2026/04/20 | [e14b89c](https://github.com/vllm-project/vllm-ascend/commit/e14b89c) |
+| 369 | [@freyfwt](https://github.com/freyfwt) | 2026/04/17 | [fed5c02](https://github.com/vllm-project/vllm-ascend/commit/fed5c02) |
+| 368 | [@Potabk](https://github.com/Potabk) | 2026/04/15 | [d2b6eb1](https://github.com/vllm-project/vllm-ascend/commit/d2b6eb1) |
+| 367 | [@gjc0824](https://github.com/gjc0824) | 2026/04/17 | [bec6314](https://github.com/vllm-project/vllm-ascend/commit/bec6314) |
+| 366 | [@skf-1999](https://github.com/skf-1999) | 2026/04/17 | [b7f92f3](https://github.com/vllm-project/vllm-ascend/commit/b7f92f3) |
+| 365 | [@sunshine202600](https://github.com/sunshine202600) | 2026/04/15 | [b414cff](https://github.com/vllm-project/vllm-ascend/commit/b414cff) |
+| 364 | [@triomino](https://github.com/triomino) | 2026/04/17 | [a837599](https://github.com/vllm-project/vllm-ascend/commit/a837599) |
 | 363 | [@GoMarck](https://github.com/GoMarck) | 2026/03/25 | [17da966](https://github.com/vllm-project/vllm-ascend/commit/17da96658f0b53a7e9b5932e64ced69a334f035c) |
 | 362 | [@drizzlezyk](https://github.com/drizzlezyk) | 2026/03/24 | [5487946](https://github.com/vllm-project/vllm-ascend/commit/54879467c41784a446aa5b486a391d9bfbf488fa) |
 | 361 | [@liuhy1213-cell](https://github.com/liuhy1213-cell) | 2026/03/23 | [fb283b5](https://github.com/vllm-project/vllm-ascend/commit/fb283b5820effe930d7f60952aca48177d710e94) |

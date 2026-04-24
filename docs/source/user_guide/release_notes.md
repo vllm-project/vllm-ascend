@@ -1,5 +1,67 @@
 # Release Notes
 
+## v0.19.0rc1 - 2026.04.22
+
+This is the first release candidate of v0.19.0rc1 for vLLM Ascend.
+Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+
+### Highlights
+
+- **Graph Capture Memory Planning**: Account for NPU graph capture memory in KV cache planning to avoid OOM [#8289](https://github.com/vllm-project/vllm-ascend/pull/8289)
+- **Dynamic Chunk for Chunked Pipeline Parallelism**: Support dynamic chunk for CPP in model_runner_v2 [#7896](https://github.com/vllm-project/vllm-ascend/pull/7896)
+- **Hamming-based Sparse Attention**: New sparse attention operators for improved efficiency [#8346](https://github.com/vllm-project/vllm-ascend/pull/8346)
+
+### Features
+
+- Qwen3VLMoe architecture support in xlite backend [#8046](https://github.com/vllm-project/vllm-ascend/pull/8046)
+- DFlash support for model_runner_v2 [#8118](https://github.com/vllm-project/vllm-ascend/pull/8118)
+- Structured output support for model_runner_v2 [#8443](https://github.com/vllm-project/vllm-ascend/pull/8443)
+- EPLB Swift balancer policy supports mix placement [#8035](https://github.com/vllm-project/vllm-ascend/pull/8035)
+- KV Pool hybrid alignment prefix cache support [#8462](https://github.com/vllm-project/vllm-ascend/pull/8462)
+
+### Hardware and Operator Support
+
+- Ascend 950 w8a8mxfp8 for MoE models [#8372](https://github.com/vllm-project/vllm-ascend/pull/8372)
+- Conv3D to linear optimization when kernel size equals stride [#8318](https://github.com/vllm-project/vllm-ascend/pull/8318)
+
+### Performance
+
+- Reduce prefill KV all-gather communication for PCP/DCP [#8043](https://github.com/vllm-project/vllm-ascend/pull/8043)
+- Optimize split_qkv_tp_rmsnorm_rope ops [#8059](https://github.com/vllm-project/vllm-ascend/pull/8059)
+- Optimize _temperature_kernel and _topk_log_softmax_kernel (triton) [#8083](https://github.com/vllm-project/vllm-ascend/pull/8083), [#8243](https://github.com/vllm-project/vllm-ascend/pull/8243)
+- Initialize VLLM metrics in EPLB worker [#8019](https://github.com/vllm-project/vllm-ascend/pull/8019)
+
+### Bug Fixes
+
+- Fix compute_slot_mapping triton for pcp+eagle3 [#8435](https://github.com/vllm-project/vllm-ascend/pull/8435)
+- Handle num_cached_tokens/num_external_computed_tokens for different vllm versions [#8426](https://github.com/vllm-project/vllm-ascend/pull/8426)
+- Fix w8a8 dispatch ffn combine bias param [#8465](https://github.com/vllm-project/vllm-ascend/pull/8465)
+- Gate recompute/balance/fused_mc2 by PD mode [#8373](https://github.com/vllm-project/vllm-ascend/pull/8373)
+- Fix DSA-CP PD role gating for DeepSeek V3.2 [#8290](https://github.com/vllm-project/vllm-ascend/pull/8290)
+- Fix quant_bias missing in w8a8_static when flashcomm1 is enabled for GLM-5 [#8220](https://github.com/vllm-project/vllm-ascend/pull/8220)
+- Fix remote KV waiting promotion in patch balance scheduler [#8279](https://github.com/vllm-project/vllm-ascend/pull/8279)
+- Resolve PD KV head count via ModelConfig.get_total_num_kv_heads() [#7997](https://github.com/vllm-project/vllm-ascend/pull/7997)
+- Handle piecewise mode synchronization [#8469](https://github.com/vllm-project/vllm-ascend/pull/8469)
+
+### Dependencies
+
+- Upgrade vllm to v0.19.1 [#8448](https://github.com/vllm-project/vllm-ascend/pull/8448)
+- Mooncake version bump to v0.3.9 [#8445](https://github.com/vllm-project/vllm-ascend/pull/8445)
+
+### Documentation
+
+- Update UCM documents [#8475](https://github.com/vllm-project/vllm-ascend/pull/8475)
+- Merge npugraph_ex guide into graph_mode doc [#8464](https://github.com/vllm-project/vllm-ascend/pull/8464)
+
+### Known Issues
+
+- Some issues identified in v0.18.0rc1 feedback remain under investigation:
+  - Qwen3.5 PD disaggregation accuracy
+  - Mooncake transfer self-healing precision
+  - MoE model accuracy bugs
+  - MTP drafter batchIdx crash
+  - Kimi K2.5 high concurrency + function call accuracy
+
 ## v0.18.0rc1 - 2026.04.01
 
 This is the first release candidate of v0.18.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
