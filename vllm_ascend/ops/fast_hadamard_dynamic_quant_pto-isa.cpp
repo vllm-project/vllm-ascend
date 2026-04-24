@@ -126,17 +126,6 @@ AICORE void issueTLoad(__gm__ InputT *x, const TileWork &tile, unsigned x_base,
   set_flag(PIPE_MTE2, PIPE_V, ev);
 }
 
-template <typename InputT>
-AICORE void issueSerializedTLoad(__gm__ InputT *x, const TileWork &tile,
-                                 unsigned x_base, event_t ev) {
-  // The validated small-row path avoids UB x-buffer reuse by alternating
-  // X_PING/X_PONG. The oversized-row helper reuses a single x slot, so it must
-  // explicitly wait until vector compute has released that slot back to MTE2
-  // before issuing the next TLOAD into the same address range.
-  wait_flag(PIPE_V, PIPE_MTE2, ev);
-  issueTLoad(x, tile, x_base, ev);
-}
-
 AICORE bool nextTile(uint32_t &sample_done, uint32_t gm_offset_base,
                      uint32_t samples_to_process, uint32_t samples_per_load,
                      uint32_t n, TileWork &tile) {
@@ -242,41 +231,6 @@ AICORE void runTileBlockwiseHadamardInPlace(unsigned tile_base,
   }
 }
 
-template <typename InputT, typename BulkTileT, typename ReduceTmpTileT,
-          typename ReduceTileColMajorT, typename ReduceTileRowMajorT>
-AICORE void reduceTileMaxAbs(BulkTileT &xTile, ReduceTmpTileT &reduceTmpTile,
-                             ReduceTileColMajorT &rowMaxTile,
-                             ReduceTileColMajorT &rowMinTile,
-                             ReduceTileRowMajorT &rowMaxTileRm,
-                             ReduceTileRowMajorT &rowMinTileRm) {
-  TROWMAX(rowMaxTile, xTile, reduceTmpTile);
-  TROWMIN(rowMinTile, xTile, reduceTmpTile);
-  pipe_barrier(PIPE_V);
-
-  TRESHAPE(rowMaxTileRm, rowMaxTile);
-  TRESHAPE(rowMinTileRm, rowMinTile);
-  pipe_barrier(PIPE_V);
-
-  TMULS(rowMinTileRm, rowMinTileRm, (InputT)-1.0f);
-  pipe_barrier(PIPE_V);
-  TMAX(rowMaxTileRm, rowMaxTileRm, rowMinTileRm);
-  pipe_barrier(PIPE_V);
-}
-
-template <typename InputT, typename BulkTileT, typename ReduceTileColMajorT,
-          typename ReduceTileRowMajorT>
-AICORE void normalizeTileFromRowMax(BulkTileT &xTile,
-                                    ReduceTileColMajorT &rowMaxTile,
-                                    ReduceTileRowMajorT &rowMaxTileRm,
-                                    float scale_divisor) {
-  TRESHAPE(rowMaxTile, rowMaxTileRm);
-  pipe_barrier(PIPE_V);
-  TROWEXPANDDIV(xTile, xTile, rowMaxTile);
-  pipe_barrier(PIPE_V);
-  TMULS(xTile, xTile, (InputT)scale_divisor);
-  pipe_barrier(PIPE_V);
-}
-
 template <typename InputT, typename OutputT>
 AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
                                         __gm__ float *row_scales,
@@ -318,40 +272,75 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
   const uint32_t blocks_per_segment = ELEMENTS_PER_TILE / hadamard_n;
   const uint32_t segment_n = blocks_per_segment * hadamard_n;
   const float scale_divisor = 7.0f;
+  const unsigned x_alt_base = (x_base == X_PING) ? X_PONG : X_PING;
+  const event_t ev_alt = (ev == EVENT_ID0) ? (event_t)EVENT_ID1
+                                            : (event_t)EVENT_ID0;
 
   ReduceTileRowMajor rowAccumTile(1, 1);
   ReduceTileRowMajor rowFloorTile(1, 1);
+  ReduceTileColMajor rowNormTile(1, 1);
+  ScaleTile scaleTile(1, 1);
+  ScaleTile scaleFloorTile(1, 1);
   TASSIGN(rowAccumTile, SCALE_BASE);
   TASSIGN(rowFloorTile, ODD_BASE);
+  TASSIGN(rowNormTile, ROWMAX_BASE);
+  // Large rows overlap the next X load in both passes, so keep the final scale
+  // in reduction scratch that is idle during the pack/store pass.
+  TASSIGN(scaleTile, REDUCE_TMP_BASE);
+  TASSIGN(scaleFloorTile, ROWMIN_BASE);
 
   bool has_row_accum = false;
-  for (uint32_t segment_offset = 0; segment_offset < full_n;
-       segment_offset += segment_n) {
-    const uint32_t segment_elements = min(segment_n, full_n - segment_offset);
-    TileWork segment_tile = {tile.gm_offset + segment_offset, 1,
-                             segment_elements};
-    issueSerializedTLoad(x, segment_tile, x_base, ev);
-    wait_flag(PIPE_MTE2, PIPE_V, ev);
+  TileWork current_segment = {tile.gm_offset, 1, min(segment_n, full_n)};
+  uint32_t next_segment_offset = current_segment.elements;
+  bool ping = true;
+  issueTLoad(x, current_segment, x_base, ev);
 
-    BulkTile xSegmentTile(1, segment_elements);
-    TASSIGN(xSegmentTile, x_base);
-    runTileBlockwiseHadamardInPlace<InputT>(x_base, 1, segment_elements,
-                                            hadamard_n, log2_hadamard_n);
-    pipe_barrier(PIPE_V);
+  while (true) {
+    const event_t current_ev = ping ? ev : ev_alt;
+    const unsigned current_x_base = ping ? x_base : x_alt_base;
 
-    ReduceTmpTile reduceTmpTile(1, segment_elements);
+    wait_flag(PIPE_MTE2, PIPE_V, current_ev);
+
+    TileWork next_segment;
+    const bool has_next = next_segment_offset < full_n;
+    if (has_next) {
+      next_segment = {tile.gm_offset + next_segment_offset, 1,
+                      min(segment_n, full_n - next_segment_offset)};
+      const event_t next_ev = ping ? ev_alt : ev;
+      const unsigned next_x_base = ping ? x_alt_base : x_base;
+      issueTLoad(x, next_segment, next_x_base, next_ev);
+    }
+
+    BulkTile xSegmentTile(1, current_segment.elements);
+    ReduceTmpTile reduceTmpTile(1, current_segment.elements);
     ReduceTileColMajor rowMaxTile(1, 1);
     ReduceTileColMajor rowMinTile(1, 1);
     ReduceTileRowMajor rowMaxTileRm(1, 1);
     ReduceTileRowMajor rowMinTileRm(1, 1);
+    TASSIGN(xSegmentTile, current_x_base);
     TASSIGN(reduceTmpTile, REDUCE_TMP_BASE);
     TASSIGN(rowMaxTile, ROWMAX_BASE);
     TASSIGN(rowMinTile, ROWMIN_BASE);
     TASSIGN(rowMaxTileRm, EVEN_BASE);
     TASSIGN(rowMinTileRm, ODD_BASE);
+    runTileBlockwiseHadamardInPlace<InputT>(current_x_base, 1,
+                                            current_segment.elements,
+                                            hadamard_n, log2_hadamard_n);
+    pipe_barrier(PIPE_V);
 
-    reduceTileMaxAbs<InputT>(xSegmentTile, reduceTmpTile, rowMaxTile,
-                             rowMinTile, rowMaxTileRm, rowMinTileRm);
+    TROWMAX(rowMaxTile, xSegmentTile, reduceTmpTile);
+    TROWMIN(rowMinTile, xSegmentTile, reduceTmpTile);
+    pipe_barrier(PIPE_V);
+
+    TRESHAPE(rowMaxTileRm, rowMaxTile);
+    TRESHAPE(rowMinTileRm, rowMinTile);
+    pipe_barrier(PIPE_V);
+
+    TMULS(rowMinTileRm, rowMinTileRm, (InputT)-1.0f);
+    pipe_barrier(PIPE_V);
+    TMAX(rowMaxTileRm, rowMaxTileRm, rowMinTileRm);
+    pipe_barrier(PIPE_V);
+
     if (!has_row_accum) {
       TMULS(rowAccumTile, rowMaxTileRm, (InputT)1.0f);
       pipe_barrier(PIPE_V);
@@ -360,7 +349,14 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
       TMAX(rowAccumTile, rowAccumTile, rowMaxTileRm);
       pipe_barrier(PIPE_V);
     }
-    set_flag(PIPE_V, PIPE_MTE2, ev);
+    set_flag(PIPE_V, PIPE_MTE2, current_ev);
+
+    if (!has_next) {
+      break;
+    }
+    next_segment_offset += next_segment.elements;
+    current_segment = next_segment;
+    ping = !ping;
   }
 
   TMULS(rowFloorTile, rowAccumTile, (InputT)0.0f);
@@ -369,52 +365,6 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
   pipe_barrier(PIPE_V);
   TMAX(rowAccumTile, rowAccumTile, rowFloorTile);
   pipe_barrier(PIPE_V);
-
-  for (uint32_t segment_offset = 0; segment_offset < full_n;
-       segment_offset += segment_n) {
-    const uint32_t segment_elements = min(segment_n, full_n - segment_offset);
-    TileWork segment_tile = {tile.gm_offset + segment_offset, 1,
-                             segment_elements};
-    issueSerializedTLoad(x, segment_tile, x_base, ev);
-    wait_flag(PIPE_MTE2, PIPE_V, ev);
-
-    BulkTile xSegmentTile(1, segment_elements);
-    BulkQuantTile ySegmentTile2D(1, segment_elements >> 1);
-    QuantTile ySegmentTile(1, segment_elements >> 1);
-    ReduceTileColMajor rowMaxTile(1, 1);
-    ReduceTileRowMajor rowMaxTileRm(1, 1);
-    TASSIGN(xSegmentTile, x_base);
-    TASSIGN(ySegmentTile2D, y_base);
-    TASSIGN(ySegmentTile, y_base);
-    TASSIGN(rowMaxTile, ROWMAX_BASE);
-    TASSIGN(rowMaxTileRm, SCALE_BASE);
-    runTileBlockwiseHadamardInPlace<InputT>(x_base, 1, segment_elements,
-                                            hadamard_n, log2_hadamard_n);
-    pipe_barrier(PIPE_V);
-    normalizeTileFromRowMax<InputT>(xSegmentTile, rowMaxTile, rowMaxTileRm,
-                                    scale_divisor);
-
-    wait_flag(PIPE_MTE3, PIPE_V, ev);
-    fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(ySegmentTile2D, xSegmentTile,
-                                                 RoundMode::CAST_RINT);
-    pipe_barrier(PIPE_V);
-
-    set_flag(PIPE_V, PIPE_MTE3, ev);
-    wait_flag(PIPE_V, PIPE_MTE3, ev);
-    OutGlobal yGlobal(y + ((tile.gm_offset + segment_offset) >> 1));
-    TASSIGN(yGlobal, (y + ((tile.gm_offset + segment_offset) >> 1)));
-    TSTORE(yGlobal, ySegmentTile);
-    set_flag(PIPE_MTE3, PIPE_V, ev);
-    set_flag(PIPE_V, PIPE_MTE2, ev);
-  }
-
-  ScaleTile scaleTile(1, 1);
-  ScaleTile scaleFloorTile(1, 1);
-  // The serialized large-row path only uses X_PING/Y_PING for load+pack.
-  // Stage the final scale store in the unused pong buffers so the next row can
-  // immediately reuse EVEN/ODD/SCALE/REDUCE scratch after we return.
-  TASSIGN(scaleTile, X_PONG);
-  TASSIGN(scaleFloorTile, Y_PONG);
 
   TCVT(scaleTile, rowAccumTile, RoundMode::CAST_RINT);
   pipe_barrier(PIPE_V);
@@ -430,12 +380,48 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
 
   ScaleGlobal scaleGlobal(row_scales + row_index);
   TASSIGN(scaleGlobal, (row_scales + row_index));
-  wait_flag(PIPE_MTE3, PIPE_V, ev);
-  set_flag(PIPE_V, PIPE_MTE3, ev);
-  wait_flag(PIPE_V, PIPE_MTE3, ev);
-  TSTORE(scaleGlobal, scaleTile);
-  set_flag(PIPE_MTE3, PIPE_V, ev);
-  set_flag(PIPE_V, PIPE_MTE2, ev);
+  for (uint32_t segment_offset = 0; segment_offset < full_n;
+       segment_offset += segment_n) {
+    const uint32_t segment_elements = min(segment_n, full_n - segment_offset);
+    const bool is_last_segment = (segment_offset + segment_elements) == full_n;
+    TileWork segment_tile = {tile.gm_offset + segment_offset, 1,
+                             segment_elements};
+    issueTLoad(x, segment_tile, x_base, ev);
+    wait_flag(PIPE_MTE2, PIPE_V, ev);
+
+    BulkTile xSegmentTile(1, segment_elements);
+    BulkQuantTile ySegmentTile2D(1, segment_elements >> 1);
+    QuantTile ySegmentTile(1, segment_elements >> 1);
+    TASSIGN(xSegmentTile, x_base);
+    TASSIGN(ySegmentTile2D, y_base);
+    TASSIGN(ySegmentTile, y_base);
+    runTileBlockwiseHadamardInPlace<InputT>(x_base, 1, segment_elements,
+                                            hadamard_n, log2_hadamard_n);
+    pipe_barrier(PIPE_V);
+
+    TRESHAPE(rowNormTile, rowAccumTile);
+    pipe_barrier(PIPE_V);
+    TROWEXPANDDIV(xSegmentTile, xSegmentTile, rowNormTile);
+    pipe_barrier(PIPE_V);
+    TMULS(xSegmentTile, xSegmentTile, (InputT)scale_divisor);
+    pipe_barrier(PIPE_V);
+
+    wait_flag(PIPE_MTE3, PIPE_V, ev);
+    fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(ySegmentTile2D, xSegmentTile,
+                                                 RoundMode::CAST_RINT);
+    pipe_barrier(PIPE_V);
+
+    set_flag(PIPE_V, PIPE_MTE3, ev);
+    wait_flag(PIPE_V, PIPE_MTE3, ev);
+    OutGlobal yGlobal(y + ((tile.gm_offset + segment_offset) >> 1));
+    TASSIGN(yGlobal, (y + ((tile.gm_offset + segment_offset) >> 1)));
+    TSTORE(yGlobal, ySegmentTile);
+    if (is_last_segment) {
+      TSTORE(scaleGlobal, scaleTile);
+    }
+    set_flag(PIPE_MTE3, PIPE_V, ev);
+    set_flag(PIPE_V, PIPE_MTE2, ev);
+  }
 }
 
 template <typename InputT, typename OutputT>
