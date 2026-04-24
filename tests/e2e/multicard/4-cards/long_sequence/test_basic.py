@@ -444,7 +444,7 @@ def test_qwen3_5_4b_multimodal_single_and_multi_image():
     with VllmRunner(
         model,
         enforce_eager=True,
-        dtype="float16",
+        dtype="bfloat16",
         max_model_len=4096,
         tensor_parallel_size=1,
         prefill_context_parallel_size=4,
