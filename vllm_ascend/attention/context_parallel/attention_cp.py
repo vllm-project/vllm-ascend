@@ -244,10 +244,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 block_tables=block_table[: num_decodes],
                 mtp_attn_mask=mtp_attn_mask,
             )
-
-        actual_seq_lengths_q = (torch.arange(num_decodes) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
-            num_decodes:
-        ]
+        actual_seq_lengths_q = (query_start_loc[1:] - query_start_loc[:-1]).tolist()
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,

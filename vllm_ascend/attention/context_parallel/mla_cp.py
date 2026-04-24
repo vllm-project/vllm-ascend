@@ -248,7 +248,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
 
-        actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
+        actual_seq_lengths_q = decode_metadata.seq_lens[: decode_metadata.num_decodes]
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
 
         masks = decode_metadata.attn_mask
