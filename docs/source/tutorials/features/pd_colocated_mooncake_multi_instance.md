@@ -283,8 +283,8 @@ Send Dataset A to Instance 1 on Node 1 and record the Time to First Token
 ### Preparation for Step 2
 
 Before Step 2, send a fully random Dataset B to Instance 1. Due to the
-unified HBM/DRAM KV Cache with LRU (Least Recently Used) eviction policy,
-Dataset B's cache evicts Dataset A's cache from HBM, leaving Dataset A's
+unified on-chip memory/DRAM KV Cache with LRU (Least Recently Used) eviction policy,
+Dataset B's cache evicts Dataset A's cache from on-chip memory, leaving Dataset A's
 cache only in Node 1's DRAM.
 
 ### Step 2: Local DRAM Hit

@@ -78,4 +78,3 @@ def test_mm_encoder_attention_310_forward_oot_with_padding():
 
     assert out.shape == query.shape
     torch.testing.assert_close(out, query + 1.0)
-

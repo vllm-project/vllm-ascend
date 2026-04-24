@@ -1,0 +1,278 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:1
+msgid "Documentation Authoring"
+msgstr "文档编写指南"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:3
+msgid ""
+"This page explains how to write model tutorial docs that stay in sync "
+"with YAML test cases checked by `tools/check_docs_yaml_sync.py`."
+msgstr ""
+"本页说明如何编写模型教程文档，使其与 `tools/check_docs_yaml_sync.py` 所检查的 YAML 测试用例保持同步。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:6
+msgid "What The Checker Scans"
+msgstr "检查器的扫描范围"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:8
+msgid ""
+"The `check-docs-yaml-sync` pre-commit hook currently runs on files that "
+"match:"
+msgstr ""
+"`check-docs-yaml-sync` pre-commit 钩子当前会扫描匹配以下模式的文件："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:14
+msgid ""
+"The CLI itself can lint any markdown path that you pass in, but the hook "
+"only targets model tutorial docs."
+msgstr ""
+"CLI 本身可以对您传入的任何 Markdown 路径进行 lint，但该钩子仅针对模型教程文档。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:17
+#, python-brace-format
+msgid ""
+"Within a checked document, every MyST block whose opening fence matches `"
+" ```{test} <lexer> ` is treated as a sync block. This means:"
+msgstr ""
+"在被检查的文档中，每个起始标记为 ` ```{test} <lexer> ` 的 MyST 代码块均被视为同步块。这意味着："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:20
+#, python-brace-format
+msgid ""
+"A checked file must contain at least one `{test}` block, or the linter "
+"reports an error."
+msgstr ""
+"被检查的文件必须至少包含一个 `{test}` 块，否则 linter 会报错。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:21
+#, python-brace-format
+msgid "Every `{test}` block in that file must include all required sync metadata."
+msgstr "该文件中的每个 `{test}` 块都必须包含所有必需的同步元数据。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:22
+#, python-brace-format
+msgid ""
+"If you want to show a shell example that should not be linted, use a "
+"normal fenced block such as ` ```bash ` instead of ` ```{test} bash `."
+msgstr ""
+"如果要展示不应被 lint 的 shell 示例，请使用普通围栏块（例如 ` ```bash `），而不是 ` ```{test} bash `。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:24
+msgid ""
+"If the whole document cannot be mapped to YAML test cases, add the "
+"markdown path to `[tool.check_docs_yaml_sync].exclude` in "
+"`pyproject.toml`."
+msgstr ""
+"如果整个文档无法映射到 YAML 测试用例，请将该 Markdown 文件的路径添加到 `pyproject.toml` 中的 `[tool.check_docs_yaml_sync].exclude` 下。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:27
+msgid "Required Metadata"
+msgstr "必需的元数据"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:29
+msgid ""
+"Each sync block must provide all three metadata fields immediately after "
+"the opening fence and before the first blank line or script content:"
+msgstr ""
+"每个同步块必须在起始标记之后、第一个空行或脚本内容之前，提供以下全部三个元数据字段："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:42
+msgid "Rules:"
+msgstr "规则："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:44
+msgid "`:sync-yaml:` is a repository-relative path to an existing YAML file."
+msgstr "`:sync-yaml:` 是一个指向已存在 YAML 文件的仓库相对路径。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:45
+msgid ""
+"`:sync-target:` uses dotted keys and bracket access, for example "
+"`test_cases[0].envs` or `test_cases[0][\"server_cmd\"]`."
+msgstr ""
+"`:sync-target:` 使用点号键和方括号访问，例如 `test_cases[0].envs` 或 `test_cases[0][\"server_cmd\"]`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:47
+msgid ""
+"Multiple `:sync-target:` values are allowed only by separating targets "
+"with spaces."
+msgstr ""
+"多个 `:sync-target:` 值仅允许通过空格分隔目标来指定。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:48
+msgid "`:sync-class:` must be one of the supported classes: `env` or `cmd`."
+msgstr "`:sync-class:` 必须是支持的类之一：`env` 或 `cmd`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:50
+msgid "How To Write `env` Blocks"
+msgstr "如何编写 `env` 块"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:52
+msgid ""
+"Use `:sync-class: env` when the YAML target resolves to a mapping of "
+"environment variables."
+msgstr ""
+"当 YAML 目标解析为环境变量的映射时，使用 `:sync-class: env`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:54
+msgid "`env` blocks must use exactly one `:sync-target:`."
+msgstr "`env` 块必须恰好使用一个 `:sync-target:`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:55
+msgid "The YAML target must resolve to a mapping such as `test_cases[0].envs`."
+msgstr "YAML 目标必须解析为一个映射，例如 `test_cases[0].envs`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:56
+msgid "The checker only reads lines written as `export KEY=value`."
+msgstr "检查器仅读取形如 `export KEY=value` 的行。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:57
+msgid "Blank lines and full-line comments are ignored."
+msgstr "空行和整行注释将被忽略。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:58
+msgid ""
+"Inline comments after the value are allowed, for example `export "
+"SERVER_PORT=DEFAULT_PORT  # Replace with a real port.`"
+msgstr ""
+"允许在值后面添加行内注释，例如 `export SERVER_PORT=DEFAULT_PORT  # 替换为实际端口。`"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:60
+msgid "Non-`export` lines are ignored."
+msgstr "非 `export` 开头的行将被忽略。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:61
+msgid ""
+"After quote normalization, the variable names and values must match the "
+"YAML mapping."
+msgstr ""
+"经过引号归一化后，变量名和值必须与 YAML 映射匹配。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:62
+msgid ""
+"Order does not matter, but the final set of `KEY=value` entries must "
+"match YAML exactly."
+msgstr ""
+"顺序无关紧要，但最终的 `KEY=value` 条目集合必须与 YAML 完全一致。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:64
+#: ../../source/developer_guide/contribution/doc_writing.md:101
+msgid "Example:"
+msgstr "示例："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:81
+msgid "How To Write `cmd` Blocks"
+msgstr "如何编写 `cmd` 块"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:83
+msgid ""
+"Use `:sync-class: cmd` when the document contains a `vllm serve` launch "
+"command."
+msgstr ""
+"当文档中包含 `vllm serve` 启动命令时，使用 `:sync-class: cmd`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:85
+msgid "The document block must parse as a valid `vllm serve` command."
+msgstr "该文档块必须能够解析为合法的 `vllm serve` 命令。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:86
+msgid "The third token must be the model name."
+msgstr "第三个词元必须是模型名称。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:87
+msgid "After the model, only options and option values are allowed."
+msgstr "模型名称之后，只允许出现选项及其取值。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:88
+msgid "Duplicate option tokens are rejected."
+msgstr "重复的选项词元将被拒绝。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:89
+msgid ""
+"Inline shell comments are not stripped unless the whole line starts with "
+"`#`."
+msgstr ""
+"除非整行以 `#` 开头，否则不会去除行内的 shell 注释。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:90
+msgid "Backslash-continued multi-line commands are supported."
+msgstr "支持使用反斜杠续行的多行命令。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:91
+msgid ""
+"Command option order does not matter, but the parsed option set must "
+"match YAML exactly."
+msgstr ""
+"命令选项的顺序无关紧要，但解析出的选项集合必须与 YAML 完全一致。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:93
+msgid "`cmd` sync targets have two modes:"
+msgstr "`cmd` 同步目标有两种模式："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:95
+msgid ""
+"One target: the YAML target must resolve to a full command fragment that "
+"already includes `vllm serve <model> ...`, either as a string or as a "
+"flat scalar list."
+msgstr ""
+"单目标模式：YAML 目标必须解析为一个完整的命令片段，该片段已包含 `vllm serve <model> ...`，可以是一个字符串或一个扁平的标量列表。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:97
+msgid ""
+"Multiple targets: the checker prepends `vllm serve` automatically, then "
+"appends each resolved fragment in the order listed in `:sync-target:`. A "
+"common pattern is `test_cases[0].model test_cases[0].server_cmd`."
+msgstr ""
+"多目标模式：检查器会自动在最前面加上 `vllm serve`，然后按照 `:sync-target:` 中列出的顺序依次追加每个解析后的片段。常见模式为 `test_cases[0].model test_cases[0].server_cmd`。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:122
+msgid "When A Document Should Be Excluded"
+msgstr "何时应排除某个文档"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:124
+msgid ""
+"Exclusions are file-level only. If a markdown file under "
+"`docs/source/tutorials/models/` cannot be mapped cleanly to YAML test "
+"cases, add its repository-relative path to "
+"`[tool.check_docs_yaml_sync].exclude` in `pyproject.toml`."
+msgstr ""
+"排除操作仅针对文件级别。如果 `docs/source/tutorials/models/` 下的某个 Markdown 文件无法干净地映射到 YAML 测试用例，请将其仓库相对路径添加到 `pyproject.toml` 中的 `[tool.check_docs_yaml_sync].exclude` 下。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:128
+msgid ""
+"Use this sparingly. Prefer keeping tutorial commands and env vars "
+"synchronized with executable test cases whenever possible."
+msgstr ""
+"请谨慎使用此功能。尽可能让教程中的命令和环境变量与可执行的测试用例保持同步。"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:131
+msgid "Local Validation"
+msgstr "本地验证"
+
+#: ../../source/developer_guide/contribution/doc_writing.md:133
+msgid "Run the sync check directly on one or more markdown files:"
+msgstr "直接在一个或多个 Markdown 文件上运行同步检查："
+
+#: ../../source/developer_guide/contribution/doc_writing.md:139
+msgid "Run the full formatting and lint workflow before pushing:"
+msgstr "在推送前运行完整的格式化和 lint 工作流："
+

@@ -97,7 +97,7 @@ export PYTHONHASHSEED=0
 | :--- | :--- | :--- | :--- |
 | 800 I/T A3 series | HDK >= 26.0.0<br>CANN >= 9.0.0 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. |
 | 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
-| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission cheme on 800 I/T A2 series|
+| 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
 ### FAQ for HIXL (ascend_direct) backend
 
@@ -153,7 +153,7 @@ The content of the multi_producer.sh script:
 
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -163,7 +163,7 @@ export ASCEND_ENABLE_USE_FABRIC_MEM=1
 #A2
 #export HCCL_INTRA_ROCE_ENABLE=1
 
-#Minimum retransmission timeout of the RDMA，equals 4.096 μs * 2 ^ timeout.
+#Minimum retransmission timeout of the RDMA, equals 4.096 μs * 2 ^ timeout.
 #Needs to satisfy the equation: ASCEND_TRANSFER_TIMEOUT > RDMA_TIMEOUT * 7, where 7 is the default number of retry for RDMA transfer.
 #HCCL_RDMA_TIMEOUT also affects collective communication behavior and should be configured carefully.
 export HCCL_RDMA_TIMEOUT=17
@@ -232,7 +232,7 @@ The content of multi_consumer.sh:
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
@@ -349,7 +349,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export ACL_OP_INIT_MODE=1
 #A3
 export ASCEND_ENABLE_USE_FABRIC_MEM=1

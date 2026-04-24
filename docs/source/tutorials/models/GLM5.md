@@ -2,7 +2,7 @@
 
 ## Introduction
 
-[GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targeting at complex systems engineering and long-horizon agentic tasks.
+[GLM-5](https://huggingface.co/zai-org/GLM-5) use a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
 The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`. In `vllm-ascend:v0.17.0rc1` and `vllm-ascend:v0.18.0rc1` , the version of transformers need to be upgraded to 5.2.0.
 
@@ -765,7 +765,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -844,7 +845,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -927,7 +929,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
     
         export TASK_QUEUE_ENABLE=1
     
@@ -1008,7 +1011,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1089,7 +1093,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1170,7 +1175,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
