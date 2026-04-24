@@ -2,12 +2,12 @@ import numpy as np
 import pytest
 import torch
 import torch_npu
+import gc
+import time
 
 from vllm_ascend.utils import enable_custom_op
 
 torch.set_printoptions(threshold=np.inf)
-import gc
-import time
 
 enable_custom_op()
 
@@ -134,8 +134,7 @@ def test_myops(num_tokens, num_head, block_size, num_blocks, count):
             key_npu, key_cache_npu, group_len, group_key_idx, group_key_cache_idx, block_size
         )
     N = 101
-    start = time.perf_counter()
-    for zt_i in range(N):
+    for i in range(N):
         group_len, group_key_idx, group_key_cache_idx = torch.ops._C_ascend.store_kv_block_pre(
             slot_mapping_npu, slot_mapping_list, block_size
         )
