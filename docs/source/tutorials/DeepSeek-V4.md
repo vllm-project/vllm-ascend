@@ -36,8 +36,10 @@ Start the docker image on your each node.
    :substitutions:
 
 export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0rc3
+export NAME=vllm-ascend
 docker run --rm \
-    --name vllm-ascend \
+    --name $NAME \
+    --net=host \
     --shm-size=1g \
     --net=host \
     --device /dev/davinci0 \
@@ -57,7 +59,8 @@ docker run --rm \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
+    -v /etc/hccn.conf:/etc/hccn.conf \
+    -v /mnt/sfs_turbo/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -72,10 +75,11 @@ Start the docker image on your each node.
    :substitutions:
 
 export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0rc3-a3
+export NAME=vllm-ascend
 docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
+    --name $NAME \
     --net=host \
+    --shm-size=1g \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
@@ -101,7 +105,8 @@ docker run --rm \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
+    -v /etc/hccn.conf:/etc/hccn.conf \
+    -v /mnt/sfs_turbo/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -159,6 +164,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
   --quantization ascend \
   --port 8006 \
   --block-size 128 \
+  --chat-template /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp/chat_template.jinja \
   --async-scheduling \
   --additional-config '{"enable_cpu_binding": "true", "multistream_overlap_shared_expert": true}' \
   --speculative-config '{"num_speculative_tokens": 1,"method": "deepseek_mtp"}' \
@@ -194,6 +200,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --quantization ascend \
+    --chat-template /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp/chat_template.jinja \
     --port 8005 \
     --block-size 128 \
     --async-scheduling \
@@ -365,6 +372,7 @@ Before you start, please
             --trust-remote-code \
             --gpu-memory-utilization 0.85 \
             --quantization ascend \
+            --chat-template /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp/chat_template.jinja \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
             --enforce-eager \
             --additional_config '{"enable_cpu_binding": "true"}' \
@@ -387,7 +395,7 @@ Before you start, please
             }'
         ```
 
-    1. Prefill node 2
+    2. Prefill node 2
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -436,6 +444,7 @@ Before you start, please
             --trust-remote-code \
             --gpu-memory-utilization 0.85 \
             --quantization ascend \
+            --chat-template /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp/chat_template.jinja \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
             --enforce-eager \
             --additional_config '{"enable_cpu_binding": "true"}' \
@@ -458,7 +467,7 @@ Before you start, please
             }'
         ```
 
-    2. Decode node (Same as another D node)
+    3. Decode node (Same as another D node)
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -508,6 +517,7 @@ Before you start, please
             --trust-remote-code \
             --gpu-memory-utilization 0.88 \
             --quantization ascend \
+            --chat-template /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp/chat_template.jinja \
             --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[144]}' \
             --kv-transfer-config \
