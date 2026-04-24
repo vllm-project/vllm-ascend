@@ -161,7 +161,6 @@ class TestMaybeAutoDetectQuantization(TestBase):
 
 
 class TestEnableFaQuant(TestBase):
-
     def test_non_quantization_scenarios(self):
         vllm_config = MagicMock()
         vllm_config.quant_config = None

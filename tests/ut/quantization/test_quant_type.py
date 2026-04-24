@@ -3,7 +3,6 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestQuantType(TestBase):
-
     def test_enum_values(self):
         self.assertEqual(QuantType.NONE.value, 0)
         self.assertEqual(QuantType.W8A8.value, 1)

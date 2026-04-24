@@ -1,18 +1,18 @@
 from unittest.mock import MagicMock, Mock, patch
+
 import torch
 import torch.nn as nn
+
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_mock_vllm_config, create_mock_ascend_config
-from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
-from vllm_ascend.quantization.methods.w4a4_mxfp4 import (
-    AscendW4A4MXFP4DynamicLinearMethod,
-    AscendW4A4MXFP4DynamicFusedMoEMethod,
-)
+from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
 from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.quantization.methods.w4a4_mxfp4 import (
+    AscendW4A4MXFP4DynamicFusedMoEMethod,
+    AscendW4A4MXFP4DynamicLinearMethod,
+)
 
 
 class TestAscendW4A4MXFP4LinearMethod(TestBase):
-
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.ensure_mxfp4_linear_available")
     @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_current_vllm_config")
     def setUp(self, mock_vllm, mock_ensure):
@@ -64,14 +64,14 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
     def test_apply_3d_input(self, mock_npu):
         mock_npu.npu_dynamic_mx_quant.return_value = (
             torch.randint(0, 255, (32, 128), dtype=torch.uint8),
-            torch.randint(0, 255, (32, 4), dtype=torch.uint8)
+            torch.randint(0, 255, (32, 4), dtype=torch.uint8),
         )
         mock_npu.npu_quant_matmul.return_value = torch.randn(32, 1, 128)
         layer = MagicMock()
         layer.weight = MagicMock(data=torch.randint(0, 255, (128, 128), dtype=torch.uint8))
         layer.weight_scale = MagicMock(data=torch.randint(0, 255, (4, 128, 2), dtype=torch.uint8))
         x = torch.randn(32, 1, 256, dtype=torch.bfloat16)
-        with patch.object(self.scheme, 'group_size', 32):
+        with patch.object(self.scheme, "group_size", 32):
             output = self.scheme.apply(layer, x)
         self.assertEqual(output.shape[0], 32)
 
@@ -100,16 +100,18 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         result = self.scheme.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
         self.assertEqual(result["w13_weight"].dtype, torch.uint8)
         self.assertEqual(result["w2_weight"].dtype, torch.uint8)
-        self.assertEqual(result["w13_weight"].shape,
-                         (self.num_experts, 2 * self.intermediate_size, self.hidden_size // 2))
+        self.assertEqual(
+            result["w13_weight"].shape, (self.num_experts, 2 * self.intermediate_size, self.hidden_size // 2)
+        )
         self.assertEqual(result["w2_weight"].shape, (self.num_experts, self.hidden_size, self.intermediate_size // 2))
 
     def test_get_dynamic_quant_param_based_on_group_size(self):
         group_sizes = [16, 32, 64]
         for gs in group_sizes:
             self.scheme.group_size = gs
-            result = self.scheme.get_dynamic_quant_param(self.num_experts, self.intermediate_size, self.hidden_size,
-                                                         torch.bfloat16)
+            result = self.scheme.get_dynamic_quant_param(
+                self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16
+            )
             self.assertEqual(result["w13_weight_scale"].shape[2], self.hidden_size // gs)
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
@@ -118,8 +120,9 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
         layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
-        layer.w13_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8),
-                                              requires_grad=False)
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
+        )
         layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False)
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
@@ -135,10 +138,12 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 64, 256), dtype=torch.uint8), requires_grad=False)
         layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
-        layer.w13_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 64, 128, 2), dtype=torch.uint8),
-                                              requires_grad=False)
-        layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 64, 2), dtype=torch.uint8),
-                                             requires_grad=False)
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 64, 128, 2), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 128, 64, 2), dtype=torch.uint8), requires_grad=False
+        )
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
         router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2)
@@ -149,9 +154,14 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         mock_ctx.moe_comm_method = mock_comm
         mock_ctx.moe_comm_type = Mock()
         result = self.scheme.apply(
-            layer, x, router_logits, top_k=2, renormalize=True,
+            layer,
+            x,
+            router_logits,
+            top_k=2,
+            renormalize=True,
             global_num_experts=self.num_experts,
-            activation="silu", pertoken_scale=torch.randn(tokens),
-            apply_router_weight_on_input=True
+            activation="silu",
+            pertoken_scale=torch.randn(tokens),
+            apply_router_weight_on_input=True,
         )
         mock_comm.fused_experts.assert_called_once()

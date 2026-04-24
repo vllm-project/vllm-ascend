@@ -1,5 +1,7 @@
 from unittest.mock import patch
+
 import torch
+
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.quant_parser import (
     QuantTypeMapping,
@@ -10,7 +12,6 @@ from vllm_ascend.quantization.quant_parser import (
 
 
 class TestQuantTypeMapping(TestBase):
-
     def test_get_quant_settings_returns_dict(self):
         settings = QuantTypeMapping.get_quant_settings()
         self.assertIsInstance(settings, dict)
@@ -35,7 +36,6 @@ class TestQuantTypeMapping(TestBase):
 
 
 class TestGetRollbackQuantType(TestBase):
-
     def test_returns_down_proj_quant_type(self):
         config = {
             "model.layers.0.mlp.gate_proj": "W8A8_MXFP8",
@@ -60,7 +60,6 @@ class TestGetRollbackQuantType(TestBase):
 
 
 class TestParseMxfpQuantParams(TestBase):
-
     def test_default_values(self):
         act, weight, scale, per_token, round_mode = parse_mxfp_quant_params()
         self.assertEqual(act, torch.float8_e4m3fn)
@@ -89,35 +88,26 @@ class TestParseMxfpQuantParams(TestBase):
 
 
 class TestParseQuantMoeDownProjParams(TestBase):
-
     @patch("vllm_ascend.quantization.quant_parser.ensure_mxfp8_scale_dtype_available")
     def test_w8a8_mxfp8_uses_rint_round_mode(self, mock_ensure):
         mock_ensure.return_value = None
-        act, weight, scale, per_token, round_mode = parse_quant_moe_down_proj_params(
-            "W8A8_MXFP8", "round"
-        )
+        act, weight, scale, per_token, round_mode = parse_quant_moe_down_proj_params("W8A8_MXFP8", "round")
         self.assertEqual(round_mode, "rint")
 
     @patch("vllm_ascend.quantization.quant_parser.ensure_mxfp4_dtype_available")
     def test_w4a4_mxfp4_respects_parsed_round_mode(self, mock_ensure):
         mock_ensure.return_value = None
-        act, weight, scale, per_token, round_mode = parse_quant_moe_down_proj_params(
-            "W4A4_MXFP4", "round"
-        )
+        act, weight, scale, per_token, round_mode = parse_quant_moe_down_proj_params("W4A4_MXFP4", "round")
         self.assertEqual(round_mode, "round")
 
     @patch("vllm_ascend.quantization.quant_parser.ensure_mxfp4_dtype_available")
     def test_w4a4_mxfp4_rint_round_mode(self, mock_ensure):
         mock_ensure.return_value = None
-        act, weight, scale, per_token, round_mode = parse_quant_moe_down_proj_params(
-            "W4A4_MXFP4", "rint"
-        )
+        act, weight, scale, per_token, round_mode = parse_quant_moe_down_proj_params("W4A4_MXFP4", "rint")
         self.assertEqual(round_mode, "rint")
 
     @patch("vllm_ascend.quantization.quant_parser.ensure_mxfp8_scale_dtype_available")
     def test_w4a8_mxfp_uses_rint_round_mode(self, mock_ensure):
         mock_ensure.return_value = None
-        act, weight, scale, per_token, round_mode = parse_quant_moe_down_proj_params(
-            "W4A8_MXFP", "round"
-        )
+        act, weight, scale, per_token, round_mode = parse_quant_moe_down_proj_params("W4A8_MXFP", "round")
         self.assertEqual(round_mode, "rint")

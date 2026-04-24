@@ -6,7 +6,7 @@ import torch
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
-from vllm_ascend.utils import AscendDeviceType, COMPRESSED_TENSORS_METHOD
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW8A8LinearMethod(TestBase):
@@ -17,36 +17,36 @@ class TestAscendW8A8LinearMethod(TestBase):
         sizes = [(64, 128), (256, 512), (1024, 2048), (1, 1)]
         for input_size, output_size in sizes:
             weight = self.method.get_weight(input_size, output_size)
-            self.assertEqual(weight['weight'].dtype, torch.int8)
-            self.assertEqual(weight['weight'].shape, (output_size, input_size))
+            self.assertEqual(weight["weight"].dtype, torch.int8)
+            self.assertEqual(weight["weight"].shape, (output_size, input_size))
             self.assertEqual(len(weight), 1)
 
         weight = self.method.get_weight(256, 128, torch.float16)
-        self.assertEqual(weight['weight'].dtype, torch.int8)
+        self.assertEqual(weight["weight"].dtype, torch.int8)
 
     def test_get_pertensor_param(self):
         dtypes = [torch.bfloat16, torch.float16, torch.float32]
         for dtype in dtypes:
             params = self.method.get_pertensor_param(dtype)
-            self.assertEqual(params['input_scale'].dtype, dtype)
-            self.assertEqual(params['input_offset'].dtype, torch.int8)
-            self.assertEqual(params['input_scale'].shape, (1,))
-            self.assertEqual(params['input_offset'].shape, (1,))
+            self.assertEqual(params["input_scale"].dtype, dtype)
+            self.assertEqual(params["input_offset"].dtype, torch.int8)
+            self.assertEqual(params["input_scale"].shape, (1,))
+            self.assertEqual(params["input_offset"].shape, (1,))
 
     def test_get_perchannel_param(self):
         for output_size, dtype in [(128, torch.bfloat16), (256, torch.float16)]:
             params = self.method.get_perchannel_param(output_size, dtype)
-            self.assertEqual(params['quant_bias'].shape, (output_size,))
-            self.assertEqual(params['quant_bias'].dtype, torch.int32)
-            self.assertEqual(params['weight_scale'].shape, (output_size, 1))
-            self.assertEqual(params['weight_scale'].dtype, dtype)
-            self.assertEqual(params['weight_offset'].shape, (output_size, 1))
-            self.assertEqual(params['weight_offset'].dtype, dtype)
-            self.assertEqual(params['deq_scale'].shape, (output_size, ))
+            self.assertEqual(params["quant_bias"].shape, (output_size,))
+            self.assertEqual(params["quant_bias"].dtype, torch.int32)
+            self.assertEqual(params["weight_scale"].shape, (output_size, 1))
+            self.assertEqual(params["weight_scale"].dtype, dtype)
+            self.assertEqual(params["weight_offset"].shape, (output_size, 1))
+            self.assertEqual(params["weight_offset"].dtype, dtype)
+            self.assertEqual(params["deq_scale"].shape, (output_size,))
             if dtype == torch.bfloat16:
-                self.assertEqual(params['deq_scale'].dtype, torch.float32)
+                self.assertEqual(params["deq_scale"].dtype, torch.float32)
             elif dtype == torch.float16:
-                self.assertEqual(params['deq_scale'].dtype, torch.int64)
+                self.assertEqual(params["deq_scale"].dtype, torch.int64)
 
     @patch("vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method")
     @patch("torch.ops.vllm.quantize")
@@ -75,7 +75,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_quantize.assert_called_once()
         mock_npu_quant_matmul.assert_called_once()
         call_kwargs = mock_npu_quant_matmul.call_args.kwargs
-        self.assertTrue(torch.equal(call_kwargs['bias'], quant_bias))
+        self.assertTrue(torch.equal(call_kwargs["bias"], quant_bias))
 
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
@@ -98,7 +98,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_quantize.assert_not_called()
         mock_npu_quant_matmul.assert_called_once()
         call_kwargs = mock_npu_quant_matmul.call_args.kwargs
-        self.assertTrue(torch.equal(call_kwargs['bias'], bias))
+        self.assertTrue(torch.equal(call_kwargs["bias"], bias))
 
     @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
     @patch("torch_npu.npu_format_cast")
@@ -149,9 +149,8 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertTrue(isinstance(layer.deq_scale, MagicMock))
 
     @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "2"})
-    @patch('torch_npu.npu_format_cast')
-    def test_process_weights_after_loading_with_nz2_and_compressed_tensors(self,
-                                                                           mock_npu_format_cast):
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_with_nz2_and_compressed_tensors(self, mock_npu_format_cast):
         layer = MagicMock()
 
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)

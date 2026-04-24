@@ -46,12 +46,10 @@ COMPRESSED_TENSORS_W8A8_CONFIG = {
                 "observer_kwargs": {},
                 "strategy": "token",
                 "symmetric": True,
-                "type": "int"
+                "type": "int",
             },
             "output_activations": None,
-            "targets": [
-                "Linear"
-            ],
+            "targets": ["Linear"],
             "weights": {
                 "actorder": None,
                 "block_structure": None,
@@ -62,22 +60,22 @@ COMPRESSED_TENSORS_W8A8_CONFIG = {
                 "observer_kwargs": {},
                 "strategy": "channel",
                 "symmetric": True,
-                "type": "int"
-            }
+                "type": "int",
+            },
         }
     },
     "format": "int-quantized",
     "global_compression_ratio": None,
-    "ignore": [
-        "lm_head"
-    ],
+    "ignore": ["lm_head"],
     "kv_cache_scheme": None,
     "quant_method": "compressed-tensors",
     "quantization_status": "compressed",
 }
 
+
 def identity(*args):
     return args[0]
+
 
 def create_mock_vllm_config(
     quant_description=None,
@@ -182,9 +180,11 @@ def create_mxfp_moe_layer(
         torch.randn(num_experts, hidden_size, intermediate_size).to(weight_dtype), requires_grad=False
     )
     layer.w13_weight_scale = nn.Parameter(
-        torch.randint(0, 255, (num_experts, 2 * intermediate_size, hidden_size // group_size), dtype=scale_dtype), requires_grad=False
+        torch.randint(0, 255, (num_experts, 2 * intermediate_size, hidden_size // group_size), dtype=scale_dtype),
+        requires_grad=False,
     )
     layer.w2_weight_scale = nn.Parameter(
-        torch.randint(0, 255, (num_experts, hidden_size, intermediate_size // group_size), dtype=scale_dtype), requires_grad=False
+        torch.randint(0, 255, (num_experts, hidden_size, intermediate_size // group_size), dtype=scale_dtype),
+        requires_grad=False,
     )
     return layer

@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
@@ -269,14 +269,16 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
     def test_get_dynamic_quant_param_compressed_tensors(self):
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
-        result = self.quant_method.get_dynamic_quant_param(self.experts, self.input_size, self.output_size, torch.bfloat16)
+        result = self.quant_method.get_dynamic_quant_param(
+            self.experts, self.input_size, self.output_size, torch.bfloat16
+        )
         self.assertIn("w13_weight_scale", result)
         self.assertIn("w2_weight_scale", result)
         self.assertEqual(result["w13_weight_scale"].dtype, torch.bfloat16)
         self.assertEqual(result["w2_weight_scale"].dtype, torch.bfloat16)
 
-    @patch('torch_npu.npu_quantize')
-    @patch('torch.Tensor.npu')
+    @patch("torch_npu.npu_quantize")
+    @patch("torch.Tensor.npu")
     def test_process_weights_after_loading_compressed_tensors(self, mock_npu, mock_npu_quantize):
         mock_npu.return_value = torch.Tensor()
         mock_npu_quantize.return_value = torch.Tensor()
@@ -286,12 +288,10 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.weight_strategy = "group"
         self.quant_method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "w13_scale_bias"))
-        self.assertEqual(layer.w13_scale_bias.data.shape,
-                         (self.experts, 2 * self.input_size))
+        self.assertEqual(layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(layer.w13_scale_bias.data.dtype, torch.float32)
         self.assertTrue(hasattr(layer, "w2_scale_bias"))
-        self.assertEqual(layer.w2_scale_bias.data.shape,
-                         (self.experts, self.output_size))
+        self.assertEqual(layer.w2_scale_bias.data.shape, (self.experts, self.output_size))
         self.assertEqual(layer.w2_scale_bias.data.dtype, torch.float32)
 
     @patch("vllm_ascend.quantization.methods.w4a8._EXTRA_CTX")

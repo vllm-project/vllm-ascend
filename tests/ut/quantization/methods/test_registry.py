@@ -5,13 +5,12 @@ from vllm_ascend.quantization.methods.base import (
 )
 from vllm_ascend.quantization.methods.registry import (
     _SCHEME_REGISTRY,
-    register_scheme,
     get_scheme_class,
+    register_scheme,
 )
 
 
 class TestRegisterScheme(TestBase):
-
     def test_register_scheme(self):
         @register_scheme("TEST_QUANT_TYPE", "linear")
         class TestLinearScheme(AscendLinearScheme):
@@ -26,7 +25,6 @@ class TestRegisterScheme(TestBase):
 
 
 class TestGetSchemeClass(TestBase):
-
     def test_get_scheme_class_existing_linear(self):
         cls = get_scheme_class("W8A8_DYNAMIC", "linear")
         self.assertIsNotNone(cls)
@@ -51,6 +49,7 @@ class TestGetSchemeClass(TestBase):
 
     def test_register_scheme_duplicate_raises(self):
         with self.assertRaises(ValueError):
+
             @register_scheme("W8A8_DYNAMIC", "linear")
             class Duplicate:
                 pass
@@ -60,8 +59,7 @@ class TestGetSchemeClass(TestBase):
             if layer_type == "linear":
                 self.assertTrue(
                     issubclass(scheme_cls, AscendLinearScheme),
-                    f"{scheme_cls.__name__} for {quant_type}/{layer_type} "
-                    f"should be subclass of AscendLinearScheme",
+                    f"{scheme_cls.__name__} for {quant_type}/{layer_type} should be subclass of AscendLinearScheme",
                 )
 
     def test_all_moe_schemes_subclass_ascend_moe_scheme(self):
@@ -69,8 +67,7 @@ class TestGetSchemeClass(TestBase):
             if layer_type == "moe":
                 self.assertTrue(
                     issubclass(scheme_cls, AscendMoEScheme),
-                    f"{scheme_cls.__name__} for {quant_type}/{layer_type} "
-                    f"should be subclass of AscendMoEScheme",
+                    f"{scheme_cls.__name__} for {quant_type}/{layer_type} should be subclass of AscendMoEScheme",
                 )
 
     def test_registry_not_empty(self):

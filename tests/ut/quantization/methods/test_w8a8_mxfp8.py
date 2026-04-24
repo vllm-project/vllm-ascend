@@ -5,19 +5,18 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
-    create_mock_vllm_config,
     create_mock_ascend_config,
+    create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
 from vllm_ascend.quantization.methods.base import QuantType
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
-    AscendW8A8MXFP8DynamicLinearMethod,
     AscendW8A8MXFP8DynamicFusedMoEMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
 )
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
-
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.ensure_mxfp8_linear_available")
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config")
     def setUp(self, mock_vllm, mock_ensure):
@@ -104,10 +103,11 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.torch_npu")
     def test_apply(self, mock_torch_npu):
         from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
+
         dynamic_scale = torch.randint(0, 255, (32, 8), dtype=torch.uint8)
         mock_torch_npu.npu_dynamic_mx_quant.return_value = (
             torch.randint(0, 255, (32, 256), dtype=torch.uint8),
-            dynamic_scale
+            dynamic_scale,
         )
         mock_torch_npu.npu_quant_matmul.return_value = torch.randn(32, 128, dtype=torch.float16)
         layer = nn.Module()
@@ -118,15 +118,14 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         output = self.scheme.apply(layer, x, bias)
         self.assertEqual(output.shape, (32, 1, 128))
         call_kwargs = mock_torch_npu.npu_quant_matmul.call_args.kwargs
-        self.assertEqual(call_kwargs['bias'].dtype, torch.float32)
-        self.assertEqual(call_kwargs['group_sizes'], [1, 1, self.scheme.group_size])
-        self.assertEqual(call_kwargs['scale_dtype'], FLOAT8_E8M0FNU_DTYPE)
-        self.assertEqual(call_kwargs['pertoken_scale_dtype'], FLOAT8_E8M0FNU_DTYPE)
-        self.assertEqual(call_kwargs['output_dtype'], torch.float16)
+        self.assertEqual(call_kwargs["bias"].dtype, torch.float32)
+        self.assertEqual(call_kwargs["group_sizes"], [1, 1, self.scheme.group_size])
+        self.assertEqual(call_kwargs["scale_dtype"], FLOAT8_E8M0FNU_DTYPE)
+        self.assertEqual(call_kwargs["pertoken_scale_dtype"], FLOAT8_E8M0FNU_DTYPE)
+        self.assertEqual(call_kwargs["output_dtype"], torch.float16)
 
 
 class TestAscendW8A8MXFP8MoEMethod(TestBase):
-
     num_experts = 8
     hidden_size = 128
     intermediate_size = 256
@@ -159,25 +158,33 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             self.assertEqual(result["w13_weight"].shape[0], num_experts)
 
     def test_get_dynamic_quant_param_dtype_uint8(self):
-        result = self.scheme.get_dynamic_quant_param(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
+        result = self.scheme.get_dynamic_quant_param(
+            self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16
+        )
         self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
         self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
     def test_process_weights_stores_original_shapes(self):
-        layer = create_mxfp_moe_layer(num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size)
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
         self.scheme.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "_mxfp8_original_shapes"))
         self.assertIn("w13_weight", layer._mxfp8_original_shapes)
 
     def test_process_weights_double_call_idempotent(self):
-        layer = create_mxfp_moe_layer(num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size)
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
         self.scheme.process_weights_after_loading(layer)
         weight_after = layer.w13_weight.data.clone()
         self.scheme.process_weights_after_loading(layer)
         self.assertTrue(torch.equal(layer.w13_weight.data, weight_after))
 
     def test_restore_weights_for_rl_loading(self):
-        layer = create_mxfp_moe_layer(num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size)
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
         original_w13_shape = layer.w13_weight.shape
         self.scheme.process_weights_after_loading(layer)
         self.assertNotEqual(layer.w13_weight.shape, original_w13_shape)
@@ -185,13 +192,17 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight.shape, original_w13_shape)
 
     def test_restore_without_transform_is_noop(self):
-        layer = create_mxfp_moe_layer(num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size)
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
         original_weight = layer.w13_weight.data.clone()
         self.scheme.restore_weights_for_rl_loading(layer)
         self.assertTrue(torch.equal(layer.w13_weight.data, original_weight))
 
     def test_process_weights_transposes_weights(self):
-        layer = create_mxfp_moe_layer(num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size)
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
         original_shape = layer.w13_weight.shape
         self.scheme.process_weights_after_loading(layer)
         self.assertEqual(layer.w13_weight.shape, (original_shape[0], original_shape[2], original_shape[1]))
@@ -200,7 +211,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.select_experts")
     def test_apply_full_params(self, mock_select, mock_ctx):
         tokens = 4
-        layer = create_mxfp_moe_layer(num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size)
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
         self.scheme.process_weights_after_loading(layer)
         x = torch.randn(tokens, self.hidden_size, dtype=torch.bfloat16)
         router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
@@ -212,9 +225,14 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         mock_ctx.moe_comm_method = mock_comm
         mock_ctx.moe_comm_type = Mock()
         result = self.scheme.apply(
-            layer, x, router_logits, top_k=2, renormalize=True,
+            layer,
+            x,
+            router_logits,
+            top_k=2,
+            renormalize=True,
             global_num_experts=self.num_experts,
-            activation="silu", pertoken_scale=torch.randn(tokens)
+            activation="silu",
+            pertoken_scale=torch.randn(tokens),
         )
         mock_select.assert_called_once()
         mock_comm.fused_experts.assert_called_once()

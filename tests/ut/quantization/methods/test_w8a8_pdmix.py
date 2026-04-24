@@ -1,9 +1,15 @@
 from unittest.mock import MagicMock, patch
+
 import torch
+
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
-from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8DynamicLinearMethod, \
-    AscendW8A8PDMixLinearMethod, AscendW8A8PDMixFusedMoeMethod
+from vllm_ascend.quantization.methods import (
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8LinearMethod,
+    AscendW8A8PDMixFusedMoeMethod,
+    AscendW8A8PDMixLinearMethod,
+)
 
 
 class TestAscendW8A8PDMixLinearScheme(TestBase):
@@ -33,7 +39,6 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
             result = scheme.get_weight(input_size, output_size, torch.bfloat16)
             mock_static_instance.get_weight.assert_called_with(input_size, output_size, torch.bfloat16)
             mock_dynamic_instance.get_weight.assert_not_called()
-
 
     @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
     @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
@@ -104,7 +109,9 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8LinearMethod")
     @patch("vllm_ascend.quantization.methods.w8a8_pdmix.AscendW8A8DynamicLinearMethod")
     @patch("vllm_ascend.quantization.methods.w8a8_pdmix.get_current_vllm_config")
-    def test_process_weights_after_loading_sets_is_kv_consumer(self, mock_vllm_config, mock_dynamic_cls, mock_static_cls):
+    def test_process_weights_after_loading_sets_is_kv_consumer(
+        self, mock_vllm_config, mock_dynamic_cls, mock_static_cls
+    ):
         mock_vllm_config.return_value = create_mock_vllm_config(kv_transfer_config=None)
         mock_static_instance = MagicMock()
         mock_static_cls.return_value = mock_static_instance
@@ -135,7 +142,6 @@ class TestAscendW8A8PDMixLinearScheme(TestBase):
 
 
 class TestAscendW8A8PDMixMoEScheme(TestBase):
-
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_mc2_group")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ep_group")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_current_vllm_config")
@@ -146,7 +152,9 @@ class TestAscendW8A8PDMixMoEScheme(TestBase):
         mock_ascend.return_value = MagicMock(eplb_config=MagicMock(dynamic_eplb=False))
         scheme = AscendW8A8PDMixFusedMoeMethod()
         num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype = 8, 256, 128, torch.bfloat16
-        result = scheme.get_dynamic_quant_param(num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype)
+        result = scheme.get_dynamic_quant_param(
+            num_experts, intermediate_size_per_partition, hidden_sizes, params_dtype
+        )
         # test adds extra params
         self.assertEqual(result["w2_deq_scale"].shape, (num_experts, hidden_sizes))
         self.assertEqual(result["w2_deq_scale"].dtype, torch.float32)

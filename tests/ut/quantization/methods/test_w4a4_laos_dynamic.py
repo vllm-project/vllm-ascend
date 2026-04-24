@@ -1,12 +1,13 @@
 from unittest.mock import MagicMock, patch
+
 import torch
 import torch.nn as nn
+
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.methods.w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 
 
 class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
-
     def setUp(self):
         self.method = AscendW4A4LaosDynamicLinearMethod()
 
@@ -43,7 +44,7 @@ class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
     def test_apply_2d_input(self, mock_dyn_quant, mock_matmul):
         mock_dyn_quant.return_value = (
             torch.randint(0, 15, (32, 128), dtype=torch.int32),
-            torch.randn(32, dtype=torch.float32)
+            torch.randn(32, dtype=torch.float32),
         )
         mock_matmul.return_value = torch.randn(32, 256)
         layer = MagicMock()
@@ -58,7 +59,7 @@ class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
     def test_apply_with_bias(self, mock_dyn_quant, mock_matmul):
         mock_dyn_quant.return_value = (
             torch.randint(0, 15, (32, 128), dtype=torch.int32),
-            torch.randn(32, dtype=torch.float32)
+            torch.randn(32, dtype=torch.float32),
         )
         expected_output = torch.randn(32, 256, dtype=torch.bfloat16)
         mock_matmul.return_value = expected_output
@@ -86,7 +87,9 @@ class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
         for input_size, output_size in [(64, 128), (256, 512)]:
             mock_convert.return_value = torch.randint(0, 15, (output_size, input_size // 8), dtype=torch.int32)
             layer = nn.Module()
-            layer.weight = nn.Parameter(torch.randint(-8, 7, (output_size, input_size), dtype=torch.int8), requires_grad=False)
+            layer.weight = nn.Parameter(
+                torch.randint(-8, 7, (output_size, input_size), dtype=torch.int8), requires_grad=False
+            )
             layer.weight_scale = nn.Parameter(torch.randn(output_size, 1, dtype=torch.float32), requires_grad=False)
             self.method.process_weights_after_loading(layer)
             mock_convert.assert_called()
