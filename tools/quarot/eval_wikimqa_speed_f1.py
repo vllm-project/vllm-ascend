@@ -75,6 +75,20 @@ def parse_model_specs(specs: list[str]) -> list[tuple[str, str]]:
     return parsed
 
 
+def parse_model_int_overrides(specs: list[str]) -> dict[str, int]:
+    parsed: dict[str, int] = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(f"Invalid override spec {spec!r}; expected name=value")
+        name, value = spec.split("=", maxsplit=1)
+        name = name.strip()
+        value = value.strip()
+        if not name or not value:
+            raise ValueError(f"Invalid override spec {spec!r}; name/value must not be empty")
+        parsed[name] = int(value)
+    return parsed
+
+
 def default_dataset_path() -> Path:
     return Path(__file__).resolve().parent / "data" / "wikimqa_s.json"
 
@@ -251,6 +265,7 @@ def run_model(
     user_prompts: list[str],
     args: argparse.Namespace,
     output_root: Path,
+    tensor_parallel_size: int,
 ) -> dict[str, Any]:
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
@@ -281,7 +296,7 @@ def run_model(
         "dtype": args.dtype,
         "max_model_len": args.max_model_len,
         "gpu_memory_utilization": args.gpu_memory_utilization,
-        "tensor_parallel_size": 1,
+        "tensor_parallel_size": tensor_parallel_size,
         "trust_remote_code": args.trust_remote_code,
         "enforce_eager": args.enforce_eager,
         "disable_log_stats": True,
@@ -353,6 +368,7 @@ def run_model(
     result = {
         "name": name,
         "model_path": model_path,
+        "tensor_parallel_size": tensor_parallel_size,
         "num_examples": len(records),
         "f1": sum(f1_values) / len(f1_values) if f1_values else 0.0,
         "exact_match": sum(exact_values) / len(exact_values) if exact_values else 0.0,
@@ -406,6 +422,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-only", action="store_true")
     parser.add_argument("--limit", type=int, default=None, help="Evaluate only the first N examples.")
     parser.add_argument("--model", action="append", default=[], help="Model spec name=path. Can be repeated.")
+    parser.add_argument(
+        "--model-tp",
+        action="append",
+        default=[],
+        help="Optional tensor parallel override name=int. Can be repeated per model.",
+    )
     parser.add_argument("--output-root", type=Path, default=Path("/tmp/quarot_wikimqa_eval"))
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--max-model-len", type=int, default=8192)
@@ -452,6 +474,7 @@ def main() -> int:
     examples = load_dataset(args.dataset_path, limit=args.limit)
     user_prompts = [build_user_prompt(example, args.query_prompt) for example in examples]
     model_specs = parse_model_specs(args.model or DEFAULT_MODELS)
+    model_tps = parse_model_int_overrides(args.model_tp)
 
     results = {
         "config": {
@@ -473,12 +496,15 @@ def main() -> int:
             "enable_thinking": args.enable_thinking,
             "system_prompt": args.system_prompt,
             "query_prompt": args.query_prompt,
+            "model_tps": model_tps,
         },
         "models": [],
     }
 
     for name, model_path in model_specs:
         print(f"[{name}] model={model_path}")
+        tensor_parallel_size = model_tps.get(name, 1)
+        print(f"[{name}] tensor_parallel_size={tensor_parallel_size}")
         model_result = run_model(
             name=name,
             model_path=model_path,
@@ -486,6 +512,7 @@ def main() -> int:
             user_prompts=user_prompts,
             args=args,
             output_root=args.output_root,
+            tensor_parallel_size=tensor_parallel_size,
         )
         results["models"].append(model_result)
         print(
