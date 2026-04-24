@@ -126,6 +126,17 @@ AICORE void issueTLoad(__gm__ InputT *x, const TileWork &tile, unsigned x_base,
   set_flag(PIPE_MTE2, PIPE_V, ev);
 }
 
+template <typename InputT>
+AICORE void issueSerializedTLoad(__gm__ InputT *x, const TileWork &tile,
+                                 unsigned x_base, event_t ev) {
+  // The validated small-row path avoids UB x-buffer reuse by alternating
+  // X_PING/X_PONG. The oversized-row helper reuses a single x slot, so it must
+  // explicitly wait until vector compute has released that slot back to MTE2
+  // before issuing the next TLOAD into the same address range.
+  wait_flag(PIPE_V, PIPE_MTE2, ev);
+  issueTLoad(x, tile, x_base, ev);
+}
+
 AICORE bool nextTile(uint32_t &sample_done, uint32_t gm_offset_base,
                      uint32_t samples_to_process, uint32_t samples_per_load,
                      uint32_t n, TileWork &tile) {
@@ -325,7 +336,7 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
     const uint32_t segment_elements = min(segment_n, full_n - segment_offset);
     TileWork segment_tile = {tile.gm_offset + segment_offset, 1,
                              segment_elements};
-    issueTLoad(x, segment_tile, x_base, ev);
+    issueSerializedTLoad(x, segment_tile, x_base, ev);
     wait_flag(PIPE_MTE2, PIPE_V, ev);
 
     BulkTile xSegmentTile(1, segment_elements);
@@ -370,7 +381,7 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
     const uint32_t segment_elements = min(segment_n, full_n - segment_offset);
     TileWork segment_tile = {tile.gm_offset + segment_offset, 1,
                              segment_elements};
-    issueTLoad(x, segment_tile, x_base, ev);
+    issueSerializedTLoad(x, segment_tile, x_base, ev);
     wait_flag(PIPE_MTE2, PIPE_V, ev);
 
     BulkTile xSegmentTile(1, segment_elements);
