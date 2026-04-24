@@ -40,6 +40,7 @@ export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirror
 # src path
 export SRC_WORKSPACE=/vllm-workspace
 mkdir -p $SRC_WORKSPACE
+cd $SRC_WORKSPACE
 
 apt-get update -y
 apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
@@ -96,6 +97,9 @@ After starting the container, you should install the required packages:
 ```bash
 # Prepare
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+# Switch to the /vllm-workspace/vllm-ascend directory
+cd /vllm-workspace/vllm-ascend/
 
 # Install required packages
 pip install -r requirements-dev.txt
