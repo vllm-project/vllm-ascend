@@ -89,8 +89,6 @@ public:
         coreTail = tilingData->coreTail;
         blockNum = AscendC::GetBlockNum();
         if (coreId < coreTail){
-            //不可能都是corePerNum，coreTail除非slotmap.size=0，这种情况不存在
-            //如果corePerNum_== 0 有的core不需要搬运也没事，因为大于coretail的如果corePerNum_是0不需要搬运不会操作地址
             corePerNum = tilingData->corePerNum+1;
         }else {
             corePerNum = tilingData->corePerNum;
@@ -117,8 +115,8 @@ public:
             //     continue;
             // }
            
-            copyParams.blockLen = groupLenGt.GetValue(idx)*tokenByteSize; //单位字节
-            DataCopyPad(tokenLocal, keyInputGt[ groupKeyIdxGt.GetValue(idx)*tokenSize], copyParams, padParams); //注意偏移顺序
+            copyParams.blockLen = groupLenGt.GetValue(idx)*tokenByteSize; 
+            DataCopyPad(tokenLocal, keyInputGt[ groupKeyIdxGt.GetValue(idx)*tokenSize], copyParams, padParams); 
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
             DataCopyPad(keyCacheIntputGt[groupKeyCacheIdxGt.GetValue(idx)*tokenSize], tokenLocal, copyParams);

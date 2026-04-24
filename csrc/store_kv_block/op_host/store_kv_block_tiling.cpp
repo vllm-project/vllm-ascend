@@ -24,22 +24,17 @@ namespace optiling {
 
 
 static ge::graphStatus StoreKVBlockTilingFunc(gert::TilingContext* context) {
-    // auto start = std::chrono::high_resolution_clock::now();
 
     std::string op_type(context->GetNodeType());
     ge::graphStatus ret;
     
     if (op_type == "StoreKVBlock") {
-        //  printf("[ZTLOG] WriteCacheByGroupListCommonTiling\n");
          StoreKVBlockCommonTiling storeKVBlockCommonTiling(context);
         ret = storeKVBlockCommonTiling.DoTiling();
     }else {
         printf("[ZTLOG] no  StoreKVBlockCommonTiling\n");
         return ge::GRAPH_FAILED;
     }
-    // auto end = std::chrono::high_resolution_clock::now();
-    // auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    // std::cout << "tiling耗时:" << duration.count() << "us" << std::endl;
     return ret;
 
 }

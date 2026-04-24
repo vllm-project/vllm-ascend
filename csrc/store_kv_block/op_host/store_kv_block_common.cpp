@@ -96,7 +96,6 @@ ge::graphStatus StoreKVBlockCommonTiling::DoCommonTiling()
     auto kDimNum=kShape->GetStorageShape().GetDimNum();
     if (kDimNum<2||kDimNum>7){
         printf("[ERROR] StoreKVBlock Intput kDimNum dim < 2 || kDimNum>7");
-        // OP_LOGE(context_->GetNodeName(), "StoreKVBlock Intput first params dim < 2 || dim_num>7");
     }else {
         for (int i = 0; i < kDimNum; i++){
             if(i==0) params.numTokens = static_cast<uint32_t>(kShape->GetStorageShape().GetDim(i));
@@ -109,7 +108,6 @@ ge::graphStatus StoreKVBlockCommonTiling::DoCommonTiling()
     auto kCacheDimNum=kCacheShape->GetStorageShape().GetDimNum();
     if (kCacheDimNum<2||kCacheDimNum>7){
         printf("[ERROR] StoreKVBlock Intput kCacheDimNum < 2 ");
-        // OP_LOGE(context_->GetNodeName(), "StoreKVBlock Intput first params dim < 2 || dim_num>7");
     }else {
         params.numCache = kCacheShape->GetStorageShape().GetDim(0)* kCacheShape->GetStorageShape().GetDim(1);
     }

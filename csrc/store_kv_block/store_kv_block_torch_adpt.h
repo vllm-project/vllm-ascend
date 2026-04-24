@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-//  #include "../aclnn_torch_adapter/op_api_common.h"
 
 #ifndef STORE_KV_BLOCK_TORCH_ADPT_H
 #define STORE_KV_BLOCK_TORCH_ADPT_H
@@ -36,46 +35,42 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> store_kv_block_pre(
 
     while (idx_slotmap < slot_mapping_len) {
 
-        // 1. 获取当前起始元素的索引和所属block信息
+
         int32_t current_idx = slot_mapping_list[idx_slotmap];
         if(current_idx <0){
             idx_slotmap++;
             continue;
         }
 
-        int32_t block_id = current_idx / block_size;       // 所属block编号
+        int32_t block_id = current_idx / block_size;       
         int32_t y= current_idx % block_size;
 
-        key_idx[idx_groups] = idx_slotmap;                          // 该组起始位置
+        key_idx[idx_groups] = idx_slotmap;                      
         key_cache_idx[idx_groups] = current_idx;    
-        // 计算该block理论上的最后一个元素值及其索引跳block计算
+
         int32_t j = idx_slotmap;
-        // 如果无序
+
         if(j+1 < slot_mapping_len &&slot_mapping_list[j+1]!=slot_mapping_list[j]+1 ) {
             j++;
 
-        }else{//如果有序
+        }else{
             int32_t idx_stride = std::min(block_size-y,slot_mapping_len-idx_slotmap)-1;
             int32_t expected_last =  current_idx + idx_stride;
             int32_t expected_last_idx = idx_slotmap + (expected_last-current_idx);
-            //如果是完整block
+
             if (expected_last == slot_mapping_list[expected_last_idx]){
                 j = expected_last_idx+1;
             }else{
-                // 3. 找该组实际的最后一个元素位置
-                // 循环条件：不越界 + 当前元素属于当前block + 未超过理论最后元素; 
                 while(j+1 < slot_mapping_len && slot_mapping_list[j] / block_size == block_id && slot_mapping_list[j+1] ==slot_mapping_list[j]+1) {
                     j++;
                 }
             }
         }
 
-        // 4. 计算该组长度
         length[idx_groups] = (j - idx_slotmap);
-        // 5. 直接跳到下一组起始位置（核心：跳过中间元素，降低时间复杂度）
         idx_slotmap = j;
         idx_groups++;
-        // 6. 超了扩容
+
 
         if(idx_groups>=length.capacity()){
             int32_t new_capacity = length.capacity() * 2;
