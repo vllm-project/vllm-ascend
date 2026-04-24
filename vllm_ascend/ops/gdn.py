@@ -29,7 +29,6 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
-from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
@@ -242,197 +241,89 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
-        if self.gqa_interleaved_layout:
-            # Qwen3Next: torch_npu ops support float16/bf16 ssm_state.
-            # g/beta are needed for both spec-decode and decode, so compute unconditionally.
-            g, beta = fused_gdn_gating_patch(self.A_log, a, b, self.dt_bias)
-            if spec_sequence_masks is not None:
-                if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                    g_spec = g
-                    beta_spec = beta
-                    g_non_spec = None
-                    beta_non_spec = None
-                else:
-                    g_spec = g.index_select(1, spec_token_indx)
-                    beta_spec = beta.index_select(1, spec_token_indx)
-                    g_non_spec = g.index_select(1, non_spec_token_indx)
-                    beta_non_spec = beta.index_select(1, non_spec_token_indx)
+        g, beta = fused_gdn_gating_patch(self.A_log, a, b, self.dt_bias)
+        if spec_sequence_masks is not None:
+            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                g_spec = g
+                beta_spec = beta
+                g_non_spec = None
+                beta_non_spec = None
             else:
-                g_spec = None
-                beta_spec = None
-                g_non_spec = g
-                beta_non_spec = beta
-
-            # 2.1: Process the multi-query part
-            if spec_sequence_masks is not None:
-                cu_seqlens = spec_query_start_loc[: attn_metadata.num_spec_decodes + 1]
-                actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
-                query_spec = l2norm_fwd(query_spec)
-                key_spec = l2norm_fwd(key_spec)
-                # Dispatches to the vllm-ascend AscendC custom operator
-                # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-                # The custom op extends dtype support (e.g. float32 state) and is
-                # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
-                core_attn_out_spec = torch_npu.npu_recurrent_gated_delta_rule(
-                    query=query_spec.squeeze(0),
-                    key=key_spec.squeeze(0),
-                    value=value_spec.squeeze(0),
-                    g=g_spec.squeeze(0),
-                    beta=beta_spec.squeeze(0),
-                    state=ssm_state,
-                    scale=key_spec.shape[-1] ** -0.5,
-                    actual_seq_lengths=actual_seq_lengths,
-                    ssm_state_indices=spec_state_indices_tensor.flatten(),
-                    num_accepted_tokens=num_accepted_tokens.to(torch.int32),
-                ).unsqueeze(0)
-            else:
-                core_attn_out_spec, last_recurrent_state = None, None
-
-            # 2.2: Process the remaining part
-            if attn_metadata.num_prefills > 0:
-                initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
-                clear_ssm_states(initial_state, has_initial_state)
-                (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=initial_state,
-                    output_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc,
-                    prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
-                    head_first=False,
-                    use_qk_l2norm_in_kernel=True,
-                )
-                ssm_state[non_spec_state_indices_tensor] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-                )
-            elif attn_metadata.num_decodes > 0:
-                cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
-                actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
-                query_non_spec = l2norm_fwd(query_non_spec)
-                key_non_spec = l2norm_fwd(key_non_spec)
-                # Dispatches to the vllm-ascend AscendC custom operator
-                # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-                core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
-                    query=query_non_spec.squeeze(0),
-                    key=key_non_spec.squeeze(0),
-                    value=value_non_spec.squeeze(0),
-                    g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
-                    beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
-                    state=ssm_state,
-                    scale=key_non_spec.shape[-1] ** -0.5,
-                    actual_seq_lengths=actual_seq_lengths,
-                    ssm_state_indices=non_spec_state_indices_tensor,
-                ).unsqueeze(0)
-            else:
-                core_attn_out_non_spec, last_recurrent_state = None, None
+                g_spec = g.index_select(1, spec_token_indx)
+                beta_spec = beta.index_select(1, spec_token_indx)
+                g_non_spec = g.index_select(1, non_spec_token_indx)
+                beta_non_spec = beta.index_select(1, non_spec_token_indx)
         else:
-            # Qwen3.5: torch_npu ops do not support float32 ssm_state, use FLA ops instead.
-            # NOTE: Once torch_npu supports float32 ssm_state, this branch can be removed.
-            if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
-                g, beta = fused_gdn_gating_patch(self.A_log, a, b, self.dt_bias)
-                if spec_sequence_masks is not None:
-                    if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                        g_spec = g
-                        beta_spec = beta
-                        g_non_spec = None
-                        beta_non_spec = None
-                    else:
-                        g_spec = g.index_select(1, spec_token_indx)
-                        beta_spec = beta.index_select(1, spec_token_indx)
-                        g_non_spec = g.index_select(1, non_spec_token_indx)
-                        beta_non_spec = beta.index_select(1, non_spec_token_indx)
-                else:
-                    g_spec = None
-                    beta_spec = None
-                    g_non_spec = g
-                    beta_non_spec = beta
+            g_spec = None
+            beta_spec = None
+            g_non_spec = g
+            beta_non_spec = beta
 
-                # 2.1: Process the multi-query part
-                if spec_sequence_masks is not None:
-                    cu_seqlens = spec_query_start_loc[: attn_metadata.num_spec_decodes + 1]
-                    actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
-                    query_spec = l2norm_fwd(query_spec)
-                    key_spec = l2norm_fwd(key_spec)
-                    # Dispatches to the vllm-ascend AscendC custom operator
-                    # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-                    core_attn_out_spec = torch_npu.npu_recurrent_gated_delta_rule(
-                        query=query_spec.squeeze(0),
-                        key=key_spec.squeeze(0),
-                        value=value_spec.squeeze(0),
-                        g=g_spec.squeeze(0),
-                        beta=beta_spec.squeeze(0),
-                        state=ssm_state,
-                        scale=key_spec.shape[-1] ** -0.5,
-                        actual_seq_lengths=actual_seq_lengths,
-                        ssm_state_indices=spec_state_indices_tensor.flatten(),
-                        num_accepted_tokens=num_accepted_tokens.to(torch.int32),
-                    ).unsqueeze(0)
-                else:
-                    core_attn_out_spec, last_recurrent_state = None, None
+        # 2.1: Process the multi-query part
+        if spec_sequence_masks is not None:
+            cu_seqlens = spec_query_start_loc[: attn_metadata.num_spec_decodes + 1]
+            actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
+            query_spec = l2norm_fwd(query_spec)
+            key_spec = l2norm_fwd(key_spec)
+            # Dispatches to the vllm-ascend AscendC custom operator
+            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+            # The custom op extends dtype support (e.g. float32 state) and is
+            # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
+            core_attn_out_spec = torch_npu.npu_recurrent_gated_delta_rule(
+                query=query_spec.squeeze(0),
+                key=key_spec.squeeze(0),
+                value=value_spec.squeeze(0),
+                g=g_spec.squeeze(0),
+                beta=beta_spec.squeeze(0),
+                state=ssm_state,
+                scale=key_spec.shape[-1] ** -0.5,
+                actual_seq_lengths=actual_seq_lengths,
+                ssm_state_indices=spec_state_indices_tensor.flatten(),
+                num_accepted_tokens=num_accepted_tokens.to(torch.int32),
+            ).unsqueeze(0)
+        else:
+            core_attn_out_spec, last_recurrent_state = None, None
 
-                # 2.2: Process the remaining part
-                if attn_metadata.num_prefills > 0:
-                    initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
-                    clear_ssm_states(initial_state, has_initial_state)
-                    (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
-                        q=query_non_spec,
-                        k=key_non_spec,
-                        v=value_non_spec,
-                        g=g_non_spec,
-                        beta=beta_non_spec,
-                        initial_state=initial_state,
-                        output_final_state=True,
-                        cu_seqlens=non_spec_query_start_loc,
-                        prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
-                        head_first=False,
-                        use_qk_l2norm_in_kernel=True,
-                    )
-                    ssm_state[non_spec_state_indices_tensor] = (
-                        last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-                    )
-                elif attn_metadata.num_decodes > 0:
-                    cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
-                    actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
-                    query_non_spec = l2norm_fwd(query_non_spec)
-                    key_non_spec = l2norm_fwd(key_non_spec)
-                    # Dispatches to the vllm-ascend AscendC custom operator
-                    # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-                    core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
-                        query=query_non_spec.squeeze(0),
-                        key=key_non_spec.squeeze(0),
-                        value=value_non_spec.squeeze(0),
-                        g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
-                        beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
-                        state=ssm_state,
-                        scale=key_non_spec.shape[-1] ** -0.5,
-                        actual_seq_lengths=actual_seq_lengths,
-                        ssm_state_indices=non_spec_state_indices_tensor,
-                    ).unsqueeze(0)
-                else:
-                    core_attn_out_non_spec, last_recurrent_state = None, None
-            elif attn_metadata.num_decodes > 0:
-                core_attn_out_spec = None
-                core_attn_out_non_spec = fused_sigmoid_gating_delta_rule_update(
-                    A_log=self.A_log.contiguous(),
-                    dt_bias=self.dt_bias.contiguous(),
-                    q=query_non_spec.contiguous(),
-                    k=key_non_spec.contiguous(),
-                    v=value_non_spec.contiguous(),
-                    a=a.contiguous(),
-                    b=b.contiguous(),
-                    initial_state_source=ssm_state,
-                    initial_state_indices=non_spec_state_indices_tensor,
-                    cu_seqlens=non_spec_query_start_loc,
-                    use_qk_l2norm_in_kernel=True,
-                    softplus_beta=1.0,
-                    softplus_threshold=20.0,
-                )
-            else:
-                core_attn_out_spec, core_attn_out_non_spec = None, None
-            maybe_save_kv_layer_to_connector("", [])
+        # 2.2: Process the remaining part
+        if attn_metadata.num_prefills > 0:
+            initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
+            clear_ssm_states(initial_state, has_initial_state)
+            (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
+                q=query_non_spec,
+                k=key_non_spec,
+                v=value_non_spec,
+                g=g_non_spec,
+                beta=beta_non_spec,
+                initial_state=initial_state,
+                output_final_state=True,
+                cu_seqlens=non_spec_query_start_loc,
+                prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
+                head_first=False,
+                use_qk_l2norm_in_kernel=True,
+            )
+            ssm_state[non_spec_state_indices_tensor] = (
+                last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+            )
+        elif attn_metadata.num_decodes > 0:
+            cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
+            actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
+            query_non_spec = l2norm_fwd(query_non_spec)
+            key_non_spec = l2norm_fwd(key_non_spec)
+            # Dispatches to the vllm-ascend AscendC custom operator
+            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+            core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
+                query=query_non_spec.squeeze(0),
+                key=key_non_spec.squeeze(0),
+                value=value_non_spec.squeeze(0),
+                g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
+                beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
+                state=ssm_state,
+                scale=key_non_spec.shape[-1] ** -0.5,
+                actual_seq_lengths=actual_seq_lengths,
+                ssm_state_indices=non_spec_state_indices_tensor,
+            ).unsqueeze(0)
+        else:
+            core_attn_out_non_spec, last_recurrent_state = None, None
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
