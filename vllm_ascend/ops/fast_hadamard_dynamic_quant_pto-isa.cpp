@@ -273,6 +273,7 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
   const uint32_t segment_n = blocks_per_segment * hadamard_n;
   const float scale_divisor = 7.0f;
   const unsigned x_alt_base = (x_base == X_PING) ? X_PONG : X_PING;
+  const unsigned y_alt_base = (y_base == Y_PING) ? Y_PONG : Y_PING;
   const event_t ev_alt = (ev == EVENT_ID0) ? (event_t)EVENT_ID1
                                             : (event_t)EVENT_ID0;
 
@@ -380,22 +381,38 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
 
   ScaleGlobal scaleGlobal(row_scales + row_index);
   TASSIGN(scaleGlobal, (row_scales + row_index));
-  for (uint32_t segment_offset = 0; segment_offset < full_n;
-       segment_offset += segment_n) {
-    const uint32_t segment_elements = min(segment_n, full_n - segment_offset);
-    const bool is_last_segment = (segment_offset + segment_elements) == full_n;
-    TileWork segment_tile = {tile.gm_offset + segment_offset, 1,
-                             segment_elements};
-    issueTLoad(x, segment_tile, x_base, ev);
-    wait_flag(PIPE_MTE2, PIPE_V, ev);
+  current_segment = {tile.gm_offset, 1, min(segment_n, full_n)};
+  next_segment_offset = current_segment.elements;
+  ping = true;
+  issueTLoad(x, current_segment, x_base, ev);
 
-    BulkTile xSegmentTile(1, segment_elements);
-    BulkQuantTile ySegmentTile2D(1, segment_elements >> 1);
-    QuantTile ySegmentTile(1, segment_elements >> 1);
-    TASSIGN(xSegmentTile, x_base);
-    TASSIGN(ySegmentTile2D, y_base);
-    TASSIGN(ySegmentTile, y_base);
-    runTileBlockwiseHadamardInPlace<InputT>(x_base, 1, segment_elements,
+  while (true) {
+    const event_t current_ev = ping ? ev : ev_alt;
+    const unsigned current_x_base = ping ? x_base : x_alt_base;
+    const unsigned current_y_base = ping ? y_base : y_alt_base;
+
+    wait_flag(PIPE_MTE2, PIPE_V, current_ev);
+
+    TileWork next_segment;
+    const bool has_next = next_segment_offset < full_n;
+    if (has_next) {
+      next_segment = {tile.gm_offset + next_segment_offset, 1,
+                      min(segment_n, full_n - next_segment_offset)};
+      const event_t next_ev = ping ? ev_alt : ev;
+      const unsigned next_x_base = ping ? x_alt_base : x_base;
+      issueTLoad(x, next_segment, next_x_base, next_ev);
+    }
+
+    BulkTile xSegmentTile(1, current_segment.elements);
+    BulkQuantTile ySegmentTile2D(1, current_segment.elements >> 1);
+    QuantTile ySegmentTile(1, current_segment.elements >> 1);
+    TASSIGN(xSegmentTile, current_x_base);
+    TASSIGN(ySegmentTile2D, current_y_base);
+    TASSIGN(ySegmentTile, current_y_base);
+
+    wait_flag(PIPE_MTE3, PIPE_V, current_ev);
+    runTileBlockwiseHadamardInPlace<InputT>(current_x_base, 1,
+                                            current_segment.elements,
                                             hadamard_n, log2_hadamard_n);
     pipe_barrier(PIPE_V);
 
@@ -406,21 +423,27 @@ AICORE void runLargeRowDynamicQuantTile(__gm__ InputT *x, __gm__ OutputT *y,
     TMULS(xSegmentTile, xSegmentTile, (InputT)scale_divisor);
     pipe_barrier(PIPE_V);
 
-    wait_flag(PIPE_MTE3, PIPE_V, ev);
     fast_hadamard_int4::TCVT_FP16_TO_INT4_PACKED(ySegmentTile2D, xSegmentTile,
                                                  RoundMode::CAST_RINT);
     pipe_barrier(PIPE_V);
 
-    set_flag(PIPE_V, PIPE_MTE3, ev);
-    wait_flag(PIPE_V, PIPE_MTE3, ev);
-    OutGlobal yGlobal(y + ((tile.gm_offset + segment_offset) >> 1));
-    TASSIGN(yGlobal, (y + ((tile.gm_offset + segment_offset) >> 1)));
+    set_flag(PIPE_V, PIPE_MTE3, current_ev);
+    wait_flag(PIPE_V, PIPE_MTE3, current_ev);
+    OutGlobal yGlobal(y + (current_segment.gm_offset >> 1));
+    TASSIGN(yGlobal, (y + (current_segment.gm_offset >> 1)));
     TSTORE(yGlobal, ySegmentTile);
-    if (is_last_segment) {
+    if (!has_next) {
       TSTORE(scaleGlobal, scaleTile);
     }
-    set_flag(PIPE_MTE3, PIPE_V, ev);
-    set_flag(PIPE_V, PIPE_MTE2, ev);
+    set_flag(PIPE_MTE3, PIPE_V, current_ev);
+    set_flag(PIPE_V, PIPE_MTE2, current_ev);
+
+    if (!has_next) {
+      break;
+    }
+    next_segment_offset += next_segment.elements;
+    current_segment = next_segment;
+    ping = !ping;
   }
 }
 
