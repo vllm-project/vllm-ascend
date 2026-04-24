@@ -88,7 +88,11 @@ jobs:
             working-directory: ./vllm-empty
             run: |
               VLLM_TARGET_DEVICE=empty uv pip install -e .
+              pip install -e tests/plugins/bge_m3_sparse_plugin
+              pip install -e tests/plugins/vllm_add_dummy_stat_logger
+              pip install -e tests/plugins/prithvi_io_processor_plugin
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
+              
 
           - name: Install vllm-project/vllm-ascend
             env:
@@ -97,14 +101,20 @@ jobs:
               pip install uc-manager
               uv pip install -r requirements-dev.txt
               uv pip install -v -e .
-              uv pip install tblib mteb runai_model_streamer pqdm timm
-
+              uv pip install tblib mteb runai_model_streamer pqdm timm schemathesis==3.39.15 "vllm[helion]" "runai-model-streamer[s3,gcs]"
+              uv pip install "mteb[bm25s]" open_clip_torch terratorch==1.2.2 imagehash
+              uv pip install "lm-eval[api]"
           - name: Run vllm-project/vllm test
+            working-directory: ./vllm-empty
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
             run: |
-                python3 .github/workflows/scripts/run_suite.py \
+                mkdir -p tiktoken_encodings
+                curl -L -o tiktoken_encodings/o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
+                curl -L -o tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+                export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
+                python3 ../.github/workflows/scripts/run_suite.py \
                   --suite e2e-upstream-singlecard \
                   --auto-partition-id "${{ matrix.part }}" \
                   --auto-partition-size 4 \
