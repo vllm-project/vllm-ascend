@@ -449,6 +449,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
     def test_build_cpu_pools_raises_on_affinity_conflict(self, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1, 2, 3, 4, 5, 6, 7]
         cpu_alloc.device_info.running_npu_list = [0]
         cpu_alloc.device_info.allowed_cpus = [8, 9]
         cpu_alloc.device_info.npu_affinity = {0: [0, 1]}
@@ -459,6 +460,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
     def test_build_cpu_pools_topo_mode_builds_and_splits_duplicate_groups(self, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1, 2]
         cpu_alloc.device_info.running_npu_list = [0, 1, 2]
         cpu_alloc.device_info.allowed_cpus = [0, 1, 2, 3]
         cpu_alloc.device_info.npu_affinity = {0: [0, 1], 1: [2, 3], 2: [2, 3]}

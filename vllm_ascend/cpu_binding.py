@@ -328,7 +328,17 @@ class CpuAlloc:
             self.build_global_slice_cpu_pool()
             return
 
-        for npu in self.device_info.running_npu_list:
+        allowed_cpu_set = set(self.device_info.allowed_cpus)
+        # Consider all logical NPUs to avoid CPU distribution overlap across worker processes.
+        candidate_npus = [
+            npu
+            for npu in self.device_info.all_logic_npus
+            # Always keep visible NPUs for strict conflict checks; include
+            # non-visible NPUs only when they overlap this process's cpuset.
+            if npu in self.device_info.running_npu_list
+            or any(cpu in allowed_cpu_set for cpu in self.device_info.npu_affinity.get(npu, []))
+        ]
+        for npu in candidate_npus:
             base_cpu_list = [
                 cpu for cpu in self.device_info.npu_affinity.get(npu, []) if cpu in self.device_info.allowed_cpus
             ]
@@ -347,7 +357,7 @@ class CpuAlloc:
                 final[npu_list[0]] = self.npu_cpu_pool[npu_list[0]]
             else:
                 final.update(self.average_distribute({key: npu_list}))
-        self.npu_cpu_pool = final
+        self.npu_cpu_pool = {npu: final[npu] for npu in self.device_info.running_npu_list}
 
     def allocate(self) -> None:
         for npu, pool in self.npu_cpu_pool.items():
