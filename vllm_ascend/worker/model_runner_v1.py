@@ -351,7 +351,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         self._positions_np_buf = self._positions_cpu_buf.numpy()
 
-        self.use_eagle = vllm_config.speculative_config.use_eagle()
+        self.use_eagle = (
+            vllm_config.speculative_config.use_eagle()
+            if vllm_config.speculative_config
+            else None
+        )
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
         # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
         _enpu = get_c_env("ENPU_ENABLE")
