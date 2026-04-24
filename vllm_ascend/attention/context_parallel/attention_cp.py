@@ -226,7 +226,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             if common_long_seq_metadata and common_long_seq_metadata.mtp_attention_masks_for_decode:
                 masks = common_long_seq_metadata.mtp_attention_masks_for_decode
                 if masks and masks[0] is not None:
-                    query_len = masks[0].shape(0)
+                    query_len = masks[0].shape[0]
                     lst = query_lens[:num_decodes]
                     actual_seq_lengths_q = list(np.diff([0] + lst))
                     attn_mask = torch.ones(num_decodes, query_len, 16384, dtype=torch.bool)

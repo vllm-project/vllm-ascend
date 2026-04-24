@@ -245,7 +245,7 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         #! 在mtp的时候进行mask的处理
         if decode_metadata.attn_mask is not None:
             masks = decode_metadata.attn_mask
-            query_len = masks[0].shape(0)
+            query_len = masks[0].shape[0]
             actual_seq_lengths_q = decode_metadata.actual_seq_lengths_q
             num_decodes = len(actual_seq_lengths_q)
             lst = actual_seq_lengths_q[:num_decodes]
