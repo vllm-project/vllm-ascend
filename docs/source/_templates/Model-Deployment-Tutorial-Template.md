@@ -76,6 +76,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide explanations for parameters, including meaning, value range, and units.
 - Specify the basic environment variables and communication environment variables that need to be enabled, with explanations including meaning, value range, and units.
 - If the code example includes version numbers, it is necessary to add a comment explaining that the version number should be filled in according to the actual version in use.
+- After the installation is successful, the corresponding success message should be displayed.
 
 ### 4.1 Docker Image Installation
 
@@ -132,7 +133,10 @@ Service Verification:
 
 ## 6 Functional Verification
 
-**Content Writing Requirements:** Guide users on how to test the basic functionality of the model through simple interface calls after the service is started.
+**Content Writing Requirements:**
+
+- After the service is successfully started, the corresponding success message should be displayed.
+- Guide users on how to test the basic functionality of the model through simple interface calls after the service is started.
 
 **Example:**
 
