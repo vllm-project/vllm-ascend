@@ -39,6 +39,7 @@ def _pytorch_causal_conv1d_decode(
     weight: torch.Tensor,
     bias: torch.Tensor,
     activation: str,
+    cache_indices: torch.Tensor,
 ) -> torch.Tensor:
     """
     Causal 1D convolution for single-token decode.
@@ -48,17 +49,19 @@ def _pytorch_causal_conv1d_decode(
     weight: (dim, kernel_size) - convolution weights
     bias: (dim,) - bias
     activation: str - activation function name
+    cache_indices: (num_tokens,) - indices into conv_state for each token
     """
-    # For decode, each token just does: out = x * weight[0] + state * weight[1:] + bias
     K = weight.shape[1]  # kernel size
+
+    # Select state for each token using cache_indices
+    state = conv_state[cache_indices]  # (num_tokens, D, K-1)
 
     # x: (num_tokens, D), weight[:, 0]: (D,)
     out = x * weight[:, 0]  # (num_tokens, D)
 
-    # Add contribution from conv_state
-    # conv_state: (num_slots, D, K-1), weight[:, 1:]: (D, K-1)
+    # Add contribution from state
     for i in range(K - 1):
-        out = out + conv_state[:, :, i] * weight[:, i + 1]
+        out = out + state[:, :, i] * weight[:, i + 1]
 
     # Add bias
     if bias is not None:
@@ -69,6 +72,14 @@ def _pytorch_causal_conv1d_decode(
         out = F.silu(out)
     elif activation == "gelu":
         out = F.gelu(out)
+
+    # Shift state left and store new token value
+    if K > 1:
+        state[:, :, :-1] = state[:, :, 1:]
+    state[:, :, -1] = x.float()
+
+    # Write back to conv_state using cache_indices
+    conv_state[cache_indices] = state.to(conv_state.dtype)
 
     return out
 
@@ -142,7 +153,7 @@ def _pytorch_causal_conv1d_prefill(
 
         # Update conv_state with last K-1 values of this sequence
         if K > 1:
-            conv_states[slot_idx] = x_seq[:, -(K - 1) :].float().to(conv_states.dtype)
+            conv_states[slot_idx] = torch.cat([conv_states[slot_idx].float(), x_seq.float()], dim=1)[:, -(K - 1) :].to(conv_states.dtype)
 
     return out
 
@@ -204,6 +215,25 @@ def _pytorch_recurrent_gdn_decode(
     Otherwise, uses precomputed g and beta.
 
     State layout: (num_slots, HV, V, K) - matching vllm's standard kernel.
+
+    Args:
+        q: (1, T, H, K) query tensor.
+        k: (1, T, H, K) key tensor.
+        v: (1, T, HV, V) value tensor.
+        g: (1, T, HV) decay values. Used when use_sigmoid_gating is False.
+        beta: (1, T, HV) beta/gating values. Used when use_sigmoid_gating is False.
+        A_log: (HV,) log decay rate.
+        dt_bias: (HV,) dt bias.
+        a: (T, HV) a input for sigmoid gating computation.
+        b: (T, HV) b input for sigmoid gating computation.
+        ssm_state: (num_slots, HV, V, K) SSM state storage.
+        state_indices: (N,) indices into ssm_state for each sequence.
+        cu_seqlens: (N+1,) cumulative sequence lengths.
+        scale: float, attention scale factor.
+        use_l2norm: bool, whether to L2-normalize q and k.
+        softplus_beta: float, beta for softplus activation.
+        softplus_threshold: float, threshold for softplus activation.
+        use_sigmoid_gating: bool, if True compute g and beta from A_log/dt_bias/a/b.
 
     Returns:
         output: (1, T, HV, V) - attention output
@@ -464,6 +494,7 @@ class PyTorchQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 weight=conv_weights,
                 bias=self.conv1d.bias,
                 activation=self.activation,
+                cache_indices=spec_state_indices_tensor,
             )
 
         # Non-spec tokens
@@ -489,6 +520,7 @@ class PyTorchQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
                 weight=conv_weights,
                 bias=self.conv1d.bias,
                 activation=self.activation,
+                cache_indices=non_spec_state_indices_tensor,
             )
 
         # ---- Rearrange QKV ----

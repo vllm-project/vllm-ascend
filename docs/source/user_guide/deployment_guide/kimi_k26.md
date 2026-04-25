@@ -42,7 +42,7 @@ modelscope download --model moonshotai/Kimi-K2.6 --local_dir /path/to/Kimi-K2.6
 export HCCL_OP_EXPANSION_MODE=AIV
 
 python -m vllm.entrypoints.openai.api_server \
-    --model /path/to/Kimi-K2.6/moonshotai/Kimi-K2___6 \
+    --model /path/to/Kimi-K2.6/moonshotai/Kimi-K2.6 \
     --tensor-parallel-size 16 \
     --trust-remote-code \
     --max-model-len 8192 \
@@ -70,7 +70,7 @@ Send a test request after the server is ready:
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "/path/to/Kimi-K2.6/moonshotai/Kimi-K2___6",
+        "model": "/path/to/Kimi-K2.6/moonshotai/Kimi-K2.6",
         "messages": [{"role": "user", "content": "Hello, introduce yourself briefly."}],
         "max_tokens": 128
     }'

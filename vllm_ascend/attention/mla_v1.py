@@ -1468,9 +1468,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if graph_params is None:
-            return
         if _EXTRA_CTX.capturing:
+            if graph_params is None:
+                return
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
