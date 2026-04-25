@@ -41,7 +41,6 @@ docker run --rm \
     --name $NAME \
     --net=host \
     --shm-size=1g \
-    --net=host \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \
