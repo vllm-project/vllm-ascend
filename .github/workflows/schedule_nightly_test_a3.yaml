@@ -147,7 +147,7 @@ jobs:
             config_file_path: DeepSeek-V3_2-W8A8-EP-aime2025.yaml
             size: 4
           - name: multi-node-GLM5_1-W8A8-EP
-            config_file_path: GLM5_1-W8A8—EP.yaml
+            config_file_path: GLM5_1-W8A8-EP.yaml
             size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
