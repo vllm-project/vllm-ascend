@@ -3279,13 +3279,26 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
-                            attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
-                                current_kv_cache_spec.dtype
-                            )
-                            conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
-                            raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                            raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
-                            raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
+                            if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
+                                attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
+                                    current_kv_cache_spec.dtype
+                                )
+                                conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
+                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
+                                raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
+                                raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
+                            else:
+                                k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
+                                nope_page_size = int(np.prod(kv_cache_shape[:-1])) * k_dim * get_dtype_size(
+                                    current_kv_cache_spec.dtype
+                                )
+                                rope_page_size = int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(
+                                    current_kv_cache_spec.dtype
+                                )
+                                conv_block_padding_size = raw_k_tensor.numel() - nope_page_size - rope_page_size
+                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
+                                raw_k_tensor = raw_kv_tensor[:nope_page_size]
+                                raw_v_tensor = raw_kv_tensor[nope_page_size:]
                     else:
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks,
@@ -3651,6 +3664,7 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
                     )
+                    attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
