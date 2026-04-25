@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-04-22 02:02+0000\n"
+"POT-Creation-Date: 2026-04-25 01:56+0000\n"
 "PO-Revision-Date: 2025-07-18 10:11+0800\n"
 "Last-Translator: \n"
 "Language: zh\n"
@@ -1036,8 +1036,8 @@ msgid ""
 "Fix GQA model error when enabling both DP and DCP. "
 "[#7012](https://github.com/vllm-project/vllm-ascend/pull/7012)"
 msgstr ""
-"修复同时启用 DP 和 DCP 时 GQA 模型的错误。[#7012](https://github.com/vllm-project"
-"/vllm-ascend/pull/7012)"
+"修复同时启用 DP 和 DCP 时 GQA 模型的错误。[#7012](https://github.com/vllm-project/vllm-"
+"ascend/pull/7012)"
 
 #: ../../source/user_guide/release_notes.md:172
 msgid ""
@@ -1060,8 +1060,8 @@ msgid ""
 "Fix RoPE shape mismatch for MTP models with FlashComm V1 enabled. "
 "[#6939](https://github.com/vllm-project/vllm-ascend/pull/6939)"
 msgstr ""
-"修复启用 FlashComm V1 时 MTP 模型的 RoPE 形状不匹配问题。[#6939](https://github.com"
-"/vllm-project/vllm-ascend/pull/6939)"
+"修复启用 FlashComm V1 时 MTP 模型的 RoPE 形状不匹配问题。[#6939](https://github.com/vllm-"
+"project/vllm-ascend/pull/6939)"
 
 #: ../../source/user_guide/release_notes.md:175
 msgid ""
@@ -1107,9 +1107,7 @@ msgstr ""
 msgid ""
 "Fix CPU binding logic. [#6889](https://github.com/vllm-project/vllm-"
 "ascend/pull/6889)"
-msgstr ""
-"修复 CPU 绑定逻辑。[#6889](https://github.com/vllm-project/vllm-"
-"ascend/pull/6889)"
+msgstr "修复 CPU 绑定逻辑。[#6889](https://github.com/vllm-project/vllm-ascend/pull/6889)"
 
 #: ../../source/user_guide/release_notes.md:181
 msgid ""
@@ -1123,7 +1121,8 @@ msgstr ""
 msgid ""
 "Currently, for DeepSeek v3.2, PCP & DCP do not yet work with FlashComm1 "
 "feature, which may cause serve errors or other unknown errors."
-msgstr "目前，对于 DeepSeek v3.2，PCP 和 DCP 尚不能与 FlashComm1 功能协同工作，这可能导致服务错误或其他未知错误。"
+msgstr ""
+"目前，对于 DeepSeek v3.2，PCP 和 DCP 尚不能与 FlashComm1 功能协同工作，这可能导致服务错误或其他未知错误。"
 
 #: ../../source/user_guide/release_notes.md:186
 msgid ""
@@ -2703,10 +2702,10 @@ msgstr ""
 
 #: ../../source/user_guide/release_notes.md:425
 msgid ""
-"support `--max_model_len=auto`. [#6193](https://github.com/vllm-project"
+"support `--max-model-len auto`. [#6193](https://github.com/vllm-project"
 "/vllm-ascend/pull/6193)"
 msgstr ""
-"支持 `--max_model_len=auto`。 [#6193](https://github.com/vllm-project/vllm-"
+"支持 `--max-model-len auto`。 [#6193](https://github.com/vllm-project/vllm-"
 "ascend/pull/6193)"
 
 #: ../../source/user_guide/release_notes.md:429
@@ -3548,6 +3547,7 @@ msgid "Core"
 msgstr "核心"
 
 #: ../../source/user_guide/release_notes.md:602
+#, python-brace-format
 msgid ""
 "[Experimental] Full decode only graph mode is supported now. Although it "
 "is not enabled by default, we suggest to enable it by `--compilation-"
@@ -3663,6 +3663,7 @@ msgid ""
 msgstr "已移除 LLMdatadist kv 连接器。请改用 mooncake 连接器。"
 
 #: ../../source/user_guide/release_notes.md:619
+#, python-brace-format
 msgid ""
 "Ascend scheduler is removed. `--additional-config {\"ascend_scheduler\": "
 "{\"enabled\": true}}` doesn't work anymore."
@@ -3671,6 +3672,7 @@ msgstr ""
 "true}}` 不再生效。"
 
 #: ../../source/user_guide/release_notes.md:620
+#, python-brace-format
 msgid ""
 "Torchair graph mode is removed. `--additional-config "
 "{\"torchair_graph_config\": {\"enabled\": true}}` doesn't work anymore. "
@@ -3683,7 +3685,7 @@ msgstr ""
 msgid ""
 "`VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION` env is removed. This feature "
 "is stable enough. We enable it by default now."
-msgstr "已移除 `VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION` 环境变量。该功能已足够稳定，我们现在默认启用它。"
+msgstr "已移除 `VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION` 环境变量。该功能已足够稳定，我们现在默认启用。"
 
 #: ../../source/user_guide/release_notes.md:622
 msgid "speculative decode method `Ngram` is back now."
@@ -4542,8 +4544,8 @@ msgid ""
 "`gpu_memory_utilization` to suitable value based on your parallel "
 "configuration to avoid oom error."
 msgstr ""
-"Qwen3-Next 的 HBM 使用率高于预期。这是一个 [已知问题](https://github.com/vllm-project/vllm-"
-"ascend/issues/2884)，我们正在处理。您可以根据并行配置将 `max_model_len` 和 "
+"Qwen3-Next 的 HBM 使用率高于预期。这是一个 [已知问题](https://github.com/vllm-project"
+"/vllm-ascend/issues/2884)，我们正在处理。您可以根据并行配置将 `max_model_len` 和 "
 "`gpu_memory_utilization` 设置为合适的值，以避免内存溢出错误。"
 
 #: ../../source/user_guide/release_notes.md:793
@@ -4610,8 +4612,8 @@ msgid ""
 " increase memory usage. [#2120](https://github.com/vllm-project/vllm-"
 "ascend/pull/2120)"
 msgstr ""
-"新增了 MLP 张量并行以提升性能，但请注意这会增加内存使用。[#2120](https://github.com/vllm-"
-"project/vllm-ascend/pull/2120)"
+"新增了 MLP 张量并行以提升性能，但请注意这会增加内存使用。[#2120](https://github.com/vllm-project"
+"/vllm-ascend/pull/2120)"
 
 #: ../../source/user_guide/release_notes.md:809
 msgid ""
@@ -4644,8 +4646,8 @@ msgid ""
 "accuracy issue. [#2528](https://github.com/vllm-project/vllm-"
 "ascend/pull/2528)"
 msgstr ""
-"在 AscendScheduler 中支持滑动窗口注意力，从而修复了 Gemma3 的精度问题。[#2528](https://github.com"
-"/vllm-project/vllm-ascend/pull/2528)"
+"在 AscendScheduler 中支持滑动窗口注意力，从而修复了 Gemma3 "
+"的精度问题。[#2528](https://github.com/vllm-project/vllm-ascend/pull/2528)"
 
 #: ../../source/user_guide/release_notes.md:816
 #: ../../source/user_guide/release_notes.md:947
@@ -5004,21 +5006,23 @@ msgstr ""
 msgid ""
 "Torch-npu is upgraded to 2.5.1.post1. CANN is upgraded to 8.2.RC1. Don't "
 "forget to upgrade them."
-msgstr "Torch-npu 已升级至 2.5.1.post1。CANN 已升级至 8.2.RC1。请务必同步升级。"
+msgstr ""
+"Torch-npu 已升级至 2.5.1.post1。CANN 已升级至 8.2.RC1。请务必同步升级。"
 
 #: ../../source/user_guide/release_notes.md:877
 msgid ""
 "The Ascend scheduler is added for V1 engine. This scheduler is more "
 "affine with Ascend hardware."
-msgstr "为 V1 引擎增加了 Ascend 调度器。该调度器与 Ascend 硬件的亲和性更高。"
+msgstr ""
+"为 V1 引擎新增了 Ascend 调度器。该调度器与 Ascend 硬件的亲和性更高。"
 
 #: ../../source/user_guide/release_notes.md:878
 msgid "Structured output feature works now on V1 Engine."
-msgstr "结构化输出（Structured output）功能现在可以在 V1 引擎上运行。"
+msgstr "结构化输出（Structured output）功能现可在 V1 引擎上运行。"
 
 #: ../../source/user_guide/release_notes.md:879
 msgid "A batch of custom ops are added to improve the performance."
-msgstr "增加了一批自定义算子以提升性能。"
+msgstr "新增了一批自定义算子以提升性能。"
 
 #: ../../source/user_guide/release_notes.md:881
 msgid "Changes"
@@ -5069,7 +5073,8 @@ msgstr ""
 msgid ""
 "When running MoE model, Aclgraph mode only work with tensor parallel. "
 "DP/EP doesn't work in this release."
-msgstr "运行 MoE 模型时，Aclgraph 模式仅支持张量并行（TP）。此版本暂不支持 DP/EP 运行该模式。"
+msgstr ""
+"运行 MoE 模型时，Aclgraph 模式仅支持张量并行（TP）。此版本暂不支持 DP/EP 运行该模式。"
 
 #: ../../source/user_guide/release_notes.md:891
 msgid "Pipeline parallelism is not supported in this release for V1 engine."
@@ -5079,7 +5084,8 @@ msgstr "此版本的 V1 引擎暂不支持流水线并行（Pipeline parallelism
 msgid ""
 "If you use w4a8 quantization with eager mode, please set "
 "`VLLM_ASCEND_MLA_PARALLEL=1` to avoid oom error."
-msgstr "如果在 eager 模式下使用 w4a8 量化，请设置 `VLLM_ASCEND_MLA_PARALLEL=1` 以避免显存溢出（OOM）。"
+msgstr ""
+"如果在 eager 模式下使用 w4a8 量化，请设置 `VLLM_ASCEND_MLA_PARALLEL=1` 以避免显存溢出（OOM）。"
 
 #: ../../source/user_guide/release_notes.md:893
 msgid ""
@@ -5136,7 +5142,7 @@ msgid ""
 "Add LMhead TP communication groups [#1956](https://github.com/vllm-"
 "project/vllm-ascend/pull/1956)"
 msgstr ""
-"增加了 LMhead 张量并行（TP）通信组。[#1956](https://github.com/vllm-project/vllm-"
+"新增了 LMhead 张量并行（TP）通信组。[#1956](https://github.com/vllm-project/vllm-"
 "ascend/pull/1956)"
 
 #: ../../source/user_guide/release_notes.md:904
@@ -5258,7 +5264,7 @@ msgid ""
 "Add document for deepseek large EP [#2339](https://github.com/vllm-"
 "project/vllm-ascend/pull/2339)"
 msgstr ""
-"增加了 DeepSeek 大规模专家并行（EP）的文档。[#2339](https://github.com/vllm-project/vllm-"
+"新增了 DeepSeek 大规模专家并行（EP）的文档。[#2339](https://github.com/vllm-project/vllm-"
 "ascend/pull/2339)"
 
 #: ../../source/user_guide/release_notes.md:924
@@ -5810,9 +5816,9 @@ msgid ""
 "ascend/pull/1234) [#1501](https://github.com/vllm-project/vllm-"
 "ascend/pull/1501)"
 msgstr ""
-"Ray：修复使用 Ray 时的设备错误，添加 `initialize_cache` 并改进警告信息：[#1234](https://github.com"
-"/vllm-project/vllm-ascend/pull/1234) [#1501](https://github.com/vllm-project"
-"/vllm-ascend/pull/1501)"
+"Ray：修复使用 Ray 时的设备错误，添加 `initialize_cache` "
+"并改进警告信息：[#1234](https://github.com/vllm-project/vllm-ascend/pull/1234) "
+"[#1501](https://github.com/vllm-project/vllm-ascend/pull/1501)"
 
 #: ../../source/user_guide/release_notes.md:1005
 msgid "Graph Mode Improvement"
@@ -5856,7 +5862,8 @@ msgid ""
 "Fix rope accuracy bug [#1887](https://github.com/vllm-project/vllm-"
 "ascend/pull/1887)"
 msgstr ""
-"修复 RoPE 精度错误 [#1887](https://github.com/vllm-project/vllm-ascend/pull/1887)。"
+"修复 RoPE 精度错误 [#1887](https://github.com/vllm-project/vllm-"
+"ascend/pull/1887)。"
 
 #: ../../source/user_guide/release_notes.md:1012
 msgid ""
@@ -5881,7 +5888,8 @@ msgid ""
 "/vllm-project/vllm-ascend/pull/1378)"
 msgstr ""
 "修复 TorchAir 下的分块预填充场景，解决 [#1378](https://github.com/vllm-project/vllm-"
-"ascend/pull/1378) 中的 `UnboundLocalError: local variable 'decode_hs_or_q_c'` 问题。"
+"ascend/pull/1378) 中的 `UnboundLocalError: local variable "
+"'decode_hs_or_q_c'` 问题。"
 
 #: ../../source/user_guide/release_notes.md:1015
 msgid ""
@@ -5896,15 +5904,16 @@ msgid ""
 "Repair moe error when set multistream. in [#1882](https://github.com"
 "/vllm-project/vllm-ascend/pull/1882)"
 msgstr ""
-"修复设置多流时的 MoE 错误 [#1882](https://github.com/vllm-project/vllm-ascend/pull/1882)。"
+"修复设置多流时的 MoE 错误 [#1882](https://github.com/vllm-project/vllm-"
+"ascend/pull/1882)。"
 
 #: ../../source/user_guide/release_notes.md:1017
 msgid ""
 "Round up graph batch size to tp size in EP case "
 "[#1610](https://github.com/vllm-project/vllm-ascend/pull/1610)"
 msgstr ""
-"在 EP 场景下将图批次大小向上取整至 TP 大小的倍数 [#1610](https://github.com/vllm-project/vllm-"
-"ascend/pull/1610)。"
+"在 EP 场景下将图批次大小向上取整至 TP 大小的倍数 [#1610](https://github.com/vllm-project"
+"/vllm-ascend/pull/1610)。"
 
 #: ../../source/user_guide/release_notes.md:1018
 msgid ""
@@ -5935,8 +5944,8 @@ msgid ""
 "torchair_graph bugfix when chunked_prefill is true in "
 "[#1748](https://github.com/vllm-project/vllm-ascend/pull/1748)"
 msgstr ""
-"修复 `chunked_prefill` 为 true 时的 `torchair_graph` 错误 [#1748](https://github.com"
-"/vllm-project/vllm-ascend/pull/1748)。"
+"修复 `chunked_prefill` 为 true 时的 `torchair_graph` 错误 "
+"[#1748](https://github.com/vllm-project/vllm-ascend/pull/1748)。"
 
 #: ../../source/user_guide/release_notes.md:1022
 msgid ""
@@ -5951,7 +5960,8 @@ msgid ""
 "Fix rank set in DP scenario [#1247](https://github.com/vllm-project/vllm-"
 "ascend/pull/1247)"
 msgstr ""
-"修复 DP 场景下的 rank 设置问题 [#1247](https://github.com/vllm-project/vllm-ascend/pull/1247)。"
+"修复 DP 场景下的 rank 设置问题 [#1247](https://github.com/vllm-project/vllm-"
+"ascend/pull/1247)。"
 
 #: ../../source/user_guide/release_notes.md:1024
 msgid ""
@@ -5974,29 +5984,32 @@ msgid ""
 "Fix block table shape to resolve accuracy issue in "
 "[#1297](https://github.com/vllm-project/vllm-ascend/pull/1297)"
 msgstr ""
-"修复块表形状以解决精度问题 [#1297](https://github.com/vllm-project/vllm-ascend/pull/1297)。"
+"修复块表形状以解决精度问题 [#1297](https://github.com/vllm-project/vllm-"
+"ascend/pull/1297)。"
 
 #: ../../source/user_guide/release_notes.md:1027
 msgid ""
 "Implement primal full graph with limited scenario in "
 "[#1503](https://github.com/vllm-project/vllm-ascend/pull/1503)"
 msgstr ""
-"在受限场景下实现初步的全图模式 [#1503](https://github.com/vllm-project/vllm-ascend/pull/1503)。"
+"在受限场景下实现初步的全图模式 [#1503](https://github.com/vllm-project/vllm-"
+"ascend/pull/1503)。"
 
 #: ../../source/user_guide/release_notes.md:1028
 msgid ""
 "Restore paged attention kernel in Full Graph for performance in "
 "[#1677](https://github.com/vllm-project/vllm-ascend/pull/1677)"
 msgstr ""
-"为提升性能，在全图模式中恢复分页注意力内核 [#1677](https://github.com/vllm-project/vllm-ascend/pull/1677)。"
+"为提升性能，在全图模式中恢复分页注意力内核 [#1677](https://github.com/vllm-project/vllm-"
+"ascend/pull/1677)。"
 
 #: ../../source/user_guide/release_notes.md:1029
 msgid ""
 "Fix DeepSeek OOM issue in extreme `--gpu-memory-utilization` scenario in "
 "[#1829](https://github.com/vllm-project/vllm-ascend/pull/1829)"
 msgstr ""
-"修复极端 `--gpu-memory-utilization` 设置下的 DeepSeek OOM 问题 [#1829](https://github.com"
-"/vllm-project/vllm-ascend/pull/1829)。"
+"修复极端 `--gpu-memory-utilization` 设置下的 DeepSeek OOM 问题 "
+"[#1829](https://github.com/vllm-project/vllm-ascend/pull/1829)。"
 
 #: ../../source/user_guide/release_notes.md:1030
 msgid ""
@@ -6015,8 +6028,8 @@ msgid ""
 "Added custom AscendC kernel `vocabparallelembedding` "
 "[#796](https://github.com/vllm-project/vllm-ascend/pull/796)"
 msgstr ""
-"新增自定义 AscendC 内核 `vocabparallelembedding` "
-"[#796](https://github.com/vllm-project/vllm-ascend/pull/796)"
+"新增自定义 AscendC 内核 `vocabparallelembedding` [#796](https://github.com/vllm-"
+"project/vllm-ascend/pull/796)"
 
 #: ../../source/user_guide/release_notes.md:1035
 msgid ""
@@ -6078,17 +6091,15 @@ msgstr ""
 msgid ""
 "Fixed v0 spec decode in [#1323](https://github.com/vllm-project/vllm-"
 "ascend/pull/1323)"
-msgstr ""
-"修复了 V0 投机解码 [#1323](https://github.com/vllm-project/vllm-"
-"ascend/pull/1323)"
+msgstr "修复了 V0 投机解码 [#1323](https://github.com/vllm-project/vllm-ascend/pull/1323)"
 
 #: ../../source/user_guide/release_notes.md:1046
 msgid ""
 "Enabled `ACL_OP_INIT_MODE=1` directly only when using V0 spec decode in "
 "[#1271](https://github.com/vllm-project/vllm-ascend/pull/1271)"
 msgstr ""
-"仅在使用 V0 投机解码时直接启用 `ACL_OP_INIT_MODE=1` [#1271](https://github.com"
-"/vllm-project/vllm-ascend/pull/1271)"
+"仅在使用 V0 投机解码时直接启用 `ACL_OP_INIT_MODE=1` [#1271](https://github.com/vllm-"
+"project/vllm-ascend/pull/1271)"
 
 #: ../../source/user_guide/release_notes.md:1047
 msgid ""
@@ -6212,8 +6223,8 @@ msgid ""
 "alltoallv support dpo in [#1547](https://github.com/vllm-project/vllm-"
 "ascend/pull/1547)"
 msgstr ""
-"针对未量化的 RL 训练进行了 MoE alltoallv 通信优化，并使 alltoallv 支持 "
-"DPO [#1547](https://github.com/vllm-project/vllm-ascend/pull/1547)"
+"针对未量化的 RL 训练进行了 MoE alltoallv 通信优化，并使 alltoallv 支持 DPO "
+"[#1547](https://github.com/vllm-project/vllm-ascend/pull/1547)"
 
 #: ../../source/user_guide/release_notes.md:1062
 msgid ""
@@ -6316,8 +6327,8 @@ msgid ""
 "Removed unnecessary reduce_results access in shared_experts.down_proj in "
 "[#2016](https://github.com/vllm-project/vllm-ascend/pull/2016)."
 msgstr ""
-"移除了 `shared_experts.down_proj` 中不必要的 `reduce_results` "
-"访问 [#2016](https://github.com/vllm-project/vllm-ascend/pull/2016)"
+"移除了 `shared_experts.down_proj` 中不必要的 `reduce_results` 访问 "
+"[#2016](https://github.com/vllm-project/vllm-ascend/pull/2016)"
 
 #: ../../source/user_guide/release_notes.md:1075
 msgid ""
@@ -6332,8 +6343,8 @@ msgid ""
 "Made multiple Ps and Ds work on a single machine in "
 "[#1936](https://github.com/vllm-project/vllm-ascend/pull/1936)."
 msgstr ""
-"实现了在单机上运行多个 P 节点（Prefill）和 D 节点（Decode） [#1936](https://github.com"
-"/vllm-project/vllm-ascend/pull/1936)"
+"实现了在单机上运行多个 P 节点（Prefill）和 D 节点（Decode） [#1936](https://github.com/vllm-"
+"project/vllm-ascend/pull/1936)"
 
 #: ../../source/user_guide/release_notes.md:1077
 msgid ""
@@ -7309,9 +7320,8 @@ msgid ""
 "ascend/pull/918)"
 msgstr ""
 "用户现在可以直接通过在线权重启动模型，例如直接从 HuggingFace 或 ModelScope "
-"加载。[#858](https://github.com/vllm-project/vllm-"
-"ascend/pull/858) [#918](https://github.com/vllm-project/vllm-"
-"ascend/pull/918)"
+"加载。[#858](https://github.com/vllm-project/vllm-ascend/pull/858) "
+"[#918](https://github.com/vllm-project/vllm-ascend/pull/918)"
 
 #: ../../source/user_guide/release_notes.md:1260
 msgid ""
@@ -7673,8 +7683,7 @@ msgid ""
 "[#636](https://github.com/vllm-project/vllm-ascend/pull/636) "
 "[#671](https://github.com/vllm-project/vllm-ascend/pull/671)"
 msgstr ""
-"DeepSeek V3/R1 "
-"现已支持数据并行（DP）、张量并行（TP）和多令牌预测（MTP）。请注意，此功能仍处于实验阶段。如遇任何问题，请告知我们。[#429](https://github.com"
+"DeepSeek V3/R1 现已支持数据并行（DP）、张量并行（TP）和多令牌预测（MTP）。请注意，此功能仍处于实验阶段。如遇任何问题，请告知我们。[#429](https://github.com"
 "/vllm-project/vllm-ascend/pull/429) [#585](https://github.com/vllm-"
 "project/vllm-ascend/pull/585)  [#626](https://github.com/vllm-project"
 "/vllm-ascend/pull/626) [#636](https://github.com/vllm-project/vllm-"

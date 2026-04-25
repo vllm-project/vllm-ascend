@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-04-25 01:56+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -50,9 +50,10 @@ msgstr "在 Docker 容器中运行 vLLM 服务器。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:45
 msgid ""
-"`--max_model_len` should be greater than `35000`, this will be suitable "
+"`--max-model-len` should be greater than `35000`, this will be suitable "
 "for most datasets. Otherwise the accuracy evaluation may be affected."
-msgstr "`--max_model_len` 参数应设置为大于 `35000`，这适用于大多数数据集。否则可能会影响准确率评估结果。"
+msgstr ""
+"`--max-model-len` 参数应设置为大于 `35000`，这适用于大多数数据集。否则可能会影响准确率评估结果。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:48
 msgid "The vLLM server is started successfully, if you see logs as below:"
@@ -182,8 +183,8 @@ msgid ""
 "`max_model_len`(config in your vllm server), `32768` will be suitable for"
 " most datasets."
 msgstr ""
-"`max_out_len`：请注意，`max_out_len` + LLM 输入长度应小于 vLLM 服务器中配置的 `max_model_len`。`32768` "
-"适用于大多数数据集。"
+"`max_out_len`：请注意，`max_out_len` + LLM 输入长度应小于 vLLM 服务器中配置的 "
+"`max_model_len`。`32768` 适用于大多数数据集。"
 
 #: ../../source/developer_guide/evaluation/using_ais_bench.md:165
 msgid "`batch_size`: Update according to your dataset."
