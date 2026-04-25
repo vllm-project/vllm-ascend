@@ -223,7 +223,7 @@ vllm serve Qwen/Qwen3-Embedding-8B --trust-remote-code
 ```shell
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve \
   --model Qwen/Qwen3-Embedding-8B \
   --backend openai-embeddings \

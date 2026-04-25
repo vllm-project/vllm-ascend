@@ -158,6 +158,12 @@ Scheduling optimization:
    :substitutions:
 # Optimize operator delivery queue. This will affect the memory peak value, and may degrade if the memory is tight.
 export TASK_QUEUE_ENABLE=2
+```
+
+or
+
+```{code-block} bash
+   :substitutions:
 
 # This will greatly improve the CPU bottleneck model and ensure the same performance for the NPU bottleneck model.
 export CPU_AFFINITY_CONF=1

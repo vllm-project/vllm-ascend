@@ -95,7 +95,7 @@ Run the following script to execute online 128k inference.
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -157,7 +157,7 @@ Node 0
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -199,7 +199,7 @@ Node1
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -309,7 +309,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model vllm-ascend/Qwen3-235B-A22B-w8a8  --dataset-name random --random-input-len 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
@@ -335,7 +335,7 @@ Example server scripts:
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -408,7 +408,7 @@ export TP_SOCKET_IFNAME=${ifname}
 export HCCL_SOCKET_IFNAME=${ifname}
 
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
@@ -470,7 +470,7 @@ export TP_SOCKET_IFNAME=${ifname}
 export HCCL_SOCKET_IFNAME=${ifname}
 
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
@@ -534,7 +534,7 @@ export TP_SOCKET_IFNAME=${ifname}
 export HCCL_SOCKET_IFNAME=${ifname}
 
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024

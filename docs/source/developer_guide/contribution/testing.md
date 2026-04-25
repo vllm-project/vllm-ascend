@@ -40,6 +40,7 @@ export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirror
 # src path
 export SRC_WORKSPACE=/vllm-workspace
 mkdir -p $SRC_WORKSPACE
+cd $SRC_WORKSPACE
 
 apt-get update -y
 apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2

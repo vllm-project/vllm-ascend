@@ -54,25 +54,25 @@ To enable Netloader, pass `--load-format=netloader` and provide configuration vi
 ### Server
 
 ```shell
-VLLM_SLEEP_WHEN_IDLE=1 vllm serve `<model_file>` \
+VLLM_SLEEP_WHEN_IDLE=1 vllm serve <model_file> \
   --tensor-parallel-size 1 \
-  --served-model-name `<model_name>` \
+  --served-model-name <model_name> \
   --enforce-eager \
-  --port `<port>` \
+  --port <port> \
   --load-format netloader
 ```
 
 ### Client
 
 ```shell
-export NETLOADER_CONFIG='{"SOURCE":[{"device_id":0, "sources": ["`<server_IP>`:`<server_Port>`"]}]}'
+export NETLOADER_CONFIG='{"SOURCE":[{"device_id":0, "sources": ["<server_IP>:<server_Port>"]}]}'
 
-VLLM_SLEEP_WHEN_IDLE=1 ASCEND_RT_VISIBLE_DEVICES=`<device_id_diff_from_server>` \
-  vllm serve `<model_file>` \
+VLLM_SLEEP_WHEN_IDLE=1 ASCEND_RT_VISIBLE_DEVICES=<device_id_diff_from_server> \
+  vllm serve <model_file> \
   --tensor-parallel-size 1 \
-  --served-model-name `<model_name>` \
+  --served-model-name <model_name> \
   --enforce-eager \
-  --port `<client_port>` \
+  --port <client_port> \
   --load-format netloader \
   --model-loader-extra-config="${NETLOADER_CONFIG}"
 ```

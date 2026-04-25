@@ -93,7 +93,7 @@ vllm serve /root/.cache/DeepSeek-OCR-2 \
     --trust-remote-code \
     --tensor-parallel-size 1  \
     --port 1055 \
-    --max_model_len 8192 \
+    --max-model-len 8192 \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.8 \
     --allowed-local-media-path / \

@@ -32,7 +32,7 @@ This is the first release candidate of v0.14.0 for vLLM Ascend. Please follow th
 - Fix multi-modal inference OOM issues by setting `expandable_segments:True` by default. [#5855](https://github.com/vllm-project/vllm-ascend/pull/5855)
 - `VLLM_ASCEND_ENABLE_MLAPO` is set to `True` by default. It's enabled automatically on decode node in PD deployment case. Please note that this feature will cost more memory. If you are memory sensitive, please set it to False. [#5952](https://github.com/vllm-project/vllm-ascend/pull/5952)
 - SSL config can be set to kv_extra_config for PD deployment with mooncake layerwise connector. [#5875](https://github.com/vllm-project/vllm-ascend/pull/5875)
-- support `--max_model_len=auto`. [#6193](https://github.com/vllm-project/vllm-ascend/pull/6193)
+- support `--max-model-len=auto`. [#6193](https://github.com/vllm-project/vllm-ascend/pull/6193)
 
 ### Dependencies
 

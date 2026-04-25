@@ -74,7 +74,7 @@ The environment variable `LOCAL_MEDIA_PATH` which allows API requests to read lo
 :::
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH="Qwen/Qwen2.5-Omni-7B"
 export LOCAL_MEDIA_PATH=$HOME/.cache/vllm/assets/vllm_public_assets/
 
@@ -104,7 +104,7 @@ VLLM_TARGET_DEVICE=empty pip install -v ".[audio]"
 #### Multiple NPU (Qwen2.5-Omni-7B)
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH=Qwen/Qwen2.5-Omni-7B
 export LOCAL_MEDIA_PATH=$HOME/.cache/vllm/assets/vllm_public_assets/
 export DP_SIZE=8

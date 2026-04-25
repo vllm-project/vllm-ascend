@@ -80,7 +80,7 @@ A simple planner implementation is provided at [`rfork_planner.py`](../../../../
 ```shell
 python rfork_planner.py \
   --host 0.0.0.0 \
-  --port `<planner_port>`
+  --port <planner_port>
 ```
 
 ### 3. Start vLLM Instances
@@ -93,15 +93,15 @@ For later instances, if the planner can allocate a compatible seed, RFork will t
 
 ```shell
 export RFORK_CONFIG='{
-  "model_url": "`<model_url>`",
-  "model_deploy_strategy_name": "`<deploy_strategy>`",
-  "rfork_scheduler_url": "http://`<planner_ip>`:`<planner_port>`"
+  "model_url": "<model_url>",
+  "model_deploy_strategy_name": "<deploy_strategy>",
+  "rfork_scheduler_url": "http://<planner_ip>:<planner_port>"
 }'
 
-vllm serve `<model_path>` \
+vllm serve <model_path> \
   --tensor-parallel-size 1 \
-  --served-model-name `<served_model_name>` \
-  --port `<port>` \
+  --served-model-name <served_model_name> \
+  --port <port> \
   --load-format rfork \
   --model-loader-extra-config "${RFORK_CONFIG}"
 ```

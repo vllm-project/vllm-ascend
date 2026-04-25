@@ -559,7 +559,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp  --dataset-name random --random-input 131072 --num-prompts 20 --request-rate 0 --save-result --result-dir ./
 ```
 

@@ -72,7 +72,7 @@ Run the following script to start the vLLM server on single 910B4:
 
 ```shell
 #!/bin/sh
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
@@ -97,11 +97,11 @@ Run the following script to start the vLLM server on single Atlas 300 inference 
 
 ```shell
 #!/bin/sh
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 
 vllm serve ${MODEL_PATH} \
-          --max_model_len 16384 \
+          --max-model-len 16384 \
           --served-model-name PaddleOCR-VL-0.9B \
           --trust-remote-code \
           --no-enable-prefix-caching \
@@ -112,7 +112,7 @@ vllm serve ${MODEL_PATH} \
 ```
 
 :::{note}
-The `--max_model_len` option is added to prevent errors when generating the attention operator mask on the Atlas 300 inference products.
+The `--max-model-len` option is added to prevent errors when generating the attention operator mask on the Atlas 300 inference products.
 :::
 
 ::::
