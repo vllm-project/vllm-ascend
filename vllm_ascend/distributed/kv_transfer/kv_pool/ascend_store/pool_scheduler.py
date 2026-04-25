@@ -104,6 +104,10 @@ class KVPoolScheduler:
         if keys_to_alloc:
             new_gvas = self.store_scheduler.batch_alloc(
                 keys_to_alloc, [alloc_size] * len(keys_to_alloc))
+            if any(gva <= 0 for gva in new_gvas):
+                raise ValueError(
+                    f"Request {req_id}: batch_alloc failed, "
+                    f"gvas={new_gvas}")
             num_new_chunk_keys = len(chunk_keys) - num_cached
             chunk_gvas.extend(new_gvas[:num_new_chunk_keys])
             if last_block_key and len(new_gvas) > num_new_chunk_keys:
@@ -161,31 +165,19 @@ class KVPoolScheduler:
             f"{self.model_name}@{bh.hex()}" for bh in block_hashes_to_check
         ]
         remaining_keys = keys_to_check
-        cached_gvas = self._req_cached_gvas.get(request.request_id)
-        if cached_gvas is None:
-            cached_gvas = []
+        cached_gvas = self._req_cached_gvas.get(request.request_id) or []
         if cached_gvas:
-            num_cached = len(cached_gvas)
-            cached_keys = keys_to_check[:num_cached]
-            exist_results = self.store_scheduler.exists(cached_keys)
-            valid_count = 0
-            for result in exist_results:
-                if result == 1:
-                    valid_count += 1
-                else:
-                    break
-            if valid_count < num_cached:
+            cached_keys = keys_to_check[:len(cached_gvas)]
+            if any(self.store_scheduler.exists(cached_keys)):
                 raise ValueError(
-                    f"Request {request.request_id}: cached gvas key(s) no longer exist "
-                    f"in store (expected {num_cached}, valid {valid_count})")
-            remaining_keys = remaining_keys[num_cached:]
+                    f"Request {request.request_id}: cached gvas key(s) no longer exist in store")
+            remaining_keys = remaining_keys[len(cached_gvas):]
 
         num_hit_blocks = len(cached_gvas)
         if remaining_keys:
             key_infos = self.store_scheduler.get_batch_key_info(remaining_keys)
             for key_info in key_infos:
-                sizes = key_info.size_list()
-                if sizes and sizes[0] > 0:
+                if key_info.size_list()[0] > 0:
                     cached_gvas.append(key_info.gva_list()[0])
                     num_hit_blocks += 1
                 else:
