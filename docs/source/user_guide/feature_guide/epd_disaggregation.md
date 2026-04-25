@@ -20,7 +20,7 @@ A **disaggregated encoder** runs the vision-encoder stage of a multimodal LLM in
    * In-process encoders confine reuse to a single worker.  
    * A remote, shared cache lets any worker retrieve existing embeddings, eliminating redundant computation.
 
-Design doc: <https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-CpnuLLzmR8l9BAE>
+Design doc: <https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-CpnuLLzmR8l9BAE/edit>
 
 ---
 
