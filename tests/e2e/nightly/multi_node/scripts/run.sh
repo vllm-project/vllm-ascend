@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -euxo pipefail
 
 # Color definitions
 GREEN="\033[0;32m"
@@ -172,9 +172,9 @@ checkout_src() {
 
 install_vllm_ascend() {
     echo "====> Install vllm-ascend"
-    VLLM_TARGET_DEVICE=empty pip install -e "$WORKSPACE/vllm"
+    VLLM_TARGET_DEVICE=empty pip install -v -e "$WORKSPACE/vllm"
     pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
-    pip install -e "$WORKSPACE/vllm-ascend"
+    pip install -v -e "$WORKSPACE/vllm-ascend"
 }
 
 install_aisbench() {
@@ -190,6 +190,7 @@ install_aisbench() {
         -r requirements/extra.txt
 
     python3 -m pip cache purge || echo "WARNING: pip cache purge failed, but proceeding..."
+    pip uninstall transformers -y
     pip install transformers==5.5.3
 
 }
