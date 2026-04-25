@@ -1860,6 +1860,8 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.kv_connector_output = kv_connector_output
 
+        # Now the batch has been launched we can wait for corrections from the
+        # previous model forward without breaking async scheduling.
         if deferred_state_corrections_fn:
             deferred_state_corrections_fn()
         return None
