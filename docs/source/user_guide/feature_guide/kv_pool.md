@@ -1147,7 +1147,7 @@ etcdctl --endpoints "${ETCD_IP}:2379" get key
 ```
 
 For production environments, refer to the official etcd clustering
-documentation: <https://etcd.io/docs/current/op-guide/clustering/>
+documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>
 
 ### Start Datasystem Worker
 

@@ -365,3 +365,25 @@ The doctest is a good way to make sure docs stay current and examples remain exe
 ```
 
 This will reproduce the same environment as the CI. See [labeled_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml).
+
+### Run docs link check
+
+You can validate external links in the Sphinx docs locally with:
+
+```bash
+make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+```
+
+To check links in a specific Markdown file, pass the file to `sphinx-build`.
+For example, to check only `docs/source/user_guide/release_notes.md`:
+
+```bash
+cd docs
+sphinx-build -b linkcheck -W --keep-going \
+  source _build/linkcheck source/user_guide/release_notes.md
+```
+
+The detailed report will be written to:
+
+- `docs/_build/linkcheck/output.txt`
+- `docs/_build/linkcheck/output.json`

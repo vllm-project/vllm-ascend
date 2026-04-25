@@ -128,9 +128,9 @@ msgstr ""
 #: ../../source/tutorials/models/GLM4.x.md:27
 msgid ""
 "`Method of Quantify`: [quantization "
-"scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209)."
+"scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8)."
 " You can use these methods to quantify the model."
-msgstr "`量化方法`：[量化方案](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209)。您可以使用这些方法对模型进行量化。"
+msgstr "`量化方法`：[量化方案](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8)。您可以使用这些方法对模型进行量化。"
 
 #: ../../source/tutorials/models/GLM4.x.md:29
 msgid ""
