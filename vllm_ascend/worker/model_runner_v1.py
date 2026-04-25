@@ -24,6 +24,7 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -38,7 +39,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -128,6 +129,7 @@ from vllm_ascend.utils import (
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
+    get_c_env,
     global_stream,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
@@ -369,7 +371,7 @@ class NPUModelRunner(GPUModelRunner):
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
             self.positions = torch.zeros(
                 max_buffer_num_tokens, dtype=torch.int64, device=self.device)
-
+            
         # Create a CPU numpy buffer for positions computation when
         # self.positions is a plain tensor (non-CpuGpuBuffer case).
         self._positions_cpu_buf = torch.zeros(
@@ -377,6 +379,16 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
         )
         self._positions_np_buf = self._positions_cpu_buf.numpy()
+
+        self.use_eagle = (
+            vllm_config.speculative_config.use_eagle()
+            if vllm_config.speculative_config
+            else None
+        )
+        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
+        # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
+        _enpu = get_c_env("ENPU_ENABLE")
+        self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
 
         self._set_up_drafter()
 
@@ -2296,26 +2308,20 @@ class NPUModelRunner(GPUModelRunner):
             )
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
 
-    def _model_forward(
+    def _update_full_graph_params_if_needed(
         self,
+        forward_context: ForwardContext,
         num_tokens_padded: int,
-        input_ids: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **model_kwargs: dict[str, Any],
-    ):
-        assert self.model is not None
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            **model_kwargs,
-        )
-        forward_context = get_forward_context()
-        assert forward_context is not None
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
+        positions: torch.Tensor | None,
+    ) -> None:
+        if (
+            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and not forward_context.capturing
+            and not self.use_sparse
+        ):
+            if self.enable_enpu:
+                torch.npu.current_stream().synchronize()
+
             assert positions is not None
             update_full_graph_params(
                 self.attn_backend,
@@ -2326,7 +2332,42 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
                 positions.shape[0],
             )
-        if get_forward_context().flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
+
+    def _model_forward(
+        self,
+        num_tokens_padded: int,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs: dict[str, Any],
+    ):
+        assert self.model is not None
+        forward_context = get_forward_context()
+        assert forward_context is not None
+
+        model_inputs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "intermediate_tensors": intermediate_tensors,
+            "inputs_embeds": inputs_embeds,
+            **model_kwargs,
+        }
+        run_model = partial(self.model, **model_inputs)
+
+        if self.enable_enpu:
+            # The soft segmentation scenario requires event.record first, then event.wait
+            self._update_full_graph_params_if_needed(
+                forward_context, num_tokens_padded, positions
+            )
+            hidden_states = run_model()
+        else:
+            hidden_states = run_model()
+            self._update_full_graph_params_if_needed(
+                forward_context, num_tokens_padded, positions
+            )
+
+        if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
@@ -3086,7 +3127,13 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
+            self.model = ACLGraphWrapper(
+                self.model,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                use_eagle=self.use_eagle,
+                enable_enpu=self.enable_enpu,
+            )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -3411,13 +3458,26 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
-                            attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
-                                current_kv_cache_spec.dtype
-                            )
-                            conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
-                            raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                            raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
-                            raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
+                            if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
+                                attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
+                                    current_kv_cache_spec.dtype
+                                )
+                                conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
+                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
+                                raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
+                                raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
+                            else:
+                                k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
+                                nope_page_size = int(np.prod(kv_cache_shape[:-1])) * k_dim * get_dtype_size(
+                                    current_kv_cache_spec.dtype
+                                )
+                                rope_page_size = int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(
+                                    current_kv_cache_spec.dtype
+                                )
+                                conv_block_padding_size = raw_k_tensor.numel() - nope_page_size - rope_page_size
+                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
+                                raw_k_tensor = raw_kv_tensor[:nope_page_size]
+                                raw_v_tensor = raw_kv_tensor[nope_page_size:]
                     else:
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks,
@@ -3783,6 +3843,7 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
                     )
+                    attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
