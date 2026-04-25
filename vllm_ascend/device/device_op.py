@@ -19,7 +19,6 @@ import torch
 import torch_npu
 
 from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
@@ -424,8 +423,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             quant_dtype=act_quant_type,
             x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
             weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
-            weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-            x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            weight_scale_dtype=torch.float8_e8m0fnu,
+            x_scale_dtype=torch.float8_e8m0fnu,
         )
         return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
 
@@ -573,10 +572,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             kv_cache=decode_k_nope,
             kr_cache=decode_k_pe,
             cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-            dequant_scale_x=dynamic_scale.view(FLOAT8_E8M0FNU_DTYPE),
-            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(FLOAT8_E8M0FNU_DTYPE),
-            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(FLOAT8_E8M0FNU_DTYPE),
-            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(FLOAT8_E8M0FNU_DTYPE),
+            dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
+            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
             cache_mode="PA_BSND",
             query_quant_mode=0,
             weight_quant_mode=3,

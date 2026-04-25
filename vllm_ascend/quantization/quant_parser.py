@@ -2,7 +2,6 @@ import torch
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT4_E2M1FN_X2_DTYPE,
-    FLOAT8_E8M0FNU_DTYPE,
     ensure_mxfp4_dtype_available,
     ensure_mxfp8_scale_dtype_available,
 )
@@ -13,20 +12,20 @@ class QuantTypeMapping:
         "W8A8_MXFP8": {
             "act_quant_type": torch.float8_e4m3fn,
             "weight_quant_type": None,
-            "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
-            "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+            "scale_dtype": torch.float8_e8m0fnu,
+            "per_token_scale_dtype": torch.float8_e8m0fnu,
         },
         "W4A4_MXFP4": {
             "act_quant_type": FLOAT4_E2M1FN_X2_DTYPE,
             "weight_quant_type": FLOAT4_E2M1FN_X2_DTYPE,
-            "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
-            "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+            "scale_dtype": torch.float8_e8m0fnu,
+            "per_token_scale_dtype": torch.float8_e8m0fnu,
         },
         "W4A8_MXFP": {
             "act_quant_type": torch.float8_e4m3fn,
             "weight_quant_type": FLOAT4_E2M1FN_X2_DTYPE,
-            "scale_dtype": FLOAT8_E8M0FNU_DTYPE,
-            "per_token_scale_dtype": FLOAT8_E8M0FNU_DTYPE,
+            "scale_dtype": torch.float8_e8m0fnu,
+            "per_token_scale_dtype": torch.float8_e8m0fnu,
         },
     }
 
