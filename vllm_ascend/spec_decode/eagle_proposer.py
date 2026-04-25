@@ -940,6 +940,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return torch.stack(draft_token_ids_list, dim=1)
 
         # Generate the remaining draft tokens.
+        batch_size = draft_token_ids.shape[0]
         draft_token_ids_tensor = torch.zeros(
             (self.num_speculative_tokens, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
         )
