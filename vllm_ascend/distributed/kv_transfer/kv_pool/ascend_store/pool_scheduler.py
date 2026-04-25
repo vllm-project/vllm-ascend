@@ -94,12 +94,16 @@ class KVPoolScheduler:
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model_name = model_config.model.split('/')[-1]
 
+        # Define independent layers (same as pool_worker.py)
+        INDEPENDENT_LAYER_INDICES = {0, self.num_layers - 1}
+        self.independent_layers = list(INDEPENDENT_LAYER_INDICES)
+
         dram_size_str = ascend_envs.VLLM_ASCEND_KV_POOL_DRAM_SIZE
         dram_size_bytes = _parse_dram_size(dram_size_str)
         keys_per_block_hash = (
             self.pcp_size * self.dcp_size
             * (self.tp_size // self.put_step)
-            * self.num_layers
+            * (self.num_layers - len(self.independent_layers))
         )
         self.keys_per_block_hash = keys_per_block_hash
         memory_per_block_hash = keys_per_block_hash * self.page_size_bytes
