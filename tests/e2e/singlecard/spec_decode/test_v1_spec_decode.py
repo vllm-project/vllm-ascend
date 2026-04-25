@@ -666,7 +666,6 @@ def test_eagle3_fia_pad_under_max_concurrency(
 
 @pytest.mark.parametrize("method", DFLASH.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
-@pytest.mark.skipif(True, reason="Fix me, DFlash acceptance test is flaky, needs investigation")
 def test_dflash_acceptance(
     method: str,
     num_speculative_tokens: int,
