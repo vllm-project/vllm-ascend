@@ -1,11 +1,11 @@
 # ruff: noqa: E501
+import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
-import inspect
 from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
@@ -517,7 +517,7 @@ class TestEagleProposerHelperMethods(TestBase):
 
 
 # fmt: off
-class TestEagleProposerPropose():
+class TestEagleProposerPropose:
     @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
 
@@ -1170,7 +1170,7 @@ class TestEagleProposerPropose():
         assert sig_name == ['self', 'common_prefix_len', 'common_attn_metadata', 'fast_build']
 
 
-    # get the param in inpect sig, for check_mock()
+    # get the param in inspect sig, for check_mock()
     def get_param_names(self, sig):
         return [p.name for p in sig.parameters.values()]
 # fmt: on
