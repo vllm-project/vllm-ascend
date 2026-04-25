@@ -360,78 +360,59 @@ class KVPoolWorker:
     def _process_chunks_incremental(
         self,
         tracker: dict,
-        block_keys: list[str],
         block_ids: list[int],
         layer_id: int,
-        key_gva_mapping: dict,
+        chunk_gvas: list[int],
         num_blocks: int,
     ) -> None:
         processed_count = tracker['processed_count']
         if processed_count >= num_blocks:
             return
 
+        rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
         blocks_to_process = num_blocks - processed_count
         for block_idx in range(blocks_to_process):
-            key = block_keys[processed_count + block_idx]
             start = (processed_count + block_idx) * self.block_size
             end = start + self.block_size
             addr, size = self.token_database.prepare_value_layer(
                 start, end, block_ids, layer_id)
             tracker['chunk_addr_list'].extend(addr)
             tracker['chunk_size_list'].extend(size)
-            base_gva = key_gva_mapping.get(key)
-            if base_gva is not None:
-                rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
-                offset = rank_layer_offset
-                for s in size:
-                    tracker['chunk_gvas_list'].append(base_gva + offset)
-                    offset += s
+            base_gva = chunk_gvas[processed_count + block_idx]
+            offset = base_gva + rank_layer_offset
+            for s in size:
+                tracker['chunk_gvas_list'].append(offset)
+                offset += s
 
         tracker['processed_count'] = num_blocks
 
     def _process_last_block(
         self,
         tracker: dict,
-        last_block_key: str | None,
         block_ids: list[int],
         layer_id: int,
-        key_gva_mapping: dict,
+        last_block_gva: int,
         num_blocks: int,
-        has_last_block: bool,
     ) -> None:
-        if not has_last_block or last_block_key is None:
-            tracker['last_block_addr'] = []
-            tracker['last_block_size'] = []
-            tracker['last_block_gvas'] = []
-            return
-
         last_block_start = num_blocks * self.block_size
         last_block_end = last_block_start + self.block_size
 
-        last_block_addr = []
-        last_block_size = []
-        last_block_gvas = []
         addr, size = self.token_database.prepare_value_layer(
             last_block_start, last_block_end, block_ids, layer_id)
-        last_block_addr.extend(addr)
-        last_block_size.extend(size)
-        base_gva = key_gva_mapping.get(last_block_key)
-        if base_gva is not None:
-            rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
-            offset = rank_layer_offset
-            for s in size:
-                last_block_gvas.append(base_gva + offset)
-                offset += s
+        rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
+        offset = last_block_gva + rank_layer_offset
+        last_block_gvas = []
+        for s in size:
+            last_block_gvas.append(offset)
+            offset += s
 
-        tracker['last_block_addr'] = last_block_addr
-        tracker['last_block_size'] = last_block_size
+        tracker['last_block_addr'] = addr
+        tracker['last_block_size'] = size
         tracker['last_block_gvas'] = last_block_gvas
 
     def _build_req_meta(
         self,
         request: ReqMeta,
-        block_keys: list[str],
-        last_block_key: str | None,
         layer_id: int,
         tracker: dict,
         is_last_chunk: bool = False,
@@ -440,12 +421,12 @@ class KVPoolWorker:
         final_size_list = tracker['chunk_size_list'] + tracker['last_block_size']
         final_gvas_list = tracker['chunk_gvas_list'] + tracker['last_block_gvas']
 
-        all_keys = list(block_keys) + ([last_block_key] if last_block_key else [])
         req_meta = LayerMultiBlockReqMeta(
-            request.req_id, all_keys,
+            request.req_id,
             request.block_ids, layer_id, is_last_chunk
         )
-        req_meta.key_gva_mapping = request.key_gva_mapping
+        req_meta.chunk_gvas = request.chunk_gvas
+        req_meta.last_block_gva = request.last_block_gva
         req_meta.addr_list = final_addr_list
         req_meta.size_list = final_size_list
         req_meta.gvas_list = final_gvas_list
@@ -454,8 +435,6 @@ class KVPoolWorker:
     def _process_save_for_layer(
         self,
         request: ReqMeta,
-        block_keys: list[str],
-        last_block_key: str | None,
         layer_id: int,
     ) -> None:
         if request.can_save is None or not request.can_save:
@@ -473,23 +452,21 @@ class KVPoolWorker:
 
         has_last_block = request.token_len_chunk % self.block_size != 0
         self._process_chunks_incremental(
-            tracker, block_keys, request.block_ids, layer_id,
-            request.key_gva_mapping, num_blocks)
+            tracker, request.block_ids, layer_id,
+            request.chunk_gvas, num_blocks)
 
-        self._process_last_block(
-            tracker, last_block_key, request.block_ids, layer_id,
-            request.key_gva_mapping, num_blocks, has_last_block)
+        if has_last_block:
+            self._process_last_block(
+                tracker, request.block_ids, layer_id,
+                request.last_block_gva, num_blocks)
 
-        save_block_keys = block_keys[num_cached_blocks:] if num_cached_blocks > 0 else block_keys
         req_meta = self._build_req_meta(
-            request, save_block_keys, last_block_key, layer_id, tracker, request.is_last_chunk)
+            request, layer_id, tracker, request.is_last_chunk)
         self.layer_save_tasks[layer_id].append(req_meta)
 
     def _process_load_for_layer(
         self,
         request: ReqMeta,
-        block_keys: list[str],
-        last_block_key: str | None,
         layer_id: int,
     ) -> None:
         load_spec = request.load_spec
@@ -500,30 +477,27 @@ class KVPoolWorker:
         num_saved_blocks = token_len // self.block_size
         has_load_last_block = token_len % self.block_size != 0
 
-        load_keys = block_keys[:num_saved_blocks]
-
         load_tracker_key = f"{request.req_id}_load"
         tracker = self._get_or_init_layer_tracker(request.req_id, layer_id, load_tracker_key)
 
         self._process_chunks_incremental(
-            tracker, block_keys, request.block_ids, layer_id,
-            request.key_gva_mapping, num_saved_blocks)
+            tracker, request.block_ids, layer_id,
+            request.chunk_gvas, num_saved_blocks)
 
-        self._process_last_block(
-            tracker, last_block_key if has_load_last_block else None, request.block_ids, layer_id,
-            request.key_gva_mapping, num_saved_blocks, has_load_last_block)
+        if has_load_last_block:
+            self._process_last_block(
+                tracker, request.block_ids, layer_id,
+                request.last_block_gva, num_saved_blocks)
 
-        req_meta = self._build_req_meta(request, load_keys, last_block_key if request.last_block_key else None, layer_id, tracker)
+        req_meta = self._build_req_meta(request, layer_id, tracker)
         self.layer_load_tasks[layer_id].append(req_meta)
 
     def process_layer_data(self, request: ReqMeta) -> None:
-        block_keys = request.block_keys or []
-        last_block_key = request.last_block_key
         for layer_id in range(self.num_layers):
             if layer_id in self.independent_layers:
                 continue
-            self._process_save_for_layer(request, block_keys, last_block_key, layer_id)
-            self._process_load_for_layer(request, block_keys, last_block_key, layer_id)
+            self._process_save_for_layer(request, layer_id)
+            self._process_load_for_layer(request, layer_id)
 
     def wait_for_layer_load(self) -> None:
         if self.current_layer in self.independent_layers:
