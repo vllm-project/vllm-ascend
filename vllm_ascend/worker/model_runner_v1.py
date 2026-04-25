@@ -251,6 +251,21 @@ class NPUModelRunner(GPUModelRunner):
         if _is_ngram_gpu:
             vllm_config.speculative_config.method = "ngram_gpu"
 
+        # Pre-record all NPU events created during super().__init__() so
+        # that the first synchronize() call does not fail.  Unlike CUDA,
+        # NPU errors on synchronize() of an event that has never been
+        # recorded (error code 507057).
+        for attr in (
+            'prepare_inputs_event',
+            'num_accepted_tokens_event',
+            'draft_token_ids_event',
+            'valid_sampled_token_count_event',
+            'transfer_event',
+        ):
+            ev = getattr(self, attr, None)
+            if ev is not None and hasattr(ev, 'record'):
+                ev.record()
+
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         self.query_start_loc = self._make_buffer(
