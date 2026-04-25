@@ -212,6 +212,132 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
 ::::
 :::::
 
+### Multi-node Deployment
+
+- `DeepSeek-V4-Flash-w8a8-mtp`: require at least 2 Atlas 800 A2 (64G × 8).
+Run the following scripts on two nodes respectively.
+
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A2 series
+:sync: A2
+
+**Node0**
+
+```{code-block} bash
+   :substitutions:
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_CONNECT_TIMEOUT=120
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+export ACL_OP_INIT_MODE=1
+export TRITON_ALL_BLOCKS_PARALLEL=1
+export USE_MULTI_BLOCK_POOL=1
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
+--host 0.0.0.0 \
+--port 8005 \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 8 \
+--quantization ascend \
+--seed 1024 \
+--served-model-name deepseek-v4-flash \
+--enable-expert-parallel \
+--max-num-seqs 64 \
+--max-model-len 131072 \
+--max-num-batched-tokens 8192 \
+--trust-remote-code \
+--async-scheduling \
+--no-enable-prefix-caching \
+--chat-template /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp/chat_template.jinja \
+--gpu-memory-utilization 0.94 \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"enable_cpu_binding": "true", "multistream_overlap_shared_expert": true}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+
+```
+
+**Node1**
+
+```{code-block} bash
+   :substitutions:
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
+nic_name="xxx"
+local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export HCCL_BUFFSIZE=200
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_CONNECT_TIMEOUT=120
+export HCCL_INTRA_PCIE_ENABLE=1
+export HCCL_INTRA_ROCE_ENABLE=0
+export ACL_OP_INIT_MODE=1
+export TRITON_ALL_BLOCKS_PARALLEL=1
+export USE_MULTI_BLOCK_POOL=1
+
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
+--host 0.0.0.0 \
+--port 8005 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 8 \
+--quantization ascend \
+--seed 1024 \
+--served-model-name deepseek-v4-flash \
+--enable-expert-parallel \
+--max-num-seqs 64 \
+--max-model-len 131072 \
+--max-num-batched-tokens 8192 \
+--trust-remote-code \
+--async-scheduling \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.94 \
+--chat-template /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp/chat_template.jinja \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--additional-config '{"enable_cpu_binding": "true", "multistream_overlap_shared_expert": true}' \
+--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+
+```
+
+::::
+:::::
+
 ### Prefill-Decode Disaggregation
 
 We'd like to show the deployment guide of DeepSeek-V4 on Atlas 800 A3 (128G × 8) multi-node environment with 2P1D for better performance.
