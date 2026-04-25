@@ -129,6 +129,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 
 try:
@@ -727,6 +728,73 @@ async def _handle_completions(api: str, request: Request):
         # refer to vLLM sampling_params: max_token default value
         origin_max_tokens = req_data.get("max_tokens", 16)
 
+        async def generate_nonstream():
+            nonlocal instance_info
+            generated_text = ""
+            released_kv = False
+            retry_count = 0
+            completion_tokens = 0
+
+            # Work on a copy so we can safely mutate prompt/max_tokens on retries.
+            req_data_local = json.loads(json.dumps(req_data))
+            req_data_local["stream"] = False
+            if "stream_options" in req_data_local:
+                del req_data_local["stream_options"]
+
+            while True:
+                headers = {
+                    "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+                    "X-Request-Id": instance_info.request_id,
+                }
+                response = await instance_info.decoder.client.post(api, json=req_data_local, headers=headers)
+                response.raise_for_status()
+                resp_json = response.json()
+
+                if not released_kv:
+                    proxy_state.release_prefiller_kv(instance_info.prefiller_idx, instance_info.prefiller_score)
+                    released_kv = True
+
+                choices = resp_json.get("choices", [])
+                if not choices:
+                    proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                    return resp_json
+
+                choice0 = choices[0]
+                message = choice0.get("message") or {}
+                content = message.get("content") or choice0.get("text") or ""
+                generated_text += content
+
+                usage = resp_json.get("usage") or {}
+                step_completion_tokens = usage.get("completion_tokens", 0) or 0
+                completion_tokens += step_completion_tokens
+
+                stop_reason = choice0.get("stop_reason")
+                if stop_reason == "recomputed":
+                    retry_count += 1
+                    if chat_flag:
+                        messages[0]["content"] = origin_prompt + generated_text
+                    else:
+                        req_data_local["prompt"] = origin_prompt + generated_text
+
+                    req_data_local["max_tokens"] = max(origin_max_tokens - completion_tokens + retry_count, 1)
+
+                    # Switch to a new instance for the next attempt.
+                    tmp_request_length = len(json.dumps(req_data_local).encode("utf-8"))
+                    proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                    instance_info = await _handle_select_instance(api, req_data_local, tmp_request_length)
+                    released_kv = False
+                    continue
+
+                if retry_count > 0:
+                    if chat_flag:
+                        choice0.setdefault("message", {})
+                        choice0["message"]["content"] = generated_text
+                    else:
+                        choice0["text"] = generated_text
+
+                proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
+                return resp_json
+
         async def generate_stream():
             nonlocal instance_info
             generated_token = ""
@@ -782,7 +850,7 @@ async def _handle_completions(api: str, request: Request):
                         completion_tokens = (
                             (completion_tokens + 1)
                             if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens"))
+                            else (completion_tokens + (usage.get("completion_tokens", 0) or 0))
                         )
                         if stop_reason == "recomputed":
                             retry = True
@@ -797,6 +865,7 @@ async def _handle_completions(api: str, request: Request):
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
+                                choice.setdefault("message", {})
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
@@ -814,9 +883,10 @@ async def _handle_completions(api: str, request: Request):
             # After streaming done, release tokens
             proxy_state.release_decoder(instance_info.decoder_idx, instance_info.decoder_score)
 
-        # Determine the correct media type based on stream flag
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        if stream_flag:
+            return StreamingResponse(generate_stream(), media_type="text/event-stream; charset=utf-8")
+        result_json = await generate_nonstream()
+        return JSONResponse(content=result_json)
     except Exception as e:
         import traceback
 
