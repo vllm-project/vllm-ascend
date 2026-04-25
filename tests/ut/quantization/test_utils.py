@@ -4,9 +4,12 @@ import tempfile
 from unittest.mock import MagicMock, patch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+from tests.ut.quantization.conftest_quantization import FAKQUANT_CONFIG, W8A8_CONFIG
+from vllm_ascend.quantization import AscendCompressedTensorsConfig
+from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME, AscendModelSlimConfig
 from vllm_ascend.quantization.utils import (
     detect_quantization_method,
+    enable_fa_quant,
     maybe_auto_detect_quantization,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
@@ -155,3 +158,31 @@ class TestMaybeAutoDetectQuantization(TestBase):
         vllm_config = self._make_vllm_config(model_path="org/model-name", revision="v1.0", quantization=None)
         maybe_auto_detect_quantization(vllm_config)
         mock_detect.assert_called_once_with("org/model-name", revision="v1.0")
+
+
+class TestEnableFaQuant(TestBase):
+    def test_non_quantization_scenarios(self):
+        # non quantization scene
+        vllm_config = MagicMock()
+        vllm_config.quant_config = None
+        result = enable_fa_quant(vllm_config)
+        self.assertFalse(result)
+
+        # CompressedTensors scene
+        vllm_config.quant_config = AscendCompressedTensorsConfig({}, [], "", {})
+        result = enable_fa_quant(vllm_config)
+        self.assertFalse(result)
+
+        # non fa3 quant scene
+        vllm_config.quant_config = AscendModelSlimConfig(W8A8_CONFIG)
+        result = enable_fa_quant(vllm_config)
+        self.assertFalse(result)
+
+    def test_fa3_quantization_scenario(self):
+        vllm_config = MagicMock()
+        vllm_config.quant_config = AscendModelSlimConfig(FAKQUANT_CONFIG)
+        vllm_config.kv_transfer_config = None
+        result = enable_fa_quant(vllm_config)
+        self.assertTrue(result)
+        result = enable_fa_quant(vllm_config, layer_name="test_layer")
+        self.assertFalse(result)
