@@ -24,7 +24,7 @@ deployment:
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
-      --tensor-parallel-size 16
+      --tensor-parallel-size 8
       --enable-expert-parallel
       --seed 1024
       --max-num-seqs 48
@@ -45,7 +45,7 @@ deployment:
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
-      --tensor-parallel-size 16
+      --tensor-parallel-size 8
       --enable-expert-parallel
       --seed 1024
       --max-num-seqs 48
