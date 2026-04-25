@@ -1,16 +1,19 @@
-test_name: "test DeepSeek-R1-W8A8 disaggregated_prefill"
+test_name: "test DeepSeek-R1-W8A8-EPLB disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 4
 npu_per_node: 16
 env_common:
   VLLM_USE_MODELSCOPE: true
-  HCCL_BUFFSIZE: 1024
+  HCCL_BUFFSIZE: 800
   SERVER_PORT: 8080
   OMP_PROC_BIND: false
-  OMP_NUM_THREADS: 10
+  OMP_NUM_THREADS: 1
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_DETERMINISTIC: True
+  ASCEND_BUFFER_POOL: "4:8"
+  HCCL_OP_EXPANSION_MODE: "AIV"
   TASK_QUEUE_ENABLE: 1
+  VLLM_ASCEND_ENABLE_FUSED_MC2: 1
   HCCL_OP_RETRY_ENABLE: "L0:0, L1:0, L2:0"
   DYNAMIC_EPLB: true
 
@@ -32,16 +35,17 @@ deployment:
           --enable-expert-parallel
           --seed 1024
           --quantization ascend
-          --max-num-seqs 4
-          --max-model-len 36864
+          --max-num-seqs 8
+          --max-model-len 16384
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
+          --async-scheduling
           --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
-          "kv_port": "30000",
+          "kv_port": "30100",
           "engine_id": "0",
           "kv_connector_extra_config": {
                     "prefill": {
@@ -55,7 +59,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+          '{"enable_prefill_optimizations":true,"recompute_scheduler_enable":true}'
 
   -
     server_cmd: >
@@ -69,11 +73,12 @@ deployment:
           --enable-expert-parallel
           --seed 1024
           --quantization ascend
-          --max-num-seqs 4
-          --max-model-len 36864
+          --max-num-seqs 8
+          --max-model-len 16384
           --max-num-batched-tokens 16384
           --trust-remote-code
           --gpu-memory-utilization 0.9
+          --async-scheduling
           --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
@@ -92,7 +97,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+          '{"enable_prefill_optimizations":true,"recompute_scheduler_enable":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -107,12 +112,13 @@ deployment:
         --enable-expert-parallel
         --seed 1024
         --quantization ascend
-        --max-num-seqs 28
-        --max-model-len 36864
-        --max-num-batched-tokens 256
+        --max-num-seqs 34
+        --max-model-len 60000
+        --max-num-batched-tokens 68
         --trust-remote-code
-        --gpu-memory-utilization 0.9
+        --gpu-memory-utilization 0.93
         --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[2,4,8,16,24,32,48,56,60,64,68]}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -130,7 +136,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}'
+        '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8}, "recompute_scheduler_enable":true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":800,"algorithm_execution_interval":50, "eplb_policy_type":2, "num_redundant_experts":32}}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
@@ -144,12 +150,13 @@ deployment:
         --enable-expert-parallel
         --seed 1024
         --quantization ascend
-        --max-num-seqs 28
-        --max-model-len 36864
-        --max-num-batched-tokens 256
+        --max-num-seqs 34
+        --max-model-len 60000
+        --max-num-batched-tokens 68
         --trust-remote-code
-        --gpu-memory-utilization 0.9
+        --gpu-memory-utilization 0.93
         --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[2,4,8,16,24,32,48,56,60,64,68]}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -167,18 +174,18 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+        '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8}, "recompute_scheduler_enable":true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":800,"algorithm_execution_interval":50, "eplb_policy_type":2, "num_redundant_experts":32}}'
 benchmarks:
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    dataset_path: vllm-ascend/GSM8K-in3500-bs10000
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 2800
+    num_prompts: 7616
     max_out_len: 1500
-    batch_size: 700
-    request_rate: 11.2
-    baseline: 1
+    batch_size: 1088
+    request_rate: 15
+    baseline: 17000
     threshold: 0.97
   acc:
     case_type: accuracy
