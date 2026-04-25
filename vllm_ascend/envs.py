@@ -94,8 +94,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     # Whether to enable fused MC2 (`dispatch_gmm_combine_decode` / `dispatch_ffn_combine`).
-    # Platform validation: only PD-disaggregated **decode** instances (`kv_role='kv_consumer'`).
-    # Not supported in PD-mixed mode (`kv_both` or no kv_transfer_config) or on prefill nodes (`kv_producer`).
     # 0, or not set: default ALLTOALL and MC2 will be used.
     # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
