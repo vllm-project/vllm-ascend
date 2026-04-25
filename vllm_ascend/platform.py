@@ -929,6 +929,22 @@ class NPUPlatform(Platform):
                 )
                 vllm_config.parallel_config.ray_workers_use_nsight = False
 
+            # --numa-bind relies on GPU-to-NUMA topology detection which is
+            # not supported on Ascend NPU.  Seamlessly replace it with the
+            # Ascend-native CPU binding via additional_config.
+            if getattr(vllm_config.parallel_config, "numa_bind", False):
+                vllm_config.parallel_config.numa_bind = False
+                if vllm_config.additional_config is None:
+                    vllm_config.additional_config = {}
+                vllm_config.additional_config.setdefault("enable_cpu_binding", True)
+                logger.info(
+                    "'--numa-bind' is not supported on Ascend NPU (GPU-to-"
+                    "NUMA topology detection unavailable). Automatically "
+                    "converted to --additional-config "
+                    "'{\"enable_cpu_binding\": true}' for Ascend-native "
+                    "CPU-core binding."
+                )
+
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
                 logger.warning(
                     "'--enable-dbo' is currently ignored on Ascend NPU because the "
