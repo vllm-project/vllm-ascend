@@ -26,7 +26,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -572,10 +572,9 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        # When scheduler rewinds num_computed_tokens (for example after KV
-        # load failure recompute), any previous draft bookkeeping is stale and
-        # must not be applied again in GPUModelRunner._update_states().
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        # Temporary rewind guard for KV-load-failure recompute.
+        # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
 
         if self.use_async_scheduling:
@@ -588,7 +587,7 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        super()._update_states(scheduler_output)
+        return super()._update_states(scheduler_output)
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1548,7 +1547,9 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
-                self._update_states(scheduler_output)
+                deferred_state_corrections_fn = self._update_states(
+                    scheduler_output
+                )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -1651,8 +1652,12 @@ class NPUModelRunner(GPUModelRunner):
                 # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
                 # We simply utilize the implementation in vLLM.
                 if self.cache_config.mamba_cache_mode == "align":
-                    # preprocess_mamba reads req_state.num_computed_tokens (CPU),
-                    # so state updates must happen before it runs.
+                    # preprocess_mamba reads req_state.num_computed_tokens (CPU)
+                    # to decide copy operations, so we must apply deferred
+                    # corrections before it runs.
+                    if deferred_state_corrections_fn:
+                        deferred_state_corrections_fn()
+                        deferred_state_corrections_fn = None
                     mamba_utils.preprocess_mamba(
                         scheduler_output,
                         self.kv_cache_config,
@@ -1855,6 +1860,8 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.kv_connector_output = kv_connector_output
 
+        if deferred_state_corrections_fn:
+            deferred_state_corrections_fn()
         return None
 
     @torch.inference_mode()
