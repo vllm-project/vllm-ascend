@@ -1359,8 +1359,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_reqs = 3
         vocab_size = 1000
 
-        seq_lens_cpu = torch.tensor([10, 15, 20], dtype=torch.int32)
-
         sampled_token_ids = torch.tensor(
             [
                 [100, 101, 102, 103, 104],
@@ -1403,8 +1401,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_reqs = 3
         vocab_size = 1000
 
-        seq_lens_cpu = torch.tensor([10, 15, 20], dtype=torch.int32)
-
         sampled_token_ids = torch.tensor(
             [
                 [100, 101, -1, -1, -1],
@@ -1443,8 +1439,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test case where all tokens are rejected, should use backup token"""
         num_reqs = 3
         vocab_size = 1000
-
-        seq_lens_cpu = torch.tensor([10, 15, 20], dtype=torch.int32)
 
         sampled_token_ids = torch.tensor(
             [
@@ -1487,8 +1481,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_reqs = 3
         vocab_size = 1000
 
-        seq_lens_cpu = torch.tensor([10, 15, 20], dtype=torch.int32)
-
         sampled_token_ids = torch.tensor(
             [
                 [100, 101, 102, 103, 104],
@@ -1529,8 +1521,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test mixed scenario: some rejected tokens, some discarded requests, some all-rejected"""
         num_reqs = 4
         vocab_size = 1000
-
-        seq_lens_cpu = torch.tensor([10, 15, 20, 25], dtype=torch.int32)
 
         sampled_token_ids = torch.tensor(
             [
@@ -1576,8 +1566,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_reqs = 1
         vocab_size = 1000
 
-        seq_lens_cpu = torch.tensor([10], dtype=torch.int32)
-
         sampled_token_ids = torch.tensor([[100, 101, 102, 103, 104]], dtype=torch.int64)
 
         requests = {
@@ -1607,8 +1595,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test with tokens at vocab size boundary"""
         num_reqs = 2
         vocab_size = 100
-
-        seq_lens_cpu = torch.tensor([10, 15], dtype=torch.int32)
 
         sampled_token_ids = torch.tensor(
             [
@@ -1650,8 +1636,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test to verify key variables that affect downstream computation"""
         num_reqs = 2
         vocab_size = 1000
-
-        seq_lens_cpu = torch.tensor([10, 15], dtype=torch.int32)
 
         sampled_token_ids = torch.tensor(
             [
