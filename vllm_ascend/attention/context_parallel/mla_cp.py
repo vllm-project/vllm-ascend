@@ -1353,7 +1353,6 @@ def split_attn_metadata(
         decode=None,
         prefill=dycp_prefill,
         num_dycp_reqs=num_dycp_reqs,
-        seq_lens_cpu=attn_metadata.seq_lens_cpu
     )
     dycp_cc = generate_dycp_chunked_metadata(
         dycp_metadata, chunked_prefill_workspace_size, block_size, common_attn_metadata, num_dycp_reqs, dcp_size, pcp_size, dycp_size, cp_virtual_block_size, cp_local_block_size)
