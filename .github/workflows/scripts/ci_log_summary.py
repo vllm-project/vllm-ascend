@@ -1153,8 +1153,7 @@ def main() -> None:
         "--no-remote-meta",
         action="store_true",
         help=(
-            "With --log-file only: do not call GitHub API for good_commit "
-            "(avoids gh/auth and duplicate work in CI)."
+            "With --log-file only: do not call GitHub API for good_commit (avoids gh/auth and duplicate work in CI)."
         ),
     )
     args = parser.parse_args()
