@@ -180,6 +180,8 @@ jobs:
     secrets:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+      VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
 
   multi-node-tests:
     name: multi-node
@@ -223,6 +225,8 @@ jobs:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+      VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
 
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
@@ -276,6 +280,11 @@ jobs:
           )
         }}
       upload: false
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+      VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
 
   single-node-accuracy-tests-pr-only:
     needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
@@ -303,6 +312,11 @@ jobs:
           contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
         }}
       upload: false
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
+      VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+      VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
 
   doc-test:
     name: doc-test

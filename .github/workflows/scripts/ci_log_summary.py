@@ -16,6 +16,7 @@ import regex as re
 Generate CI failure summaries from a local pytest log or a GitHub Actions run.
 Examples:
     python3 .github/workflows/scripts/ci_log_summary.py --log-file /tmp/unit-test.log --mode ut --step-name "Unit test"
+    python3 .github/workflows/scripts/ci_log_summary.py --log-file /tmp/e2e.log --no-remote-meta --format llm-json
     python3 .github/workflows/scripts/ci_log_summary.py --run-id 23127187822 --format json
 """
 
@@ -887,7 +888,12 @@ def _suppress_wrapper_assertions(errors: list[dict]) -> list[dict]:
     return filtered
 
 
-def process_local_log(log_text: str, job_name: str = "local-log") -> dict:
+def process_local_log(
+    log_text: str,
+    job_name: str = "local-log",
+    *,
+    fetch_remote_meta: bool = True,
+) -> dict:
     failed_test_cases = extract_failed_test_cases(log_text)
     failed_test_files = extract_failed_test_files(log_text, failed_test_cases)
     errors = []
@@ -900,11 +906,12 @@ def process_local_log(log_text: str, job_name: str = "local-log") -> dict:
     job_errors = _dedupe_errors_by_scope(errors)
     unique_errors = _dedupe_errors(job_errors)
     conclusion = "failure" if failed_test_files or failed_test_cases or unique_errors else "success"
+    good_commit = get_good_commit() if fetch_remote_meta else None
     return {
         "run_id": None,
         "run_url": None,
         "run_created_at": None,
-        "good_commit": get_good_commit(),
+        "good_commit": good_commit,
         "bad_commit": extract_bad_commit(log_text, resolve_remote=False),
         "total_jobs": 1,
         "failed_jobs_count": 1 if conclusion == "failure" else 0,
@@ -953,7 +960,7 @@ def process_run(run_id: int, repo: str = REPO) -> dict:
         if bad_commit is None:
             bad_commit = extract_bad_commit(log_text)
 
-        local_result = process_local_log(log_text, job_name=job_name)
+        local_result = process_local_log(log_text, job_name=job_name, fetch_remote_meta=False)
         job_scoped_errors = local_result["job_results"][0]["errors"]
         has_failure_signal = bool(
             local_result["failed_test_files"] or local_result["failed_test_cases"] or job_scoped_errors
@@ -1082,7 +1089,7 @@ def render_llm_json(result: dict) -> str:
 
 def render_summary(result: dict, *, step_name: str, mode: str) -> str:
     lines = [
-        f"## Test Failure Summary: {step_name}",
+        f"## CI failure summary: {step_name}",
         "",
         "### Overview",
         "",
@@ -1142,6 +1149,14 @@ def main() -> None:
     parser.add_argument(
         "--output", type=Path, default=None, help="Optional output file path. If omitted, prints to stdout."
     )
+    parser.add_argument(
+        "--no-remote-meta",
+        action="store_true",
+        help=(
+            "With --log-file only: do not call GitHub API for good_commit "
+            "(avoids gh/auth and duplicate work in CI)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.run_id is not None:
@@ -1150,7 +1165,11 @@ def main() -> None:
         if not args.log_file.exists() or args.log_file.stat().st_size == 0:
             return
         log_text = args.log_file.read_text(encoding="utf-8", errors="replace")
-        result = process_local_log(log_text, job_name=args.step_name)
+        result = process_local_log(
+            log_text,
+            job_name=args.step_name,
+            fetch_remote_meta=not args.no_remote_meta,
+        )
 
     if args.format == "json":
         rendered_output = render_json(result)
