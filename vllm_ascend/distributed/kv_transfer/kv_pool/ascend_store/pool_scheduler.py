@@ -101,6 +101,7 @@ class KVPoolScheduler:
             * (self.tp_size // self.put_step)
             * self.num_layers
         )
+        self.keys_per_block_hash = keys_per_block_hash
         memory_per_block_hash = keys_per_block_hash * self.page_size_bytes
         lru_capacity = dram_size_bytes // memory_per_block_hash
         logger.info(
@@ -112,28 +113,27 @@ class KVPoolScheduler:
         self.key_lru_cache = KeyLRUCache(lru_capacity, self.store_scheduler)
         self._req_last_block_gvas: dict[str, dict[str, int | None]] = {}
 
-    def _generate_keys_and_alloc(self, block_hashes, req_id='', has_last_block=False) -> tuple[list[list[str]], list[list[str]], dict[str, int | None]]:
-        block_keys_by_layer, last_block_keys_by_layer, block_hash_groups = self.generate_keys(block_hashes, req_id=req_id, has_last_block=has_last_block)
+    def _generate_keys_and_alloc(self, block_hashes, req_id='', has_last_block=False) -> tuple[list[str], str | None, dict[str, int | None]]:
+        chunk_keys, last_block_key, block_hash_groups = self.generate_keys(block_hashes, req_id=req_id, has_last_block=has_last_block)
+        alloc_size = self.page_size_bytes * self.keys_per_block_hash
         need_alloc_last_block = has_last_block and req_id not in self._req_last_block_gvas
 
         if need_alloc_last_block:
-            all_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
-            all_keys.extend([key for layer_keys in last_block_keys_by_layer for key in layer_keys])
+            all_keys = chunk_keys + ([last_block_key] if last_block_key else [])
             gvas = self.key_lru_cache.batch_get_and_alloc(
-                all_keys, self.page_size_bytes, block_hash_groups)
+                all_keys, alloc_size, block_hash_groups)
             key_gva_mapping: dict[str, Any] = dict(zip(all_keys, gvas))
-            last_block_keys_flat = [key for layer_keys in last_block_keys_by_layer for key in layer_keys]
-            self._req_last_block_gvas[req_id] = {
-                k: key_gva_mapping[k] for k in last_block_keys_flat if k in key_gva_mapping
-            }
+            if last_block_key:
+                self._req_last_block_gvas[req_id] = {
+                    last_block_key: key_gva_mapping.get(last_block_key)
+                }
         else:
-            chunk_keys = [key for layer_keys in block_keys_by_layer for key in layer_keys]
             chunk_block_hash_groups = {
                 k: v for k, v in block_hash_groups.items()
                 if not k.endswith(b'_lastblock')
             }
             gvas = self.key_lru_cache.batch_get_and_alloc(
-                chunk_keys, self.page_size_bytes,
+                chunk_keys, alloc_size,
                 chunk_block_hash_groups if chunk_block_hash_groups else None)
             # TODO here should verify the gvas is not None
             # TODO if gvas is None, should release the keys and retry
@@ -141,44 +141,23 @@ class KVPoolScheduler:
             if has_last_block and req_id in self._req_last_block_gvas:
                 key_gva_mapping.update(self._req_last_block_gvas[req_id])
 
-        return block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping
+        return chunk_keys, last_block_key, key_gva_mapping
 
     def generate_keys(self, chunk_hashes, req_id='', has_last_block=False):
         block_hash_groups: dict[bytes, list[str]] = {}
+        chunk_keys = []
+        for chunk_hash in chunk_hashes:
+            key = f"{self.model_name}@{chunk_hash.hex()}"
+            chunk_keys.append(key)
+            block_hash_groups[chunk_hash] = [key]
 
-        def _build_layer_keys(layer_id: int) -> tuple[list[str], list[str]]:
-            chunk_keys = []
-            for chunk_hash in chunk_hashes:
-                if chunk_hash not in block_hash_groups:
-                    block_hash_groups[chunk_hash] = []
-                keys_for_hash = [
-                    f"{self.model_name}@pcp{pcp_rank}@dcp{dcp_rank}"
-                    f"@head_or_tp_rank:{head_or_tp_rank}@{chunk_hash.hex()}@{layer_id}"
-                    for pcp_rank in range(self.pcp_size)
-                    for dcp_rank in range(self.dcp_size)
-                    for head_or_tp_rank in range(self.tp_size // self.put_step)
-                ]
-                chunk_keys.extend(keys_for_hash)
-                block_hash_groups[chunk_hash].extend(keys_for_hash)
+        last_block_key = None
+        if has_last_block:
+            last_block_hash = f"{req_id}_lastblock".encode()
+            last_block_key = f"{self.model_name}@{req_id}_lastblock"
+            block_hash_groups[last_block_hash] = [last_block_key]
 
-            last_block_keys = []
-            if has_last_block:
-                last_block_hash = f"{req_id}_lastblock".encode()
-                if last_block_hash not in block_hash_groups:
-                    block_hash_groups[last_block_hash] = []
-                last_block_keys = [
-                    f"{self.model_name}@pcp{pcp_rank}@dcp{dcp_rank}"
-                    f"@head_or_tp_rank:{head_or_tp_rank}@{req_id}_lastblock@{layer_id}"
-                    for pcp_rank in range(self.pcp_size)
-                    for dcp_rank in range(self.dcp_size)
-                    for head_or_tp_rank in range(self.tp_size // self.put_step)
-                ]
-                block_hash_groups[last_block_hash].extend(last_block_keys)
-            return chunk_keys, last_block_keys
-        results = [_build_layer_keys(layer_id) for layer_id in range(self.num_layers)]
-        block_keys_by_layer = [r[0] for r in results]
-        last_block_keys_by_layer = [r[1] for r in results]
-        return block_keys_by_layer, last_block_keys_by_layer, block_hash_groups
+        return chunk_keys, last_block_key, block_hash_groups
 
     def get_num_new_matched_tokens(
         self,
@@ -333,11 +312,11 @@ class KVPoolScheduler:
             num_blocks = len(unfolded_block_ids)
             has_last_block = num_tokens_to_compute % self._block_size != 0
 
-            block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+            block_keys, last_block_key, key_gva_mapping = self._generate_keys_and_alloc(
                 request_real.block_hashes[:num_blocks], req_id=request.req_id, has_last_block=has_last_block)
             request_tracker.key_gva_mapping = key_gva_mapping
-            request_tracker.block_keys_by_layer = block_keys_by_layer
-            request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
+            request_tracker.block_keys = block_keys
+            request_tracker.last_block_key = last_block_key
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -351,8 +330,8 @@ class KVPoolScheduler:
             )
             if req_meta is not None:
                 req_meta.key_gva_mapping = key_gva_mapping
-                req_meta.block_keys_by_layer = block_keys_by_layer
-                req_meta.last_block_keys_by_layer = last_block_keys_by_layer
+                req_meta.block_keys = block_keys
+                req_meta.last_block_key = last_block_key
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -392,11 +371,11 @@ class KVPoolScheduler:
 
                     num_blocks = len(new_block_ids)
                     has_last_block = num_tokens_to_compute % self._block_size != 0
-                    block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+                    block_keys, last_block_key, key_gva_mapping = self._generate_keys_and_alloc(
                         request_real.block_hashes[:num_blocks], req_id=req_id, has_last_block=has_last_block)
 
-                    request_tracker.block_keys_by_layer = block_keys_by_layer
-                    request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
+                    request_tracker.block_keys = block_keys
+                    request_tracker.last_block_key = last_block_key
 
                     last_chunk_tokens_num = (
                         (len(request_real.prompt_token_ids) // self._block_size * self._block_size)
@@ -415,8 +394,8 @@ class KVPoolScheduler:
                     )
                     if req_meta is not None:
                         req_meta.key_gva_mapping = key_gva_mapping
-                        req_meta.block_keys_by_layer = block_keys_by_layer
-                        req_meta.last_block_keys_by_layer = last_block_keys_by_layer
+                        req_meta.block_keys = block_keys
+                        req_meta.last_block_key = last_block_key
 
                 # decode/chunked request
                 else:
@@ -438,14 +417,13 @@ class KVPoolScheduler:
                     new_hash_count = current_hash_count - prev_hash_count
                     if new_hash_count > 0:
                         new_block_hashes = request.block_hashes[prev_hash_count : current_hash_count]
-                        block_keys_by_layer, _, key_gva_mapping = self._generate_keys_and_alloc(new_block_hashes)
+                        new_block_keys, _, key_gva_mapping = self._generate_keys_and_alloc(new_block_hashes)
                         request_tracker.key_gva_mapping.update(key_gva_mapping)
 
-                        if request_tracker.block_keys_by_layer is None:
-                            request_tracker.block_keys_by_layer = block_keys_by_layer
+                        if request_tracker.block_keys is None:
+                            request_tracker.block_keys = new_block_keys
                         else:
-                            for layer_id, layer_keys in enumerate(block_keys_by_layer):
-                                request_tracker.block_keys_by_layer[layer_id].extend(layer_keys)
+                            request_tracker.block_keys.extend(new_block_keys)
 
                     if new_block_ids is not None:
                         request_tracker.update(new_block_ids)
@@ -472,8 +450,8 @@ class KVPoolScheduler:
                         original_block_size=self.original_block_size,
                     )
                     req_meta.key_gva_mapping = request_tracker.key_gva_mapping
-                    req_meta.block_keys_by_layer = request_tracker.block_keys_by_layer
-                    req_meta.last_block_keys_by_layer = request_tracker.last_block_keys_by_layer
+                    req_meta.block_keys = request_tracker.block_keys
+                    req_meta.last_block_key = request_tracker.last_block_key
                 if req_meta is not None:
                     meta.add_request(req_meta)
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
@@ -499,11 +477,11 @@ class KVPoolScheduler:
                 num_blocks = num_tokens_to_compute // self._block_size
                 has_last_block = num_tokens_to_compute % self._block_size != 0
                 block_hashes_for_keys = request.block_hashes[:num_blocks]
-                block_keys_by_layer, last_block_keys_by_layer, key_gva_mapping = self._generate_keys_and_alloc(
+                block_keys, last_block_key, key_gva_mapping = self._generate_keys_and_alloc(
                     block_hashes_for_keys, req_id=request_id, has_last_block=has_last_block)
                 request_tracker.key_gva_mapping = key_gva_mapping
-                request_tracker.block_keys_by_layer = block_keys_by_layer
-                request_tracker.last_block_keys_by_layer = last_block_keys_by_layer
+                request_tracker.block_keys = block_keys
+                request_tracker.last_block_key = last_block_key
 
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
@@ -515,8 +493,8 @@ class KVPoolScheduler:
                 )
                 if req_meta is not None:
                     req_meta.key_gva_mapping = key_gva_mapping
-                    req_meta.block_keys_by_layer = block_keys_by_layer
-                    req_meta.last_block_keys_by_layer = last_block_keys_by_layer
+                    req_meta.block_keys = block_keys
+                    req_meta.last_block_key = last_block_key
                     meta.add_request(req_meta)
         return meta
 

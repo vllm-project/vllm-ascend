@@ -270,14 +270,14 @@ class RequestTracker:
 
     key_gva_mapping: dict[str, int | None] = field(default_factory=dict)
 
-    block_keys_by_layer: list[list[str]] | None = None
+    block_keys: list[str] | None = None
 
     starts: list[int] | None = None
     ends: list[int] | None = None
 
     sizes_per_chunk: list[list[int]] | None = None
 
-    last_block_keys_by_layer: list[list[str]] | None = None
+    last_block_key: str | None = None
 
     @staticmethod
     def from_new_request(
@@ -351,8 +351,8 @@ class ReqMeta:
     original_block_size: int | None = None
 
     key_gva_mapping: dict[str, int | None] = field(default_factory=dict)
-    block_keys_by_layer: list[list[str]] | None = None
-    last_block_keys_by_layer: list[list[str]] | None = None
+    block_keys: list[str] | None = None
+    last_block_key: str | None = None
 
     starts: list[int] | None = None
     ends: list[int] | None = None
