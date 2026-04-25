@@ -73,7 +73,7 @@ Please install system dependencies
 ```bash
 pip install qwen_omni_utils modelscope
 # Used for audio processing.
-apt-get update && apt-get install ffmpeg -y
+apt-get update && apt-get install -y ffmpeg
 # Check the installation.
 ffmpeg -version
 ```
