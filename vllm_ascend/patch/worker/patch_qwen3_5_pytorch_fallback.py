@@ -1,26 +1,32 @@
 #
-# Pure PyTorch fallback for Qwen3.5 GDN (Gated Delta Network) on Ascend NPU.
+# Pure PyTorch fallback for GDN (Gated Delta Network) attention on Ascend NPU.
 #
-# This file provides a correct (but slower) implementation of the GDN computation
-# when triton kernels produce incorrect numerical results on NPU.
+# Targets GatedDeltaNetAttention (shared layer for Qwen3-Next and Qwen3.5).
+# Replaces triton kernels that produce incorrect results on NPU with pure
+# PyTorch equivalents.
 #
-# The triton kernels (chunk_gated_delta_rule, fused_recurrent_gated_delta_rule,
-# fused_sigmoid_gating_delta_rule_update, causal_conv1d_fn, causal_conv1d_update)
-# all produce incorrect results on Ascend 910 with Triton 3.2.0 + NPU backend.
-#
-# This fallback implements the same algorithms in pure PyTorch.
+# Problematic triton kernels on NPU:
+# - causal_conv1d_fn / causal_conv1d_update (convolution)
+# - fused_post_conv_prep (QKV preparation + gating)
+# - chunk_gated_delta_rule (prefill recurrence)
+# - fused_sigmoid_gating_delta_rule_update (decode recurrence)
+# - fused_recurrent_gated_delta_rule_packed_decode (packed decode)
 
 import torch
 import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.models.qwen3_5 import Qwen3_5GatedDeltaNet
-from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.utils import enable_sp
 
-# Use the non-triton causal_conv1d_ops if available (some builds have PyTorch versions)
-_CONV_TRITON_AVAILABLE = False  # triton conv1d is broken on NPU
+try:
+    from vllm.model_executor.layers.mamba.gdn_linear_attn import (
+        GatedDeltaNetAttention,
+    )
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+except ImportError:
+    # GatedDeltaNetAttention may not exist in older vllm versions.
+    GatedDeltaNetAttention = None  # type: ignore[assignment, misc]
+    GDNAttentionMetadata = None  # type: ignore[assignment, misc]
 
 
 def _softplus(x, beta=1.0, threshold=20.0):
@@ -104,7 +110,8 @@ def _pytorch_causal_conv1d_prefill(
     conv_states: (num_slots, D, K-1) - convolution state storage
     cache_indices: (num_sequences,) - indices into conv_states
     query_start_loc: (num_sequences+1,) - cumulative sequence lengths
-    has_initial_state: (num_sequences,) - whether each sequence has initial state
+    has_initial_state: (num_sequences,) - whether each sequence has initial
+        state
     """
     D, T = x.shape
     K = weight.shape[1]
@@ -133,11 +140,10 @@ def _pytorch_causal_conv1d_prefill(
             # Pad with zeros
             x_padded = F.pad(x_seq, (K - 1, 0))  # (D, K-1+seq_len)
 
-        # Apply convolution: out[d][t] = sum_{k=0}^{K-1} weight[d][k] * x_padded[d][t + K-1 - k]
-        # This is equivalent to F.conv1d with groups=D
+        # Apply convolution
         x_padded_4d = x_padded.unsqueeze(0)  # (1, D, L_padded)
         weight_3d = weight.unsqueeze(1)  # (D, 1, K)
-        conv_out = F.conv1d(x_padded_4d, weight_3d, groups=D).squeeze(0)  # (D, seq_len)
+        conv_out = F.conv1d(x_padded_4d, weight_3d, groups=D).squeeze(0)
 
         # Add bias
         if bias is not None:
@@ -179,12 +185,10 @@ def _compute_gdn_gating(
         g: (1, num_tokens, HV) - decay values
         beta: (1, num_tokens, HV) - beta values
     """
-    # g = -exp(A_log) * softplus(a + dt_bias)
     x = a.float() + dt_bias.float().unsqueeze(0)  # (T, HV)
     sp = _softplus(x, softplus_beta, softplus_threshold)  # (T, HV)
-    g = -torch.exp(A_log.float()).unsqueeze(0) * sp  # (1, T, HV) broadcasting
+    g = -torch.exp(A_log.float()).unsqueeze(0) * sp  # (1, T, HV)
 
-    # beta = sigmoid(b)
     beta = torch.sigmoid(b.float()).unsqueeze(0)  # (1, T, HV)
 
     return g, beta
@@ -212,32 +216,7 @@ def _pytorch_recurrent_gdn_decode(
     """
     Pure PyTorch implementation of GDN decode (single token per sequence).
 
-    If use_sigmoid_gating is True, computes g and beta internally from A_log, dt_bias, a, b.
-    Otherwise, uses precomputed g and beta.
-
-    State layout: (num_slots, HV, V, K) - matching vllm's standard kernel.
-
-    Args:
-        q: (1, T, H, K) query tensor.
-        k: (1, T, H, K) key tensor.
-        v: (1, T, HV, V) value tensor.
-        g: (1, T, HV) decay values. Used when use_sigmoid_gating is False.
-        beta: (1, T, HV) beta/gating values. Used when use_sigmoid_gating is False.
-        A_log: (HV,) log decay rate.
-        dt_bias: (HV,) dt bias.
-        a: (T, HV) a input for sigmoid gating computation.
-        b: (T, HV) b input for sigmoid gating computation.
-        ssm_state: (num_slots, HV, V, K) SSM state storage.
-        state_indices: (N,) indices into ssm_state for each sequence.
-        cu_seqlens: (N+1,) cumulative sequence lengths.
-        scale: float, attention scale factor.
-        use_l2norm: bool, whether to L2-normalize q and k.
-        softplus_beta: float, beta for softplus activation.
-        softplus_threshold: float, threshold for softplus activation.
-        use_sigmoid_gating: bool, if True compute g and beta from A_log/dt_bias/a/b.
-
-    Returns:
-        output: (1, T, HV, V) - attention output
+    State layout: (num_slots, HV, V, K).
     """
     T = q.shape[1]
     H = q.shape[2]
@@ -257,58 +236,51 @@ def _pytorch_recurrent_gdn_decode(
             continue
 
         # Load state: (HV, V, K) in float32
-        h = ssm_state[state_idx].float()  # (HV, V, K)
+        h = ssm_state[state_idx].float()
 
         for t in range(bos, eos):
-            # Get inputs for this token
             q_t = q[0, t].float()  # (H, K)
             k_t = k[0, t].float()  # (H, K)
             v_t = v[0, t].float()  # (HV, V)
 
-            # L2 normalize q and k
             if use_l2norm:
                 q_t = q_t / (q_t.norm(dim=-1, keepdim=True) + 1e-6)
                 k_t = k_t / (k_t.norm(dim=-1, keepdim=True) + 1e-6)
             q_t = q_t * scale
 
-            # Expand key/value to all value heads (GQA)
             k_expanded = k_t.repeat_interleave(kv_ratio, dim=0)  # (HV, K)
             q_expanded = q_t.repeat_interleave(kv_ratio, dim=0)  # (HV, K)
 
-            # Compute gating
             if use_sigmoid_gating:
-                # Compute g and beta from A_log, a, b, dt_bias
-                a_t = a[t].float()  # (HV,)
-                b_t = b[t].float()  # (HV,)
+                a_t = a[t].float()
+                b_t = b[t].float()
                 x = a_t + dt_bias.float()
                 sp = _softplus(x, softplus_beta, softplus_threshold)
-                g_t = -torch.exp(A_log.float()) * sp  # (HV,)
-                beta_t = torch.sigmoid(b_t)  # (HV,)
+                g_t = -torch.exp(A_log.float()) * sp
+                beta_t = torch.sigmoid(b_t)
             else:
-                g_t = g[0, t]  # (HV,)
-                beta_t = beta[0, t]  # (HV,)
+                g_t = g[0, t]
+                beta_t = beta[0, t]
 
             # Decay state: h *= exp(g)
             exp_g = torch.exp(g_t).unsqueeze(1).unsqueeze(2)  # (HV, 1, 1)
-            h = h * exp_g  # (HV, V, K)
+            h = h * exp_g
 
             # Delta rule: v -= h @ k
-            # h: (HV, V, K), k_expanded: (HV, K)
-            v_corr = torch.bmm(h, k_expanded.unsqueeze(2)).squeeze(2)  # (HV, V)
+            v_corr = torch.bmm(h, k_expanded.unsqueeze(2)).squeeze(2)
             v_t = v_t - v_corr
 
             # Beta gating
-            v_t = v_t * beta_t.unsqueeze(1)  # (HV, V)
+            v_t = v_t * beta_t.unsqueeze(1)
 
             # Update state: h += v outer k
-            h = h + torch.bmm(v_t.unsqueeze(2), k_expanded.unsqueeze(1))  # (HV, V, K)
+            h = h + torch.bmm(v_t.unsqueeze(2), k_expanded.unsqueeze(1))
 
             # Output: o = h @ q
-            o_t = torch.bmm(h, q_expanded.unsqueeze(2)).squeeze(2)  # (HV, V)
+            o_t = torch.bmm(h, q_expanded.unsqueeze(2)).squeeze(2)
 
             output[0, t] = o_t.to(v.dtype)
 
-        # Store state back
         ssm_state[state_idx] = h.to(ssm_state.dtype)
 
     return output
@@ -327,15 +299,11 @@ def _pytorch_recurrent_gdn_prefill(
     use_l2norm: bool,
 ):
     """
-    Pure PyTorch implementation of GDN prefill (sequential token processing).
+    Pure PyTorch implementation of GDN prefill (sequential processing).
 
-    Uses precomputed g and beta (from fused_gdn_gating_patch).
+    Uses precomputed g and beta.
 
-    State layout: (HV, V, K) - matching vllm's standard kernel.
-
-    Returns:
-        output: (1, T, HV, V)
-        final_states: dict mapping sequence index to final state tensor
+    State layout: (HV, V, K).
     """
     T = q.shape[1]
     H = q.shape[2]
@@ -354,7 +322,6 @@ def _pytorch_recurrent_gdn_prefill(
         if state_idx < 0 or bos >= eos:
             continue
 
-        # Load initial state: (HV, V, K) in float32
         h = ssm_state[state_idx].float()  # (HV, V, K)
 
         for t in range(bos, eos):
@@ -367,11 +334,11 @@ def _pytorch_recurrent_gdn_prefill(
                 k_t = k_t / (k_t.norm(dim=-1, keepdim=True) + 1e-6)
             q_t = q_t * scale
 
-            k_expanded = k_t.repeat_interleave(kv_ratio, dim=0)  # (HV, K)
-            q_expanded = q_t.repeat_interleave(kv_ratio, dim=0)  # (HV, K)
+            k_expanded = k_t.repeat_interleave(kv_ratio, dim=0)
+            q_expanded = q_t.repeat_interleave(kv_ratio, dim=0)
 
-            g_t = g[0, t].float()  # (HV,)
-            beta_t = beta[0, t].float()  # (HV,)
+            g_t = g[0, t].float()
+            beta_t = beta[0, t].float()
 
             # Decay
             exp_g = torch.exp(g_t).unsqueeze(1).unsqueeze(2)
@@ -391,291 +358,245 @@ def _pytorch_recurrent_gdn_prefill(
             o_t = torch.bmm(h, q_expanded.unsqueeze(2)).squeeze(2)
             output[0, t] = o_t.to(v.dtype)
 
-        # Store final state
         ssm_state[state_idx] = h.to(ssm_state.dtype)
 
     return output
 
 
-def _rearrange_mixed_qkv(mixed_qkv, head_k_dim, head_v_dim):
-    """Split mixed_qkv into query, key, value tensors."""
-    if mixed_qkv is None:
-        return None, None, None
-    # Use a simpler approach for splitting mixed_qkv
-    # mixed_qkv: (T, key_dim + key_dim + value_dim) from conv output
-    D = mixed_qkv.shape[-1]
-    # Split proportionally: 2*key_dim + value_dim = D
-    # key_dim = num_k_heads * head_k_dim, value_dim = num_v_heads * head_v_dim
-    # For Qwen3.5 GDN: num_k_heads = num_v_heads, head_k_dim = head_v_dim
-    # So D = 3 * key_dim, split into 3 equal parts? No...
-    # Actually the conv output is key_dim * 2 + value_dim
-    # For Qwen3.5: key_dim = num_k_heads * head_k_dim, value_dim = num_v_heads * head_v_dim
-    # If num_k_heads == num_v_heads and head_k_dim == head_v_dim: D = 3 * key_dim
-    # Split: [key_dim, key_dim, value_dim]
-    # But we need the head_k_dim and num_k_heads to split correctly
+def _pytorch_gdn_forward_core(
+    self,
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+) -> None:
+    """Pure PyTorch replacement for GatedDeltaNetAttention._forward_core."""
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        is_conv_state_dim_first,
+    )
 
-    # The split should be [key_dim, key_dim, value_dim]
-    # where key_dim = num_k_heads * head_k_dim, value_dim = num_v_heads * head_v_dim
-    # For simplicity, split into 3 equal parts if they're equal
-    third = D // 3
-    query, key, value = torch.split(mixed_qkv, [third, third, D - 2 * third], dim=-1)
-    num_k_heads = third // head_k_dim
-    num_v_heads = (D - 2 * third) // head_v_dim
+    forward_context = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
 
-    query = query.view(*query.shape[:-1], num_k_heads, head_k_dim).unsqueeze(0)  # (1, T, H, K)
-    key = key.view(*key.shape[:-1], num_k_heads, head_k_dim).unsqueeze(0)  # (1, T, H, K)
-    value = value.view(*value.shape[:-1], num_v_heads, head_v_dim).unsqueeze(0)  # (1, T, HV, V)
+    if attn_metadata is None:
+        # V1 profile run -- skip triton warmup since we use pure PyTorch
+        return
 
-    return query.contiguous(), key.contiguous(), value.contiguous()
+    assert isinstance(attn_metadata, dict)
+    attn_metadata = attn_metadata[self.prefix]
+    assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+    num_actual_tokens = attn_metadata.num_actual_tokens
+    spec_sequence_masks = attn_metadata.spec_sequence_masks
+    spec_token_indx = attn_metadata.spec_token_indx
+    non_spec_token_indx = attn_metadata.non_spec_token_indx
+    spec_query_start_loc = attn_metadata.spec_query_start_loc
+    non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
+    spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor
+    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
+    has_initial_state = attn_metadata.has_initial_state
 
-class PyTorchQwen3_5GatedDeltaNet(Qwen3_5GatedDeltaNet):
-    """
-    Pure PyTorch implementation of Qwen3.5 GDN for Ascend NPU.
-    Replaces all triton kernels with correct (but slower) PyTorch code.
-    """
+    self_kv_cache = self.kv_cache
+    conv_state = self_kv_cache[0] if is_conv_state_dim_first() else self_kv_cache[0].transpose(-1, -2)
+    ssm_state = self_kv_cache[1]
 
-    def _forward_core(
-        self,
-        mixed_qkv: torch.Tensor,
-        b: torch.Tensor,
-        a: torch.Tensor,
-        core_attn_out: torch.Tensor,
-    ):
-        forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+    if not enable_sp():
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
 
-        if attn_metadata is None:
-            return
+    # Convolution weights
+    conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
 
-        assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]
-        assert isinstance(attn_metadata, GDNAttentionMetadata)
+    # Split into spec and non-spec tokens
+    if spec_sequence_masks is not None:
+        if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+            mixed_qkv_spec = mixed_qkv
+            mixed_qkv_non_spec = None
+        else:
+            mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
+            mixed_qkv_non_spec = mixed_qkv.index_select(0, non_spec_token_indx)
+    else:
+        mixed_qkv_spec = None
+        mixed_qkv_non_spec = mixed_qkv
 
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        spec_sequence_masks = attn_metadata.spec_sequence_masks
-        spec_token_indx = attn_metadata.spec_token_indx
-        non_spec_token_indx = attn_metadata.non_spec_token_indx
-        spec_query_start_loc = attn_metadata.spec_query_start_loc
-        non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
-        spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor
-        non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
-        has_initial_state = attn_metadata.has_initial_state
+    # ---- Convolution ----
+    if spec_sequence_masks is not None and mixed_qkv_spec is not None:
+        num_spec_decodes = attn_metadata.num_spec_decodes
+        spec_cache_idx = spec_state_indices_tensor[:, 0][:num_spec_decodes]
+        mixed_qkv_spec = _pytorch_causal_conv1d_decode(
+            x=mixed_qkv_spec,
+            conv_state=conv_state,
+            weight=conv_weights,
+            bias=self.conv1d.bias,
+            activation=self.activation,
+            cache_indices=spec_cache_idx,
+        )
 
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-        conv_state = self_kv_cache[0].transpose(-1, -2)  # (..., K-1, D) -> (..., D, K-1)
-        ssm_state = self_kv_cache[1]  # (num_pages, HV, V, K)
+    # Non-spec tokens
+    if attn_metadata.num_prefills > 0 and mixed_qkv_non_spec is not None:
+        mixed_qkv_non_spec_T = mixed_qkv_non_spec.T.contiguous()
+        out = _pytorch_causal_conv1d_prefill(
+            x=mixed_qkv_non_spec_T,
+            weight=conv_weights,
+            bias=self.conv1d.bias,
+            activation=self.activation,
+            conv_states=conv_state,
+            cache_indices=non_spec_state_indices_tensor,
+            query_start_loc=non_spec_query_start_loc,
+            has_initial_state=has_initial_state,
+        )
+        mixed_qkv_non_spec = out.T.contiguous()
+    elif attn_metadata.num_decodes > 0 and mixed_qkv_non_spec is not None:
+        non_spec_cache_idx = non_spec_state_indices_tensor[:num_actual_tokens]
+        mixed_qkv_non_spec = _pytorch_causal_conv1d_decode(
+            x=mixed_qkv_non_spec,
+            conv_state=conv_state,
+            weight=conv_weights,
+            bias=self.conv1d.bias,
+            activation=self.activation,
+            cache_indices=non_spec_cache_idx,
+        )
 
-        if not enable_sp():
-            mixed_qkv = mixed_qkv[:num_actual_tokens]
-            b = b[:num_actual_tokens]
-            a = a[:num_actual_tokens]
+    # ---- Rearrange QKV ----
+    query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+    query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
-        # Convolution weights
-        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+    scale = self.head_k_dim**-0.5
 
-        # Split into spec and non-spec tokens
+    # ---- GDN Recurrent Computation ----
+    if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
+        # Path 1: Prefill + spec decode
+        a_for_gating = a[:num_actual_tokens] if not enable_sp() else a
+        b_for_gating = b[:num_actual_tokens] if not enable_sp() else b
+        g_all, beta_all = _compute_gdn_gating(self.A_log, a_for_gating, b_for_gating, self.dt_bias)
+
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                mixed_qkv_spec = mixed_qkv
-                mixed_qkv_non_spec = None
+                g_spec = g_all
+                beta_spec = beta_all
+                g_non_spec = None
+                beta_non_spec = None
             else:
-                mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
-                mixed_qkv_non_spec = mixed_qkv.index_select(0, non_spec_token_indx)
+                g_spec = g_all[:, spec_token_indx, :]
+                beta_spec = beta_all[:, spec_token_indx, :]
+                g_non_spec = g_all[:, non_spec_token_indx, :]
+                beta_non_spec = beta_all[:, non_spec_token_indx, :]
+            a_spec = a.index_select(0, spec_token_indx) if mixed_qkv_spec is not None else None
+            b_spec = b.index_select(0, spec_token_indx) if mixed_qkv_spec is not None else None
+            a_non_spec = a.index_select(0, non_spec_token_indx) if mixed_qkv_non_spec is not None else None
+            b_non_spec = b.index_select(0, non_spec_token_indx) if mixed_qkv_non_spec is not None else None
         else:
-            mixed_qkv_spec = None
-            mixed_qkv_non_spec = mixed_qkv
+            g_spec = None
+            beta_spec = None
+            g_non_spec = g_all
+            beta_non_spec = beta_all
+            a_spec = None
+            b_spec = None
+            a_non_spec = a_for_gating
+            b_non_spec = b_for_gating
 
-        # ---- Convolution ----
-        # Spec tokens: decode convolution
-        if spec_sequence_masks is not None and mixed_qkv_spec is not None:
-            mixed_qkv_spec = _pytorch_causal_conv1d_decode(
-                x=mixed_qkv_spec,
-                conv_state=conv_state,
-                weight=conv_weights,
-                bias=self.conv1d.bias,
-                activation=self.activation,
-                cache_indices=spec_state_indices_tensor,
+        # Spec decode: sequential GDN
+        core_attn_out_spec = None
+        if spec_sequence_masks is not None and query_spec is not None:
+            core_attn_out_spec = _pytorch_recurrent_gdn_decode(
+                q=query_spec,
+                k=key_spec,
+                v=value_spec,
+                g=g_spec,
+                beta=beta_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                a=a_spec,
+                b=b_spec,
+                ssm_state=ssm_state,
+                state_indices=spec_state_indices_tensor,
+                cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
+                scale=scale,
+                use_l2norm=True,
+                softplus_beta=1.0,
+                softplus_threshold=20.0,
+                use_sigmoid_gating=False,
             )
 
-        # Non-spec tokens
-        if attn_metadata.num_prefills > 0 and mixed_qkv_non_spec is not None:
-            # Prefill convolution
-            mixed_qkv_non_spec_T = mixed_qkv_non_spec.T.contiguous()  # (D, T)
-            out = _pytorch_causal_conv1d_prefill(
-                x=mixed_qkv_non_spec_T,
-                weight=conv_weights,
-                bias=self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                has_initial_state=has_initial_state,
-            )
-            mixed_qkv_non_spec = out.T.contiguous()  # (T, D)
-        elif attn_metadata.num_decodes > 0 and mixed_qkv_non_spec is not None:
-            # Decode convolution
-            mixed_qkv_non_spec = _pytorch_causal_conv1d_decode(
-                x=mixed_qkv_non_spec,
-                conv_state=conv_state,
-                weight=conv_weights,
-                bias=self.conv1d.bias,
-                activation=self.activation,
-                cache_indices=non_spec_state_indices_tensor,
-            )
-
-        # ---- Rearrange QKV ----
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
-
-        scale = self.head_k_dim**-0.5
-
-        # ---- GDN Recurrent Computation ----
-        if attn_metadata.num_prefills > 0 or spec_sequence_masks is not None:
-            # Path 1: Prefill + spec decode
-            # Compute gating values for all actual tokens
-            a_for_gating = a[:num_actual_tokens] if not enable_sp() else a
-            b_for_gating = b[:num_actual_tokens] if not enable_sp() else b
-            g_all, beta_all = _compute_gdn_gating(self.A_log, a_for_gating, b_for_gating, self.dt_bias)
-
-            # Split gating for spec and non-spec tokens
-            if spec_sequence_masks is not None:
-                if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                    g_spec = g_all
-                    beta_spec = beta_all
-                    g_non_spec = None
-                    beta_non_spec = None
-                else:
-                    g_spec = g_all[:, spec_token_indx, :]
-                    beta_spec = beta_all[:, spec_token_indx, :]
-                    g_non_spec = g_all[:, non_spec_token_indx, :]
-                    beta_non_spec = beta_all[:, non_spec_token_indx, :]
-                a_spec = a.index_select(0, spec_token_indx) if mixed_qkv_spec is not None else None
-                b_spec = b.index_select(0, spec_token_indx) if mixed_qkv_spec is not None else None
-                a_non_spec = a.index_select(0, non_spec_token_indx) if mixed_qkv_non_spec is not None else None
-                b_non_spec = b.index_select(0, non_spec_token_indx) if mixed_qkv_non_spec is not None else None
-            else:
-                # No spec decode: all tokens are non-spec
-                g_spec = None
-                beta_spec = None
-                g_non_spec = g_all
-                beta_non_spec = beta_all
-                a_spec = None
-                b_spec = None
-                a_non_spec = a_for_gating
-                b_non_spec = b_for_gating
-
-            # Spec decode: sequential GDN
-            core_attn_out_spec = None
-            if spec_sequence_masks is not None and query_spec is not None:
-                core_attn_out_spec = _pytorch_recurrent_gdn_decode(
-                    q=query_spec,
-                    k=key_spec,
-                    v=value_spec,
-                    g=g_spec,
-                    beta=beta_spec,
-                    A_log=self.A_log,
-                    dt_bias=self.dt_bias,
-                    a=a_spec,
-                    b=b_spec,
-                    ssm_state=ssm_state,
-                    state_indices=spec_state_indices_tensor,
-                    cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
-                    scale=scale,
-                    use_l2norm=True,
-                    softplus_beta=1.0,
-                    softplus_threshold=20.0,
-                    use_sigmoid_gating=False,
-                )
-
-            # Non-spec: prefill or decode
-            core_attn_out_non_spec = None
-            if attn_metadata.num_prefills > 0 and query_non_spec is not None:
-                # Prefill: sequential GDN with precomputed g, beta
-                core_attn_out_non_spec = _pytorch_recurrent_gdn_prefill(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    ssm_state=ssm_state,
-                    state_indices=non_spec_state_indices_tensor,
-                    cu_seqlens=non_spec_query_start_loc,
-                    scale=scale,
-                    use_l2norm=True,
-                )
-            elif attn_metadata.num_decodes > 0 and query_non_spec is not None:
-                # Decode: sequential GDN with precomputed g, beta
-                core_attn_out_non_spec = _pytorch_recurrent_gdn_decode(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    A_log=self.A_log,
-                    dt_bias=self.dt_bias,
-                    a=a_non_spec,
-                    b=b_non_spec,
-                    ssm_state=ssm_state,
-                    state_indices=non_spec_state_indices_tensor,
-                    cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
-                    scale=scale,
-                    use_l2norm=True,
-                    softplus_beta=1.0,
-                    softplus_threshold=20.0,
-                    use_sigmoid_gating=False,
-                )
-
-        elif attn_metadata.num_decodes > 0 and query_non_spec is not None:
-            # Path 2: Decode only - sigmoid gating
-            core_attn_out_non_spec = _pytorch_recurrent_gdn_decode(
+        # Non-spec: prefill or decode
+        core_attn_out_non_spec = None
+        if attn_metadata.num_prefills > 0 and query_non_spec is not None:
+            core_attn_out_non_spec = _pytorch_recurrent_gdn_prefill(
                 q=query_non_spec,
                 k=key_non_spec,
                 v=value_non_spec,
-                g=None,
-                beta=None,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                a=a,
-                b=b,
+                g=g_non_spec,
+                beta=beta_non_spec,
                 ssm_state=ssm_state,
                 state_indices=non_spec_state_indices_tensor,
                 cu_seqlens=non_spec_query_start_loc,
                 scale=scale,
                 use_l2norm=True,
+            )
+        elif attn_metadata.num_decodes > 0 and query_non_spec is not None:
+            core_attn_out_non_spec = _pytorch_recurrent_gdn_decode(
+                q=query_non_spec,
+                k=key_non_spec,
+                v=value_non_spec,
+                g=g_non_spec,
+                beta=beta_non_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                a=a_non_spec,
+                b=b_non_spec,
+                ssm_state=ssm_state,
+                state_indices=non_spec_state_indices_tensor,
+                cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+                scale=scale,
+                use_l2norm=True,
                 softplus_beta=1.0,
                 softplus_threshold=20.0,
-                use_sigmoid_gating=True,
+                use_sigmoid_gating=False,
             )
-            core_attn_out_spec = None
-        else:
-            core_attn_out_spec = None
-            core_attn_out_non_spec = None
 
-        # ---- Merge output ----
-        if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),  # type: ignore[union-attr]
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
-            )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)[:num_actual_tokens]
-        elif spec_sequence_masks is not None and core_attn_out_spec is not None:
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)[:num_actual_tokens]
-        elif core_attn_out_non_spec is not None:
-            if not enable_sp():
-                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
-            else:
-                core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)[:num_actual_tokens]
+    elif attn_metadata.num_decodes > 0 and query_non_spec is not None:
+        # Path 2: Decode only - sigmoid gating
+        core_attn_out_non_spec = _pytorch_recurrent_gdn_decode(
+            q=query_non_spec,
+            k=key_non_spec,
+            v=value_non_spec,
+            g=None,
+            beta=None,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            a=a,
+            b=b,
+            ssm_state=ssm_state,
+            state_indices=non_spec_state_indices_tensor,
+            cu_seqlens=non_spec_query_start_loc,
+            scale=scale,
+            use_l2norm=True,
+            softplus_beta=1.0,
+            softplus_threshold=20.0,
+            use_sigmoid_gating=True,
+        )
+        core_attn_out_spec = None
+    else:
+        core_attn_out_spec = None
+        core_attn_out_non_spec = None
+
+    # ---- Merge output ----
+    if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
+        merged_out = torch.empty(
+            (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
+            dtype=core_attn_out_non_spec.dtype,
+            device=core_attn_out_non_spec.device,
+        )
+        merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
+        merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+        core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+    elif spec_sequence_masks is not None and core_attn_out_spec is not None:
+        core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+    elif core_attn_out_non_spec is not None:
+        core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
 
-# Apply the monkey-patch
-Qwen3_5GatedDeltaNet._forward_core = PyTorchQwen3_5GatedDeltaNet._forward_core
+# Apply the monkey-patch only if GatedDeltaNetAttention is available
+if GatedDeltaNetAttention is not None:
+    GatedDeltaNetAttention._forward_core = _pytorch_gdn_forward_core
