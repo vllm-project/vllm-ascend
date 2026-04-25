@@ -1545,12 +1545,6 @@ class NPUModelRunner(GPUModelRunner):
                         self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
-            if self.use_cp and self.dycp_size > 1:
-                preview_logits_indices = logits_indices[:num_reqs].detach().cpu().tolist()
-                logger.debug(
-                    f"sample_prepare hidden_states_shape={tuple(hidden_states.shape)}, "
-                    f"num_reqs={num_reqs}, preview_logits_indices={preview_logits_indices}"
-                )
 
             if not self.broadcast_pp_output:
                 # Common case.

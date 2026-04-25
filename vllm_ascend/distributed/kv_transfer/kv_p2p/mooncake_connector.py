@@ -1368,7 +1368,7 @@ class MooncakeConnectorWorker:
         local_pcp_size = len(local_dycp_ranks)
         remote_cp_size = remote_pcp_size * meta.remote_dcp_size
         local_cp_size = local_pcp_size * self.dcp_size  # decode pcp is not supported now
-        local_block_ids = meta.local_block_ids[local_pcp_rank] if decode_dycp_enable else meta.local_block_ids
+        local_block_ids = meta.local_block_ids[local_pcp_rank if local_pcp_size > 1 else 0] if decode_dycp_enable else meta.local_block_ids
         meta_remote_block_ids = copy.deepcopy(meta.remote_block_ids)
 
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1 and not prefill_dycp_enable and not decode_dycp_enable:
