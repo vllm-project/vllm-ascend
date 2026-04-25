@@ -573,11 +573,9 @@ class NPUModelRunner(GPUModelRunner):
         return self.model
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        # Local hotfix for KV-load-failure recompute with async scheduling + MTP.
-        # If a request has already been rewound by scheduler-side invalid-block
-        # handling, carrying previous-step draft bookkeeping into the upstream
-        # GPUModelRunner._update_states() can drive num_computed_tokens negative.
-        rewound_req_ids: list[str] = []
+        # When scheduler rewinds num_computed_tokens (for example after KV
+        # load failure recompute), any previous draft bookkeeping is stale and
+        # must not be applied again in GPUModelRunner._update_states().
         req_data = scheduler_output.scheduled_cached_reqs
 
         if self.use_async_scheduling:
@@ -586,45 +584,11 @@ class NPUModelRunner(GPUModelRunner):
                 if req_state is None:
                     continue
 
-                num_output_tokens = req_data.num_output_tokens[i]
-                if num_output_tokens < len(req_state.output_token_ids):
+                num_computed_tokens = req_data.num_computed_tokens[i]
+                if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
-                    rewound_req_ids.append(req_id)
 
         super()._update_states(scheduler_output)
-
-        if not rewound_req_ids:
-            return
-
-        # Force the next _prepare_input_ids() to rebuild from CPU-side state
-        # instead of reusing previous-step sampled/draft token caches.
-        self.input_batch.prev_sampled_token_ids = None
-        self.input_batch.prev_req_id_to_index = None
-        self._draft_token_ids = None
-
-        # Keep NPU-only mirrors aligned with the rewound request state.
-        for req_id in rewound_req_ids:
-            req_state = self.requests.get(req_id)
-            req_index = self.input_batch.req_id_to_index.get(req_id)
-            if req_state is None or req_index is None:
-                continue
-
-            end_idx = (
-                self.input_batch.num_prompt_tokens[req_index]
-                + len(req_state.output_token_ids)
-            )
-            self.input_batch.num_tokens_no_spec[req_index] = end_idx
-            self.input_batch.num_tokens[req_index] = end_idx
-
-            if self.input_batch.num_computed_tokens_cpu[req_index] < 0:
-                logger.warning(
-                    "Clamp negative num_computed_tokens after KV-load rewind: "
-                    "req_id=%s, old_value=%s, end_idx=%s",
-                    req_id,
-                    int(self.input_batch.num_computed_tokens_cpu[req_index]),
-                    end_idx,
-                )
-                self.input_batch.num_computed_tokens_cpu[req_index] = 0
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -781,29 +745,6 @@ class NPUModelRunner(GPUModelRunner):
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
         token_indices = positions_np + req_indices * self.input_batch.token_ids_cpu.shape[1]
-        flat_len = self.input_batch.token_ids_cpu_tensor.numel()
-        if token_indices.size > 0:
-            max_idx = int(token_indices.max())
-            min_idx = int(token_indices.min())
-            if min_idx < 0 or max_idx >= flat_len:
-                raise RuntimeError(
-                    "token_indices out of range after KV-load recompute: "
-                    f"min_idx={min_idx}, max_idx={max_idx}, flat_len={flat_len}, "
-                    f"num_reqs={num_reqs}, "
-                    f"total_num_scheduled_tokens={total_num_scheduled_tokens}, "
-                    f"num_scheduled_tokens={num_scheduled_tokens.tolist()}, "
-                    f"num_computed_tokens="
-                    f"{self.input_batch.num_computed_tokens_cpu[:num_reqs].tolist()}, "
-                    f"req_ids={self.input_batch.req_ids[:num_reqs]}, "
-                    f"positions={positions_np[:total_num_scheduled_tokens].tolist()}, "
-                    f"req_indices={req_indices.tolist()}, "
-                    f"prev_req_id_to_index={self.input_batch.prev_req_id_to_index}, "
-                    f"has_prev_sampled_token_ids="
-                    f"{self.input_batch.prev_sampled_token_ids is not None}, "
-                    f"draft_token_ids_is_none={self._draft_token_ids is None}, "
-                    f"request_num_tokens="
-                    f"{[self.requests[r].num_tokens for r in self.input_batch.req_ids[:num_reqs]]}"
-                )
         token_indices_tensor = torch.from_numpy(token_indices)
         # Prepare input_ids.
         # NOTE(woosuk): We use torch.index_select instead of np.take here
