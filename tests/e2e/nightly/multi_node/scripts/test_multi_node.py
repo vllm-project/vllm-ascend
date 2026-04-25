@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 import vllm
-
+import sys
+import subprocess
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.multi_node.scripts.multi_node_config import MultiNodeConfig, MultiNodeConfigLoader, ProxyLauncher
 from tools.aisbench import run_aisbench_cases
@@ -258,6 +259,14 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
 @pytest.mark.asyncio
 async def test_multi_node() -> None:
     config = MultiNodeConfigLoader.from_yaml()
+    if config.special_dependencies:
+        for k, v in config.special_dependencies.items():
+            command = [
+                sys.executable,
+                "-m", "pip", "install",
+                f"{k}=={v}",
+            ]
+            subprocess.call(command)
 
     with (
         ProxyLauncher(

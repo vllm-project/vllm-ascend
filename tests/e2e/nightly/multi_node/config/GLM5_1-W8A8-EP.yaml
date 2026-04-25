@@ -22,6 +22,9 @@ env_common:
   HCCL_INTRA_ROCE_ENABLE: 0
   VLLM_ASCEND_ENABLE_FUSED_MC2: 1
 
+special_dependencies:
+  transformers: "5.2.0"
+
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0, 1]
