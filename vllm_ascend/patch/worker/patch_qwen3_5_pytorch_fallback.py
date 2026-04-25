@@ -583,6 +583,9 @@ def _pytorch_gdn_forward_core(
 
     # ---- Merge output ----
     if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
+        assert core_attn_out_spec is not None, (
+            "core_attn_out_spec must not be None when core_attn_out_non_spec is not None"
+        )
         merged_out = torch.empty(
             (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
             dtype=core_attn_out_non_spec.dtype,
