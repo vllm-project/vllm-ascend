@@ -784,7 +784,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Eco-Tech/Kimi-K2.5-w4a8 --dataset-name random --random-input 1024 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
