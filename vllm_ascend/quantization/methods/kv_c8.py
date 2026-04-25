@@ -25,8 +25,6 @@ def _fa_quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
 @register_scheme("FAKQuant", "attention")
 class AscendFAQuantAttentionMethod:
     def __init__(self):
-        self.transpose_weight = True
-        self.printFlag = False
         vllm_config = get_current_vllm_config()
         config = vllm_config.model_config.hf_config
         self.kv_lora_rank = getattr(config, "kv_lora_rank", 0)
