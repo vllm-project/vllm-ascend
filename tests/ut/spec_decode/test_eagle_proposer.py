@@ -796,14 +796,16 @@ class TestEagleProposerPropose:
             num_scheduled_tokens = num_actual_tokens
 
         #run
-        with patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect):
-            with set_current_vllm_config(self.vllm_config):
-                self.proposer._propose(target_token_ids, target_positions, target_hidden_states, next_token_ids,
-                                    token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
-                                    mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
-                                    scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
-                                    )
-                self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode)
+        with (
+            patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
+            set_current_vllm_config(self.vllm_config),
+        ):
+            self.proposer._propose(target_token_ids, target_positions, target_hidden_states, next_token_ids,
+                                token_indices_to_sample, mock_common_attn_metadata, target_model_batch_desc, mock_sampling_metadata,
+                                mm_embed_inputs, req_scheduled_tokens, long_seq_metadata, num_prefill_reqs, num_decode_reqs,
+                                scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
+                                )
+            self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode)
 
     # give common_attn_metadata value
     def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
@@ -919,15 +921,15 @@ class TestEagleProposerPropose:
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([16, 15, 16]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([12, 11, 12]))
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([14, 12, 12, 13, 9, 10, 11, 12, 10, 11, 12, 13, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9] + [0]*(8704-23), dtype=torch.int64))
-        assert captured_common_attn_metadata.causal == True
-        assert captured_common_attn_metadata.logits_indices_padded == None
-        assert captured_common_attn_metadata.num_logits_indices == None
-        assert captured_common_attn_metadata.encoder_seq_lens == None
-        assert captured_common_attn_metadata.encoder_seq_lens_cpu == None
-        assert captured_common_attn_metadata.dcp_local_seq_lens == None
-        assert captured_common_attn_metadata.dcp_local_seq_lens_cpu == None
-        assert captured_common_attn_metadata._num_computed_tokens_cpu == None
-        assert captured_common_attn_metadata._num_computed_tokens_cache == None
+        assert captured_common_attn_metadata.causal
+        assert captured_common_attn_metadata.logits_indices_padded is None
+        assert captured_common_attn_metadata.num_logits_indices is None
+        assert captured_common_attn_metadata.encoder_seq_lens is None
+        assert captured_common_attn_metadata.encoder_seq_lens_cpu is None
+        assert captured_common_attn_metadata.dcp_local_seq_lens is None
+        assert captured_common_attn_metadata.dcp_local_seq_lens_cpu is None
+        assert captured_common_attn_metadata._num_computed_tokens_cpu is None
+        assert captured_common_attn_metadata._num_computed_tokens_cache is None
         assert captured_common_attn_metadata.decode_token_per_req == 1
         assert captured_common_attn_metadata.actual_seq_lengths_q == []
         if model_type == 'deepseek':
@@ -1034,7 +1036,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_sync_metadata_across_dp")
         sig = inspect.signature(RunnerCls._sync_metadata_across_dp)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens', 'with_prefill', 'is_draft_model']
+        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode', 'allow_dp_padding']
 
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
@@ -1043,8 +1045,8 @@ class TestEagleProposerPropose:
 
 
         import vllm_ascend.spec_decode.eagle_proposer
-        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "SpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.SpecDecodeBaseProposer
+        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "AscendSpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.AscendSpecDecodeBaseProposer
         assert hasattr(RunnerCls, "_get_model")
         assert hasattr(RunnerCls, "_update_full_graph_params")
         assert hasattr(RunnerCls, "_propose")
@@ -1135,8 +1137,8 @@ class TestEagleProposerPropose:
 
 
         import vllm_ascend.spec_decode.eagle_proposer
-        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "SpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.SpecDecodeBaseProposer
+        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "AscendSpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.AscendSpecDecodeBaseProposer
         assert hasattr(RunnerCls, "_run_merged_draft")
         sig = inspect.signature(RunnerCls._run_merged_draft)
         sig_name = self.get_param_names(sig)
