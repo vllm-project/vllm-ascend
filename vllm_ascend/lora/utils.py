@@ -26,6 +26,7 @@ from vllm_ascend.ops.linear import (
     AscendRowParallelLinear,
 )
 from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -184,16 +185,27 @@ class AscendRowParallelLinearWithShardedLoRA(RowParallelLinearWithShardedLoRA):
         return type(source_layer) is AscendRowParallelLinear
 
 
+_ASCEND_LORA_CLASSES = (
+    AscendColumnParallelLinearWithLoRA,
+    AscendMergedColumnParallelLinearWithLoRA,
+    AscendRowParallelLinearWithLoRA,
+    AscendVocabParallelEmbeddingWithLoRA,
+    AscendQKVParallelLinearWithLoRA,
+    AscendMergedQKVParallelLinearWithLoRA,
+    AscendColumnParallelLinearWithShardedLoRA,
+    AscendMergedColumnParallelLinearWithShardedLoRA,
+    AscendMergedQKVParallelLinearWithShardedLoRA,
+    AscendQKVParallelLinearWithShardedLoRA,
+    AscendRowParallelLinearWithShardedLoRA,
+    AscendReplicatedLinearWithLoRA,
+)
+
+
 def refresh_all_lora_classes():
-    vllm.lora.utils._all_lora_classes.add(AscendColumnParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedColumnParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendVocabParallelEmbeddingWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedQKVParallelLinearWithLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendColumnParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedColumnParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendMergedQKVParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithShardedLoRA)
-    vllm.lora.utils._all_lora_classes.add(AscendReplicatedLinearWithLoRA)
+    if vllm_version_is("0.19.0"):
+        vllm.lora.utils._all_lora_classes.update(_ASCEND_LORA_CLASSES)
+        return
+
+    vllm.lora.utils._all_lora_classes = tuple(
+        dict.fromkeys((*_ASCEND_LORA_CLASSES, *vllm.lora.utils._all_lora_classes))
+    )

@@ -55,6 +55,9 @@ if vllm_version_is("0.19.0"):
     from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE  # type: ignore[no-redef]
 else:
     from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner as _MoERunnerBase  # type: ignore[no-redef]
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import (  # type: ignore[no-redef]
+        SharedExpertsOrder,
+    )
 
 
 @dataclass
@@ -232,6 +235,43 @@ class AscendMoERunner(_MoERunnerBase):
         chunked path. Always return False to stay on forward_impl."""
         return False
 
+    def _forward_impl(
+        self,
+        layer: torch.nn.Module,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if not vllm_version_is("0.19.0"):
+            self._maybe_sync_shared_experts_stream(shared_experts_input)
+            if self.gate is not None:
+                router_logits, _ = self.gate(hidden_states)
+
+        with self._sequence_parallel_context():
+            if not vllm_version_is("0.19.0"):
+                self._maybe_apply_shared_experts(
+                    shared_experts_input,
+                    SharedExpertsOrder.NO_OVERLAP,
+                )
+
+            routed_out = self.forward_impl(
+                layer,
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+            )
+            if vllm_version_is("0.19.0"):
+                return routed_out
+
+            self._maybe_apply_shared_experts(
+                shared_experts_input,
+                SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
+            )
+            if self.shared_experts is not None:
+                return self.shared_experts.output, routed_out
+
+            return routed_out
+
     # TODO: Remove this after drop v0.19.0 support
     def forward_impl(
         self,
@@ -275,6 +315,12 @@ class AscendFusedMoE(FusedMoE):
         is_legacy = vllm_version_is("0.19.0")
         if not is_legacy:
             _routed_input_transform = kwargs.get("routed_input_transform")
+            _routed_output_transform = kwargs.get("routed_output_transform")
+            _runner_routed_scaling_factor = (
+                kwargs.get("routed_scaling_factor", 1.0)
+                if kwargs.get("apply_routed_scale_to_output", False)
+                else 1.0
+            )
         super().__init__(*args, **kwargs)
         if not is_legacy:
             self.reduce_results = False
@@ -389,6 +435,8 @@ class AscendFusedMoE(FusedMoE):
                 kwargs.pop("shared_experts", None),
                 self.quant_method,
                 self.vllm_config.parallel_config.enable_dbo,
+                routed_output_transform=_routed_output_transform,
+                routed_scaling_factor=_runner_routed_scaling_factor,
             )
 
     def _get_quant_type(self) -> QuantType:
@@ -420,6 +468,9 @@ class AscendFusedMoE(FusedMoE):
         outputs since each rank only has partial outputs.
         """
         return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
+
+    def maybe_init_modular_kernel(self) -> None:
+        return None
 
     def forward(
         self,
@@ -621,6 +672,11 @@ class AscendSharedFusedMoE(*_SharedFusedMoEBase):  # type: ignore[misc]
                 self.vllm_config.parallel_config.enable_dbo,
             )
         else:
+            runner_routed_scaling_factor = (
+                kwargs.get("routed_scaling_factor", 1.0)
+                if kwargs.get("apply_routed_scale_to_output", False)
+                else 1.0
+            )
             self.runner = AscendMoERunner(
                 self.layer_name,
                 self.moe_config,
@@ -630,6 +686,8 @@ class AscendSharedFusedMoE(*_SharedFusedMoEBase):  # type: ignore[misc]
                 self._shared_experts,
                 self.quant_method,
                 self.vllm_config.parallel_config.enable_dbo,
+                routed_output_transform=kwargs.get("routed_output_transform"),
+                routed_scaling_factor=runner_routed_scaling_factor,
             )
 
         if self.multistream_overlap_shared_expert:

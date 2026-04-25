@@ -239,6 +239,9 @@ class AscendFusedMoE310(FusedMoE):
             raise RuntimeError("Only Unquant and W8A8 is supported.")
         return quant_type
 
+    def maybe_init_modular_kernel(self) -> None:
+        return None
+
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
     ) -> torch.Tensor:
