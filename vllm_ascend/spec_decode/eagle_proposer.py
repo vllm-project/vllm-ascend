@@ -58,129 +58,6 @@ else:
 _PREPARE_INPUTS_BLOCK_SIZE = 4
 
 
-def _copy_and_expand_eagle_inputs_fallback(
-    target_token_ids: "torch.Tensor",
-    target_positions: "torch.Tensor",
-    next_token_ids: "torch.Tensor",
-    query_start_loc: "torch.Tensor",
-    query_end_loc: "torch.Tensor",
-    padding_token_id: int,
-    parallel_drafting_token_id: int,
-    num_padding_slots: int,
-    shift_input_ids: bool,
-    total_draft_tokens: int,
-) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]":
-    """Pure-Python fallback for npu_copy_and_expand_eagle_inputs.
-    Uses caller's total_draft_tokens for output size with bounds checking."""
-    device = target_token_ids.device
-    tid = target_token_ids.cpu().numpy()
-    target_pos = target_positions.cpu().numpy()
-    ntid = next_token_ids.cpu().numpy()
-    qsl = query_start_loc.cpu().numpy()
-    qel = query_end_loc.cpu().numpy()
-
-    num_reqs = len(qsl) - 1
-    total_input_tokens = len(tid)
-
-    out_ids = np.zeros(total_draft_tokens, dtype=np.int32)
-    out_pos = np.zeros(total_draft_tokens, dtype=np.int32)
-    out_rej = np.zeros(total_draft_tokens, dtype=np.int8)
-    out_msk = np.zeros(total_draft_tokens, dtype=np.int8)
-    out_nti = np.zeros(num_reqs * num_padding_slots, dtype=np.int32)
-    out_hsm = np.zeros(total_input_tokens, dtype=np.int32)
-
-    for r in range(num_reqs):
-        qs = int(qsl[r])
-        nqs = int(qsl[r + 1])
-        qe = int(qel[r])
-
-        num_rejected = max(nqs - qe - 1, 0)
-
-        if shift_input_ids:
-            num_valid = max(qe - qs, 0)
-            output_start = qs + r * (num_padding_slots - 1)
-        else:
-            num_valid = max(qe - qs + 1, 0)
-            output_start = qs + r * num_padding_slots
-
-        start_pos = int(target_pos[qs]) if qs < len(target_pos) else 0
-        next_token_id = int(ntid[r]) if r < len(ntid) else 0
-
-        # Valid region
-        if shift_input_ids:
-            read_start = qs + 1
-            read_count = min(num_valid, total_input_tokens - read_start)
-            if read_count < 0:
-                read_count = 0
-            for j in range(num_valid):
-                w = output_start + j
-                if w >= total_draft_tokens:
-                    break
-                idx = min(j, read_count - 1) if read_count > 0 else 0
-                out_ids[w] = tid[read_start + idx] if read_count > 0 else 0
-                out_pos[w] = start_pos + j
-        else:
-            num_input = nqs - qs
-            for j in range(num_valid):
-                w = output_start + j
-                if w >= total_draft_tokens:
-                    break
-                idx = min(j, num_input - 1)
-                out_ids[w] = tid[qs + idx]
-                out_pos[w] = start_pos + j
-
-        # Bonus token
-        w = output_start + num_valid
-        if w < total_draft_tokens:
-            out_ids[w] = next_token_id
-            out_pos[w] = start_pos + num_valid
-
-        # Parallel draft tokens
-        for k in range(1, num_padding_slots):
-            j = num_valid + k
-            w = output_start + j
-            if w >= total_draft_tokens:
-                break
-            out_ids[w] = parallel_drafting_token_id
-            out_pos[w] = start_pos + j
-            out_msk[w] = 1
-
-        # Rejected tokens
-        for k in range(num_rejected):
-            j = num_valid + num_padding_slots + k
-            w = output_start + j
-            if w >= total_draft_tokens:
-                break
-            out_ids[w] = padding_token_id
-            out_pos[w] = 0
-            out_rej[w] = 1
-
-        # New token indices
-        for k in range(num_padding_slots):
-            nti_w = output_start + num_valid + k
-            if nti_w >= total_draft_tokens:
-                nti_w = total_draft_tokens - 1
-            out_nti[r * num_padding_slots + k] = nti_w
-
-        # Hidden state mapping
-        if shift_input_ids:
-            num_input = nqs - qs
-            for j in range(num_input):
-                hsm_w = output_start + j
-                if hsm_w >= total_draft_tokens:
-                    hsm_w = total_draft_tokens - 1
-                out_hsm[qs + j] = hsm_w
-
-    return (
-        torch.from_numpy(out_ids).to(device),
-        torch.from_numpy(out_pos).to(device),
-        torch.from_numpy(out_rej).to(device),
-        torch.from_numpy(out_msk).to(device),
-        torch.from_numpy(out_nti).to(device),
-        torch.from_numpy(out_hsm).to(device),
-    )
-
-
 # TODO: Remove it when the bug of fx-graph is solved
 # patch vllm_config to be in CompilationMode.NONE temporarily
 @contextmanager
@@ -1322,46 +1199,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
-            try:
-                (
-                    out_input_ids,
-                    out_positions,
-                    out_is_rejected_token_mask,
-                    out_is_masked_token_mask,
-                    token_indices_to_sample,
-                    out_hidden_state_mapping,
-                ) = torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs(
-                    target_token_ids,
-                    target_positions.to(torch.int32),
-                    next_token_ids,
-                    query_start_loc,
-                    query_end_loc,
-                    0,  # padding_token_id
-                    self.parallel_drafting_token_id,
-                    self.extra_slots_per_request,
-                    self.pass_hidden_states_to_model,
-                    total_num_output_tokens,
-                )
-            except (AttributeError, RuntimeError):
-                (
-                    out_input_ids,
-                    out_positions,
-                    out_is_rejected_token_mask,
-                    out_is_masked_token_mask,
-                    token_indices_to_sample,
-                    out_hidden_state_mapping,
-                ) = _copy_and_expand_eagle_inputs_fallback(
-                    target_token_ids,
-                    target_positions.to(torch.int32),
-                    next_token_ids,
-                    query_start_loc,
-                    query_end_loc,
-                    0,  # padding_token_id
-                    self.parallel_drafting_token_id,
-                    self.extra_slots_per_request,
-                    self.pass_hidden_states_to_model,
-                    total_num_output_tokens,
-                )
+            (
+                out_input_ids,
+                out_positions,
+                out_is_rejected_token_mask,
+                out_is_masked_token_mask,
+                token_indices_to_sample,
+                out_hidden_state_mapping,
+            ) = torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs(
+                target_token_ids,
+                target_positions.to(torch.int32),
+                next_token_ids,
+                query_start_loc,
+                query_end_loc,
+                0,  # padding_token_id
+                self.parallel_drafting_token_id,
+                self.extra_slots_per_request,
+                self.pass_hidden_states_to_model,
+                total_num_output_tokens,
+            )
 
             # Copy returned tensors into pre-allocated buffers
             self.input_ids[:total_num_output_tokens].copy_(out_input_ids)
