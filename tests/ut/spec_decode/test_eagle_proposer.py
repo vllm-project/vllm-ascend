@@ -1382,7 +1382,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_discarded_requests = 0
 
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
@@ -1427,7 +1426,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_discarded_requests = 0
 
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
@@ -1469,7 +1467,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_discarded_requests = 0
 
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
@@ -1513,7 +1510,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_discarded_requests = 2
 
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
@@ -1561,7 +1557,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_discarded_requests = 1
 
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
@@ -1595,7 +1590,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_discarded_requests = 0
 
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
@@ -1635,7 +1629,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_discarded_requests = 0
 
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
@@ -1679,7 +1672,6 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         num_discarded_requests = 0
 
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
