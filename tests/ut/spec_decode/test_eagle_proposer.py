@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -515,6 +516,7 @@ class TestEagleProposerHelperMethods(TestBase):
             self.assertEqual(indices.tolist(), [1, 2, 4])
 
 
+# fmt: off
 class TestEagleProposerPropose():
     @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
@@ -1131,6 +1133,44 @@ class TestEagleProposerPropose():
 
         assert not missing, f"Missing dataclass fields: {missing}"
 
+
+        import vllm_ascend.spec_decode.eagle_proposer
+        assert hasattr(vllm_ascend.spec_decode.eagle_proposer, "SpecDecodeBaseProposer")
+        RunnerCls = vllm_ascend.spec_decode.eagle_proposer.SpecDecodeBaseProposer
+        assert hasattr(RunnerCls, "_run_merged_draft")
+        sig = inspect.signature(RunnerCls._run_merged_draft)
+        sig_name = self.get_param_names(sig)
+        assert sig_name == ['self', 'num_input_tokens', 'batch_size', 'token_indices_to_sample',
+                            'target_positions', 'inputs_embeds', 'multi_steps_attn_metadata',
+                            'num_tokens', 'is_prefill'
+                        ]
+
+
+        import vllm.v1.worker.utils
+        assert hasattr(vllm.v1.worker.utils, "AttentionGroup")
+        assert hasattr(vllm.v1.worker.utils.AttentionGroup, "get_metadata_builder")
+        fields = {
+            'backend', 'layer_names', 'kv_cache_spec', \
+            'kv_cache_group_id'
+        }
+
+        actual = set(vllm.v1.worker.utils.AttentionGroup.__dataclass_fields__)
+        missing = fields - actual
+
+        assert not missing, f"Missing dataclass fields: {missing}"
+
+
+        import vllm.v1.attention.backend
+        assert hasattr(vllm.v1.attention.backend, "AttentionMetadataBuilder")
+        assert hasattr(vllm.v1.attention.backend.AttentionMetadataBuilder, "build")
+        assert hasattr(vllm.v1.attention.backend.AttentionMetadataBuilder, "build_for_drafting")
+        RunnerCls = vllm.v1.attention.backend.AttentionMetadataBuilder
+        sig = inspect.signature(RunnerCls.build)
+        sig_name = self.get_param_names(sig)
+        assert sig_name == ['self', 'common_prefix_len', 'common_attn_metadata', 'fast_build']
+
+
     # get the param in inpect sig, for check_mock()
     def get_param_names(self, sig):
         return [p.name for p in sig.parameters.values()]
+# fmt: on
