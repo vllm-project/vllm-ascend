@@ -211,7 +211,8 @@ def set_mc2_mask(vllm_config, device):
         return
     if is_moe_model(vllm_config):
         _reserved_mc2_mask = torch.zeros(
-            vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.bool, device=device)
+            vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.bool, device=device
+        )
     else:
         _reserved_mc2_mask = None
 
