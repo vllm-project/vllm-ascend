@@ -97,7 +97,7 @@ For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 First start serving your model:
 
 ```bash
-export VLLM_USE_MODELSCOPE=True 
+export VLLM_USE_MODELSCOPE=True
 vllm serve Qwen/Qwen3-8B
 ```
 
@@ -148,7 +148,7 @@ P99 ITL (ms):                            28.85
 #### 3.2.2 Offline Throughput Benchmark
 
 ```bash
-VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=True
 vllm bench throughput \
   --model Qwen/Qwen3-8B \
   --dataset-name random \
@@ -223,7 +223,7 @@ vllm serve Qwen/Qwen3-Embedding-8B --trust-remote-code
 ```shell
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve \
   --model Qwen/Qwen3-Embedding-8B \
   --backend openai-embeddings \
