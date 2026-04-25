@@ -45,7 +45,8 @@ export VLLM_ASCEND_LAPS_WAIT_MAX_BATCH=4
 ### Variables
 
 - `VLLM_ASCEND_LAPS_SCHEDULING`
-  - `1` enables the LAPS-style waiting queue patch.
+  - `1` enables the Ascend LAPS scheduler.
+  - `0` disables it.
 - `VLLM_ASCEND_LAPS_THRESHOLD`
   - Prompts with `num_prompt_tokens <= threshold` are treated as short.
 - `VLLM_ASCEND_LAPS_WAIT_WINDOW_MS`
@@ -54,6 +55,54 @@ export VLLM_ASCEND_LAPS_WAIT_MAX_BATCH=4
 - `VLLM_ASCEND_LAPS_WAIT_MAX_BATCH`
   - Dispatch short requests early once this many short requests are queued,
     even if the wait window has not expired.
+
+## How It Is Selected
+
+`vllm-ascend` selects the scheduler at config time:
+
+- `VLLM_ASCEND_LAPS_SCHEDULING=0`
+  - Keep the normal scheduler path.
+- `VLLM_ASCEND_LAPS_SCHEDULING=1` and normal serving
+  - Use `vllm_ascend.core.laps_scheduler.LAPSScheduler`.
+- `VLLM_ASCEND_LAPS_SCHEDULING=1` and `recompute_scheduler_enable=true`
+  - Keep `RecomputeScheduler`, and install the LAPS waiting queue inside it.
+- `SLO_limits_for_dynamic_batch != -1`
+  - `SchedulerDynamicBatch` takes precedence and LAPS is ignored.
+
+In other words, the effective priority is:
+
+`dynamic batch > recompute (+ optional LAPS) > LAPS > default`
+
+## Minimal Examples
+
+Enable LAPS in normal serving:
+
+```bash
+export VLLM_ASCEND_LAPS_SCHEDULING=1
+export VLLM_ASCEND_LAPS_THRESHOLD=256
+export VLLM_ASCEND_LAPS_WAIT_WINDOW_MS=5
+export VLLM_ASCEND_LAPS_WAIT_MAX_BATCH=4
+
+vllm serve <model> ...
+```
+
+Enable recompute scheduler together with LAPS:
+
+```bash
+export VLLM_ASCEND_LAPS_SCHEDULING=1
+export VLLM_ASCEND_LAPS_THRESHOLD=256
+export VLLM_ASCEND_LAPS_WAIT_WINDOW_MS=5
+export VLLM_ASCEND_LAPS_WAIT_MAX_BATCH=4
+
+vllm serve <model> \
+  --additional-config '{"recompute_scheduler_enable": true}'
+```
+
+Disable LAPS explicitly:
+
+```bash
+export VLLM_ASCEND_LAPS_SCHEDULING=0
+```
 
 ## Scheduling Semantics
 
@@ -71,3 +120,5 @@ export VLLM_ASCEND_LAPS_WAIT_MAX_BATCH=4
   decode instances across nodes or proxies.
 - The implementation targets the vLLM waiting-queue layer and is intended for
   PD / EPD style serving where prompt length skew is a dominant bottleneck.
+- When dynamic batch is selected through `SLO_limits_for_dynamic_batch`,
+  LAPS is not applied.
