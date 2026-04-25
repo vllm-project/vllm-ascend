@@ -920,6 +920,15 @@ class NPUPlatform(Platform):
 
         # ==================== 9. Parallel Config ====================
         if vllm_config.parallel_config:
+            # ray_workers_use_nsight requires NVIDIA Nsight which is not
+            # available on Ascend NPU
+            if getattr(vllm_config.parallel_config, "ray_workers_use_nsight", False):
+                logger.warning(
+                    "'--ray-workers-use-nsight' requires NVIDIA Nsight which is "
+                    "not available on Ascend NPU. Resetting to False."
+                )
+                vllm_config.parallel_config.ray_workers_use_nsight = False
+
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
                 logger.warning(
                     "'--enable-dbo' is currently ignored on Ascend NPU because the "
