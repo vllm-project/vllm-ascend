@@ -29,14 +29,12 @@ AsyncLLMEngine are working correctly.
 import lm_eval
 import pytest
 
-from tests.e2e.conftest import wait_until_npu_memory_free
-
-MODEL_NAMES = ["Qwen/Qwen3-0.6B", "deepseek-ai/DeepSeek-V2-Lite-Chat"]
+MODEL_NAMES = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 NUM_CONCURRENT = 500
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
-EXPECTED_VALUES = {"Qwen/Qwen3-0.6B": 0.414, "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.34}
+EXPECTED_VALUES = {"Qwen/Qwen3-0.6B": 0.414, "vllm-ascend/DeepSeek-V2-Lite-W8A8": 0.34}
 
 
 def run_test(model_name, more_args=None):
@@ -63,7 +61,6 @@ def run_test(model_name, more_args=None):
     )
 
 
-@wait_until_npu_memory_free(target_free_percentage=0.95)
 @pytest.mark.parametrize("model", MODEL_NAMES)
 def test_lm_eval_accuracy(model):
     """Run with the V1 Engine."""
