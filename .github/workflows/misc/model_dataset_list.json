@@ -251,6 +251,7 @@
       "MiniMax/MiniMax-M2.5",
       "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
       "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
+      "popowww/MiniMax-M2.5-Eagle3",
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
       "z-lab/Qwen3-8B-DFlash-b16"
     ], 
