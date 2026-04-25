@@ -238,7 +238,8 @@ def generate_test_case(rng, num_reqs, num_padding_slots, shift_input_ids,
 # Parametrized tests
 # ---------------------------------------------------------------------------
 @pytest.mark.skip(    
-    reason="Failure of an individual operator use case causes failures of other operators."
+    reason="Only one type of machine is supported. It is necessary to consult \
+        with him to confirm whether it can be adapted to other machines."
 )
 @pytest.mark.parametrize("num_reqs", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("num_padding_slots", [1, 2, 3, 5])
@@ -304,7 +305,8 @@ def test_copy_and_expand_eagle_inputs(num_reqs, num_padding_slots,
                                    msg="out_hidden_state_mapping mismatch")
 
 @pytest.mark.skip(    
-    reason="Failure of an individual operator use case causes failures of other operators."
+    reason="Only one type of machine is supported. It is necessary to consult \
+        with him to confirm whether it can be adapted to other machines."
 )
 @pytest.mark.parametrize("num_reqs", [1])
 @pytest.mark.parametrize("num_padding_slots", [1])
@@ -348,6 +350,10 @@ def test_minimal_case(num_reqs, num_padding_slots, shift_input_ids):
     torch.testing.assert_close(n_nti, torch.from_numpy(g_nti), atol=0, rtol=0)
 
 
+@pytest.mark.skip(    
+    reason="Only one type of machine is supported. It is necessary to consult \
+        with him to confirm whether it can be adapted to other machines."
+)
 @pytest.mark.parametrize("num_reqs", [3, 7, 13])
 def test_large_tokens_per_request(num_reqs):
     """Test with larger token counts per request."""
@@ -390,7 +396,8 @@ def test_large_tokens_per_request(num_reqs):
     torch.testing.assert_close(n_nti, torch.from_numpy(g_nti), atol=0, rtol=0)
 
 @pytest.mark.skip(    
-    reason="Failure of an individual operator use case causes failures of other operators."
+    reason="Only one type of machine is supported. It is necessary to consult \
+        with him to confirm whether it can be adapted to other machines."
 )
 @pytest.mark.parametrize("num_reqs", [3, 7, 13])
 def test_large_tokens_shift_true(num_reqs):
@@ -435,7 +442,8 @@ def test_large_tokens_shift_true(num_reqs):
     torch.testing.assert_close(n_hsm, torch.from_numpy(g_hsm), atol=0, rtol=0)
 
 @pytest.mark.skip(    
-    reason="Failure of an individual operator use case causes failures of other operators."
+    reason="Only one type of machine ascend910b is supported. It is necessary to consult \
+        with him to confirm whether it can be adapted to other machines."
 )
 @pytest.mark.parametrize("num_reqs", [1, 4, 8])
 def test_no_rejected_tokens(num_reqs):

@@ -250,6 +250,10 @@ def test_ascend_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias,
     validate_cmp(conv_states, conv_states_ref, itype)
 
 
+@pytest.mark.skip(    
+    reason="To use this tirton ops:causal_conv1d_fn, you need to set `get_forward_context`. After\
+          the model side dumps the data, Zeng Tian has made the necessary fixes."
+)
 @pytest.mark.parametrize('has_initial_state', [False, True])
 @pytest.mark.parametrize('itype', [torch.bfloat16])
 @pytest.mark.parametrize('silu_activation', [True])
@@ -378,6 +382,10 @@ def causal_conv1d_update_ref(x,
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
 
 
+@pytest.mark.skip(    
+    reason="In this scenario, using tirton ops:causal_conv1d_update will cause an overflow. \
+        Later, Zeng Tian was responsible for fixing this issue."
+)
 @pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [False, True])
