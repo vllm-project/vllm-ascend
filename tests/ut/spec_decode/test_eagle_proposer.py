@@ -859,7 +859,7 @@ class TestEagleProposerPropose:
             if model_type == 'qwen_moe':
                 assert captured_common_attn_metadata._seq_lens_cpu == torch.tensor([15])
             if model_type == 'qwen_dense':
-                assert captured_common_attn_metadata._seq_lens_cpu == None
+                assert captured_common_attn_metadata._seq_lens_cpu is None
             if model_type == 'deepseek':
                 assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([11]))
                 assert captured_common_attn_metadata.max_seq_len == 9
@@ -893,7 +893,7 @@ class TestEagleProposerPropose:
             assert captured_common_attn_metadata.num_actual_tokens == 3
             assert captured_common_attn_metadata.max_query_len == 1
             assert captured_common_attn_metadata.max_seq_len == 0
-            assert captured_common_attn_metadata._seq_lens_cpu == None
+            assert captured_common_attn_metadata._seq_lens_cpu is None
             if model_type == 'qwen_dense':
                 if graphmode == 'full':
                     assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19] + [0]*13))
@@ -937,7 +937,7 @@ class TestEagleProposerPropose:
         else:
             assert captured_common_attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         assert captured_common_attn_metadata.graph_pad_size == -1
-        assert captured_common_attn_metadata.prefill_context_parallel_metadata == None
+        assert captured_common_attn_metadata.prefill_context_parallel_metadata is None
 
     # prefill or decode
     def is_decode(self, flag_prefill_decode):
