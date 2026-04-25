@@ -158,4 +158,4 @@ python -m vllm.entrypoints.api_server \
 
 - [ModelSlim Documentation](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md)
 - [LLM-Compressor GitHub](https://github.com/vllm-project/llm-compressor)
-- [vLLM Quantization Guide](https://docs.vllm.ai/en/latest/quantization/)
+- [vLLM Quantization Guide](https://docs.vllm.ai/en/latest/features/quantization/)
