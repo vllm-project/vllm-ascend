@@ -32,7 +32,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
       - "--speculative_config"
-      - '{"method":"eagle3","model":"popowww/MiniMax-M2.5-Eagle3","num_speculative_tokens":3}'
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/popowww/MiniMax-M2.5-Eagle3","num_speculative_tokens":3}'
       - "--enable-expert-parallel"
       - "--max-num-seqs"
       - "32"
