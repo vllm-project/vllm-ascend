@@ -153,7 +153,8 @@ def _pytorch_causal_conv1d_prefill(
 
         # Update conv_state with last K-1 values of this sequence
         if K > 1:
-            conv_states[slot_idx] = torch.cat([conv_states[slot_idx].float(), x_seq.float()], dim=1)[:, -(K - 1) :].to(conv_states.dtype)
+            cat_state = torch.cat([conv_states[slot_idx].float(), x_seq.float()], dim=1)
+            conv_states[slot_idx] = cat_state[:, -(K - 1) :].to(conv_states.dtype)
 
     return out
 
