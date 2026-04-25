@@ -38,8 +38,6 @@ test_cases:
       - '{"cudagraph_capture_sizes":[4, 8, 16, 20, 24, 28, 32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
-      - "--additional-config"
-      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - "--reasoning-parser"
       - "deepseek_v3"
       - "--tokenizer_mode"
