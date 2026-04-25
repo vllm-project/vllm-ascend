@@ -380,7 +380,10 @@ class ProfilingChunkScheduler(Scheduler):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
-            time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
+            # Decode requests (num_new_tokens == 1) have negligible latency;
+            # skip time_budget accounting so they don't starve other requests.
+            if num_new_tokens > 1:
+                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
             req_index += 1
 
             # Speculative decode related.
@@ -634,7 +637,10 @@ class ProfilingChunkScheduler(Scheduler):
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(request_id)
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
-                time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
+                # Decode requests (num_new_tokens == 1) have negligible latency;
+                # skip time_budget accounting so they don't starve other requests.
+                if num_new_tokens > 1:
+                    time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if vllm_version_is("0.19.0"):
