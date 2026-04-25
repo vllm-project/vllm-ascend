@@ -93,7 +93,7 @@ The converted model files look like:
 Run the following script to start the vLLM server with the quantized model:
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH=vllm-ascend/Qwen3-8B-W4A8
 vllm serve ${MODEL_PATH} --served-model-name "qwen3-8b-w4a8" --max-model-len 4096 --quantization ascend
 ```
