@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-26 02:10+0000\n"
 "PO-Revision-Date: 2026-01-22 10:00+0800\n"
 "Last-Translator: Your Name <email@example.com>\n"
 "Language: zh_CN\n"
@@ -51,8 +51,8 @@ msgstr "您可以按照以下步骤在 CPU 上运行单元测试："
 msgid "Single card"
 msgstr "单卡"
 
-#: ../../source/developer_guide/contribution/testing.md:96
-#: ../../source/developer_guide/contribution/testing.md:135
+#: ../../source/developer_guide/contribution/testing.md:97
+#: ../../source/developer_guide/contribution/testing.md:139
 msgid "After starting the container, you should install the required packages:"
 msgstr "启动容器后，您需要安装必要的依赖包："
 
@@ -60,19 +60,19 @@ msgstr "启动容器后，您需要安装必要的依赖包："
 msgid "Multi cards"
 msgstr "多卡"
 
-#: ../../source/developer_guide/contribution/testing.md:149
+#: ../../source/developer_guide/contribution/testing.md:153
 msgid "Running tests"
 msgstr "运行测试"
 
-#: ../../source/developer_guide/contribution/testing.md:151
+#: ../../source/developer_guide/contribution/testing.md:155
 msgid "Unit tests"
 msgstr "单元测试"
 
-#: ../../source/developer_guide/contribution/testing.md:153
+#: ../../source/developer_guide/contribution/testing.md:157
 msgid "There are several principles to follow when writing unit tests:"
 msgstr "编写单元测试时需遵循以下原则："
 
-#: ../../source/developer_guide/contribution/testing.md:155
+#: ../../source/developer_guide/contribution/testing.md:159
 msgid ""
 "The test file path should be consistent with the source file and start "
 "with the `test_` prefix, such as: `vllm_ascend/worker/worker.py` --> "
@@ -81,22 +81,23 @@ msgstr ""
 "测试文件路径应与源代码文件路径保持一致，并以 `test_` 为前缀，例如：`vllm_ascend/worker/worker.py` → "
 "`tests/ut/worker/test_worker.py`"
 
-#: ../../source/developer_guide/contribution/testing.md:156
+#: ../../source/developer_guide/contribution/testing.md:160
 msgid ""
 "The vLLM Ascend test uses unittest framework. See [the Python unittest "
 "documentation](https://docs.python.org/3/library/unittest.html#module-"
 "unittest) to understand how to write unit tests."
 msgstr ""
 "vLLM Ascend 测试使用 unittest 框架。请参阅 [Python unittest "
-"文档](https://docs.python.org/3/library/unittest.html#module-unittest) 了解如何编写单元测试。"
+"文档](https://docs.python.org/3/library/unittest.html#module-unittest) "
+"了解如何编写单元测试。"
 
-#: ../../source/developer_guide/contribution/testing.md:157
+#: ../../source/developer_guide/contribution/testing.md:161
 msgid ""
 "All unit tests can be run on CPUs, so you must mock the device-related "
 "functions on the host."
 msgstr "所有单元测试都可在 CPU 上运行，因此必须在主机端模拟与设备相关的函数。"
 
-#: ../../source/developer_guide/contribution/testing.md:158
+#: ../../source/developer_guide/contribution/testing.md:162
 msgid ""
 "Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project"
 "/vllm-ascend/blob/main/tests/ut/test_ascend_config.py)."
@@ -104,7 +105,7 @@ msgstr ""
 "示例：[tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/tests/ut/test_ascend_config.py)。"
 
-#: ../../source/developer_guide/contribution/testing.md:159
+#: ../../source/developer_guide/contribution/testing.md:163
 msgid "You can run the unit tests using `pytest`:"
 msgstr "您可以使用 `pytest` 运行单元测试："
 
@@ -116,11 +117,11 @@ msgstr "单卡"
 msgid "Multi-card"
 msgstr "多卡"
 
-#: ../../source/developer_guide/contribution/testing.md:206
+#: ../../source/developer_guide/contribution/testing.md:210
 msgid "E2E test"
 msgstr "端到端（E2E）测试"
 
-#: ../../source/developer_guide/contribution/testing.md:208
+#: ../../source/developer_guide/contribution/testing.md:212
 msgid ""
 "Although vllm-ascend CI provides E2E tests on Ascend CI (for example, "
 "[schedule_nightly_test_a2.yaml](https://github.com/vllm-project/vllm-"
@@ -131,62 +132,63 @@ msgid ""
 "ascend/blob/main/.github/workflows/pr_test_full.yaml)), you can run them "
 "locally."
 msgstr ""
-"虽然 vllm-ascend CI 在 Ascend CI 上提供了 E2E 测试（例如，"
-"[schedule_nightly_test_a2.yaml](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml)、"
-"[schedule_nightly_test_a3.yaml](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)、"
-"[pr_test_full.yaml](https://github.com/vllm-project/vllm-"
+"虽然 vllm-ascend CI 在 Ascend CI 上提供了 E2E "
+"测试（例如，[schedule_nightly_test_a2.yaml](https://github.com/vllm-project"
+"/vllm-"
+"ascend/blob/main/.github/workflows/schedule_nightly_test_a2.yaml)、[schedule_nightly_test_a3.yaml](https://github.com"
+"/vllm-project/vllm-"
+"ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)、[pr_test_full.yaml](https://github.com"
+"/vllm-project/vllm-"
 "ascend/blob/main/.github/workflows/pr_test_full.yaml)），但您也可以在本地运行它们。"
 
-#: ../../source/developer_guide/contribution/testing.md:211
+#: ../../source/developer_guide/contribution/testing.md:215
 msgid "PR-triggered E2E test"
 msgstr "PR 触发的 E2E 测试"
 
-#: ../../source/developer_guide/contribution/testing.md:213
-#: ../../source/developer_guide/contribution/testing.md:264
+#: ../../source/developer_guide/contribution/testing.md:217
+#: ../../source/developer_guide/contribution/testing.md:268
 msgid "You can run tests with `pytest` as well. Typical examples:"
 msgstr "您也可以使用 `pytest` 运行测试。典型示例如下："
 
-#: ../../source/developer_guide/contribution/testing.md:221
-#: ../../source/developer_guide/contribution/testing.md:273
+#: ../../source/developer_guide/contribution/testing.md:225
+#: ../../source/developer_guide/contribution/testing.md:277
 msgid "You can't run the E2E test on CPUs."
 msgstr "注意：端到端测试无法在 CPU 上运行。"
 
-#: ../../source/developer_guide/contribution/testing.md:260
+#: ../../source/developer_guide/contribution/testing.md:264
 msgid "This will reproduce the E2E test behavior."
 msgstr "这将复现 E2E 测试的行为。"
 
-#: ../../source/developer_guide/contribution/testing.md:262
+#: ../../source/developer_guide/contribution/testing.md:266
 msgid "Nightly-triggered E2E test"
 msgstr "夜间触发的 E2E 测试"
 
-#: ../../source/developer_guide/contribution/testing.md:303
+#: ../../source/developer_guide/contribution/testing.md:307
 msgid ""
 "For running nightly single-node model test cases locally, refer to the "
 "following example."
 msgstr "要在本地运行夜间单节点模型测试用例，请参考以下示例。"
 
-#: ../../source/developer_guide/contribution/testing.md:310
+#: ../../source/developer_guide/contribution/testing.md:314
 msgid ""
 "For running nightly multi-node model test cases locally, refer to the "
 "`Running Locally` section in [Multi Node Test](./multi_node_test.md)."
 msgstr "要在本地运行夜间多节点模型测试用例，请参阅[多节点测试](./multi_node_test.md)文档中的“本地运行”章节。"
 
-#: ../../source/developer_guide/contribution/testing.md:312
+#: ../../source/developer_guide/contribution/testing.md:316
 msgid "E2E test examples"
 msgstr "E2E 测试示例"
 
-#: ../../source/developer_guide/contribution/testing.md:314
+#: ../../source/developer_guide/contribution/testing.md:318
 msgid ""
 "Offline test example: "
 "[`tests/e2e/singlecard/test_camem.py`](https://github.com/vllm-project"
 "/vllm-ascend/blob/main/tests/e2e/singlecard/test_camem.py)"
 msgstr ""
-"离线测试示例：[`tests/e2e/singlecard/test_camem.py`](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/tests/e2e/singlecard/test_camem.py)"
+"离线测试示例：[`tests/e2e/singlecard/test_camem.py`](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/tests/e2e/singlecard/test_camem.py)"
 
-#: ../../source/developer_guide/contribution/testing.md:315
+#: ../../source/developer_guide/contribution/testing.md:319
 msgid ""
 "Online test example: "
 "[`tests/e2e/multicard/2-cards/test_single_request_aclgraph.py`](https://github.com"
@@ -197,37 +199,38 @@ msgstr ""
 "/vllm-project/vllm-"
 "ascend/blob/main/tests/e2e/multicard/2-cards/test_single_request_aclgraph.py)"
 
-#: ../../source/developer_guide/contribution/testing.md:316
+#: ../../source/developer_guide/contribution/testing.md:320
 msgid ""
 "Correctness test example: "
 "[`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com"
 "/vllm-project/vllm-"
 "ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)"
 msgstr ""
-"正确性测试示例：[`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-"
+"正确性测试示例：[`tests/e2e/singlecard/test_aclgraph_accuracy.py`](https://github.com"
+"/vllm-project/vllm-"
 "ascend/blob/main/tests/e2e/singlecard/test_aclgraph_accuracy.py)"
 
-#: ../../source/developer_guide/contribution/testing.md:318
+#: ../../source/developer_guide/contribution/testing.md:322
 msgid ""
 "The CI resource is limited, and you might need to reduce the number of "
 "layers of a model. Below is an example of how to generate a reduced layer"
 " model:"
 msgstr "由于 CI 资源有限，您可能需要减少模型的层数。以下是一个如何生成精简层数模型的示例："
 
-#: ../../source/developer_guide/contribution/testing.md:320
+#: ../../source/developer_guide/contribution/testing.md:324
 msgid ""
 "Fork the original model repo in modelscope. All the files in the repo "
 "except for weights are required."
 msgstr "在 modelscope 上 fork 原始模型仓库。除权重文件外，需要保留仓库中的所有文件。"
 
-#: ../../source/developer_guide/contribution/testing.md:321
+#: ../../source/developer_guide/contribution/testing.md:325
 #, python-brace-format
 msgid ""
 "Set `num_hidden_layers` to the expected number of layers, e.g., "
 "`{\"num_hidden_layers\": 2,}`"
 msgstr "在配置中将 `num_hidden_layers` 设置为期望的层数，例如：`{\"num_hidden_layers\": 2,}`"
 
-#: ../../source/developer_guide/contribution/testing.md:322
+#: ../../source/developer_guide/contribution/testing.md:326
 msgid ""
 "Copy the following python script as `generate_random_weight.py`. Set the "
 "relevant parameters `MODEL_LOCAL_PATH`, `DIST_DTYPE` and "
@@ -236,59 +239,61 @@ msgstr ""
 "将以下 Python 脚本保存为 `generate_random_weight.py`，并根据需要设置 "
 "`MODEL_LOCAL_PATH`、`DIST_DTYPE` 和 `DIST_MODEL_PATH` 参数："
 
-#: ../../source/developer_guide/contribution/testing.md:340
+#: ../../source/developer_guide/contribution/testing.md:344
 msgid "View CI log summary in GitHub Actions"
 msgstr "在 GitHub Actions 中查看 CI 日志摘要"
 
-#: ../../source/developer_guide/contribution/testing.md:342
+#: ../../source/developer_guide/contribution/testing.md:346
 msgid ""
 "After a CI job finishes, you can open the corresponding GitHub Actions "
 "job page and check the `Summary` tab to view the generated CI log "
 "summary."
 msgstr "CI 作业完成后，您可以打开相应的 GitHub Actions 作业页面，并查看 `Summary` 选项卡以查看生成的 CI 日志摘要。"
 
-#: ../../source/developer_guide/contribution/testing.md:345
+#: ../../source/developer_guide/contribution/testing.md:349
 msgid "![GitHub Actions CI log summary](../../assets/ci_log_summary.png)"
 msgstr "![GitHub Actions CI 日志摘要](../../assets/ci_log_summary.png)"
 
-#: ../../source/developer_guide/contribution/testing.md:345
+#: ../../source/developer_guide/contribution/testing.md:349
 msgid "GitHub Actions CI log summary"
 msgstr "GitHub Actions CI 日志摘要"
 
-#: ../../source/developer_guide/contribution/testing.md:347
+#: ../../source/developer_guide/contribution/testing.md:351
 msgid ""
 "The summary is intended to help developers triage failures more quickly. "
 "It may include:"
 msgstr "该摘要旨在帮助开发者更快地排查故障。它可能包括："
 
-#: ../../source/developer_guide/contribution/testing.md:349
+#: ../../source/developer_guide/contribution/testing.md:353
 msgid "failed test files"
 msgstr "失败的测试文件"
 
-#: ../../source/developer_guide/contribution/testing.md:350
+#: ../../source/developer_guide/contribution/testing.md:354
 msgid "failed test cases"
 msgstr "失败的测试用例"
 
-#: ../../source/developer_guide/contribution/testing.md:351
+#: ../../source/developer_guide/contribution/testing.md:355
 msgid "distinct root-cause errors"
 msgstr "不同的根本原因错误"
 
-#: ../../source/developer_guide/contribution/testing.md:352
+#: ../../source/developer_guide/contribution/testing.md:356
 msgid "short error context extracted from the job log"
 msgstr "从作业日志中提取的简短错误上下文"
 
-#: ../../source/developer_guide/contribution/testing.md:354
+#: ../../source/developer_guide/contribution/testing.md:358
 msgid ""
 "This summary is generated from the job log by "
 "`/.github/workflows/scripts/ci_log_summary.py` for unit-test and e2e "
 "workflows."
-msgstr "该摘要由 `/.github/workflows/scripts/ci_log_summary.py` 从作业日志中生成，适用于单元测试和 e2e 工作流。"
+msgstr ""
+"该摘要由 `/.github/workflows/scripts/ci_log_summary.py` 从作业日志中生成，适用于单元测试和 e2e"
+" 工作流。"
 
-#: ../../source/developer_guide/contribution/testing.md:357
+#: ../../source/developer_guide/contribution/testing.md:361
 msgid "Run doctest"
 msgstr "运行文档测试（doctest）"
 
-#: ../../source/developer_guide/contribution/testing.md:359
+#: ../../source/developer_guide/contribution/testing.md:363
 msgid ""
 "vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to"
 " run all doctests in the doc files. The doctest is a good way to make "
@@ -298,15 +303,41 @@ msgstr ""
 "vllm-ascend 提供了 `vllm-ascend/tests/e2e/run_doctests.sh` 命令，用于运行所有文档文件中的 "
 "doctest。Doctest 是确保文档内容及时更新且示例代码保持可执行性的有效方法，您可以通过以下方式在本地运行："
 
-#: ../../source/developer_guide/contribution/testing.md:367
+#: ../../source/developer_guide/contribution/testing.md:371
 msgid ""
 "This will reproduce the same environment as the CI. See "
 "[labeled_doctest.yaml](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/.github/workflows/labeled_doctest.yaml)."
 msgstr ""
-"这将复现与 CI 相同的测试环境。请参阅 "
-"[labeled_doctest.yaml](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/.github/workflows/labeled_doctest.yaml)。"
+"这将复现与 CI 相同的测试环境。请参阅 [labeled_doctest.yaml](https://github.com/vllm-"
+"project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml)。"
+
+#: ../../source/developer_guide/contribution/testing.md:373
+msgid "Run docs link check"
+msgstr "运行文档链接检查"
+
+#: ../../source/developer_guide/contribution/testing.md:375
+msgid "You can validate external links in the Sphinx docs locally with:"
+msgstr "您可以通过以下方式在本地验证 Sphinx 文档中的外部链接："
+
+#: ../../source/developer_guide/contribution/testing.md:381
+msgid ""
+"To check links in a specific Markdown file, pass the file to `sphinx-"
+"build`. For example, to check only "
+"`docs/source/user_guide/release_notes.md`:"
+msgstr "要检查特定 Markdown 文件中的链接，请将该文件传递给 `sphinx-build`。例如，仅检查 `docs/source/user_guide/release_notes.md`："
+
+#: ../../source/developer_guide/contribution/testing.md:390
+msgid "The detailed report will be written to:"
+msgstr "详细报告将写入以下位置："
+
+#: ../../source/developer_guide/contribution/testing.md:392
+msgid "`docs/_build/linkcheck/output.txt`"
+msgstr "`docs/_build/linkcheck/output.txt`"
+
+#: ../../source/developer_guide/contribution/testing.md:393
+msgid "`docs/_build/linkcheck/output.json`"
+msgstr "`docs/_build/linkcheck/output.json`"
 
 #~ msgid ""
 #~ "Offline test example: "
