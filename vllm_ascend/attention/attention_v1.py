@@ -509,13 +509,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         scale,
                         attn_output,
                         softmax_lse,
+                        sparse_mode,
                         c8_k_aq_scale,
                         c8_k_aq_offset,
                         c8_v_aq_scale,
                         c8_v_aq_offset,
                     ) = param
 
-                    sparse_mode = 3
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
@@ -528,6 +528,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
                         block_tables = attn_metadata[key].block_tables
+
+                    # TND layout constraint: queryT must equal
+                    # actual_seq_lengths_q[-1]. When the graph was captured
+                    # with a padded num_tokens (e.g. 16) but the live batch
+                    # produces fewer actual tokens (e.g. 9), the mismatch
+                    # causes FIA kernel validation failure.
+                    if actual_seq_lengths_q and actual_seq_lengths_q[-1] != num_tokens:
+                        actual_seq_lengths_q = list(actual_seq_lengths_q)
+                        actual_seq_lengths_q[-1] = num_tokens
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
@@ -597,7 +606,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         workspace = graph_params.workspaces.get(num_tokens)
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        attn_mask = attn_metadata.attn_mask
+        attn_mask = attn_metadata.attn_mask if attn_metadata.causal else None
         sparse_mode = 3 if attn_metadata.causal else 0
         extra_args = {}
         if self.enable_c8_quant:
@@ -658,6 +667,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self.scale,
             weak_ref_tensors(output),
             weak_ref_tensors(softmax_lse),
+            sparse_mode,
         )
         if self.enable_c8_quant:
             attn_params = attn_params + (
