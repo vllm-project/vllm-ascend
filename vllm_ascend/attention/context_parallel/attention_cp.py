@@ -236,9 +236,12 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         if num_decodes > 0:
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
             num_computed_tokens_array = num_computed_tokens_array[: num_decodes]
-            # TODO: numpy array mode of the shared memory is used to improve performance
-            masks = common_long_seq_metadata.mtp_attention_masks_for_decode
-            mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, num_decodes)
+            if common_long_seq_metadata.mtp_attention_masks_for_decode:
+                masks = common_long_seq_metadata.mtp_attention_masks_for_decode
+                mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, num_decodes)
+            else:
+                mtp_attn_mask = None
+            
             decode_metadata = AscendMetadataForDecode(
                 num_computed_tokens_of_pcp_dcp=num_computed_tokens_array,
                 block_tables=block_table[: num_decodes],
