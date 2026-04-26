@@ -1230,6 +1230,8 @@ class PCPManager:
                 )
 
                 long_seq_metadata.mtp_attention_masks_for_decode = mtp_masks
+            else:
+                long_seq_metadata.mtp_attention_masks_for_decode = None
 
         self.long_seq_metadata = long_seq_metadata
         return long_seq_metadata, block_table_tensor
