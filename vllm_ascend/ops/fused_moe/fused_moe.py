@@ -51,10 +51,14 @@ from vllm_ascend.utils import (
 )
 
 if vllm_version_is("0.19.0"):
-    from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner as _MoERunnerBase  # type: ignore[no-redef]
+    from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
+        DefaultMoERunner as _MoERunnerBase,  # type: ignore[no-redef]
+    )
     from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE  # type: ignore[no-redef]
 else:
-    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner as _MoERunnerBase  # type: ignore[no-redef]
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+        MoERunner as _MoERunnerBase,  # type: ignore[no-redef]
+    )
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import (  # type: ignore[no-redef]
         SharedExpertsOrder,
     )
@@ -317,9 +321,7 @@ class AscendFusedMoE(FusedMoE):
             _routed_input_transform = kwargs.get("routed_input_transform")
             _routed_output_transform = kwargs.get("routed_output_transform")
             _runner_routed_scaling_factor = (
-                kwargs.get("routed_scaling_factor", 1.0)
-                if kwargs.get("apply_routed_scale_to_output", False)
-                else 1.0
+                kwargs.get("routed_scaling_factor", 1.0) if kwargs.get("apply_routed_scale_to_output", False) else 1.0
             )
         super().__init__(*args, **kwargs)
         if not is_legacy:
@@ -673,9 +675,7 @@ class AscendSharedFusedMoE(*_SharedFusedMoEBase):  # type: ignore[misc]
             )
         else:
             runner_routed_scaling_factor = (
-                kwargs.get("routed_scaling_factor", 1.0)
-                if kwargs.get("apply_routed_scale_to_output", False)
-                else 1.0
+                kwargs.get("routed_scaling_factor", 1.0) if kwargs.get("apply_routed_scale_to_output", False) else 1.0
             )
             self.runner = AscendMoERunner(
                 self.layer_name,

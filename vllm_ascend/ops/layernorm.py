@@ -22,7 +22,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method, vllm_version_is
 
 
 class AscendRMSNorm(RMSNorm):
@@ -112,7 +112,18 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
 class LayerNormFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True, is_rms_norm=False):
+    def forward(
+        ctx,
+        x,
+        weight,
+        bias,
+        z=None,
+        eps=1e-6,
+        group_size=None,
+        norm_before_gate=True,
+        is_rms_norm=False,
+        activation: str = "swish",
+    ):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
 
         x_shape_og = x.shape
@@ -156,13 +167,18 @@ class AscendRMSNormGated(RMSNormGated):
         norm_before_gate: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        activation: str = "swish",
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
         """
         factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype)
+        if vllm_version_is("0.19.0"):
+            super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype)
+        else:
+            super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype, activation)
         self.eps = eps
+        self.activation = activation
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
         self.register_parameter("bias", None)
         self.group_size = group_size
@@ -174,4 +190,17 @@ class AscendRMSNormGated(RMSNormGated):
 
     def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+        # assert self.activation in ["silu", "sigmoid", "swish"]
+        # if not vllm_version_is("0.19.0") and self.activation == "sigmoid":
+        #     return super().forward_native(x, z)
+        return LayerNormFn.apply(
+            x,
+            self.weight,
+            self.bias,
+            z,
+            self.eps,
+            self.group_size,
+            self.norm_before_gate,
+            True,
+            self.activation,
+        )
