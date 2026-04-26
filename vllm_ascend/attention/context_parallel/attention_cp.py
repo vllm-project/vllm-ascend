@@ -247,14 +247,13 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 block_tables=block_table[: num_decodes],
                 mtp_attn_mask=mtp_attn_mask,
             )
-        if self.decode_threshold > 1:
-            num_decodes_flatten = query_lens[:num_decodes].sum().item()
-            actual_seq_lengths_q = (torch.arange(num_decodes_flatten) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
-                num_decodes:
-            ]
-        else:
-            actual_seq_lengths_q = (query_start_loc_cpu[1:num_decodes + 1] - query_start_loc_cpu[:num_decodes]).tolist() + \
-                query_start_loc_cpu[1:].tolist()[num_decodes:]
+
+            if self.decode_threshold == 1:
+                actual_seq_lengths_q = (torch.arange(num_decodes) + 1).tolist() + query_start_loc_cpu[1:].tolist()[
+                    num_decodes:
+                ]
+            else:
+                actual_seq_lengths_q = [(1 + self.decode_threshold) for _ in range(num_decodes)] + query_start_loc_cpu[num_decodes + 1 :].tolist()
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
