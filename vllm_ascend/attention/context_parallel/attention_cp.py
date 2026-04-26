@@ -223,8 +223,11 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_computed_tokens_array = np.array(num_computed_tokens_of_pcp_dcp)
             num_computed_tokens_array = num_computed_tokens_array[: num_decodes]
             # Get MTP attention mask from PCP metadata
-            masks = common_long_seq_metadata.mtp_attention_masks_for_decode
-            mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, num_decodes)
+            if common_long_seq_metadata.mtp_attention_masks_for_decode:
+                masks = common_long_seq_metadata.mtp_attention_masks_for_decode
+                mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, num_decodes)
+            else:
+                mtp_attn_mask = None
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc_cpu[1 : num_decodes + 1].tolist()
