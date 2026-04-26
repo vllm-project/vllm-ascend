@@ -253,7 +253,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
                 num_decodes:
             ]
         else:
-            actual_seq_lengths_q = [(1 + self.decode_threshold) for _ in range(num_decodes)] + query_start_loc_cpu[num_decodes + 1 :].tolist()
+            actual_seq_lengths_q = [self.decode_threshold for _ in range(num_decodes)] + query_start_loc_cpu[num_decodes + 1 :].tolist()
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
