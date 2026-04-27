@@ -1,10 +1,15 @@
 # CohereLabs/c4ai-command-r-v01
+
 This tutorial shows how to run `CohereLabs/c4ai-command-r-v01` with vLLM-Ascend on Atlas A2.
+
 ## Prerequisites
+
 - Ascend driver/toolkit is installed and healthy.
 - vLLM-Ascend environment is ready.
 - Model files are available (local path or Hugging Face access).
+
 ## Environment Setup
+
 ```bash
 cd /data/vllm-ascend
 PY=/usr/local/python3.11.13/bin/python
@@ -30,8 +35,11 @@ vllm serve "CohereLabs/c4ai-command-r-v01" \
   --enforce-eager \
   --port 8000
 ```
+
 ## Quick Verification
+
 Open another terminal and run:
+
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -44,12 +52,18 @@ curl http://127.0.0.1:8000/v1/chat/completions \
     "temperature":0.2
   }'
 ```
+
 Expected result:
+
 - Response contains `choices`.
 - `finish_reason` is `stop`.
+
 ## Troubleshooting
+
 ### HCCL init failure (EI0010 / error code 5)
+
 Typical symptom:
+
 - `hcclCommInitRootInfoConfig ... error code is 5`
 - `P2P_Communication_Failed(EI0010)`
 Checklist:
