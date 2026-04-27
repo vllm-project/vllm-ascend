@@ -353,7 +353,7 @@ class AscendFusedMoE(FusedMoE):
                 self.moe_load = torch.zeros((self.num_iter, self.local_num_experts), dtype=torch.int32, device="npu")
             if eplb_config.eplb_policy_type == 4:
                 self.token2req = None
-                self.moe_load1 = torch.zeros([eplb_config.max_batch_token, self.global_num_experts],
+                self.moe_load_prev = torch.zeros([eplb_config.max_batch_token, self.global_num_experts],
                                             dtype=torch.float32).npu()
                 self.moe_load = torch.zeros(self.local_num_experts, dtype=torch.int64).npu()
                 self.ones_buffer = torch.ones(1024*16, dtype=torch.float32).npu()
@@ -418,7 +418,7 @@ class AscendFusedMoE(FusedMoE):
         if self.multi_stage:
             self.load_counter.zero_()
         if self.policy_type == 4:
-            self.moe_load1.add_(self.moe_load_local)
+            self.moe_load_prev.add_(self.moe_load_local)
             self.moe_load_local.zero_()
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
@@ -544,17 +544,7 @@ class AscendFusedMoE(FusedMoE):
             if self.policy_type == 4:
                 topk_ids = fused_experts_results.topk_ids.reshape(get_ep_group().world_size, -1, self.top_k)[get_ep_group().rank]
                 if self.token2req is not None:
-                    # expanded_req_ids = self.token2req
-                    # expanded_req_ids = expanded_req_ids.unsqueeze(1)
-                    # updates = torch.ones_like(topk_ids, dtype=torch.float32)
-                    # indices = torch.add(topk_ids, expanded_req_ids, alpha=self.global_num_experts).view(-1)
-                    # self.moe_load_local.view(-1).index_put_(
-                    #     (indices,), 
-                    #     updates.view(-1), 
-                    #     accumulate=True
-                    # )
                     expanded_req_ids = self.token2req.unsqueeze(1)  
-                    # indices = topk_ids + (expanded_req_ids * self.global_num_experts)  
                     indices = torch.add(topk_ids, expanded_req_ids, alpha=self.global_num_experts).view(-1)
                     self.moe_load_local.view(-1).index_add_(
                         0, 
