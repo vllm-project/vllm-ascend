@@ -65,14 +65,16 @@ class MemcacheBackend(Backend):
             for value in res:
                 if value != 0:
                     logger.error(f"Failed to get key {key},res:{res}")
+            return res
         except Exception as e:
             logger.error(f"Failed to get key {key}. {e}")
+            return None
 
     def put(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         try:
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             for value in res:
                 if value != 0:
-                    logger.error(f"Failed to get key {key},res:{res}")
+                    logger.error(f"Failed to put key {key},res:{res}")
         except Exception as e:
             logger.error(f"Failed to put key {key},error:{e}")

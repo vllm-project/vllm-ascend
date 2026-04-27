@@ -21,6 +21,7 @@ import math
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
@@ -555,6 +556,23 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        # Temporary rewind guard for KV-load-failure recompute.
+        # This can be removed after the upstream fix is merged.
+        req_data = scheduler_output.scheduled_cached_reqs
+
+        if self.use_async_scheduling:
+            for i, req_id in enumerate(req_data.req_ids):
+                req_state = self.requests.get(req_id)
+                if req_state is None:
+                    continue
+
+                num_computed_tokens = req_data.num_computed_tokens[i]
+                if num_computed_tokens < req_state.num_computed_tokens:
+                    req_state.prev_num_draft_len = 0
+
+        return super()._update_states(scheduler_output)
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1457,7 +1475,9 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
-                deferred_state_corrections_fn = self._update_states(scheduler_output)
+                deferred_state_corrections_fn = self._update_states(
+                    scheduler_output
+                )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
