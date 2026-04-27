@@ -98,6 +98,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from vllm.logger import init_logger
 
@@ -456,6 +457,67 @@ async def _handle_completions(api: str, request: Request):
         # refer to vLLM sampling_params: max_token default value
         origin_max_tokens = req_data.get("max_tokens", 16)
 
+        async def generate_nonstream():
+            nonlocal released_kv
+            released_kv = False
+            retry_count = 0
+            completion_tokens = 0
+            generated_text = ""
+
+            # Work on a copy so we can safely mutate prompt/max_tokens on retries.
+            req_data_local = copy.deepcopy(req_data)
+            req_data_local["stream"] = False
+            if "stream_options" in req_data_local:
+                del req_data_local["stream_options"]
+
+            while True:
+                headers = {
+                    "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+                    "X-Request-Id": request_id,
+                }
+                response = await decoder.client.post(api, json=req_data_local, headers=headers)
+                response.raise_for_status()
+                resp_json = response.json()
+
+                choices = resp_json.get("choices", [])
+                if not choices:
+                    # Unexpected, but pass through as-is.
+                    proxy_state.release_decoder(decoder_idx, decoder_score)
+                    return resp_json
+
+                choice0 = choices[0]
+                message = choice0.get("message") or {}
+                content = message.get("content") or choice0.get("text") or ""
+                generated_text += content
+
+                usage = resp_json.get("usage") or {}
+                step_completion_tokens = usage.get("completion_tokens", 0) or 0
+                completion_tokens += step_completion_tokens
+
+                stop_reason = choice0.get("stop_reason")
+                if stop_reason == "recomputed":
+                    retry_count += 1
+                    if chat_flag:
+                        # Best-effort: only update first user message, matching original logic.
+                        messages[0]["content"] = origin_prompt + generated_text
+                    else:
+                        req_data_local["prompt"] = origin_prompt + generated_text
+
+                    # Make sure max_tokens stays positive to avoid backend errors.
+                    req_data_local["max_tokens"] = max(origin_max_tokens - completion_tokens + retry_count, 1)
+                    continue
+
+                # Final response: if we had recomputes, collapse to a single coherent text.
+                if retry_count > 0:
+                    if chat_flag:
+                        choice0.setdefault("message", {})
+                        choice0["message"]["content"] = generated_text
+                    else:
+                        choice0["text"] = generated_text
+
+                proxy_state.release_decoder(decoder_idx, decoder_score)
+                return resp_json
+
         async def generate_stream():
             nonlocal released_kv
             generated_token = ""
@@ -508,7 +570,7 @@ async def _handle_completions(api: str, request: Request):
                         completion_tokens = (
                             (completion_tokens + 1)
                             if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens"))
+                            else (completion_tokens + (usage.get("completion_tokens", 0) or 0))
                         )
                         if stop_reason == "recomputed":
                             retry = True
@@ -521,6 +583,7 @@ async def _handle_completions(api: str, request: Request):
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
+                                choice.setdefault("message", {})
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
@@ -539,7 +602,8 @@ async def _handle_completions(api: str, request: Request):
         if stream_flag:
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
         else:
-            return StreamingResponse(generate_stream(), media_type="application/json")
+            result_json = await generate_nonstream()
+            return JSONResponse(content=result_json)
     except Exception as e:
         import traceback
 
@@ -573,6 +637,8 @@ async def healthcheck():
 
 @app.post("/v1/metaserver")
 async def metaserver(request: Request):
+    prefiller_idx = None
+    prefiller_score = None
     try:
         kv_transfer_params = await request.json()
 
@@ -603,8 +669,9 @@ async def metaserver(request: Request):
 
     except Exception as e:
         logger.error(f"Post metaserver failed with: {str(e)}")
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+        if prefiller_idx is not None and prefiller_score is not None:
+            proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+            proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == "__main__":
