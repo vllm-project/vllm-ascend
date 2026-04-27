@@ -78,7 +78,127 @@ if TYPE_CHECKING:
 
 DONE_SENDING_MSG = b"done_sending_msg"
 
+_MAX_HCCL_REGISTER_REGIONS = 256
+_REGISTER_MERGE_GAP_BYTES = 4096
 
+
+@dataclass
+class _RegisterRange:
+    start: int
+    end: int
+
+
+def _iter_kv_cache_tensors(obj: Any) -> Iterator[torch.Tensor]:
+    """Flatten kv_caches into tensors without materializing new tensors."""
+    if obj is None:
+        return
+
+    if isinstance(obj, torch.Tensor):
+        yield obj
+        return
+
+    if isinstance(obj, (tuple, list)):
+        for item in obj:
+            yield from _iter_kv_cache_tensors(item)
+        return
+
+    if isinstance(obj, dict):
+        for item in obj.values():
+            yield from _iter_kv_cache_tensors(item)
+        return
+
+
+def _tensor_nbytes(tensor: torch.Tensor) -> int:
+    return tensor.numel() * tensor.element_size()
+
+
+def _tensor_storage_key(tensor: torch.Tensor) -> int:
+    """Return a stable grouping key for tensors sharing the same storage.
+
+    Do NOT use this key as the register address directly. For aligned KV cache
+    views, tensor.untyped_storage().data_ptr() may point to the original raw
+    allocation, whose address can be unaligned. We only use it to group views.
+    """
+    try:
+        return tensor.untyped_storage().data_ptr()
+    except Exception:
+        try:
+            return tensor.storage().data_ptr()
+        except Exception:
+            return tensor.data_ptr()
+
+
+def _collect_storage_merged_register_regions(
+    kv_caches: dict[str, Any],
+) -> tuple[list[int], list[int], int, int]:
+    """Collect HCCL/Mooncake register regions with storage-aware merging.
+
+    Important:
+    - Layer metadata should still use each logical tensor's own data_ptr().
+    - register_buffer should register merged memory ranges.
+    - We must not register untyped_storage().data_ptr() directly because the
+      raw storage base may be unaligned when _align_memory() returns a view.
+    """
+    ranges_by_storage: OrderedDict[int, list[_RegisterRange]] = OrderedDict()
+    logical_tensor_count = 0
+    logical_total_bytes = 0
+
+    for tensor in _iter_kv_cache_tensors(kv_caches):
+        if tensor is None or tensor.numel() == 0:
+            continue
+
+        if not tensor.is_contiguous():
+            logger.warning(
+                "Mooncake register_buffer got a non-contiguous KV cache "
+                "tensor: shape=%s, dtype=%s, data_ptr=%s. "
+                "Registration will use logical numel * element_size.",
+                tuple(tensor.shape),
+                tensor.dtype,
+                hex(tensor.data_ptr()),
+            )
+
+        nbytes = _tensor_nbytes(tensor)
+        start = tensor.data_ptr()
+        end = start + nbytes
+        storage_key = _tensor_storage_key(tensor)
+
+        logical_tensor_count += 1
+        logical_total_bytes += nbytes
+
+        if storage_key not in ranges_by_storage:
+            ranges_by_storage[storage_key] = []
+        ranges_by_storage[storage_key].append(_RegisterRange(start, end))
+
+    register_ptrs: list[int] = []
+    register_lengths: list[int] = []
+
+    for ranges in ranges_by_storage.values():
+        ranges.sort(key=lambda r: r.start)
+
+        merged_start = ranges[0].start
+        merged_end = ranges[0].end
+
+        for region in ranges[1:]:
+            # Merge overlapping / adjacent / tiny-gap views from the same
+            # allocation. The tiny gap handles dtype alignment padding between
+            # dsa_k int8 bytes and dsa_k_scale fp16 bytes.
+            if region.start <= merged_end + _REGISTER_MERGE_GAP_BYTES:
+                merged_end = max(merged_end, region.end)
+            else:
+                register_ptrs.append(merged_start)
+                register_lengths.append(merged_end - merged_start)
+                merged_start = region.start
+                merged_end = region.end
+
+        register_ptrs.append(merged_start)
+        register_lengths.append(merged_end - merged_start)
+
+    return (
+        register_ptrs,
+        register_lengths,
+        logical_tensor_count,
+        logical_total_bytes,
+    )
 @dataclass
 class LayerMetadata:
     tensor_group_idx: list[int]
@@ -1196,7 +1316,32 @@ class MooncakeLayerwiseConnectorWorker:
                 ptrs.append(min(set(tensor_addrs)))
                 lengths.append(kv_cache_tensor.size)
 
-        global_te.register_buffer(ptrs, lengths)
+        (
+            register_ptrs,
+            register_lengths,
+            logical_tensor_count,
+            logical_total_bytes,
+        ) = _collect_storage_merged_register_regions(kv_caches)
+
+        logger.info(
+            "Mooncake register_buffer: logical_tensors=%d, "
+            "merged_regions=%d, logical_bytes=%d, registered_bytes=%d",
+            logical_tensor_count,
+            len(register_ptrs),
+            logical_total_bytes,
+            sum(register_lengths),
+        )
+
+        if len(register_ptrs) > _MAX_HCCL_REGISTER_REGIONS:
+            logger.warning(
+                "Mooncake register_buffer merged region count %d exceeds "
+                "HCCL per-process limit %d. This may still fail. "
+                "Consider merging k/v/dsa/scale allocation further.",
+                len(register_ptrs),
+                _MAX_HCCL_REGISTER_REGIONS,
+            )
+
+        global_te.register_buffer(register_ptrs, register_lengths)
         if use_kv_buffer:
             self.create_kv_buffer(kv_buffer)
 
