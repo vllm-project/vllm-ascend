@@ -1,4 +1,5 @@
 import gc
+
 import pytest
 import torch
 
@@ -39,10 +40,7 @@ def pytorch_apply_penalties(
     num_status = prompt_bin_mask.shape[0]
     num_packed = prompt_bin_mask.shape[1]
 
-    prompt_masks_unpacked = torch.zeros(
-        num_status, vocab_size, dtype=torch.bool,
-        device=device
-    )
+    prompt_masks_unpacked = torch.zeros(num_status, vocab_size, dtype=torch.bool, device=device)
 
     for state_idx in range(num_status):
         for packed_idx in range(num_packed):
@@ -56,7 +54,7 @@ def pytorch_apply_penalties(
 
     for token_idx in range(num_tokens):
         req_state_idx = idx_mapping[token_idx].item()
-        
+
         rep_penalty = repetition_penalty[req_state_idx].item()
         freq_penalty = frequency_penalty[req_state_idx].item()
         pres_penalty = presence_penalty[req_state_idx].item()
@@ -71,17 +69,17 @@ def pytorch_apply_penalties(
 
         current_prompt_mask = prompt_masks_unpacked[req_state_idx]
         base_output_counts = output_bin_counts[req_state_idx]
-        
+
         # Compute cumulative draft counts
         pos = expanded_local_pos[token_idx].item()
         start_idx_in_batch = token_idx - pos
         draft_counts = torch.zeros(vocab_size, device=device, dtype=torch.int32)
-        
+
         for prev_pos in range(num_speculative_tokens):
             if prev_pos < pos:
                 prev_token = token_ids[start_idx_in_batch + prev_pos + 1].item()
                 draft_counts[prev_token] += 1
-        
+
         # Total counts = base output counts + cumulative draft counts
         total_output_counts = base_output_counts + draft_counts
         output_bin_mask = total_output_counts > 0
@@ -133,20 +131,15 @@ def create_test_data(
         if torch.rand(1) > 0.5:
             presence_penalty[i] = torch.rand(1, device=device).item() * 0.2
 
-    idx_mapping = torch.randint(
-        0, num_status, (num_tokens,), device=device,
-        dtype=torch.int32
-    )
-    
+    idx_mapping = torch.randint(0, num_status, (num_tokens,), device=device, dtype=torch.int32)
+
     # Create token_ids for speculative decoding
     token_ids = torch.randint(0, vocab_size, (num_tokens,), device=device, dtype=torch.int32)
-    
+
     # Create expanded_local_pos (position within speculative decoding window)
     expanded_local_pos = torch.zeros(num_tokens, device=device, dtype=torch.int32)
     for i in range(num_tokens):
-        expanded_local_pos[i] = torch.randint(
-            0, num_speculative_tokens + 1, (1,)
-        ).item()
+        expanded_local_pos[i] = torch.randint(0, num_speculative_tokens + 1, (1,)).item()
 
     num_packed = (vocab_size + 31) // 32
     prompt_bin_mask = torch.zeros(num_status, num_packed, device=device, dtype=torch.int32)
@@ -158,13 +151,12 @@ def create_test_data(
         for token_id in prompt_tokens:
             packed_idx = token_id // 32
             bit_pos = token_id % 32
-            prompt_bin_mask[state_idx, packed_idx] |= (1 << bit_pos)
+            prompt_bin_mask[state_idx, packed_idx] |= 1 << bit_pos
 
     output_bin_counts = torch.zeros(num_status, vocab_size, device=device, dtype=torch.int32)
     for state_idx in range(num_status):
         num_output_tokens = max(1, vocab_size // 20)
-        output_tokens = torch.randint(0, vocab_size,
-                                      (num_output_tokens, ))
+        output_tokens = torch.randint(0, vocab_size, (num_output_tokens,))
         counts = torch.randint(1, 10, (num_output_tokens,))
 
         for token, count in zip(output_tokens, counts):
@@ -192,15 +184,7 @@ def create_test_data(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
-def test_apply_penalties(
-    num_tokens,
-    vocab_size,
-    num_status,
-    num_speculative_tokens,
-    dtype,
-    seed,
-    device
-):
+def test_apply_penalties(num_tokens, vocab_size, num_status, num_speculative_tokens, dtype, seed, device):
     (
         logits_triton,
         idx_mapping,
@@ -219,7 +203,7 @@ def test_apply_penalties(
         num_speculative_tokens=num_speculative_tokens,
         device=device,
         dtype=dtype,
-        seed=seed
+        seed=seed,
     )
 
     logits_pytorch = logits_triton.clone()

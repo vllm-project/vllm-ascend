@@ -40,7 +40,7 @@ def create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req
                 break
             # Create a bad word with specific tokens
             bad_word = torch.tensor([100 + req_idx * 10 + bw_idx] * bad_word_length, dtype=torch.int32, device=device)
-            bad_word_token_ids[req_idx, offset:offset+bad_word_length] = bad_word
+            bad_word_token_ids[req_idx, offset : offset + bad_word_length] = bad_word
             bad_word_offsets[req_idx, bw_idx] = offset
             offset += bad_word_length
             actual_bad_words += 1
@@ -73,27 +73,35 @@ def create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req
     expanded_local_pos = torch.full((num_tokens,), bad_word_length - 1, dtype=torch.int32, device=device)
 
     return (
-        logits, expanded_idx_mapping, bad_word_token_ids, bad_word_offsets, num_bad_words,
-        all_token_ids, prompt_len, total_len, input_ids, expanded_local_pos
+        logits,
+        expanded_idx_mapping,
+        bad_word_token_ids,
+        bad_word_offsets,
+        num_bad_words,
+        all_token_ids,
+        prompt_len,
+        total_len,
+        input_ids,
+        expanded_local_pos,
     )
 
 
-@pytest.mark.parametrize("num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length", BAD_WORDS_TEST_CASES)
+@pytest.mark.parametrize(
+    "num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length", BAD_WORDS_TEST_CASES
+)
 @torch.inference_mode()
-def test_apply_bad_words_different_shapes(num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device="npu"):
+def test_apply_bad_words_different_shapes(
+    num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device="npu"
+):
     """Test apply_bad_words with different input shapes"""
-    test_data = create_test_data(
-        num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device
-    )
+    test_data = create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device)
 
     # Make a copy of logits to compare
     logits_before = test_data[0].clone()
     logits_after = test_data[0].clone()
 
     # Apply bad words
-    apply_bad_words(
-        logits_after, *test_data[1:], num_bad_words_per_req
-    )
+    apply_bad_words(logits_after, *test_data[1:], num_bad_words_per_req)
 
     # Verify that logits were modified
     assert not torch.allclose(logits_before, logits_after), "Logits should be modified when bad words are present"
@@ -109,18 +117,14 @@ def test_apply_bad_words_no_bad_words(device="npu"):
     num_bad_words_per_req = 0
     bad_word_length = 3
 
-    test_data = create_test_data(
-        num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device
-    )
+    test_data = create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device)
 
     # Make a copy of logits to compare
     logits_before = test_data[0].clone()
     logits_after = test_data[0].clone()
 
     # Apply bad words
-    apply_bad_words(
-        logits_after, *test_data[1:], num_bad_words_per_req
-    )
+    apply_bad_words(logits_after, *test_data[1:], num_bad_words_per_req)
 
     # Verify that logits were not modified
     assert torch.allclose(logits_before, logits_after), "Logits should not be modified when no bad words are present"
@@ -138,21 +142,19 @@ def test_apply_bad_words_edge_cases(device="npu"):
     bad_word_length = 2
 
     print("\nTesting edge case: maximum bad words")
-    test_data = create_test_data(
-        num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device
-    )
+    test_data = create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device)
 
     # Make a copy of logits to compare
     logits_before = test_data[0].clone()
     logits_after = test_data[0].clone()
 
     # Apply bad words
-    apply_bad_words(
-        logits_after, *test_data[1:], num_bad_words_per_req
-    )
+    apply_bad_words(logits_after, *test_data[1:], num_bad_words_per_req)
 
     # Verify that logits were modified
-    assert not torch.allclose(logits_before, logits_after), "Logits should be modified when maximum bad words are present"
+    assert not torch.allclose(logits_before, logits_after), (
+        "Logits should be modified when maximum bad words are present"
+    )
     print("Maximum bad words test passed")
 
 
@@ -168,21 +170,19 @@ def test_apply_bad_words_token_limit(device="npu"):
     num_bad_words_per_req = 32
     bad_word_length = 32  # 32 * 32 = 1024 tokens (exactly at limit)
 
-    test_data = create_test_data(
-        num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device
-    )
+    test_data = create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device)
 
     # Make a copy of logits to compare
     logits_before = test_data[0].clone()
     logits_after = test_data[0].clone()
 
     # Apply bad words
-    apply_bad_words(
-        logits_after, *test_data[1:], num_bad_words_per_req
-    )
+    apply_bad_words(logits_after, *test_data[1:], num_bad_words_per_req)
 
     # Verify that logits were modified
-    assert not torch.allclose(logits_before, logits_after), "Logits should be modified when total tokens are within limit"
+    assert not torch.allclose(logits_before, logits_after), (
+        "Logits should be modified when total tokens are within limit"
+    )
     print("Total tokens within limit test passed")
 
     # Test case 2: Total tokens exceeding limit (this should still work but only process up to limit)
@@ -190,18 +190,14 @@ def test_apply_bad_words_token_limit(device="npu"):
     num_bad_words_per_req = 33
     bad_word_length = 32  # 33 * 32 = 1056 tokens (exceeding limit)
 
-    test_data = create_test_data(
-        num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device
-    )
+    test_data = create_test_data(num_tokens, vocab_size, num_requests, num_bad_words_per_req, bad_word_length, device)
 
     # Make a copy of logits to compare
     logits_before = test_data[0].clone()
     logits_after = test_data[0].clone()
 
     # Apply bad words
-    apply_bad_words(
-        logits_after, *test_data[1:], num_bad_words_per_req
-    )
+    apply_bad_words(logits_after, *test_data[1:], num_bad_words_per_req)
 
     # Verify that logits were modified (even though we exceed the limit)
     assert not torch.allclose(logits_before, logits_after), "Logits should be modified when total tokens exceed limit"
