@@ -11,6 +11,8 @@ env_common:
   VLLM_ASCEND_BALANCE_SCHEDULING: 1
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_USE_MODELSCOPE: true
+  VLLM_ENGINE_READY_TIMEOUT_S: 1800
+  VLLM_RPC_TIMEOUT: 300
   SERVER_PORT: 8078
 
 special_dependencies:
@@ -25,6 +27,7 @@ deployment:
       --port $SERVER_PORT
       --data-parallel-size 2
       --tensor-parallel-size 8
+      --data-parallel-rpc-port 13389
       --data-parallel-size-local 1
       --data-parallel-start-rank 1
       --data-parallel-address $MASTER_IP
@@ -51,6 +54,7 @@ deployment:
       --tensor-parallel-size 8
       --data-parallel-size-local 1
       --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13389
       --enable-expert-parallel
       --seed 1024
       --max-num-seqs 64
