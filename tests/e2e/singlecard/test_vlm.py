@@ -65,6 +65,25 @@ def test_multimodal_vl(vl_config):
 
 
 @patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
+def test_multimodal_vl_language_model_only():
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+        "Qwen/Qwen3-VL-8B-Instruct",
+        max_model_len=4096,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        gpu_memory_utilization=0.90,
+        language_model_only=True,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
 def test_multimodal_audio():
     audio_prompt = "".join([f"Audio {idx + 1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(2)])
     question = "What sport and what nursery rhyme are referenced?"
