@@ -946,7 +946,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # That is, the batch size needs to be modified only when lmhead_tp_enable() is enabled.
         if lmhead_tp_enable():
             batch_size = draft_token_ids.shape[0]
-                
+
         # Generate the remaining draft tokens.
         draft_token_ids_tensor = torch.zeros(
             (self.num_speculative_tokens, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
