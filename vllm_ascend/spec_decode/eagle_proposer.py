@@ -499,6 +499,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
+            # The logits are split and then merged only when lmhead_tp_enable() is enabled.
+            # As a result, the batch size length becomes the actual length 32.
+            # However, when lmhead_tp_enable() is disabled, the batch size uses the length after padding.
+            # To decouple the scenarios, a judgment is required. That is, the batch size needs to be modified only when lmhead_tp_enable() is enabled.
+            if lmhead_tp_enable():
+                batch_size = draft_token_ids.shape[0]
+
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
