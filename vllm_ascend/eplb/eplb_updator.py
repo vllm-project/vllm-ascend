@@ -40,7 +40,8 @@ class EplbUpdator:
     def set_adaptor(self, adaptor: VllmEplbAdaptor):
         self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
-        local_load = self.adaptor.get_rank_expert_workload()
+        # local_load = self.adaptor.get_rank_expert_workload()
+        _, local_load = self.adaptor.get_rank_expert_workload()
         self.world_size = dist.get_world_size()
         self.device = local_load.device
         self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
@@ -131,11 +132,16 @@ class EplbUpdator:
         self.update_iteration()
 
     def compute_and_set_moe_load(self):
-        local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
-        moe_load = self.comm_group.all_gather(local_load, dim=1).cpu()
+        local_load, old_moe_load = self.adaptor.get_rank_expert_workload()
+        if self.eplb_config.eplb_policy_type != 4:
+            local_load = old_moe_load.unsqueeze(1)
+            moe_load = self.comm_group.all_gather(local_load, dim=1).cpu()
 
-        if self.multi_stage:
-            moe_load = moe_load.permute(2, 0, 1, 3)
+            if self.multi_stage:
+                moe_load = moe_load.permute(2, 0, 1, 3)
+        else:
+            self.comm_group.all_reduce(local_load)
+            moe_load = local_load.reshape(local_load.shape[0], self.world_size, -1).cpu()
 
         self.shared_dict["moe_load"] = moe_load
         logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")

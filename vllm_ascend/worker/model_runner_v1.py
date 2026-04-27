@@ -1267,7 +1267,6 @@ class NPUModelRunner(GPUModelRunner):
                         if num_reqs_padded > old_num_reqs_padded:
                             num_reqs_padded = old_num_reqs_padded
                             self.query_start_loc.np[num_reqs_padded + 1] = 0
-
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
                     if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
@@ -1283,6 +1282,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
+                if get_ascend_config().eplb_config.eplb_policy_type == 4:
+                    self.eplb_adaptor.do_update_request_slot(scheduler_output, torch.max(num_tokens_across_dp))
 
             (
                 input_ids,

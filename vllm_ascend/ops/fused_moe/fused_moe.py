@@ -330,6 +330,7 @@ class AscendFusedMoE(FusedMoE):
         )
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
+        self.policy_type = eplb_config.eplb_policy_type
         self.local_num_experts = self.global_num_experts // self.ep_size
         if self._expert_map is not None:
             logger.info_once(
@@ -350,7 +351,13 @@ class AscendFusedMoE(FusedMoE):
                 self.load_counter = torch.tensor(0, dtype=torch.int32, device="npu")
                 self.num_iter = eplb_config.expert_heat_collection_interval
                 self.moe_load = torch.zeros((self.num_iter, self.local_num_experts), dtype=torch.int32, device="npu")
-
+            if eplb_config.eplb_policy_type == 4:
+                self.token2req = None
+                self.moe_load1 = torch.zeros([eplb_config.max_batch_token, self.global_num_experts],
+                                            dtype=torch.float32).npu()
+                self.moe_load = torch.zeros(self.local_num_experts, dtype=torch.int64).npu()
+                self.ones_buffer = torch.ones(1024*16, dtype=torch.float32).npu()
+                self.moe_load_local = torch.zeros([eplb_config.max_batch_token, self.global_num_experts], dtype=torch.float32).npu()
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
         self.moe_config.global_redundant_expert_num = self.global_redundant_expert_num
@@ -410,6 +417,9 @@ class AscendFusedMoE(FusedMoE):
             self.moe_load.zero_()
         if self.multi_stage:
             self.load_counter.zero_()
+        if self.policy_type == 4:
+            self.moe_load1.add_(self.moe_load_local)
+            self.moe_load_local.zero_()
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
         """NOTE(Yizhou): This is to override the parent class method. In `mc2commimpl`,
@@ -531,24 +541,45 @@ class AscendFusedMoE(FusedMoE):
         )
 
         if self.dynamic_eplb:
-            expert_tokens = fused_experts_results.expert_tokens
-            group_list_type = fused_experts_results.group_list_type
-            assert expert_tokens is not None and group_list_type is not None, (
-                "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            )
-            local_load = (
-                expert_tokens
-                if group_list_type == 1
-                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            )
-            if self.multi_stage:
-                cur_iter = torch.remainder(self.load_counter, self.num_iter)
-                self.moe_load.index_add_(
-                    dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
-                )
-                self.load_counter.add_(1)
+            if self.policy_type == 4:
+                topk_ids = fused_experts_results.topk_ids.reshape(get_ep_group().world_size, -1, self.top_k)[get_ep_group().rank]
+                if self.token2req is not None:
+                    # expanded_req_ids = self.token2req
+                    # expanded_req_ids = expanded_req_ids.unsqueeze(1)
+                    # updates = torch.ones_like(topk_ids, dtype=torch.float32)
+                    # indices = torch.add(topk_ids, expanded_req_ids, alpha=self.global_num_experts).view(-1)
+                    # self.moe_load_local.view(-1).index_put_(
+                    #     (indices,), 
+                    #     updates.view(-1), 
+                    #     accumulate=True
+                    # )
+                    expanded_req_ids = self.token2req.unsqueeze(1)  
+                    # indices = topk_ids + (expanded_req_ids * self.global_num_experts)  
+                    indices = torch.add(topk_ids, expanded_req_ids, alpha=self.global_num_experts).view(-1)
+                    self.moe_load_local.view(-1).index_add_(
+                        0, 
+                        indices, 
+                        self.ones_buffer[:indices.shape[0]]  
+                    )
             else:
-                self.moe_load.add_(local_load)
+                expert_tokens = fused_experts_results.expert_tokens
+                group_list_type = fused_experts_results.group_list_type
+                assert expert_tokens is not None and group_list_type is not None, (
+                    "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
+                )
+                local_load = (
+                    expert_tokens
+                    if group_list_type == 1
+                    else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+                )
+                if self.multi_stage:
+                    cur_iter = torch.remainder(self.load_counter, self.num_iter)
+                    self.moe_load.index_add_(
+                        dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
+                    )
+                    self.load_counter.add_(1)
+                else:
+                    self.moe_load.add_(local_load)
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
