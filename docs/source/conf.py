@@ -79,11 +79,8 @@ myst_substitutions = {
     "pip_vllm_version": "0.18.0",
     # CANN image tag
     "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
-    # vllm version in ci
-    "ci_vllm_version": "v0.18.0",
-    # main branch compatibility matrix - updated dynamically
     # vLLM commit hash for main branch
-    "main_vllm_commit": "5af684c31912232e5c89484c2e8259e0fac6c55b",
+    "main_vllm_commit": "6f786f2c506cb07f4566771fdc62e640e2c4a176",
     # vLLM tag for main branch
     "main_vllm_tag": "v0.19.0",
     # Python version for main branch
@@ -143,6 +140,26 @@ html_theme_options = {
 # html_static_path = ['_static']
 # Copy llms.txt to site root so it is available as /llms.txt.
 html_extra_path = ["llms.txt"]
+
+# -- Options for linkcheck builder -------------------------------------------
+
+# Check external links without validating remote anchors. Many third-party
+# sites render anchors dynamically, which makes anchor checks flaky in CI.
+linkcheck_anchors = False
+linkcheck_retries = 2
+linkcheck_timeout = 15
+linkcheck_workers = 10
+
+# Example service endpoints in docs are intentionally not reachable from CI.
+linkcheck_ignore = [
+    r"https?://localhost(:\d+)?($|/.*)",
+    r"https?://127\.0\.0\.1(:\d+)?($|/.*)",
+    r"https?://0\.0\.0\.0(:\d+)?($|/.*)",
+    r"https?://192\.0\.0\.1(:\d+)?($|/.*)",
+    r"https?://<[^>]+>.*",
+    r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
+    r"https://github\.com/[^/?#]+/?$",
+]
 
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
 if READTHEDOCS_VERSION_TYPE == "tag":

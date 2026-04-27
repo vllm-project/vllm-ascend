@@ -168,6 +168,128 @@ void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
     return;
 }
 
+void swap_blocks_batch(const torch::Tensor& src_ptrs,
+                       const torch::Tensor& dst_ptrs,
+                       const torch::Tensor& sizes,
+                       int64_t direction) {
+
+    TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
+    TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
+    TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
+    TORCH_CHECK(src_ptrs.dtype() == torch::kInt64, "src_ptrs must be int64");
+    TORCH_CHECK(dst_ptrs.dtype() == torch::kInt64, "dst_ptrs must be int64");
+    TORCH_CHECK(sizes.dtype() == torch::kInt64, "sizes must be int64");
+
+    const int64_t n = src_ptrs.size(0);
+    TORCH_CHECK(dst_ptrs.size(0) == n, "dst_ptrs length must match src_ptrs");
+    TORCH_CHECK(sizes.size(0) == n, "sizes length must match src_ptrs");
+
+    if (n == 0) return;
+
+    const int64_t* src_data = src_ptrs.data_ptr<int64_t>();
+    const int64_t* dst_data = dst_ptrs.data_ptr<int64_t>();
+    const int64_t* size_data = sizes.data_ptr<int64_t>();
+
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    aclrtMemcpyKind memcpy_kind;
+    switch (direction) {
+        case 0:
+            memcpy_kind = ACL_MEMCPY_HOST_TO_DEVICE;
+            break;
+        case 1:
+            memcpy_kind = ACL_MEMCPY_DEVICE_TO_HOST;
+            break;
+        case 2:
+            memcpy_kind = ACL_MEMCPY_DEVICE_TO_DEVICE;
+            break;
+        default:
+            TORCH_CHECK(false,
+                        "swap_blocks_batch: invalid direction ", direction,
+                        " (expected 0=H2D, 1=D2H, 2=D2D)");
+    }
+
+    // =========================================================================
+    // path 1: aclrtMemcpyBatchAsync (CANN 8.5+)
+    // =========================================================================
+#if defined(CANN_MEMCPY_BATCH_ASYNC)
+    if (memcpy_kind != ACL_MEMCPY_DEVICE_TO_DEVICE) {
+        static_assert(sizeof(void*) == sizeof(int64_t),
+                      "void* and int64_t must be the same size");
+        static_assert(sizeof(size_t) == sizeof(int64_t),
+                      "size_t and int64_t must be the same size");
+
+        void** dst_arr = reinterpret_cast<void**>(
+            const_cast<int64_t*>(dst_data));
+        void** src_arr = reinterpret_cast<void**>(
+            const_cast<int64_t*>(src_data));
+        size_t* size_arr = reinterpret_cast<size_t*>(
+            const_cast<int64_t*>(size_data));
+        size_t* dest_maxs = size_arr;
+
+        // aclrtMemcpyBatchAttr uses srcLoc/dstLoc (aclrtMemLocation)
+        // to specify memory locations, not aclrtMemcpyKind.
+        int32_t device_id = 0;
+        aclrtGetDevice(&device_id);
+
+        aclrtMemLocation host_loc = {};
+        host_loc.type = ACL_MEM_LOCATION_TYPE_HOST;
+        host_loc.id = 0;
+
+        aclrtMemLocation device_loc = {};
+        device_loc.type = ACL_MEM_LOCATION_TYPE_DEVICE;
+        device_loc.id = device_id;
+
+        aclrtMemcpyBatchAttr attr = {};
+        if (memcpy_kind == ACL_MEMCPY_HOST_TO_DEVICE) {
+            attr.srcLoc = host_loc;
+            attr.dstLoc = device_loc;
+        } else {  // ACL_MEMCPY_DEVICE_TO_HOST
+            attr.srcLoc = device_loc;
+            attr.dstLoc = host_loc;
+        }
+
+        size_t attrs_index = 0;
+        size_t fail_index = 0;
+
+        aclError result = aclrtMemcpyBatchAsync(
+            dst_arr, dest_maxs, src_arr, size_arr,
+            static_cast<size_t>(n),
+            &attr, &attrs_index, 1,
+            &fail_index, stream);
+
+        TORCH_CHECK(result == ACL_SUCCESS,
+                    "aclrtMemcpyBatchAsync failed at index ", fail_index,
+                    " with error code ", result);
+        return;
+    }
+#endif
+
+    // =========================================================================
+    // path 2: aclrtMemcpyAsync
+    // =========================================================================
+    for (int64_t i = 0; i < n; i++) {
+        void* dst = reinterpret_cast<void*>(dst_data[i]);
+        const void* src = reinterpret_cast<const void*>(src_data[i]);
+        size_t copy_size = static_cast<size_t>(size_data[i]);
+
+        aclError ret = aclrtMemcpyAsync(
+            dst,                
+            copy_size,          
+            src,                
+            copy_size,          
+            memcpy_kind,        
+            stream);            
+
+        TORCH_CHECK(ret == ACL_SUCCESS,
+                    "aclrtMemcpyAsync failed at index ", i,
+                    " with error code ", ret,
+                    ", src=", src_data[i],
+                    ", dst=", dst_data[i],
+                    ", size=", size_data[i]);
+    }
+}
+
 AscendType get_dtype_from_torch(at::ScalarType scalarType)
 {
     if (scalarType == at::ScalarType::Float) {
@@ -617,6 +739,67 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> dispatch_prefill(
     return {expandx_out, expand_idx_out, recv_count, num_recv_tokens_per_expert};
 }
 
+at::Tensor convert_hamming_dist_top_k_output(const at::Tensor &hashq, 
+                                             const at::Tensor &hashkCache,
+                                             const c10::optional<at::Tensor>& indices) {
+    if (indices.has_value()) {
+        return indices.value();
+    }
+    uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
+
+    auto n_bs = hashq.size(0);
+    auto n_kv_heads = hashkCache.size(1); 
+    auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
+    at::Tensor res = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
+    return res;
+}
+
+at::Tensor npu_hamming_dist_top_k(const at::Tensor &hashq, 
+                                       const at::Tensor &hashkCache,
+                                       const at::Tensor& hashkCacheRope,
+                                       const at::Tensor &topN,
+                                       const at::Tensor &seqLen, 
+                                       const c10::optional<at::Tensor> &chunkSize,
+                                       const c10::optional<int64_t> maxSeqLen, 
+                                       const c10::optional<int64_t> sink, 
+                                       const c10::optional<int64_t> recent, 
+                                       const c10::optional<int64_t> supportOffload,
+                                       const c10::optional<at::Tensor> &blockTable,
+                                       const c10::optional<at::Tensor> &mask,
+                                       const c10::optional<at::Tensor>& indices) {
+
+    auto&& maxSeqLen_ = maxSeqLen.value_or(0);
+    auto&& sink_ = sink.value_or(0);
+    auto&& recent_ = recent.value_or(0);
+    auto&& supportOffload_ = supportOffload.value_or(0);
+
+    at::Tensor out = convert_hamming_dist_top_k_output(hashq, hashkCache, indices);
+    EXEC_NPU_CMD(aclnnHammingDistTopK, hashq, hashkCache, topN, seqLen, chunkSize, blockTable, indices, hashkCacheRope, mask, maxSeqLen_, sink_, recent_, supportOffload_, out);
+    return out;
+}
+
+at::Tensor npu_reshape_and_cache_bnsd(const at::Tensor& hashq,
+                                           const at::Tensor& hashkCache,
+                                           const at::Tensor& slotMapping,
+                                           const at::Tensor& seqLen,
+                                           const at::Tensor& hashkCacheOut) {
+    EXEC_NPU_CMD(aclnnReshapeAndCacheBnsd, hashq, hashkCache, slotMapping, seqLen, hashkCacheOut);
+    return hashkCacheOut;
+}
+
+at::Tensor npu_sign_bits_pack(const at::Tensor& input, 
+                                   const int64_t size) {   
+    int64_t ySize = (input.size(0) + 7) / 8;
+    int64_t outDim = 0;
+    if (size != 0) {
+        outDim = ySize / size;
+    }
+
+    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));                                 
+    EXEC_NPU_CMD(aclnnSignBitsPack, input, size, out);
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm(
     const at::Tensor& x,
     const at::Tensor& gamma,
@@ -901,6 +1084,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 
+    // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
+    // tensors, so dispatch must be registered on the CPU backend. The function
+    // internally submits async memcpy on the current NPU stream.
+    ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
+    ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
@@ -957,7 +1145,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
-        "                     Tensor[] scale1, Tensor[] scale2, Tensor[] bias1, Tensor[] bias2, Tensor probs, str group,"
+        "                     Tensor[] scale1, Tensor[] scale2, Tensor[]? bias1, Tensor[]? bias2, Tensor probs, str group,"
         "                     int max_output_size, Tensor! out, Tensor! expert_token_nums) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
@@ -1024,6 +1212,23 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("npu_apply_top_k_top_p(Tensor logits, Tensor? p=None, Tensor? k=None) -> Tensor");
     ops.impl("npu_apply_top_k_top_p", torch::kPrivateUse1, &vllm_ascend::npu_apply_top_k_top_p);
+
+    ops.def(
+        "npu_hamming_dist_top_k(Tensor q, Tensor k_comp, Tensor k_comp_rope, Tensor k,"
+        "                      Tensor seq_len, Tensor? chunk_size=None,"
+        "                      int? max_seq_len=None, int? sink=None, int? recent=None, int? support_offload=None,"
+        "                      Tensor? key_block_table=None, Tensor? mask=None, Tensor? indices=None) -> Tensor"
+    );
+    ops.impl("npu_hamming_dist_top_k", torch::kPrivateUse1, &vllm_ascend::npu_hamming_dist_top_k);
+    
+    ops.def(
+        "npu_reshape_and_cache_bnsd(Tensor q, Tensor k_comp, Tensor slot_mapping, Tensor seq_len, Tensor k_out) -> Tensor"
+    );
+    ops.impl("npu_reshape_and_cache_bnsd", torch::kPrivateUse1, &vllm_ascend::npu_reshape_and_cache_bnsd);
+
+    ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
+    ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
+
     ops.def(
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
     );

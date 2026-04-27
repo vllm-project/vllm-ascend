@@ -13,6 +13,11 @@ spec:
         labels:
           role: leader
       spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "night"
+            effect: "NoSchedule"
         containers:
           - name: vllm-leader
             imagePullPolicy: Always
@@ -70,7 +75,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 15Gi
+            sizeLimit: 128Gi
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
@@ -79,6 +84,11 @@ spec:
             path: /usr/local/Ascend/driver/tools
     workerTemplate:
       spec:
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "night"
+            effect: "NoSchedule"
         containers:
           - name: vllm-worker
             imagePullPolicy: Always
@@ -127,7 +137,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 15Gi
+            sizeLimit: 128Gi
         - name: shared-volume
           persistentVolumeClaim:
             claimName: {{ pvc_name | default("nv-action-vllm-benchmarks-v2") }}
