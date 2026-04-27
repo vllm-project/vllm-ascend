@@ -8,7 +8,7 @@ TL;DR CPP uses profiling-based dynamic chunking to equalize per-chunk latency an
 
 In Pipeline Parallelism (PP) + Chunked Prefill scenarios, long sequences are split into fixed-size chunks that pass through the pipeline sequentially. Due to the O(n²) computational complexity of Self-Attention, **chunks of the same size take increasingly longer to process as the prefix sequence grows**:
 
-```
+```text
 Chunk 1 (history=0):     ██████         → Time T1
 Chunk 2 (history=4K):    ████████       → Time T2 > T1
 Chunk 3 (history=8K):    ██████████     → Time T3 > T2
@@ -21,7 +21,7 @@ This time variance propagates across pipeline stages, causing increased idle wai
 
 Dynamic Chunked Pipeline Parallel uses a **profile-first, then predict** strategy:
 
-```
+```text
 Fixed Chunking (equal chunk size, unequal time):
 
           Stage 0  |■■■■|■■■■■■|■■■■■■■■|■■■■■■■■■■|
@@ -46,6 +46,7 @@ Transformer prefill latency grows quadratically with sequence length due to the 
 $$f(l) = a \cdot l^2 + b \cdot l + c$$
 
 Where:
+
 - $a \cdot l^2$: Attention overhead (quadratic)
 - $b \cdot l$: Linear operations (FFN, projection)
 - $c$: Fixed overhead (kernel launch)
@@ -108,7 +109,7 @@ After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual executio
 
 ### Workflow
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Startup Phase                            │
 ├─────────────────────────────────────────────────────────────┤

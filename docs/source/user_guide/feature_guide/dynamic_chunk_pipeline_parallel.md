@@ -21,7 +21,6 @@ Currently CPP mainly focuses on optimization during the prefill phase. It is bet
 | ------- | ----- | ----- | ------ | ------ |
 | **CPP** | ✅    | ✅     | ✅      | ✅       |
 
-
 ## How to Enable
 
 ### Online Serving
@@ -57,9 +56,9 @@ llm = LLM(
 ### Parameter Tuning
 
 - `smooth_factor`: Controls trust level in dynamic prediction
-  - `1.0`: Strictly follow model prediction
-  - `0.6~0.85`: Balance dynamic adjustment and scheduling overhead
-  - `0.0`: No dynamic adjustment (degrades to fixed chunking)
+    - `1.0`: Strictly follow model prediction
+    - `0.6~0.85`: Balance dynamic adjustment and scheduling overhead
+    - `0.0`: No dynamic adjustment (degrades to fixed chunking)
 - `min_chunk`: Generally doesn't need adjustment. Should be smaller than `max-num-batched-tokens`
 
 ## Recommended Settings
@@ -101,6 +100,7 @@ synthetic_config = {
 ```
 
 2. Run for online calibration:
+
 ```bash
 ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --debug
 ```
@@ -114,28 +114,29 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, deploy P instance in Ascend Atlas A3 inference products*64G (A3), the configuration and performance data are as follows.
 
 **Fixed-length requests, concurrency=1**:
+
 - DeepSeek-V3.1-W8A8:
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
-    | ----------------------------- | ------------------------- | ------------------------- | 
+    | ----------------------------- | ------------------------- | ------------------------- |
     | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |
 
 - Qwen3-235B:
 
     | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
-    | ----------------------------- | ------------------------- | ------------------------- | 
+    | ----------------------------- | ------------------------- | ------------------------- |
     | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |
 
-**Variable-length requests**:
+**Variable-length requests, concurrency=4**:
+
 - DeepSeek-V3.1-W8A8:
 
     | Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |
-    | ----------------------------- | ------------------------- | 
+    | ----------------------------- | ------------------------- |
     |  CPP2TP8   | Input throughput: 22424 tps/card |
     |  DP2TP8   | Input throughput: 16150 tps/card |
     |  PCP2TP8   | Input throughput: 18197 tps/card |
     |  TP16   | Input throughput: 18875 tps/card |
-
 
 ## Constraints
 
