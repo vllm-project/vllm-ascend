@@ -70,6 +70,6 @@ def register_connector():
             KVConnectorFactory._registry.pop("SimpleCPUOffloadConnector")
         KVConnectorFactory.register_connector(
             "SimpleCPUOffloadConnector",
-            "vllm_ascend.simple_kv_offload.connector",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.simple_cpu_offload_connector",  # noqa: E501
             "AscendSimpleCPUOffloadConnector",
         )
