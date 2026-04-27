@@ -2698,6 +2698,90 @@ class NPUModelRunner(GPUModelRunner):
         head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
         return kv_cache_spec.head_size, head_size_v
 
+    @staticmethod
+    def _align_up(value: int, alignment: int) -> int:
+        return (value + alignment - 1) // alignment * alignment
+
+    def _allocate_int8_cache_tensor(
+        self,
+        numel: int,
+        alignment: int,
+    ) -> torch.Tensor:
+        """Allocate an int8 raw cache tensor.
+
+        When KV transfer is enabled, the returned tensor's data_ptr is aligned
+        to `alignment`. This keeps the original Mooncake/ADXL alignment behavior.
+        """
+        if numel <= 0:
+            raise ValueError(f"Invalid cache tensor size: {numel}")
+
+        if self.vllm_config.kv_transfer_config is None:
+            return torch.zeros(numel, dtype=torch.int8, device=self.device)
+
+        raw_tensor = torch.zeros(
+            numel + alignment,
+            dtype=torch.int8,
+            device=self.device,
+        )
+        return self._align_memory(raw_tensor, alignment)[:numel]
+
+    def _allocate_sparse_c8_indexer_tensors(
+        self,
+        dsa_k_tensor_size: int,
+        dsa_k_scale_tensor_size: int,
+        alignment: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Allocate dsa_k and dsa_k_scale from one aligned int8 raw allocation.
+
+        Both returned tensors are logical views into the same underlying storage:
+
+            sparse_c8_raw
+              ├── dsa_k_tensor        int8 raw bytes
+              └── dsa_k_scale_tensor  float16 raw bytes stored as int8 view
+
+        `dsa_k_scale_tensor` is still returned as int8 raw storage. Later reshape
+        code should continue to use:
+
+            raw_dsa_k_scale_tensor.view(torch.float16).view(scale_shape)
+
+        This reduces HCCL/Mooncake registration count because register_buffer
+        can merge these two views into one registered memory range.
+        """
+        if dsa_k_tensor_size <= 0:
+            raise ValueError(
+                f"Invalid dsa_k_tensor_size: {dsa_k_tensor_size}"
+            )
+        if dsa_k_scale_tensor_size <= 0:
+            raise ValueError(
+                f"Invalid dsa_k_scale_tensor_size: {dsa_k_scale_tensor_size}"
+            )
+
+        scale_dtype_size = torch.empty(
+            (),
+            dtype=self.c8_k_scale_cache_dtype,
+        ).element_size()
+
+        # Ensure the float16 scale view starts at an address aligned for float16.
+        scale_offset = self._align_up(dsa_k_tensor_size, scale_dtype_size)
+        total_raw_size = scale_offset + dsa_k_scale_tensor_size
+
+        # The raw allocation is int8 because sizes here are byte counts.
+        sparse_c8_raw_tensor = self._allocate_int8_cache_tensor(
+            total_raw_size,
+            alignment,
+        )
+
+        dsa_k_tensor = sparse_c8_raw_tensor[:dsa_k_tensor_size]
+        dsa_k_scale_tensor = sparse_c8_raw_tensor[
+            scale_offset : scale_offset + dsa_k_scale_tensor_size
+        ]
+
+        assert dsa_k_tensor.is_contiguous()
+        assert dsa_k_scale_tensor.is_contiguous()
+        assert dsa_k_scale_tensor.data_ptr() % scale_dtype_size == 0
+        assert dsa_k_scale_tensor.numel() % scale_dtype_size == 0
+
+        return dsa_k_tensor, dsa_k_scale_tensor
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
@@ -2788,35 +2872,40 @@ class NPUModelRunner(GPUModelRunner):
                     if self.use_sparse_c8_indexer:
                         dsa_k_scale_tensor_size = int(kv_cache_tensor.size // dsa_k_scale_tensor_split_factor)
 
-                    # for other attentions, e.g., self_attn, sliding window attn
-                    if self.vllm_config.kv_transfer_config is None:
-                        k_tensor = torch.zeros(k_tensor_size, dtype=torch.int8, device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size, dtype=torch.int8, device=self.device)
-                        #### for deepseek sparse attention
-                        if dsa_k_tensor_size is not None:
-                            dsa_k_tensor = torch.zeros(dsa_k_tensor_size, dtype=torch.int8, device=self.device)
-                        if dsa_k_scale_tensor_size is not None:
-                            dsa_k_scale_tensor = torch.zeros(
-                                dsa_k_scale_tensor_size, dtype=torch.int8, device=self.device
+                    # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
+                    # are allocated as int8 raw bytes first and then viewed as
+                    # the target dtype in _reshape_kv_cache_tensors.
+                    k_tensor = self._allocate_int8_cache_tensor(
+                        k_tensor_size,
+                        alignment,
+                    )
+                    v_tensor = self._allocate_int8_cache_tensor(
+                        v_tensor_size,
+                        alignment,
+                    )
+
+                    dsa_k_tensor = None
+                    dsa_k_scale_tensor = None
+
+                    if self.use_sparse:
+                        assert dsa_k_tensor_size is not None
+
+                        if self.use_sparse_c8_indexer:
+                            assert dsa_k_scale_tensor_size is not None
+
+                            (
+                                dsa_k_tensor,
+                                dsa_k_scale_tensor,
+                            ) = self._allocate_sparse_c8_indexer_tensors(
+                                dsa_k_tensor_size=dsa_k_tensor_size,
+                                dsa_k_scale_tensor_size=dsa_k_scale_tensor_size,
+                                alignment=alignment,
                             )
-                    else:
-                        k_tensor = torch.zeros(k_tensor_size + alignment, dtype=torch.int8, device=self.device)
-                        v_tensor = torch.zeros(v_tensor_size + alignment, dtype=torch.int8, device=self.device)
-                        k_tensor = self._align_memory(k_tensor, alignment)[:k_tensor_size]
-                        v_tensor = self._align_memory(v_tensor, alignment)[:v_tensor_size]
-                        #### for deepseek sparse attention
-                        if dsa_k_tensor_size is not None:
-                            dsa_k_tensor = torch.zeros(
-                                dsa_k_tensor_size + alignment, dtype=torch.int8, device=self.device
+                        else:
+                            dsa_k_tensor = self._allocate_int8_cache_tensor(
+                                dsa_k_tensor_size,
+                                alignment,
                             )
-                            dsa_k_tensor = self._align_memory(dsa_k_tensor, alignment)[:dsa_k_tensor_size]
-                        if dsa_k_scale_tensor_size is not None:
-                            dsa_k_scale_tensor = torch.zeros(
-                                dsa_k_scale_tensor_size + alignment, dtype=torch.int8, device=self.device
-                            )
-                            dsa_k_scale_tensor = self._align_memory(
-                                dsa_k_scale_tensor, alignment
-                            )[:dsa_k_scale_tensor_size]
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the attn kvcache for all shared layers
