@@ -1180,6 +1180,7 @@ class TestEagleProposerPropose:
 
 class MockCpuGpuBuffer:
     """Mock CpuGpuBuffer for testing"""
+
     def __init__(self, max_size, dtype, device="cpu", **kwargs):
         self.max_size = max_size
         self.dtype = dtype
@@ -1187,7 +1188,7 @@ class MockCpuGpuBuffer:
         self.cpu = torch.zeros(max_size, dtype=dtype, device="cpu")
         self.np = self.cpu.numpy()
         self.gpu = torch.zeros(max_size, dtype=dtype, device=device)
-    
+
     def copy_to_gpu(self, size=None):
         if size is None:
             size = self.max_size
@@ -1196,10 +1197,11 @@ class MockCpuGpuBuffer:
 
 class MockCachedRequestState:
     """Mock CachedRequestState for testing"""
+
     def __init__(self, req_id, token_ids):
         self.req_id = req_id
         self.token_ids = token_ids
-    
+
     def get_token_id(self, position):
         if position < len(self.token_ids):
             return self.token_ids[position]
@@ -1208,15 +1210,22 @@ class MockCachedRequestState:
 
 class MockInputBatch:
     """Mock InputBatch for testing"""
-    def __init__(self, num_reqs, req_ids, vocab_size):
+
+    def __init__(self, num_reqs, req_ids, vocab_size, num_tokens_no_spec=None):
         self.num_reqs = num_reqs
         self.req_ids = req_ids
         self.vocab_size = vocab_size
+        # num_tokens_no_spec represents the sequence length (excluding speculative tokens)
+        # for each request. Default to seq_len + 1 for each request.
+        if num_tokens_no_spec is None:
+            self.num_tokens_no_spec = np.array([i + 11 for i in range(num_reqs)], dtype=np.int64)
+        else:
+            self.num_tokens_no_spec = np.array(num_tokens_no_spec, dtype=np.int64)
 
 
 class TestPrepareNextTokenIdsPadded(TestBase):
     """Test prepare_next_token_ids_padded method with precision validation"""
-    
+
     def setUp(self):
         self.vllm_config = MagicMock(spec=VllmConfig)
         self.vllm_config.speculative_config = MagicMock()
@@ -1272,45 +1281,46 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test case where all requests have valid sampled tokens"""
         num_reqs = 3
         vocab_size = 1000
-        
-        seq_lens_cpu = torch.tensor([10, 15, 20], dtype=torch.int32)
-        
-        sampled_token_ids = torch.tensor([
-            [100, 101, 102, 103, 104],
-            [200, 201, 202, 203, 204],
-            [300, 301, 302, 303, 304],
-        ], dtype=torch.int64)
-        
+
+        sampled_token_ids = torch.tensor(
+            [
+                [100, 101, 102, 103, 104],
+                [200, 201, 202, 203, 204],
+                [300, 301, 302, 303, 304],
+            ],
+            dtype=torch.int64,
+        )
+
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(10))),
             "req_1": MockCachedRequestState("req_1", list(range(15))),
             "req_2": MockCachedRequestState("req_2", list(range(20))),
         }
-        
+
         gpu_input_batch = MockInputBatch(
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2"],
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 20]
         )
-        
+
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
-        
+
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
         )
-        
+
         self.assertEqual(next_token_ids.shape[0], num_reqs)
         self.assertEqual(valid_sampled_tokens_count.shape[0], num_reqs)
-        
+
         expected_valid_counts = torch.tensor([5, 5, 5], dtype=torch.int64)
         self.assertTrue(torch.equal(valid_sampled_tokens_count, expected_valid_counts))
-        
+
         expected_next_tokens = torch.tensor([104, 204, 304], dtype=torch.int64)
         self.assertTrue(torch.equal(next_token_ids, expected_next_tokens))
 
@@ -1318,42 +1328,43 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test case where some tokens are rejected (marked as -1)"""
         num_reqs = 3
         vocab_size = 1000
-        
-        seq_lens_cpu = torch.tensor([10, 15, 20], dtype=torch.int32)
-        
-        sampled_token_ids = torch.tensor([
-            [100, 101, -1, -1, -1],
-            [200, 201, 202, 203, -1],
-            [300, 301, 302, 303, 304],
-        ], dtype=torch.int64)
-        
+
+        sampled_token_ids = torch.tensor(
+            [
+                [100, 101, -1, -1, -1],
+                [200, 201, 202, 203, -1],
+                [300, 301, 302, 303, 304],
+            ],
+            dtype=torch.int64,
+        )
+
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(10))),
             "req_1": MockCachedRequestState("req_1", list(range(15))),
             "req_2": MockCachedRequestState("req_2", list(range(20))),
         }
-        
+
         gpu_input_batch = MockInputBatch(
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2"],
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 20]
         )
-        
+
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
-        
+
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
         )
-        
+
         expected_valid_counts = torch.tensor([2, 4, 5], dtype=torch.int64)
         self.assertTrue(torch.equal(valid_sampled_tokens_count, expected_valid_counts))
-        
+
         expected_next_tokens = torch.tensor([101, 203, 304], dtype=torch.int64)
         self.assertTrue(torch.equal(next_token_ids, expected_next_tokens))
 
@@ -1361,42 +1372,43 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test case where all tokens are rejected, should use backup token"""
         num_reqs = 3
         vocab_size = 1000
-        
-        seq_lens_cpu = torch.tensor([10, 15, 20], dtype=torch.int32)
-        
-        sampled_token_ids = torch.tensor([
-            [-1, -1, -1, -1, -1],
-            [-1, -1, -1, -1, -1],
-            [300, 301, 302, 303, 304],
-        ], dtype=torch.int64)
-        
+
+        sampled_token_ids = torch.tensor(
+            [
+                [-1, -1, -1, -1, -1],
+                [-1, -1, -1, -1, -1],
+                [300, 301, 302, 303, 304],
+            ],
+            dtype=torch.int64,
+        )
+
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(15))),
             "req_1": MockCachedRequestState("req_1", list(range(20))),
             "req_2": MockCachedRequestState("req_2", list(range(25))),
         }
-        
+
         gpu_input_batch = MockInputBatch(
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2"],
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16, 26],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 25]
         )
-        
+
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
-        
+
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
         )
-        
+
         expected_valid_counts = torch.tensor([0, 0, 5], dtype=torch.int64)
         self.assertTrue(torch.equal(valid_sampled_tokens_count, expected_valid_counts))
-        
+
         expected_backup_token_0 = requests["req_0"].get_token_id(10)
         expected_backup_token_1 = requests["req_1"].get_token_id(15)
         expected_next_tokens = torch.tensor([expected_backup_token_0, expected_backup_token_1, 304], dtype=torch.int64)
@@ -1406,42 +1418,43 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test case with discarded requests"""
         num_reqs = 3
         vocab_size = 1000
-        
-        seq_lens_cpu = torch.tensor([10, 15, 20], dtype=torch.int32)
-        
-        sampled_token_ids = torch.tensor([
-            [100, 101, 102, 103, 104],
-            [200, 201, 202, 203, 204],
-            [300, 301, 302, 303, 304],
-        ], dtype=torch.int64)
-        
+
+        sampled_token_ids = torch.tensor(
+            [
+                [100, 101, 102, 103, 104],
+                [200, 201, 202, 203, 204],
+                [300, 301, 302, 303, 304],
+            ],
+            dtype=torch.int64,
+        )
+
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(15))),
             "req_1": MockCachedRequestState("req_1", list(range(20))),
             "req_2": MockCachedRequestState("req_2", list(range(25))),
         }
-        
+
         gpu_input_batch = MockInputBatch(
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2"],
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 21, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 20, 20]
         )
-        
+
         discard_request_indices = torch.tensor([0, 2], dtype=torch.int64)
         num_discarded_requests = 2
-        
+
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
         )
-        
+
         expected_valid_counts = torch.tensor([0, 5, 0], dtype=torch.int64)
         self.assertTrue(torch.equal(valid_sampled_tokens_count, expected_valid_counts))
-        
+
         expected_backup_token_0 = requests["req_0"].get_token_id(10)
         expected_backup_token_2 = requests["req_2"].get_token_id(20)
         expected_next_tokens = torch.tensor([expected_backup_token_0, 204, expected_backup_token_2], dtype=torch.int64)
@@ -1451,44 +1464,45 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test mixed scenario: some rejected tokens, some discarded requests, some all-rejected"""
         num_reqs = 4
         vocab_size = 1000
-        
-        seq_lens_cpu = torch.tensor([10, 15, 20, 25], dtype=torch.int32)
-        
-        sampled_token_ids = torch.tensor([
-            [100, 101, -1, -1, -1],
-            [-1, -1, -1, -1, -1],
-            [300, 301, 302, 303, 304],
-            [400, 401, 402, -1, -1],
-        ], dtype=torch.int64)
-        
+
+        sampled_token_ids = torch.tensor(
+            [
+                [100, 101, -1, -1, -1],
+                [-1, -1, -1, -1, -1],
+                [300, 301, 302, 303, 304],
+                [400, 401, 402, -1, -1],
+            ],
+            dtype=torch.int64,
+        )
+
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(15))),
             "req_1": MockCachedRequestState("req_1", list(range(20))),
             "req_2": MockCachedRequestState("req_2", list(range(25))),
             "req_3": MockCachedRequestState("req_3", list(range(30))),
         }
-        
+
         gpu_input_batch = MockInputBatch(
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2", "req_3"],
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16, 26, 31],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 25, 30]
         )
-        
+
         discard_request_indices = torch.tensor([1], dtype=torch.int64)
         num_discarded_requests = 1
-        
+
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
         )
-        
+
         expected_valid_counts = torch.tensor([2, 0, 5, 3], dtype=torch.int64)
         self.assertTrue(torch.equal(valid_sampled_tokens_count, expected_valid_counts))
-        
+
         expected_backup_token_1 = requests["req_1"].get_token_id(15)
         expected_next_tokens = torch.tensor([101, expected_backup_token_1, 304, 402], dtype=torch.int64)
         self.assertTrue(torch.equal(next_token_ids, expected_next_tokens))
@@ -1497,36 +1511,34 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test with single request"""
         num_reqs = 1
         vocab_size = 1000
-        
-        seq_lens_cpu = torch.tensor([10], dtype=torch.int32)
-        
+
         sampled_token_ids = torch.tensor([[100, 101, 102, 103, 104]], dtype=torch.int64)
-        
+
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(15))),
         }
-        
+
         gpu_input_batch = MockInputBatch(
             num_reqs=num_reqs,
             req_ids=["req_0"],
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[16],  # seq_len = num_tokens_no_spec - 1 = [15]
         )
-        
+
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
-        
+
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
         )
-        
+
         expected_valid_counts = torch.tensor([5], dtype=torch.int64)
         self.assertTrue(torch.equal(valid_sampled_tokens_count, expected_valid_counts))
-        
+
         expected_next_tokens = torch.tensor([104], dtype=torch.int64)
         self.assertTrue(torch.equal(next_token_ids, expected_next_tokens))
 
@@ -1534,42 +1546,43 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test with tokens at vocab size boundary"""
         num_reqs = 2
         vocab_size = 100
-        
-        seq_lens_cpu = torch.tensor([10, 15], dtype=torch.int32)
-        
-        sampled_token_ids = torch.tensor([
-            [99, 100, 101, -1, -1],
-            [50, 51, 52, 53, 54],
-        ], dtype=torch.int64)
-        
+
+        sampled_token_ids = torch.tensor(
+            [
+                [99, 100, 101, -1, -1],
+                [50, 51, 52, 53, 54],
+            ],
+            dtype=torch.int64,
+        )
+
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(15))),
             "req_1": MockCachedRequestState("req_1", list(range(20))),
         }
-        
+
         gpu_input_batch = MockInputBatch(
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1"],
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[16, 21],  # seq_len = num_tokens_no_spec - 1 = [15, 20]
         )
-        
+
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
-        
+
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
         )
-        
+
         # Token 100 and 101 are >= vocab_size (100), so they are invalid
         # Only token 99 is valid for the first request
         expected_valid_counts = torch.tensor([1, 5], dtype=torch.int64)
         self.assertTrue(torch.equal(valid_sampled_tokens_count, expected_valid_counts))
-        
+
         # Next token should be 99 (last valid token) for first request
         # and 54 for second request
         expected_next_tokens = torch.tensor([99, 54], dtype=torch.int64)
@@ -1579,57 +1592,60 @@ class TestPrepareNextTokenIdsPadded(TestBase):
         """Test to verify key variables that affect downstream computation"""
         num_reqs = 2
         vocab_size = 1000
-        
-        seq_lens_cpu = torch.tensor([10, 15], dtype=torch.int32)
-        
-        sampled_token_ids = torch.tensor([
-            [100, 101, -1, -1, -1],
-            [200, 201, 202, -1, -1],
-        ], dtype=torch.int64)
-        
+
+        sampled_token_ids = torch.tensor(
+            [
+                [100, 101, -1, -1, -1],
+                [200, 201, 202, -1, -1],
+            ],
+            dtype=torch.int64,
+        )
+
         requests = {
             "req_0": MockCachedRequestState("req_0", list(range(15))),
             "req_1": MockCachedRequestState("req_1", list(range(20))),
         }
-        
+
         gpu_input_batch = MockInputBatch(
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1"],
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            num_tokens_no_spec=[11, 16],  # seq_len = num_tokens_no_spec - 1 = [10, 15]
         )
-        
+
         discard_request_indices = torch.tensor([], dtype=torch.int64)
         num_discarded_requests = 0
-        
+
         next_token_ids, valid_sampled_tokens_count = self.proposer.prepare_next_token_ids_padded(
-            seq_lens_cpu=seq_lens_cpu,
             sampled_token_ids=sampled_token_ids,
             requests=requests,
             gpu_input_batch=gpu_input_batch,
             discard_request_indices=discard_request_indices,
             num_discarded_requests=num_discarded_requests,
         )
-        
+
         # Verify return values
         self.assertEqual(next_token_ids[0].item(), 101, "next_token_ids[0] should be 101")
         self.assertEqual(next_token_ids[1].item(), 202, "next_token_ids[1] should be 202")
         self.assertEqual(valid_sampled_tokens_count[0].item(), 2, "valid_sampled_tokens_count[0] should be 2")
         self.assertEqual(valid_sampled_tokens_count[1].item(), 3, "valid_sampled_tokens_count[1] should be 3")
-        
+
         # Verify public member that affects downstream computation
         expected_backup_0 = requests["req_0"].get_token_id(10)
         expected_backup_1 = requests["req_1"].get_token_id(15)
         self.assertEqual(
-            self.proposer.backup_next_token_ids.np[0], 
+            self.proposer.backup_next_token_ids.np[0],
             expected_backup_0,
-            f"backup_next_token_ids[0] should be {expected_backup_0}"
+            f"backup_next_token_ids[0] should be {expected_backup_0}",
         )
         self.assertEqual(
-            self.proposer.backup_next_token_ids.np[1], 
+            self.proposer.backup_next_token_ids.np[1],
             expected_backup_1,
-            f"backup_next_token_ids[1] should be {expected_backup_1}"
+            f"backup_next_token_ids[1] should be {expected_backup_1}",
         )
-        
+
         # Verify data types
         self.assertEqual(next_token_ids.dtype, torch.int64, "next_token_ids dtype should be torch.int64")
-        self.assertEqual(valid_sampled_tokens_count.dtype, torch.int64, "valid_sampled_tokens_count dtype should be torch.int64")
+        self.assertEqual(
+            valid_sampled_tokens_count.dtype, torch.int64, "valid_sampled_tokens_count dtype should be torch.int64"
+        )
