@@ -21,8 +21,6 @@ import sys
 from enum import Enum
 from unittest.mock import MagicMock
 
-import pytest
-
 try:
     # Note: do not import torch here for cpu env, which will lead to circle import error.
     subprocess.run(["npu-smi", "info"], capture_output=True, check=True)
@@ -90,13 +88,22 @@ def npu_test(num_npus: int = 1, npu_type: str | RunnerDeviceType = RunnerDeviceT
         def wrapper(*args, **kwargs):
             if npu_type == RunnerDeviceType.CPU:
                 return func(*args, **kwargs)
+            # CI routes this test to a runner matching (npu_type, num_npus).
+            # If the requirements are not met at runtime, the routing or the
+            # runner environment is broken — fail loudly instead of skipping.
             if not _npu_available:
-                pytest.skip(f"NPU not available (need {npu_type.value} x{num_npus})")
+                raise RuntimeError(
+                    f"NPU required but not available on this runner "
+                    f"(test needs {npu_type.value} x{num_npus}). "
+                    "Check runner_label.json and the runner's NPU setup."
+                )
             import torch  # noqa
 
             device_count = torch.npu.device_count()
             if device_count < num_npus:
-                pytest.skip(f"Not enough NPUs: need {num_npus}, have {device_count}")
+                raise RuntimeError(
+                    f"Insufficient NPUs on this runner: need {num_npus}, have {device_count}. Check runner_label.json."
+                )
             return func(*args, **kwargs)
 
         return wrapper
