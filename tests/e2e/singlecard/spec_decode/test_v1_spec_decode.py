@@ -408,7 +408,8 @@ def test_qwen3_eagle3_dcp_tp8(
         tensor_parallel_size=8,
         decode_context_parallel_size=2,
     ) as runner:
-        spec_outputs = runner.model.chat(test_prompts, sampling_config)
+        runner.model.chat(test_prompts, sampling_config)
+
 
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
