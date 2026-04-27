@@ -50,6 +50,8 @@ deployment:
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
+      --data-parallel-size-local 1
+      --data-parallel-start-rank 0
       --tensor-parallel-size 8
       --data-parallel-size-local 1
       --data-parallel-start-rank 1
