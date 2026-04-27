@@ -49,7 +49,9 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     @patch("vllm_ascend.utils.has_shared_experts", return_value=True)
-    def test_init_ascend_config_with_additional_config(self, mock_has_shared_experts, mock_fix_incompatible_config):
+    def test_init_ascend_config_with_additional_config(
+        self, mock_has_shared_experts, mock_fix_incompatible_config
+    ):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "ascend_compilation_config": {
@@ -79,7 +81,9 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     @patch("vllm_ascend.utils.has_shared_experts", return_value=False)
-    def test_multistream_overlap_disabled_without_shared_experts(self, mock_has_shared_experts, mock_fix_incompatible_config):
+    def test_multistream_overlap_disabled_without_shared_experts(
+        self, mock_has_shared_experts, mock_fix_incompatible_config
+    ):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "multistream_overlap_shared_expert": True,
