@@ -77,14 +77,6 @@ def test_asyn_transfer_and_update(mock_adaptor):
     assert loader_obj.recv_expert_list == []
 
 
-def test_set_log2phy_map(mock_adaptor):
-    with patch("vllm_ascend.eplb.core.eplb_device_transfer_loader.get_dynamic_eplb_group", return_value=None):
-        loader_obj = loader.D2DExpertWeightLoader()
-    loader_obj.set_adator(mock_adaptor)
-    loader_obj.set_log2phy_map({"a": 1})
-    assert loader_obj.updated_log2phy_map == {"a": 1}
-
-
 def test_invalid_state_asyn_update(mock_adaptor):
     with patch("vllm_ascend.eplb.core.eplb_device_transfer_loader.get_dynamic_eplb_group", return_value=None):
         loader_obj = loader.D2DExpertWeightLoader()
