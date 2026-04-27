@@ -11,10 +11,15 @@ env_common:
   VLLM_ASCEND_BALANCE_SCHEDULING: 0
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_USE_MODELSCOPE: true
+<<<<<<< HEAD
   VLLM_ENGINE_READY_TIMEOUT_S: 3000
   VLLM_RPC_TIMEOUT: 600
   SERVER_PORT: 8078
 
+=======
+  SERVER_PORT: 8080
+ 
+>>>>>>> ca955d8e... modify GLM-5_1_W8A8-A2
 special_dependencies:
   transformers: "5.2.0"
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
