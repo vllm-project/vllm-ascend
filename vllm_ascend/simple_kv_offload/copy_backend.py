@@ -1,9 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-#
 """DMA copy backend for NPU<->CPU block transfers.
 
 Mirrors :class:`vllm.v1.simple_kv_offload.copy_backend.DmaCopyBackend`
