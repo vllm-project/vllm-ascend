@@ -250,9 +250,11 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
 
         actual_seq_lengths_q = decode_metadata.seq_lens[: self.num_decodes]
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
-
-        masks = decode_metadata.attn_mask
-        decode_metadata.attn_mask = generate_dcp_mtp_mask(masks, decode_metadata.actual_seq_lengths_q, self.num_decodes)
+        if long_seq_metadata.mtp_attention_masks_for_decode:
+            masks = long_seq_metadata.mtp_attention_masks_for_decode
+            query_lens = common_attn_metadata.query_start_loc_cpu[1 : self.num_decodes + 1] - common_attn_metadata.query_start_loc_cpu[: self.num_decodes]
+            mtp_attn_mask = generate_dcp_mtp_mask(masks, query_lens, self.num_decodes)
+            decode_metadata.attn_mask = mtp_attn_mask
 
         return decode_metadata
 
