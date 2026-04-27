@@ -159,6 +159,22 @@ class NPUPlatform(Platform):
         """
         return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
 
+    @staticmethod
+    def _sync_additional_config(vllm_config: VllmConfig, ascend_config) -> None:
+        ascend_compilation_config = getattr(ascend_config, "ascend_compilation_config", None)
+        if ascend_compilation_config:
+            vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
+                vars(ascend_compilation_config)
+                if not isinstance(ascend_compilation_config, dict)
+                else ascend_compilation_config
+            )
+
+        ascend_fusion_config = getattr(ascend_config, "ascend_fusion_config", None)
+        if ascend_fusion_config:
+            vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
+                vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
+            )
+
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
         # Adapt the global patch here.
@@ -324,24 +340,11 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
-        ascend_compilation_config = ascend_config.ascend_compilation_config
-        if ascend_compilation_config:
-            vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
-                vars(ascend_compilation_config)
-                if not isinstance(ascend_compilation_config, dict)
-                else ascend_compilation_config
-            )
 
         ascend_config.update_compile_ranges_split_points()
 
         if model_config and hasattr(model_config.hf_text_config, "index_topk"):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
-
-        ascend_fusion_config = ascend_config.ascend_fusion_config
-        if ascend_fusion_config:
-            vllm_config.additional_config.setdefault("ascend_fusion_config", {}).update(
-                vars(ascend_fusion_config) if not isinstance(ascend_fusion_config, dict) else ascend_fusion_config
-            )
 
         enforce_eager = getattr(model_config, "enforce_eager", False)
 
@@ -477,6 +480,8 @@ class NPUPlatform(Platform):
                 "for example, check the plog files (default: $HOME/ascend/log/debug) "
                 "for more information about runtime errors."
             )
+
+        cls._sync_additional_config(vllm_config, ascend_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
