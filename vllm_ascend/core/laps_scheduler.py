@@ -187,7 +187,7 @@ class LAPSRequestQueue(RequestQueue):
         self._on_short_queue_changed()
 
     def __bool__(self) -> bool:
-        return len(self) > 0
+        return self._select_schedulable_queue() is not None
 
     def __len__(self) -> int:
         return (

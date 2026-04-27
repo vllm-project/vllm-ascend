@@ -45,8 +45,10 @@ def test_wait_window_holds_isolated_short_request():
         short_request = make_request("short", 8)
         queue.add_request(short_request)
 
+        assert len(queue) == 1
         assert not queue
         current_time["value"] = 0.009
+        assert len(queue) == 1
         assert not queue
         current_time["value"] = 0.011
         assert queue
