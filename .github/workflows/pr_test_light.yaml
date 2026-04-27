@@ -43,7 +43,9 @@ jobs:
     with:
       vllm: 6f786f2c506cb07f4566771fdc62e640e2c4a176
   changes:
-    runs-on: ubuntu-latest
+    runs-on: linux-aarch64-a2b3-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       _310_tracker: ${{ steps.filter.outputs._310_tracker }}
@@ -84,14 +86,11 @@ jobs:
               - 'vllm_ascend/patch/**'
               - 'CMakeLists.txt'
 
-      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
-        with:
-          python-version: "3.11"
-
       - name: Determine smart UT test scope
         if: ${{ steps.filter.outputs.e2e_tracker == 'true' }}
         id: scope
         run: |
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           git fetch origin ${{ github.base_ref }}
           pip install pyyaml
           python3 .github/workflows/scripts/determine_smart_e2e_scope.py \
