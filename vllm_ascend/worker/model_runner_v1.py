@@ -1269,6 +1269,27 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices=logits_indices,
         )
 
+    def _copy_valid_sampled_token_count(
+        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
+    ) -> None:
+        if self.valid_sampled_token_count_event is None:
+            return
+
+        # Initialize a new stream to overlap the copy operation with
+        # prepare_input of draft model.
+        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):  
+            self.valid_sampled_token_count_copy_stream.wait_stream(torch.npu.current_stream())  
+            counts = valid_sampled_tokens_count
+            counts_cpu = self.valid_sampled_token_count_cpu
+            assert counts_cpu is not None
+            counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
+            self.valid_sampled_token_count_event.record()
+
+        if self.use_async_spec_decode:
+            # Stash for GPU-side correction in _prepare_inputs.
+            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count
+        self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
