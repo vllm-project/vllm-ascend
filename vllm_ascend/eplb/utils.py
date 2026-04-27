@@ -61,12 +61,14 @@ def get_all_moe_loads(self, policy_type=0, pd_delay=0):
         )
         return None, moe_load_old
 
-def set_all_token2req(self, token2req):
+def set_all_token2req(self, token2req, expired_req_ids=None):
     num_dense_layers = self.num_dense_layers if hasattr(
         self, "num_dense_layers") else 0
     x = token2req.npu()
     for layer_id in range(self.num_moe_layers):
         self.model.layers[layer_id + num_dense_layers].mlp.experts.token2req = x
+    if expired_req_ids is not None:
+        self.model.layers[layer_id + num_dense_layers].mlp.experts.moe_load_prev[expired_req_ids] = 0  # clear the moe load of expired requests to avoid affecting load balancing
 
 
 

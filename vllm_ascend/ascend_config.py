@@ -378,7 +378,7 @@ class EplbConfig:
         "num_redundant_experts": 0,
         "eplb_policy_type": 1,
         "max_batch_token": 128,
-        "pd_dynamic_delay": 0,
+        "pd_dynamic_decay": 0,
     }
 
     def __init__(self, user_config: dict | None = None):

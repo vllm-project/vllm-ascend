@@ -42,4 +42,4 @@ class RequestManager:
             target_tensor[current_ptr : current_ptr + num] = target_idx
             current_ptr += num
             
-        return target_tensor, self.m2
+        return target_tensor, self.m2, expired_req_ids

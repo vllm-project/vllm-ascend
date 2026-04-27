@@ -99,7 +99,7 @@ class VllmEplbAdaptor:
     def get_rank_expert_workload(self) -> torch.Tensor:
         self.moe_load, moe_load_old = self.model.get_all_moe_loads(
             policy_type=get_ascend_config().eplb_config.eplb_policy_type,
-            pd_delay=get_ascend_config().eplb_config.pd_dynamic_delay)
+            pd_delay=get_ascend_config().eplb_config.pd_dynamic_decay)
         return self.moe_load, moe_load_old
 
     def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
@@ -137,8 +137,8 @@ class VllmEplbAdaptor:
             logger.debug(f"Expert tensor shape is :{expert_tensor.shape}")
 
     def do_update_request_slot(self, scheduler_output, num_tokens_padded):
-        self.req_manager.update_and_copy(scheduler_output.num_scheduled_tokens, self.token2req)
-        self.model.set_all_token2req(torch.tensor(self.token2req[:num_tokens_padded], dtype=torch.int32))
+        _, _, expired_req_ids = self.req_manager.update_and_copy(scheduler_output.num_scheduled_tokens, self.token2req)
+        self.model.set_all_token2req(torch.tensor(self.token2req[:num_tokens_padded], dtype=torch.int32), expired_req_ids)
 
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
