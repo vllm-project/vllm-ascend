@@ -50,6 +50,7 @@ class KVPoolScheduler:
         self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._req_cached_gvas: dict[str, list[int]] = {}
+        self._req_cached_last_block_gvas: dict[str, int] = {}
 
         self.page_size_bytes = page_size_bytes
         logger.info(f"==============> page_size_bytes {page_size_bytes}")
@@ -96,11 +97,15 @@ class KVPoolScheduler:
 
         all_keys = chunk_keys + ([last_block_key] if last_block_key else [])
         cached_gvas = self._req_cached_gvas.get(req_id)
-
-        num_cached = min(len(cached_gvas), len(chunk_keys)) if cached_gvas else 0
+        if cached_gvas is None:
+            cached_gvas = []
+        # num_cached = min(len(cached_gvas), len(chunk_keys)) if cached_gvas else 0
+        num_cached = len(cached_gvas)
+        # self._req_cached_gvas[req_id] = self._req_cached_gvas[req_id][:num_cached]
         chunk_gvas: list[int] = list(cached_gvas[:num_cached]) if cached_gvas else []
         last_block_gva = None
         keys_to_alloc = all_keys[num_cached:]
+        keys_to_alloc = all_keys
         if keys_to_alloc:
             new_gvas = self.store_scheduler.batch_alloc(
                 keys_to_alloc, [alloc_size] * len(keys_to_alloc))
@@ -109,6 +114,7 @@ class KVPoolScheduler:
                     f"Request {req_id}: batch_alloc failed, "
                     f"gvas={new_gvas}")
             num_new_chunk_keys = len(chunk_keys) - num_cached
+            # num_new_chunk_keys = len(chunk_keys)
             chunk_gvas.extend(new_gvas[:num_new_chunk_keys])
             if last_block_key and len(new_gvas) > num_new_chunk_keys:
                 last_block_gva = new_gvas[-1]
@@ -168,16 +174,17 @@ class KVPoolScheduler:
         cached_gvas = self._req_cached_gvas.get(request.request_id) or []
         if cached_gvas:
             cached_keys = keys_to_check[:len(cached_gvas)]
-            if any(self.store_scheduler.exists(cached_keys)):
+            if any(self.store_scheduler.batch_is_exist(cached_keys)):
                 raise ValueError(
                     f"Request {request.request_id}: cached gvas key(s) no longer exist in store")
             remaining_keys = remaining_keys[len(cached_gvas):]
 
         num_hit_blocks = len(cached_gvas)
         if remaining_keys:
-            key_infos = self.store_scheduler.get_batch_key_info(remaining_keys)
+            key_infos = self.store_scheduler.batch_get_key_info(remaining_keys)
             for key_info in key_infos:
-                if key_info.size_list()[0] > 0:
+                sizes = key_info.size()
+                if sizes and sizes > 0:
                     cached_gvas.append(key_info.gva_list()[0])
                     num_hit_blocks += 1
                 else:
@@ -300,11 +307,13 @@ class KVPoolScheduler:
                 else len(request.prompt_token_ids)
             )
 
-            num_blocks = len(unfolded_block_ids)
+            num_blocks = num_tokens_to_compute // self._block_size
             has_last_block = num_tokens_to_compute % self._block_size != 0
 
             block_keys, last_block_key, chunk_gvas, last_block_gva = self._generate_keys_and_alloc(
                 request_real.block_hashes[:num_blocks], req_id=request.req_id, has_last_block=has_last_block)
+            self._req_cached_gvas[request.req_id].extend(chunk_gvas)
+            self._req_cached_last_block_gvas[request.req_id]=last_block_gva
             request_tracker.chunk_gvas = chunk_gvas
             request_tracker.last_block_gva = last_block_gva
             request_tracker.block_keys = block_keys
@@ -364,7 +373,8 @@ class KVPoolScheduler:
                     has_last_block = num_tokens_to_compute % self._block_size != 0
                     block_keys, last_block_key, chunk_gvas, last_block_gva = self._generate_keys_and_alloc(
                         request_real.block_hashes[:num_blocks], req_id=req_id, has_last_block=has_last_block)
-
+                    self._req_cached_gvas[req_id].extend(chunk_gvas)
+                    self._req_cached_last_block_gvas[req_id] = last_block_gva
                     request_tracker.chunk_gvas = chunk_gvas
                     request_tracker.last_block_gva = last_block_gva
                     request_tracker.block_keys = block_keys
@@ -416,7 +426,7 @@ class KVPoolScheduler:
                             request_tracker.block_keys = new_block_keys
                         else:
                             request_tracker.block_keys.extend(new_block_keys)
-
+                        self._req_cached_gvas[req_id].extend(new_chunk_gvas)
                     if new_block_ids is not None:
                         request_tracker.update(new_block_ids)
                     last_chunk_tokens_num = (

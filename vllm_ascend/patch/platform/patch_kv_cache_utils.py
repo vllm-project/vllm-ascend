@@ -1,7 +1,7 @@
 from functools import partial
 
 import vllm
-from vllm import envs
+from vllm_ascend import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
@@ -37,9 +37,9 @@ def get_kv_cache_num_layers(vllm_config: VllmConfig) -> int | None:
     or the VLLM_KV_CACHE_REUSE_LAYERS env var), only this many layers
     need unique KV cache storage. Returns None if reuse is not enabled.
     """
-    reuse_layers = vllm_config.cache_config.kv_cache_reuse_layers
-    if reuse_layers is None:
-        reuse_layers = envs.VLLM_KV_CACHE_REUSE_LAYERS
+    # reuse_layers = vllm_config.cache_config.kv_cache_reuse_layers
+    # if reuse_layers is None:
+    reuse_layers = envs.VLLM_KV_CACHE_REUSE_LAYERS
     return reuse_layers
 
 
