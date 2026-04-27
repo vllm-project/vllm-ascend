@@ -112,3 +112,20 @@ class TestAscendConfig(TestBase):
         clear_ascend_config()
         with self.assertRaises(RuntimeError):
             get_ascend_config()
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    def test_init_ascend_config_recreates_for_new_vllm_config(self, mock_fix_incompatible_config):
+        first_vllm_config = VllmConfig()
+        first_vllm_config.additional_config = {
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": False,
+            }
+        }
+        first_ascend_config = init_ascend_config(first_vllm_config)
+        self.assertFalse(first_ascend_config.ascend_compilation_config.enable_npugraph_ex)
+
+        second_vllm_config = VllmConfig()
+        second_ascend_config = init_ascend_config(second_vllm_config)
+        self.assertIsNot(first_ascend_config, second_ascend_config)
+        self.assertTrue(second_ascend_config.ascend_compilation_config.enable_npugraph_ex)
