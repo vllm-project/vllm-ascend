@@ -1345,10 +1345,16 @@ class NPUModelRunner(GPUModelRunner):
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
-            # prepare sampled_token_ids tensor（list → padded tensor）
+            # Prepare sampled_token_ids as a contiguous int32 tensor.
+            # The NPU ngram kernel strictly interprets this buffer as
+            # int32 (see csrc/ngram_spec_decode/...); passing the raw
+            # int64 sampler output would alias high/low halves and walk
+            # past row strides, surfacing as an aivec MTE OOB on device.
             sampled_token_ids = valid_sampled_token_ids
             if isinstance(sampled_token_ids, list):
-                max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
+                max_len = max(
+                    (len(sublist) for sublist in sampled_token_ids), default=0
+                )
                 max_len = max(max_len, 1)
                 padded_list = [
                     sublist + [-1] * (max_len - len(sublist))
@@ -1358,7 +1364,17 @@ class NPUModelRunner(GPUModelRunner):
                     padded_list, dtype=torch.int32, device=self.device
                 )
             else:
+                # sampler_output.sampled_token_ids is torch.long; cast
+                # to int32 to match the kernel's binding contract.
                 sampled_token_ids_tensor = sampled_token_ids
+                if sampled_token_ids_tensor.dtype != torch.int32:
+                    sampled_token_ids_tensor = sampled_token_ids_tensor.to(
+                        torch.int32
+                    )
+                if not sampled_token_ids_tensor.is_contiguous():
+                    sampled_token_ids_tensor = (
+                        sampled_token_ids_tensor.contiguous()
+                    )
 
             (_token_ids, next_token_ids, draft_token_ids,
              num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
