@@ -558,7 +558,12 @@ def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     refresh = additional_config.get("refresh", False) if additional_config else False
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is not None and not refresh and _is_ascend_config_initialized(_ASCEND_CONFIG):
+    if (
+        _ASCEND_CONFIG is not None
+        and not refresh
+        and _is_ascend_config_initialized(_ASCEND_CONFIG)
+        and _ASCEND_CONFIG.vllm_config is vllm_config
+    ):
         return _ASCEND_CONFIG
     new_config = AscendConfig(vllm_config)
     if _is_ascend_config_initialized(new_config):

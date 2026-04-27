@@ -1,5 +1,4 @@
 import importlib
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -85,26 +84,6 @@ class TestNPUPlatform(TestBase):
         self.platform.pre_register_and_update(None)
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
-
-    @patch.dict("os.environ", {}, clear=True)
-    @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_defaults_worker_method_to_spawn(
-            self, mock_quant_config, mock_adapt_patch):
-        self.platform.pre_register_and_update(None)
-
-        mock_adapt_patch.assert_called_once_with(is_global_patch=True)
-        self.assertEqual(os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"), "spawn")
-
-    @patch.dict("os.environ", {"VLLM_WORKER_MULTIPROC_METHOD": "fork"}, clear=True)
-    @patch("vllm_ascend.utils.adapt_patch")
-    @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")
-    def test_pre_register_and_update_preserves_explicit_worker_method(
-            self, mock_quant_config, mock_adapt_patch):
-        self.platform.pre_register_and_update(None)
-
-        mock_adapt_patch.assert_called_once_with(is_global_patch=True)
-        self.assertEqual(os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"), "fork")
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.quantization.modelslim_config.AscendModelSlimConfig")

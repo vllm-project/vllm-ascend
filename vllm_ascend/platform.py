@@ -62,22 +62,6 @@ else:
 _CUSTOM_OP_REGISTERED = False
 
 
-def _ensure_ascend_worker_multiproc_method() -> None:
-    current_method = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
-    if current_method:
-        logger.debug(
-            "Keeping user-specified VLLM_WORKER_MULTIPROC_METHOD=%s for Ascend.",
-            current_method,
-        )
-        return
-
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    logger.info(
-        "VLLM_WORKER_MULTIPROC_METHOD is not set; defaulting to 'spawn' on Ascend "
-        "because torch-npu/ACL runtime is not fork-safe."
-    )
-
-
 def _get_npu_smi_field(lines: list[str], key: str) -> str | None:
     for line in lines:
         normalized = " ".join(line.split())
@@ -177,8 +161,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
-        _ensure_ascend_worker_multiproc_method()
-
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
 
@@ -309,8 +291,6 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
-
-        _ensure_ascend_worker_multiproc_method()
 
         device_config = getattr(vllm_config, "device_config", None)
         if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
