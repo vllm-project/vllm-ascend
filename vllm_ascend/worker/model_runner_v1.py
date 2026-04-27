@@ -2041,6 +2041,8 @@ class NPUModelRunner(GPUModelRunner):
         else:
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
         if use_spec_decode and self.need_accepted_tokens:
+            if self.num_accepted_tokens_event is not None:
+                self.num_accepted_tokens_event.synchronize()
             self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
