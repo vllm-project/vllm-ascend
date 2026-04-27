@@ -1,0 +1,172 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+name: Smart E2E
+
+on:
+  workflow_call:
+    inputs:
+      vllm:
+        type: string
+        required: true
+        description: 'The vllm commit hash or tag to test.'
+      test_groups:
+        type: string
+        required: true
+        description: 'JSON array of test groups from determine_smart_e2e_scope.py'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+
+jobs:
+  smart-ut-test:
+    name: smart-ut (${{ matrix.group.npu_type }} x${{ matrix.group.num_npus }})
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(inputs.test_groups) }}
+    runs-on: ${{ matrix.group.runner }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        MAX_JOBS: 4
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
+        UV_PYTHON: python3
+    steps:
+      - name: Install packages
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
+          pip install uv
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v6
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty uv pip install . ${{ runner.arch == 'X64' && '--extra-index-url https://download.pytorch.org/whl/cpu/' || '' }}
+          uv pip uninstall triton
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v6
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        run: |
+          CSRC_HASH=$(find ./csrc ./setup.py ./CMakeLists.txt ./cmake \
+            -type f -not -path '*/.*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache vllm-ascend csrc
+        if: ${{ runner.arch != 'X64' }}
+        uses: runs-on/cache@v4
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          restore-keys: |
+            vllm-ascend-build-v1-${{ runner.os }}-swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+      - name: Install vllm-project/vllm-ascend
+        if: ${{ runner.arch != 'X64' }}
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -v -e .
+          else
+            uv pip install -v -e .
+          fi
+
+      - name: Install vllm-project/vllm-ascend
+        if: ${{ runner.arch == 'X64' }}
+        env:
+          SOC_VERSION: ascend910b1
+          COMPILE_CUSTOM_KERNELS: 0
+        run: |
+          pip install uc-manager
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          uv pip install -v . --extra-index-url https://download.pytorch.org/whl/cpu/
+          uv pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu/
+
+      - name: Run smart UT with device
+        if: ${{ runner.arch != 'X64' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        run: |
+          echo -e "\033[1;34m=== TEST INFO ===\033[0m"
+          echo -e "  \033[33mDevice:\033[0m ${{ matrix.group.npu_type }}"
+          if [ "${{ matrix.group.npu_type }}" != "cpu" ]; then
+            echo -e "  \033[33mNPU count:\033[0m ${{ matrix.group.num_npus }}"
+          fi
+          echo -e "  \033[33mTargets:\033[0m"
+          for target in ${{ matrix.group.tests }}; do
+            echo -e "    \033[32m-\033[0m ${target}"
+          done
+          echo -e "\033[1;34m====================\033[0m"
+          pytest -sv --color=yes ${{ matrix.group.tests }}
+
+      - name: Run smart UT without device
+        if: ${{ runner.arch == 'X64' }}
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+        shell: bash
+        run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+
+          echo -e "\033[1;34m=== TEST INFO ===\033[0m"
+          echo -e "  \033[33mDevice:\033[0m ${{ matrix.group.npu_type }}"
+          if [ "${{ matrix.group.npu_type }}" != "cpu" ]; then
+            echo -e "  \033[33mNPU count:\033[0m ${{ matrix.group.num_npus }}"
+          fi
+          echo -e "  \033[33mTargets:\033[0m"
+          for target in ${{ matrix.group.tests }}; do
+            echo -e "    \033[32m-\033[0m ${target}"
+          done
+          echo -e "\033[1;34m====================\033[0m"
+          pytest -sv --color=yes ${{ matrix.group.tests }}

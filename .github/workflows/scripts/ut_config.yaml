@@ -1,0 +1,135 @@
+# Smart UT test scope configuration.
+# Each entry maps source directories to the UT test directories that should
+# be triggered when those sources change.
+#
+# Fields:
+#   name: Module identifier
+#   optional: true (triggered only when matched) or false (always triggered)
+#   source_file_dependencies: List of source/test directories whose changes trigger the tests
+#   tests: List of test directories/files under tests/ut/ to run
+
+- name: quantization
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/quantization
+    - tests/ut/quantization
+  tests:
+    - tests/ut/quantization
+- name: attention
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/attention
+    - tests/ut/attention
+  tests:
+    - tests/ut/attention
+
+- name: ops
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/ops
+    - tests/ut/ops
+  tests:
+    - tests/ut/ops
+
+- name: distributed
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/distributed
+    - tests/ut/distributed
+  tests:
+    - tests/ut/distributed
+
+- name: spec_decode
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/spec_decode
+    - tests/ut/spec_decode
+  tests:
+    - tests/ut/spec_decode
+
+- name: worker
+  optional: false
+  source_file_dependencies:
+    - vllm_ascend/worker
+    - tests/ut/worker
+  tests:
+    - tests/ut/worker
+
+- name: compilation
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/compilation
+    - tests/ut/compilation
+  tests:
+    - tests/ut/compilation
+
+- name: sample
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/sample
+    - tests/ut/sample
+  tests:
+    - tests/ut/sample
+
+- name: core
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/core
+    - tests/ut/core
+  tests:
+    - tests/ut/core
+
+- name: model_loader
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/model_loader
+    - tests/ut/model_loader
+  tests:
+    - tests/ut/model_loader
+
+- name: eplb
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/eplb
+    - tests/ut/eplb
+  tests:
+    - tests/ut/eplb
+
+- name: patch
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/patch
+    - tests/ut/patch
+  tests:
+    - tests/ut/patch
+
+- name: device_allocator
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/device_allocator
+    - tests/ut/device_allocator
+  tests:
+    - tests/ut/device_allocator
+
+- name: kv_offload
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/kv_offload
+    - tests/ut/kv_connector
+  tests:
+    - tests/ut/kv_connector
+
+- name: batch_invariant
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/batch_invariant.py
+    - tests/ut/batch_invariant
+  tests:
+    - tests/ut/batch_invariant
+
+- name: dummy
+  optional: false
+  source_file_dependencies:
+    - tests/ut/dummy
+  tests:
+    - tests/ut/dummy
