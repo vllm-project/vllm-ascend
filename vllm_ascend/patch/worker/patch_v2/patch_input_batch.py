@@ -17,8 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-
-# 显式导入模块，确保模块被加载后再进行 patch
 from vllm.v1.worker.gpu import cudagraph_utils, model_runner
 
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch

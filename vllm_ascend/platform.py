@@ -507,7 +507,7 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
             )
-            import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
+            import vllm_ascend.patch.dynamic.patch_profiling_chunk  # noqa
 
         cp_size = parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size
         if (
