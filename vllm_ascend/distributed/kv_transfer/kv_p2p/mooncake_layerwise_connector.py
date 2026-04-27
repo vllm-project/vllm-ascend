@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import hashlib
+import logging
 import math
 import os
 import queue
@@ -270,7 +271,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         try:
             self._transfer_kv_cache(send_task)
         except Exception as e:
-            logger.error(f"Failed to transfer KV cache for layer idx {send_task.layer_idx}, {e}")
+            logger.error("Failed to transfer KV cache for layer idx %s, %s", send_task.layer_idx, e)
 
     def get_transfer_meta(self, send_task: SendTask, req_id: str, req_meta: ReqMeta, layer_group_idx: int):
         src_list: list[int] = []
@@ -482,7 +483,9 @@ class KVCacheSendingLayerThread(threading.Thread):
                 )
                 if ret < 0:
                     logger.error(
-                        f"Mooncake transfer failed for send requests {transfer_meta.req_ids} kv cache to {session_id}"
+                        "Mooncake transfer failed for send requests %s kv cache to %s",
+                        transfer_meta.req_ids,
+                        session_id,
                     )
                     if send_task.layer_idx == (self.total_layers - 1):
                         for req_id in transfer_meta.req_ids:
@@ -813,7 +816,7 @@ class MooncakeLayerwiseConnectorScheduler:
             remote_cached_tokens = request.num_computed_tokens
             # Get unhashed blocks to pull from remote.
             logger.debug(
-                f"MooncakeLayerwiseConnector update_state_after_alloc: add {request.request_id} to need recv queue"
+                "MooncakeLayerwiseConnector update_state_after_alloc: add %s to need recv queue", request.request_id
             )
             self._reqs_need_recv[request.request_id] = (
                 request,
@@ -823,7 +826,7 @@ class MooncakeLayerwiseConnectorScheduler:
 
             params["do_remote_prefill"] = False
 
-            logger.info(f"Send request: {request.request_id} to proxy metaserver: {params.get('metaserver', None)}")
+            logger.info("Send request: %s to proxy metaserver: %s", request.request_id, params.get("metaserver", None))
             # All parameters here should appear in the returned dict of
             # request_finished in the scheduler side except "request_id".
             # change the format of request_id if vllm-version >= 0.14.0
@@ -850,7 +853,7 @@ class MooncakeLayerwiseConnectorScheduler:
 
                 def handle_exception(future):
                     if future.exception():
-                        logger.error(f"Access metaserver fail: {future.exception()}")
+                        logger.error("Access metaserver fail: %s", future.exception())
 
                 future.add_done_callback(handle_exception)
 
@@ -858,7 +861,7 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_decode"):
             local_block_ids = list(blocks.get_block_ids())
             logger.debug(
-                f"MooncakeLayerwiseConnector update_state_after_alloc: add {request.request_id} to need send queue"
+                "MooncakeLayerwiseConnector update_state_after_alloc: add %s to need send queue", request.request_id
             )
             remote_cache_tokens = params["remote_cached_tokens"]
             local_transferred_tokens = remote_cache_tokens
@@ -936,14 +939,20 @@ class MooncakeLayerwiseConnectorScheduler:
                             local_computed_tokens=local_computed_tokens,
                             local_transed_tokens=local_transed_tokens,
                         )
-                        logger.debug(
-                            f"MooncakeLayerwiseConnector build_connector_meta: {req_id=}"
-                            f"prompt_len={len(request.all_token_ids)} {local_computed_tokens=}"
-                            f"{local_transed_tokens=}"
-                            f"remote_cache_tokens={request.kv_transfer_params.get('remote_cached_tokens')}"
-                            f"{chunk_finish=} {local_block_ids=}"
-                            f"remote_block_ids={request.kv_transfer_params.get('remote_block_ids')}"
-                        )
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(
+                                "MooncakeLayerwiseConnector build_connector_meta: req_id=%r prompt_len=%s "
+                                "local_computed_tokens=%r local_transed_tokens=%r remote_cache_tokens=%s "
+                                "chunk_finish=%r local_block_ids=%r remote_block_ids=%s",
+                                req_id,
+                                len(request.all_token_ids),
+                                local_computed_tokens,
+                                local_transed_tokens,
+                                request.kv_transfer_params.get("remote_cached_tokens"),
+                                chunk_finish,
+                                local_block_ids,
+                                request.kv_transfer_params.get("remote_block_ids"),
+                            )
 
                     # whether chunk finish
                     chunk_finish = send_req_info.local_computed_tokens >= len(send_req_info.request.all_token_ids)
@@ -962,7 +971,7 @@ class MooncakeLayerwiseConnectorScheduler:
                 self.metaserver_client.post(url, json=message)
                 success = True
             except Exception as e:
-                logger.error(f"Failed to connect to metaserver: {url}, retry {retry} time.")
+                logger.error("Failed to connect to metaserver: %s, retry %s time.", url, retry)
                 if retry == 3:
                     raise e
 
@@ -1103,7 +1112,7 @@ class MooncakeLayerwiseConnectorWorker:
         for tensor in (self.k_buffer, self.v_buffer):
             assert tensor.data_ptr() % alignment == 0, "The address of the registered kv cache should be aligned to 2M"
             ret_value = self.engine.register_memory(tensor.data_ptr(), tensor.numel() * tensor.element_size())
-            logger.info(f"Register memory buffer for transfer, buffer size:{tensor.numel() * tensor.element_size()}")
+            logger.info("Register memory buffer for transfer, buffer size:%s", tensor.numel() * tensor.element_size())
             if ret_value != 0:
                 raise RuntimeError("Mooncake memory registration failed. ")
 
@@ -1172,7 +1181,7 @@ class MooncakeLayerwiseConnectorWorker:
                     lengths.append(
                         num_blocks * single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
                     )
-                logger.info(f"layer: {layer_name}, num_blocks: {num_blocks}, block_shape: {block_shape}")
+                logger.info("layer: %s, num_blocks: %s, block_shape: %s", layer_name, num_blocks, block_shape)
             self.layer_metadata[layer_name] = single_layer_meta
 
         if self.use_attn_mamba_hybrid:
@@ -1266,7 +1275,7 @@ class MooncakeLayerwiseConnectorWorker:
             self.request_map.pop(req_id, None)
         if len(done_recving) > 0:
             logger.info(
-                f"Number of completed KV cache recv requests: {len(done_recving)}, receive requests: {done_recving}"
+                "Number of completed KV cache recv requests: %s, receive requests: %s", len(done_recving), done_recving
             )
         return set(), done_recving
 
@@ -1315,7 +1324,7 @@ class MooncakeLayerwiseConnectorWorker:
 
         p_cp_group = get_cp_group(self.tp_size, self.total_num_kv_heads, self.dcp_size)
         d_cp_group = get_cp_group(remote_tp_size, self.total_num_kv_heads, remote_dcp_size)
-        logger.debug(f"Compute cp group for P&D {req_id=} {p_cp_group=} {d_cp_group=}")
+        logger.debug("Compute cp group for P&D req_id=%r p_cp_group=%r d_cp_group=%r", req_id, p_cp_group, d_cp_group)
 
         cp_ratio = len(p_cp_group) // len(d_cp_group)
         if cp_ratio == 0:
@@ -1339,9 +1348,11 @@ class MooncakeLayerwiseConnectorWorker:
             return {}
 
         logger.debug(
-            f"MooncakeLayerwiseConnector _get_kv_split_metadata {req_id=} "
-            f"P-side selected head_group cp group: {selected_p_cp_group}, "
-            f"D-side selected head_group cp group: {selected_d_cp_group}"
+            "MooncakeLayerwiseConnector _get_kv_split_metadata req_id=%r "
+            "P-side selected head_group cp group: %s, D-side selected head_group cp group: %s",
+            req_id,
+            selected_p_cp_group,
+            selected_d_cp_group,
         )
 
         context_parallel_parameters_check(
@@ -1647,11 +1658,14 @@ class MooncakeLayerwiseConnectorWorker:
                     req_meta_update = self.update_decoder_info(req_id, req_meta)
                 except Exception as e:
                     logger.warning(
-                        f"MooncakeLayerwiseConnector transfer fail for req_id {req_id} in layer_idx "
-                        f"{self.current_layer}, update_decoder_info with error: {e}"
+                        "MooncakeLayerwiseConnector transfer fail for req_id %s in layer_idx %s, "
+                        "update_decoder_info with error: %s",
+                        req_id,
+                        self.current_layer,
+                        e,
                     )
                     continue
-                logger.debug(f"Add request {req_id} to kv send layer thread. {req_meta_update=}")
+                logger.debug("Add request %s to kv send layer thread. req_meta_update=%r", req_id, req_meta_update)
                 layer_send_task.send_request[req_id] = req_meta_update
 
             self.kv_send_layer_thread.send_queue.put(layer_send_task)
@@ -1701,9 +1715,11 @@ class MooncakeLayerwiseConnectorWorker:
                 agent_meta: MooncakeAgentMetadata = self.decoder.decode(metadata_bytes)
             except Exception as e:
                 logger.error(
-                    f"Query to port and kv base addr for request {req_id}"
-                    f"from {req_meta.remote_host}:{req_meta.remote_port}"
-                    f"fail with error: {e}"
+                    "Query to port and kv base addr for request %sfrom %s:%sfail with error: %s",
+                    req_id,
+                    req_meta.remote_host,
+                    req_meta.remote_port,
+                    e,
                 )
                 raise e
             assert req_meta.remote_engine_id != self.engine_id, (
@@ -1712,9 +1728,13 @@ class MooncakeLayerwiseConnectorWorker:
             self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port] = agent_meta.layer_metadata
             self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port] = agent_meta.te_rpc_port
             logger.debug(
-                f"Query to port and kv base addr for request {req_id}"
-                f"from {req_meta.remote_host}:{req_meta.remote_port}"
-                f"success {agent_meta.layer_metadata=} {agent_meta.te_rpc_port=}"
+                "Query to port and kv base addr for request %s from %s:%s success "
+                "agent_meta.layer_metadata=%r agent_meta.te_rpc_port=%r",
+                req_id,
+                req_meta.remote_host,
+                req_meta.remote_port,
+                agent_meta.layer_metadata,
+                agent_meta.te_rpc_port,
             )
             if self.pd_head_ratio > 1:
                 # for tp inequal, pre-create link to prevent alltoall out of memory
@@ -1727,7 +1747,7 @@ class MooncakeLayerwiseConnectorWorker:
                     [128],
                 )
                 if ret < 0:
-                    logger.error(f"Mooncake transfer failed to create link to device {session_id}")
+                    logger.error("Mooncake transfer failed to create link to device %s", session_id)
         req_meta.remote_te_rpc_port = self.remote_te_port[req_meta.remote_engine_id][req_meta.remote_port]
         req_meta.remote_layer_metadata = self.remote_layer_metadata[req_meta.remote_engine_id][req_meta.remote_port]
         return req_meta
@@ -1778,8 +1798,11 @@ class MooncakeLayerwiseConnectorWorker:
                         raise RuntimeError(f"Failed to receive ACK after {max_retries} attempts: {e}") from e
         except Exception as e:
             logger.error(
-                f"Sending done sending signal for request {external_req_id} to "
-                f"{req_meta.remote_host}:{req_meta.remote_port} fail with error: {e}"
+                "Sending done sending signal for request %s to %s:%s fail with error: %s",
+                external_req_id,
+                req_meta.remote_host,
+                req_meta.remote_port,
+                e,
             )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -1861,10 +1884,10 @@ def ensure_zmq_send(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning(f"Send failed: {e}, retrying... ({retries_left} attempts left)")
+                logger.warning("Send failed: %s, retrying... (%s attempts left)", e, retries_left)
                 time.sleep(0.1)
             else:
-                logger.error(f"Send failed after all retries: {e}")
+                logger.error("Send failed after all retries: %s", e)
                 raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
 
 
@@ -1886,10 +1909,10 @@ def ensure_zmq_recv(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning(f"Receive failed: {e}, retrying... ({retries_left} attempts left)")
+                logger.warning("Receive failed: %s, retrying... (%s attempts left)", e, retries_left)
                 time.sleep(0.1)
             else:
-                logger.error(f"Receive failed after all retries: {e}")
+                logger.error("Receive failed after all retries: %s", e)
                 raise RuntimeError(f"Failed to receive data from {path} after {max_retries} retries: {e}")
 
 
