@@ -289,6 +289,18 @@ class AscendDflashProposer(AscendEagleProposer):
             self._context_slot_mapping_buffer[:num_context],
         )
 
+    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
+        """DFlash reads use_aux_hidden_state from dflash_config."""
+        use_aux_hidden_state = True
+        dflash_config = getattr(
+            self.draft_model_config.hf_config, "dflash_config", None
+        )
+        if dflash_config is not None:
+            use_aux_hidden_state = dflash_config.get(
+                "use_aux_hidden_state", True
+            )
+        return use_aux_hidden_state
+
     def _raise_if_multimodal(self):
         # Allow DFlash on multimodal models running in text-only mode
         # (e.g., Qwen3.5 with --language-model-only).
