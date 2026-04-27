@@ -2,7 +2,6 @@
 import contextlib
 import copy
 import hashlib
-import logging
 import math
 import os
 import queue
@@ -174,7 +173,7 @@ class KVCacheTaskTracker:
         while self.delayed_free_requests:
             request_id = next(iter(self.delayed_free_requests))
             delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
+            if current_time - delay_start_time > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
                 expired_requests.add(request_id)
@@ -244,14 +243,13 @@ class KVCacheSendingThread(threading.Thread):
                 self.ready_event.set()
                 self.run_busy_loop(sock)
         except Exception as e:
-            logger.exception("Mooncake KVCacheSendingThread exception: %s", e)
+            logger.error("Mooncake KVCacheSendingThread exception: %s", e, exc_info=True)
 
     def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
         size_in_bytes = len(encoded_data)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
+        logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
         while True:
@@ -370,6 +368,9 @@ class KVCacheRecvingThread(threading.Thread):
                 self.v_head_dim = self.model_config.hf_text_config.head_dim
                 self.num_kv_heads = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
         self.proc_not_transfer_request: dict[str, bool] = {}
+        self.failed_recv_requests: set[str] = set()
+        self.invalid_block_ids: set[int] = set()
+        self.failed_recv_requests_lock = threading.Lock()
 
     def add_request(
         self,
@@ -388,7 +389,7 @@ class KVCacheRecvingThread(threading.Thread):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
             remote_port_send_num = {}
-        logger.debug("Adding request %s to the queue.", request_id)
+        logger.debug(f"Adding request {request_id} to the queue.")
         self.request_queue.put(
             {
                 "request_id": request_id,
@@ -413,6 +414,26 @@ class KVCacheRecvingThread(threading.Thread):
         """
         return self.task_tracker.get_and_clear_finished_requests()
 
+    def get_and_clear_invalid_block_ids(self) -> set[int]:
+        """Get and clear block ids that failed to load."""
+        with self.failed_recv_requests_lock:
+            invalid_block_ids = self.invalid_block_ids
+            self.invalid_block_ids = set()
+        return invalid_block_ids
+
+    def _is_failed_recv_request(self, request_id: str) -> bool:
+        with self.failed_recv_requests_lock:
+            return request_id in self.failed_recv_requests
+
+    def _mark_failed_recv_request(self, request_id: str, local_block_ids: list[int]) -> None:
+        with self.failed_recv_requests_lock:
+            self.failed_recv_requests.add(request_id)
+            self.invalid_block_ids.update(local_block_ids)
+
+    def _clear_failed_recv_request(self, request_id: str) -> None:
+        with self.failed_recv_requests_lock:
+            self.failed_recv_requests.discard(request_id)
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self.ready_event.set()
@@ -434,20 +455,32 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port = req_meta["remote_handshake_port"]
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
+        transfer_failed = self._is_failed_recv_request(request_id)
 
         try:
-            logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
-            self._transfer_kv_cache(req_meta)
-            logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
-        except Exception as e:
-            logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
+            if transfer_failed:
+                self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                logger.warning(
+                    "Skipping KV cache transfer for request %s because a previous transfer failed.",
+                    remote_request_id,
+                )
+            else:
+                try:
+                    logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
+                    self._transfer_kv_cache(req_meta)
+                    logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
+                except Exception as e:
+                    transfer_failed = True
+                    self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                    logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if all_task_done:
-                if len(req_meta["local_block_ids"]) > 0:
+                if len(req_meta["local_block_ids"]) > 0 or transfer_failed:
                     self.task_tracker.update_done_task_count(request_id)
                 if request_id in self.proc_not_transfer_request:
                     del self.proc_not_transfer_request[request_id]
+                self._clear_failed_recv_request(request_id)
             self.request_queue.task_done()
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
@@ -524,7 +557,7 @@ class KVCacheRecvingThread(threading.Thread):
         local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][
             first_layer_index * num_cache_per_layer : end_layer_index * num_cache_per_layer
         ]
-        logger.debug("transfer kv cache first_layer_index:%s , end_layer_index:%s", first_layer_index, end_layer_index)
+        logger.debug(f"transfer kv cache first_layer_index:{first_layer_index} , end_layer_index:{end_layer_index}")
         remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
         num_blocks = len(local_block_ids)
         session_id = f"{remote_host}:{remote_transfer_port}"
@@ -589,7 +622,7 @@ class KVCacheRecvingThread(threading.Thread):
         head_dim = self.model_config.hf_text_config.head_dim
         block_size = self.vllm_config.cache_config.block_size
         num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
-        layers = len(self.kv_caches)
+        layers = self.model_config.hf_text_config.num_hidden_layers
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
 
@@ -732,8 +765,7 @@ class KVCacheRecvingThread(threading.Thread):
             resp = ensure_zmq_recv(
                 sock, self.remote_poller, f"{remote_host}:{remote_handshake_port}", timeout=self.timeout
             )
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Received response for request %s: %s", request_id, resp.decode("utf-8"))
+            logger.debug(f"Received response for request {request_id}: {resp.decode('utf-8')}")
             if resp != b"ACK":
                 logger.error(
                     "Failed to receive ACK for request %s from %s:%d", request_id, remote_host, remote_handshake_port
@@ -743,7 +775,7 @@ class KVCacheRecvingThread(threading.Thread):
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
                 sock = None
-                logger.warning("Unexpected error occurred in socket, %s, closing the original channel", e)
+                logger.warning(f"Unexpected error occurred in socket, {e}, closing the original channel")
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host, remote_handshake_port)
@@ -864,6 +896,11 @@ class MooncakeConnector(KVConnectorBase_V1):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get the block ids whose KV load failed."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -1302,13 +1339,17 @@ class MooncakeConnectorWorker:
             else set()
         )
         if self.tp_rank == 0:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "Number of completed KV cache send requests: %d, receive requests: %d",
-                    len(done_sending),
-                    len(done_recving),
-                )
+            logger.debug(
+                "Number of completed KV cache send requests: %d, receive requests: %d",
+                len(done_sending),
+                len(done_recving),
+            )
         return done_sending, done_recving
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.kv_role == "kv_consumer" and self.kv_recv_thread is not None:
+            return self.kv_recv_thread.get_and_clear_invalid_block_ids()
+        return set()
 
     def _get_kv_split_metadata(
         self,
@@ -1524,15 +1565,14 @@ class MooncakeConnectorWorker:
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
         for req_id, meta in metadata.requests.items():
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "start_load_kv for request %s from remote engine %s. "
-                    "Num local_block_ids: %s. Num remote_block_ids: %s. ",
-                    req_id,
-                    meta.remote_engine_id,
-                    len(meta.local_block_ids),
-                    len(meta.remote_block_ids),
-                )
+            logger.debug(
+                "start_load_kv for request %s from remote engine %s. "
+                "Num local_block_ids: %s. Num remote_block_ids: %s. ",
+                req_id,
+                meta.remote_engine_id,
+                len(meta.local_block_ids),
+                len(meta.remote_block_ids),
+            )
 
             prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
@@ -1772,10 +1812,10 @@ def ensure_zmq_send(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning("Send failed: %s, retrying... (%s attempts left)", e, retries_left)
+                logger.warning(f"Send failed: {e}, retrying... ({retries_left} attempts left)")
                 time.sleep(0.1)
             else:
-                logger.error("Send failed after all retries: %s", e)
+                logger.error(f"Send failed after all retries: {e}")
                 raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
 
 
@@ -1797,10 +1837,10 @@ def ensure_zmq_recv(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning("Receive failed: %s, retrying... (%s attempts left)", e, retries_left)
+                logger.warning(f"Receive failed: {e}, retrying... ({retries_left} attempts left)")
                 time.sleep(0.1)
             else:
-                logger.error("Receive failed from %s after all retries: %s", path, e)
+                logger.error(f"Receive failed from {path} after all retries: {e}")
                 raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
 
 
