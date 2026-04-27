@@ -1715,7 +1715,7 @@ class MooncakeLayerwiseConnectorWorker:
                 agent_meta: MooncakeAgentMetadata = self.decoder.decode(metadata_bytes)
             except Exception as e:
                 logger.error(
-                    "Query to port and kv base addr for request %sfrom %s:%sfail with error: %s",
+                    "Query to port and kv base addr for request %s from %s:%s fail with error: %s",
                     req_id,
                     req_meta.remote_host,
                     req_meta.remote_port,
