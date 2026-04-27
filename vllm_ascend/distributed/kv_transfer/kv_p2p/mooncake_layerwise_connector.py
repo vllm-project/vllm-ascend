@@ -759,12 +759,10 @@ class MooncakeLayerwiseConnectorScheduler:
         self.cert_path = (ssl_certfile, ssl_keyfile, ssl_keyfile_password)
         self.ssl_enable = tls_config.get("ssl_enable", False)
         self.ca_path = ssl_ca_certs
-        if self.ssl_enable:
-            self.metaserver_client = httpx.Client(
-                limits=httpx.Limits(max_connections=100000), timeout=None, cert=self.cert_path, verify=self.ca_path
-            )
-        else:
-            self.metaserver_client = httpx.Client(limits=httpx.Limits(max_connections=100000), timeout=None)
+        self.metaserver_clients: dict[str, httpx.Client] = {}
+        self.metaserver_client_lock = threading.Lock()
+        self.metaserver_request_ids: set[str] = set()
+        self.aborted_metaserver_requests: set[str] = set()
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -844,8 +842,13 @@ class MooncakeLayerwiseConnectorScheduler:
                 remote_cached_tokens=remote_cached_tokens,
             )
             if not do_virtual:
+                with self.metaserver_client_lock:
+                    self.metaserver_request_ids.add(request.request_id)
                 future = self.executor.submit(
-                    self._access_metaserver, url=params.get("metaserver", None), message=kv_transfer_params
+                    self._access_metaserver,
+                    url=params.get("metaserver", None),
+                    message=kv_transfer_params,
+                    request_id=request.request_id,
                 )
 
                 def handle_exception(future):
@@ -953,18 +956,55 @@ class MooncakeLayerwiseConnectorScheduler:
                         self._reqs_need_send_layerwise.pop(req_id)
         return meta
 
-    def _access_metaserver(self, url, message):
+    def _new_metaserver_client(self):
+        if self.ssl_enable:
+            return httpx.Client(
+                limits=httpx.Limits(max_connections=100000), timeout=None, cert=self.cert_path, verify=self.ca_path
+            )
+        return httpx.Client(limits=httpx.Limits(max_connections=100000), timeout=None)
+
+    def _abort_metaserver_request(self, request_id: str):
+        with self.metaserver_client_lock:
+            if request_id not in self.metaserver_request_ids and request_id not in self.metaserver_clients:
+                return
+            self.aborted_metaserver_requests.add(request_id)
+            client = self.metaserver_clients.pop(request_id, None)
+        if client is not None:
+            logger.info("Closing metaserver connection for request %s", request_id)
+            client.close()
+
+    def _access_metaserver(self, url, message, request_id: str):
         success = False
         retry = 0
-        while retry < 3 and success is False:
-            retry += 1
-            try:
-                self.metaserver_client.post(url, json=message)
-                success = True
-            except Exception as e:
-                logger.error(f"Failed to connect to metaserver: {url}, retry {retry} time.")
-                if retry == 3:
-                    raise e
+        client = self._new_metaserver_client()
+        with self.metaserver_client_lock:
+            if request_id in self.aborted_metaserver_requests:
+                client.close()
+                self.metaserver_request_ids.discard(request_id)
+                self.aborted_metaserver_requests.discard(request_id)
+                return
+            self.metaserver_clients[request_id] = client
+        try:
+            while retry < 3 and success is False:
+                retry += 1
+                try:
+                    client.post(url, json=message)
+                    success = True
+                except Exception as e:
+                    with self.metaserver_client_lock:
+                        is_aborted = request_id in self.aborted_metaserver_requests
+                    if is_aborted:
+                        logger.info("Metaserver request %s is aborted.", request_id)
+                        return
+                    logger.error(f"Failed to connect to metaserver: {url}, retry {retry} time.")
+                    if retry == 3:
+                        raise e
+        finally:
+            with self.metaserver_client_lock:
+                self.metaserver_clients.pop(request_id, None)
+                self.metaserver_request_ids.discard(request_id)
+                self.aborted_metaserver_requests.discard(request_id)
+            client.close()
 
     def request_finished(
         self,
@@ -975,6 +1015,7 @@ class MooncakeLayerwiseConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        self._abort_metaserver_request(request.request_id)
         # layer_wise push, not need delay_free_blocks
         return False, None
 
@@ -987,6 +1028,7 @@ class MooncakeLayerwiseConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        self._abort_metaserver_request(request.request_id)
         # layer_wise push, not need delay_free_blocks
         return False, None
 

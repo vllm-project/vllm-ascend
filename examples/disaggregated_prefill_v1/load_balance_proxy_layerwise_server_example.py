@@ -311,12 +311,16 @@ async def listen_for_disconnect(request: Request) -> None:
 def with_cancellation(handler_func):
     @functools.wraps(handler_func)
     async def wrapper(*args, **kwargs):
-        request = kwargs["request"]
+        request = kwargs.get("request")
+        if request is None:
+            request = next(arg for arg in args if isinstance(arg, Request))
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
         done, pending = await asyncio.wait([handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if handler_task in done:
             return handler_task.result()
         return None
@@ -532,9 +536,9 @@ async def _handle_completions(api: str, request: Request):
                     f"the aborted request {request_id} will be routing to the target "
                     "prefiller when new request is ready to dispatch to it"
                 )
-
-            # After streaming done, release tokens
-            proxy_state.release_decoder(decoder_idx, decoder_score)
+            finally:
+                # After streaming done or is cancelled, release tokens.
+                proxy_state.release_decoder(decoder_idx, decoder_score)
 
         if stream_flag:
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
@@ -572,7 +576,10 @@ async def healthcheck():
 
 
 @app.post("/v1/metaserver")
+@with_cancellation
 async def metaserver(request: Request):
+    prefiller_idx = None
+    prefiller_score = None
     try:
         kv_transfer_params = await request.json()
 
@@ -598,13 +605,13 @@ async def metaserver(request: Request):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay,
         )
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
     except Exception as e:
         logger.error(f"Post metaserver failed with: {str(e)}")
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+    finally:
+        if prefiller_idx is not None and prefiller_score is not None:
+            proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+            proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == "__main__":

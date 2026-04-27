@@ -417,6 +417,21 @@ class MockRequest:
         self.all_token_ids = list(self.prompt_token_ids)
 
 
+class MockMetaserverClient:
+    def __init__(self, post_side_effect=None):
+        self.closed = False
+        self.post_calls = []
+        self.post_side_effect = post_side_effect
+
+    def post(self, url, json):
+        self.post_calls.append((url, json))
+        if self.post_side_effect is not None:
+            raise self.post_side_effect()
+
+    def close(self):
+        self.closed = True
+
+
 class TestMooncakeLayerwiseConnectorMetadata(unittest.TestCase):
     def test_add_new_req(self):
         meta = MooncakeLayerwiseConnectorMetadata()
@@ -642,6 +657,58 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         ok, params = self.scheduler.request_finished(MockRequest("req_fin"), [1, 2])
         self.assertFalse(ok)
         self.assertIsNone(params)
+
+
+class TestMooncakeLayerwiseMetaserverCancel(unittest.TestCase):
+    def setUp(self):
+        self.scheduler = object.__new__(MooncakeLayerwiseConnectorScheduler)
+        self.scheduler.metaserver_client_lock = threading.Lock()
+        self.scheduler.metaserver_clients = {}
+        self.scheduler.metaserver_request_ids = set()
+        self.scheduler.aborted_metaserver_requests = set()
+
+    def test_request_finished_closes_active_metaserver_client(self):
+        client = MockMetaserverClient()
+        self.scheduler.metaserver_request_ids.add("req-1")
+        self.scheduler.metaserver_clients["req-1"] = client
+
+        delay_free, params = self.scheduler.request_finished(MockRequest("req-1"), [])
+
+        self.assertFalse(delay_free)
+        self.assertIsNone(params)
+        self.assertTrue(client.closed)
+        self.assertNotIn("req-1", self.scheduler.metaserver_clients)
+        self.assertIn("req-1", self.scheduler.aborted_metaserver_requests)
+
+    def test_access_metaserver_skips_request_cancelled_before_worker_starts(self):
+        client = MockMetaserverClient()
+        self.scheduler.metaserver_request_ids.add("req-2")
+        self.scheduler.aborted_metaserver_requests.add("req-2")
+
+        with patch.object(self.scheduler, "_new_metaserver_client", return_value=client):
+            self.scheduler._access_metaserver("http://proxy/v1/metaserver", {"request_id": "req-2"}, "req-2")
+
+        self.assertTrue(client.closed)
+        self.assertEqual(client.post_calls, [])
+        self.assertNotIn("req-2", self.scheduler.metaserver_request_ids)
+        self.assertNotIn("req-2", self.scheduler.aborted_metaserver_requests)
+
+    def test_access_metaserver_stops_retrying_after_request_is_cancelled(self):
+        def cancel_before_error():
+            self.scheduler._abort_metaserver_request("req-3")
+            return RuntimeError("connection closed")
+
+        client = MockMetaserverClient(post_side_effect=cancel_before_error)
+        self.scheduler.metaserver_request_ids.add("req-3")
+
+        with patch.object(self.scheduler, "_new_metaserver_client", return_value=client):
+            self.scheduler._access_metaserver("http://proxy/v1/metaserver", {"request_id": "req-3"}, "req-3")
+
+        self.assertTrue(client.closed)
+        self.assertEqual(len(client.post_calls), 1)
+        self.assertNotIn("req-3", self.scheduler.metaserver_clients)
+        self.assertNotIn("req-3", self.scheduler.metaserver_request_ids)
+        self.assertNotIn("req-3", self.scheduler.aborted_metaserver_requests)
 
 
 class TestHelperFunctions(unittest.TestCase):
