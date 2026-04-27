@@ -11,7 +11,6 @@ import queue
 import threading
 
 import torch
-from vllm.logger import logger
 
 from vllm_ascend.simple_kv_offload.npu_mem_ops import (
     DIRECTION_D2H,

@@ -12,7 +12,6 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
-from vllm.logger import logger
 
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
