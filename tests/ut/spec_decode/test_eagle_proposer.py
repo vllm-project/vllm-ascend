@@ -1298,7 +1298,12 @@ class MockInputBatch:
         self.num_reqs = num_reqs
         self.req_ids = req_ids
         self.vocab_size = vocab_size
-        self.num_tokens_no_spec = num_tokens_no_spec
+        # num_tokens_no_spec represents the sequence length (excluding speculative tokens)
+        # for each request. Default to seq_len + 1 for each request.
+        if num_tokens_no_spec is None:
+            self.num_tokens_no_spec = np.array([i + 11 for i in range(num_reqs)], dtype=np.int64)
+        else:
+            self.num_tokens_no_spec = np.array(num_tokens_no_spec, dtype=np.int64)
 
 
 class TestPrepareNextTokenIdsPadded(TestBase):
@@ -1379,7 +1384,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=torch.tensor([11, 16, 21], dtype=torch.int32),
+            num_tokens_no_spec=[11, 16, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 20]
         )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
@@ -1426,7 +1431,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=torch.tensor([11, 16, 21], dtype=torch.int32),
+            num_tokens_no_spec=[11, 16, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 20]
         )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
@@ -1470,7 +1475,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=torch.tensor([11, 16, 21], dtype=torch.int32),
+            num_tokens_no_spec=[11, 16, 26],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 25]
         )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
@@ -1516,7 +1521,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=torch.tensor([11, 16, 21], dtype=torch.int32),
+            num_tokens_no_spec=[11, 21, 21],  # seq_len = num_tokens_no_spec - 1 = [10, 20, 20]
         )
 
         discard_request_indices = torch.tensor([0, 2], dtype=torch.int64)
@@ -1564,7 +1569,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1", "req_2", "req_3"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=torch.tensor([11, 16, 21, 26], dtype=torch.int32),
+            num_tokens_no_spec=[11, 16, 26, 31],  # seq_len = num_tokens_no_spec - 1 = [10, 15, 25, 30]
         )
 
         discard_request_indices = torch.tensor([1], dtype=torch.int64)
@@ -1600,7 +1605,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=torch.tensor([11], dtype=torch.int32),
+            num_tokens_no_spec=[16],  # seq_len = num_tokens_no_spec - 1 = [15]
         )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
@@ -1642,7 +1647,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=torch.tensor([11, 16], dtype=torch.int32),
+            num_tokens_no_spec=[16, 21],  # seq_len = num_tokens_no_spec - 1 = [15, 20]
         )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
@@ -1688,7 +1693,7 @@ class TestPrepareNextTokenIdsPadded(TestBase):
             num_reqs=num_reqs,
             req_ids=["req_0", "req_1"],
             vocab_size=vocab_size,
-            num_tokens_no_spec=torch.tensor([11, 16], dtype=torch.int32),
+            num_tokens_no_spec=[11, 16],  # seq_len = num_tokens_no_spec - 1 = [10, 15]
         )
 
         discard_request_indices = torch.tensor([], dtype=torch.int64)
