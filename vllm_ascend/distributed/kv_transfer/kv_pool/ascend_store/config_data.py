@@ -271,7 +271,7 @@ class RequestTracker:
     chunk_gvas: list[int] = field(default_factory=list)
     last_block_gva: int | None = None
 
-    block_keys: list[str] | None = None
+    block_keys: list[str] = field(default_factory=list)
 
     starts: list[int] | None = None
     ends: list[int] | None = None
@@ -431,6 +431,9 @@ class ReqMeta:
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
             original_block_size=original_block_size,
+            # TODO is this necessary?
+            chunk_gvas=tracker.chunk_gvas.copy(),
+            last_block_gva=tracker.last_block_gva,
         )
 
 
