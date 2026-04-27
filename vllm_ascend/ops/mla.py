@@ -56,7 +56,7 @@ class IndexerWrapper(nn.Module):
         self.q_lora_rank: int = vllm_indexer.q_lora_rank  # 1536
         self.wq_b = vllm_indexer.wq_b
         # upstream ac3dac545 fused wk+weights_proj into wk_weights_proj
-        if vllm_version_is("0.19.0"):
+        if vllm_version_is("0.19.1"):
             self.wk = vllm_indexer.wk
             self.weights_proj = vllm_indexer.weights_proj
         else:

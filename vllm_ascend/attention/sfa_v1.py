@@ -440,8 +440,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.n_head: int = self.indexer.n_head  # 64
         self.head_dim: int = self.indexer.head_dim  # 128
         self.wq_b = self.indexer.wq_b
-        # upstream ac3dac545 fused wk+weights_proj into wk_weights_proj
-        if vllm_version_is("0.19.0"):
+        if vllm_version_is("0.19.1"):
             self.wk = self.indexer.wk
             self.weights_proj = self.indexer.weights_proj
         else:
@@ -914,7 +913,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ):
-        if vllm_version_is("0.19.0"):
+        if vllm_version_is("0.19.1"):
             k_li, _ = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
         else:
             kw, _ = self.wk_weights_proj(x)
@@ -963,7 +962,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        if vllm_version_is("0.19.0"):
+        if vllm_version_is("0.19.1"):
             weights, _ = self.weights_proj(x)
         else:
             kw, _ = self.wk_weights_proj(x)

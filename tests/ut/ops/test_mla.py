@@ -20,7 +20,7 @@ class TestIndexerWrapper(TestBase):
         mock_indexer.topk_tokens = 2048
         mock_indexer.q_lora_rank = 1536
         mock_indexer.wq_b = nn.Linear(128, 128)
-        if vllm_version_is("0.19.0"):
+        if vllm_version_is("0.19.1"):
             mock_indexer.wk = nn.Linear(128, 128)
             mock_indexer.weights_proj = nn.Linear(128, 128)
         else:
@@ -37,7 +37,7 @@ class TestIndexerWrapper(TestBase):
         self.assertEqual(wrapper.topk_tokens, 2048)
         self.assertEqual(wrapper.q_lora_rank, 1536)
         self.assertIs(wrapper.wq_b, mock_indexer.wq_b)
-        if vllm_version_is("0.19.0"):
+        if vllm_version_is("0.19.1"):
             self.assertIs(wrapper.wk, mock_indexer.wk)
             self.assertIs(wrapper.weights_proj, mock_indexer.weights_proj)
         else:
