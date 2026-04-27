@@ -1386,19 +1386,28 @@ class NPUModelRunner(GPUModelRunner):
             # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
 
-            # Synchronous D2H copy of num_valid_draft_tokens.
-            # We intentionally do NOT record the event here so that
-            # update_scheduler_for_invalid_drafts' event.synchronize()
-            # hits the pre-recorded (already-completed) event from init
-            # and returns immediately.  The CPU tensor already holds the
-            # correct data because the copy below is blocking.
+            # Async D2H copy of num_valid_draft_tokens on a dedicated NPU
+            # stream.  Use NPU-native stream / event APIs (mirroring
+            # _copy_draft_token_ids_to_cpu) instead of upstream's CUDA-based
+            # copy_num_valid_draft_tokens helper, whose torch.cuda.stream /
+            # torch.cuda.current_stream calls do not bind reliably to NPU
+            # events under the cuda->npu monkey-patch and surface as
+            # "SUSPECT REMOTE ERROR" (507057) on the next event.synchronize().
             if num_valid_draft_tokens is not None:
                 num_reqs_to_copy = min(
                     batch_size, num_valid_draft_tokens.shape[0])
                 if num_reqs_to_copy > 0:
-                    self._num_valid_draft_tokens_cpu[
-                        :num_reqs_to_copy].copy_(
-                        num_valid_draft_tokens[:num_reqs_to_copy])
+                    default_stream = torch.npu.current_stream()
+                    with torch.npu.stream(
+                            self._num_valid_draft_tokens_copy_stream):
+                        self._num_valid_draft_tokens_copy_stream.wait_stream(
+                            default_stream)
+                        self._num_valid_draft_tokens_cpu[
+                            :num_reqs_to_copy].copy_(
+                            num_valid_draft_tokens[:num_reqs_to_copy],
+                            non_blocking=True,
+                        )
+                        self._num_valid_draft_tokens_event.record()
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
