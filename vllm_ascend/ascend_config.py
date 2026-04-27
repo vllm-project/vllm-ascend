@@ -505,10 +505,10 @@ class EplbConfig:
 
     def _validate_config(self):
         if self.expert_map_path is not None:
-            logger.info(f"The expert_map is {self.config['dynamic_eplb']}")
+            logger.info(f"The expert_map is {self.expert_map_path}")
             if self.expert_map_path[-5:] != ".json":
                 raise TypeError("The expert_map is not json.")
-            if not os.path.exists(self.expert_map_path):
+            if not (os.path.exists(self.expert_map_path) and os.access(self.expert_map_path, os.R_OK)):
                 raise ValueError("The expert_map is not exist.")
         if self.expert_map_record_path is not None:
             self.config["dynamic_eplb"] = True
@@ -527,7 +527,7 @@ class EplbConfig:
             assert (
                 os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
                 or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
-            ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the ePLB must be set to true."
+            ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
 
         logger.info(f"Dynamic EPLB is {self.config['dynamic_eplb']}")
         logger.info(f"The number of redundant experts is {self.config['num_redundant_experts']}")
