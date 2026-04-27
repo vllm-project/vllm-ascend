@@ -925,6 +925,50 @@ class NPUPlatform(Platform):
 
         # ==================== 9. Parallel Config ====================
         if vllm_config.parallel_config:
+            # ray_workers_use_nsight requires NVIDIA Nsight which is not
+            # available on Ascend NPU
+            if getattr(vllm_config.parallel_config, "ray_workers_use_nsight", False):
+                logger.warning(
+                    "'--ray-workers-use-nsight' requires NVIDIA Nsight which is "
+                    "not available on Ascend NPU. Resetting to False."
+                )
+                vllm_config.parallel_config.ray_workers_use_nsight = False
+
+            # --numa-bind relies on GPU-to-NUMA topology detection which is
+            # not supported on Ascend NPU.  Seamlessly replace with the
+            # Ascend-native CPU binding via additional_config.
+            # --numa-bind-nodes and --numa-bind-cpus are also ignored because
+            # the Ascend NPU implementation performs automatic topo-affinity
+            # CPU binding internally.
+            if getattr(vllm_config.parallel_config, "numa_bind", False):
+                vllm_config.parallel_config.numa_bind = False
+                if vllm_config.additional_config is None:
+                    vllm_config.additional_config = {}
+                vllm_config.additional_config.setdefault("enable_cpu_binding", True)
+                logger.info(
+                    "'--numa-bind' is not supported on Ascend NPU (GPU-to-"
+                    "NUMA topology detection unavailable). Automatically "
+                    "converted to --additional-config "
+                    "'{\"enable_cpu_binding\": true}' for Ascend-native "
+                    "CPU-core binding."
+                )
+
+            if getattr(vllm_config.parallel_config, "numa_bind_nodes", None):
+                logger.info(
+                    "'--numa-bind-nodes' is ignored on Ascend NPU. The "
+                    "Ascend-native CPU binding automatically performs "
+                    "topo-affinity core allocation."
+                )
+                vllm_config.parallel_config.numa_bind_nodes = None
+
+            if getattr(vllm_config.parallel_config, "numa_bind_cpus", None):
+                logger.info(
+                    "'--numa-bind-cpus' is ignored on Ascend NPU. The "
+                    "Ascend-native CPU binding automatically performs "
+                    "topo-affinity core allocation."
+                )
+                vllm_config.parallel_config.numa_bind_cpus = None
+
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
                 logger.warning(
                     "'--enable-dbo' is currently ignored on Ascend NPU because the "
