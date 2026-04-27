@@ -106,7 +106,7 @@ class EplbUpdator:
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
                 0
             )
-            log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
+            log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map, dtype=numpy.int32))
             self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
             updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
             self.eplb_loader.generate_expert_d2d_transfer_task(
