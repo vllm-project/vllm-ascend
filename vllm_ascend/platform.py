@@ -220,6 +220,31 @@ class NPUPlatform(Platform):
         return device_props.uuid
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """Return the number of Cube Cores on the NPU device.
+        This is the NPU equivalent of CUDA's ``multi_processor_count``
+        (SM count).  On Ascend hardware the closest concept is
+        ``cube_core_num`` exposed by ``torch.npu.get_device_properties``,
+        which represents the matrix-compute units (analogous to CUDA SMs).
+        This value is consumed by vLLM's
+        ``layernorm_guard.calc_rows_per_block`` to size the Triton kernel
+        launch grid.  Note that the result is clamped to 4 by that
+        function, so the exact value has minimal impact on correctness;
+        it only affects kernel occupancy heuristics.
+        """
+        props = torch.npu.get_device_properties(device_id)
+        # cube_core_num is the matrix-compute unit count, semantically
+        # closest to CUDA's multi_processor_count (SM count).
+        cube_core_num = getattr(props, "cube_core_num", None)
+        if cube_core_num is not None and cube_core_num > 0:
+            return int(cube_core_num)
+        # Fallback for older torch-npu versions that may not expose cube_core_num
+        vector_core_num = getattr(props, "vector_core_num", None)
+        if vector_core_num is not None and vector_core_num > 0:
+            return int(vector_core_num)
+        return 24  # safe default (24 Cube Cores)
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
@@ -900,6 +925,50 @@ class NPUPlatform(Platform):
 
         # ==================== 9. Parallel Config ====================
         if vllm_config.parallel_config:
+            # ray_workers_use_nsight requires NVIDIA Nsight which is not
+            # available on Ascend NPU
+            if getattr(vllm_config.parallel_config, "ray_workers_use_nsight", False):
+                logger.warning(
+                    "'--ray-workers-use-nsight' requires NVIDIA Nsight which is "
+                    "not available on Ascend NPU. Resetting to False."
+                )
+                vllm_config.parallel_config.ray_workers_use_nsight = False
+
+            # --numa-bind relies on GPU-to-NUMA topology detection which is
+            # not supported on Ascend NPU.  Seamlessly replace with the
+            # Ascend-native CPU binding via additional_config.
+            # --numa-bind-nodes and --numa-bind-cpus are also ignored because
+            # the Ascend NPU implementation performs automatic topo-affinity
+            # CPU binding internally.
+            if getattr(vllm_config.parallel_config, "numa_bind", False):
+                vllm_config.parallel_config.numa_bind = False
+                if vllm_config.additional_config is None:
+                    vllm_config.additional_config = {}
+                vllm_config.additional_config.setdefault("enable_cpu_binding", True)
+                logger.info(
+                    "'--numa-bind' is not supported on Ascend NPU (GPU-to-"
+                    "NUMA topology detection unavailable). Automatically "
+                    "converted to --additional-config "
+                    "'{\"enable_cpu_binding\": true}' for Ascend-native "
+                    "CPU-core binding."
+                )
+
+            if getattr(vllm_config.parallel_config, "numa_bind_nodes", None):
+                logger.info(
+                    "'--numa-bind-nodes' is ignored on Ascend NPU. The "
+                    "Ascend-native CPU binding automatically performs "
+                    "topo-affinity core allocation."
+                )
+                vllm_config.parallel_config.numa_bind_nodes = None
+
+            if getattr(vllm_config.parallel_config, "numa_bind_cpus", None):
+                logger.info(
+                    "'--numa-bind-cpus' is ignored on Ascend NPU. The "
+                    "Ascend-native CPU binding automatically performs "
+                    "topo-affinity core allocation."
+                )
+                vllm_config.parallel_config.numa_bind_cpus = None
+
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
                 logger.warning(
                     "'--enable-dbo' is currently ignored on Ascend NPU because the "
