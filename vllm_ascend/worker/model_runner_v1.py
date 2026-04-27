@@ -227,6 +227,47 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+class _NPULazyEvent:
+    """A torch.npu.Event proxy that defers event creation until first record().
+
+    Why this exists:
+    Upstream ``update_scheduler_for_invalid_drafts`` calls
+    ``event.synchronize()`` unconditionally at the start of every step,
+    including the very first step before any ngram D2H copy has run.
+    On CUDA, ``synchronize()`` of a never-recorded event is a no-op.
+    On NPU, the same call returns
+    ``RuntimeError: SUSPECT REMOTE ERROR (507057)``.
+
+    This proxy mirrors the CUDA semantic: ``synchronize()`` and
+    ``query()`` are no-ops until the first ``record()``, after which the
+    proxy delegates to a real ``torch.npu.Event``. ``record()``
+    accepts the same args as ``torch.npu.Event.record`` (in particular
+    a stream object), matching the calls in
+    ``propose_draft_token_ids``'s D2H path.
+    """
+
+    __slots__ = ("_event",)
+
+    def __init__(self) -> None:
+        self._event: torch.npu.Event | None = None
+
+    def record(self, *args, **kwargs) -> None:
+        if self._event is None:
+            self._event = torch.npu.Event()
+        self._event.record(*args, **kwargs)
+
+    def synchronize(self) -> None:
+        if self._event is not None:
+            self._event.synchronize()
+
+    def query(self) -> bool:
+        return True if self._event is None else self._event.query()
+
+    def wait(self, *args, **kwargs) -> None:
+        if self._event is not None:
+            self._event.wait(*args, **kwargs)
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -253,10 +294,22 @@ class NPUModelRunner(GPUModelRunner):
         if _is_ngram_gpu:
             vllm_config.speculative_config.method = "ngram_gpu"
 
-        # Pre-record all NPU events created during super().__init__() so
-        # that the first synchronize() call does not fail.  Unlike CUDA,
-        # NPU errors on synchronize() of an event that has never been
-        # recorded (error code 507057).
+        # Pre-record all NPU events created during super().__init__() on
+        # the default stream so the first synchronize() call from
+        # upstream code does not fail. Unlike CUDA, NPU returns
+        # ``SUSPECT REMOTE ERROR (507057)`` on synchronize() of an event
+        # with no completion anchor. The default stream already has
+        # init-time work queued by super().__init__() so record() here
+        # gives every event a real anchor.
+        #
+        # NOTE: We deliberately do NOT call ``synchronize()`` here ---
+        # that would block on init-time ops (model weight load, KV cache
+        # alloc) finishing, which can dramatically slow startup, and on
+        # NPU it can also itself surface as 507057 if any of those
+        # init-time ops error asynchronously. The host-side observation
+        # cache is not needed; upstream's later synchronize() will see
+        # a valid recorded event and become a fast no-op once the
+        # default stream has progressed past the recording point.
         for attr in (
             'prepare_inputs_event',
             'num_accepted_tokens_event',
@@ -544,12 +597,25 @@ class NPUModelRunner(GPUModelRunner):
                     self.max_num_reqs, dtype=torch.int32,
                     pin_memory=self.pin_memory)
                 self._num_valid_draft_tokens_copy_stream = torch.npu.Stream()
-                self._num_valid_draft_tokens_event = torch.npu.Event()
-                # Record event immediately so the first synchronize() in
-                # update_scheduler_for_invalid_drafts does not fail on NPU
-                # (NPU unlike CUDA errors on unrecorded-event synchronize).
-                with torch.npu.stream(self._num_valid_draft_tokens_copy_stream):
-                    self._num_valid_draft_tokens_event.record()
+                # Use a synchronization-safe Event proxy instead of a raw
+                # torch.npu.Event(). Upstream
+                # ``update_scheduler_for_invalid_drafts`` calls
+                # ``event.synchronize()`` UNCONDITIONALLY at the start of
+                # every step — including the very first step, before any
+                # real ngram D2H copy has had a chance to record() the
+                # event on its copy stream. On NPU this surfaces as
+                # ``SUSPECT REMOTE ERROR (507057)`` because the event has
+                # no completion anchor yet.
+                #
+                # Our NPU propose_draft_token_ids does its own ordered
+                # D2H via copy_stream.wait_stream(default_stream) +
+                # non_blocking copy, and the proxy's record()/synchronize()
+                # delegate to a real torch.npu.Event AFTER the first
+                # record(). Before any record() has been called, both
+                # synchronize() and query() are safe no-ops — matching
+                # CUDA's "synchronize on unrecorded event = no-op"
+                # semantic that upstream relies on.
+                self._num_valid_draft_tokens_event = _NPULazyEvent()
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
