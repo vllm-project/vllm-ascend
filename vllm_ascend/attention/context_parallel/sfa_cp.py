@@ -414,7 +414,7 @@ class AscendSFACPImpl(AscendSFAImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        if vllm_version_is("0.19.0"):
+        if vllm_version_is("0.19.1"):
             weights, _ = self.weights_proj(x)
         else:
             kw, _ = self.wk_weights_proj(x)
