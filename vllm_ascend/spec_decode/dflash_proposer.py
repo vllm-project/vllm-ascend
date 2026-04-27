@@ -289,6 +289,11 @@ class AscendDflashProposer(AscendEagleProposer):
             self._context_slot_mapping_buffer[:num_context],
         )
 
+    def _raise_if_multimodal(self):
+        # Allow DFlash on multimodal models running in text-only mode
+        # (e.g., Qwen3.5 with --language-model-only).
+        pass
+
     def build_model_inputs_first_pass(
         self,
         num_input_tokens: int,
