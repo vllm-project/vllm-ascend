@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
@@ -20,8 +20,6 @@ from vllm_ascend.simple_kv_offload.copy_backend import NPUDmaCopyBackend
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
-
-logger = init_logger(__name__)
 
 
 def _flatten_kv_value(

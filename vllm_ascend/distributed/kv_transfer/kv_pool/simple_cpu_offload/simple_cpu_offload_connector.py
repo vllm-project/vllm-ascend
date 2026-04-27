@@ -13,14 +13,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
     SimpleCPUOffloadConnector,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.simple_kv_offload.worker import SimpleCPUOffloadNPUWorker
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
-
-logger = init_logger(__name__)
 
 
 class AscendSimpleCPUOffloadConnector(SimpleCPUOffloadConnector):

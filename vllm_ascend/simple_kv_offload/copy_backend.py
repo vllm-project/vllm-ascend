@@ -11,7 +11,7 @@ import queue
 import threading
 
 import torch
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.simple_kv_offload.npu_mem_ops import (
     DIRECTION_D2H,
@@ -20,8 +20,6 @@ from vllm_ascend.simple_kv_offload.npu_mem_ops import (
     build_params,
     copy_blocks,
 )
-
-logger = init_logger(__name__)
 
 
 class NPUDmaCopyBackend:

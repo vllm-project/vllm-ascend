@@ -12,9 +12,7 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.logger import logger
 
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
