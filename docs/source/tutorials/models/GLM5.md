@@ -765,7 +765,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
@@ -844,7 +845,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -927,7 +929,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
-        export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
     
         export TASK_QUEUE_ENABLE=1
     
@@ -1008,7 +1011,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1089,7 +1093,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1170,7 +1175,8 @@ Before you start, please
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
-         export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300000
+         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
             
          export TASK_QUEUE_ENABLE=1
             
@@ -1361,7 +1367,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
 
 ## Best Practices
 

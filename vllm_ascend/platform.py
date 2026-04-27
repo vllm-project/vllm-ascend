@@ -220,6 +220,31 @@ class NPUPlatform(Platform):
         return device_props.uuid
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """Return the number of Cube Cores on the NPU device.
+        This is the NPU equivalent of CUDA's ``multi_processor_count``
+        (SM count).  On Ascend hardware the closest concept is
+        ``cube_core_num`` exposed by ``torch.npu.get_device_properties``,
+        which represents the matrix-compute units (analogous to CUDA SMs).
+        This value is consumed by vLLM's
+        ``layernorm_guard.calc_rows_per_block`` to size the Triton kernel
+        launch grid.  Note that the result is clamped to 4 by that
+        function, so the exact value has minimal impact on correctness;
+        it only affects kernel occupancy heuristics.
+        """
+        props = torch.npu.get_device_properties(device_id)
+        # cube_core_num is the matrix-compute unit count, semantically
+        # closest to CUDA's multi_processor_count (SM count).
+        cube_core_num = getattr(props, "cube_core_num", None)
+        if cube_core_num is not None and cube_core_num > 0:
+            return int(cube_core_num)
+        # Fallback for older torch-npu versions that may not expose cube_core_num
+        vector_core_num = getattr(props, "vector_core_num", None)
+        if vector_core_num is not None and vector_core_num > 0:
+            return int(vector_core_num)
+        return 24  # safe default (24 Cube Cores)
+
+    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
@@ -444,17 +469,6 @@ class NPUPlatform(Platform):
         # Activate custom ops for v1, except on 310P
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
-
-        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
-            kv_transfer_config = vllm_config.kv_transfer_config
-            kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_transfer_config is None or kv_role != "kv_consumer":
-                raise ValueError(
-                    "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) only supports PD-disaggregated "
-                    "decode nodes (D-side) with kv_role='kv_consumer'. It is not supported "
-                    "in PD-mixed mode (no kv_transfer_config / kv_role='kv_both') nor on "
-                    "prefill nodes (P-side) with kv_role='kv_producer'."
-                )
 
         if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
             kv_transfer_config = vllm_config.kv_transfer_config
@@ -699,6 +713,9 @@ class NPUPlatform(Platform):
 
         # is_draft_model will be removed later, so we set it to False temporarily.
         is_draft_model = False
+        # v2 has 2 graphs in eager, one for prefill, the other for decodes, this flag is aimed to distinguish them.
+        is_draft_model_prefill = False
+
         in_profile_run = get_mrv2_in_profile_run()
         moe_comm_type = select_moe_comm_method(
             num_tokens,
@@ -769,6 +786,7 @@ class NPUPlatform(Platform):
             "max_tokens_across_dp": max_tokens_across_dp,
             "mc2_mask": mc2_mask,
             "is_draft_model": is_draft_model,
+            "is_draft_model_prefill": is_draft_model_prefill,
             "in_profile_run": in_profile_run,
             "padded_num_tokens": padded_num_tokens,
         }
@@ -828,19 +846,6 @@ class NPUPlatform(Platform):
                     "Parameter '--max-num-partial-prefills' is optimized for ROCm. Resetting to default (1) for Ascend."
                 )
                 vllm_config.scheduler_config.max_num_partial_prefills = 1
-
-            # Disable async scheduling when speculative decoding is active.
-            # Ascend does not implement the GPU-side num_computed_tokens
-            # correction (update_num_computed_tokens_for_batch_change) required
-            # for async spec decode, which causes accuracy divergence.
-            if vllm_config.speculative_config is not None and getattr(
-                vllm_config.scheduler_config, "async_scheduling", False
-            ):
-                logger.warning(
-                    "Async scheduling with speculative decoding is not yet "
-                    "supported on Ascend. Disabling async scheduling."
-                )
-                vllm_config.scheduler_config.async_scheduling = False
 
         # ==================== 6. Speculative Config ====================
         if vllm_config.speculative_config:
