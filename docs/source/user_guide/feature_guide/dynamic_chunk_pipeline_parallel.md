@@ -107,6 +107,35 @@ ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --d
 
 Configure online calibration data length to match your `max-model-len`. Use `batch_size=1` and ensure data differs to avoid cache hits if prefix caching is enabled.
 
+## Performance
+
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and **Qwen3-235B**, deploy P instance in Ascend Atlas A3 inference products*64G (A3), the configuration and performance data are as follows.
+
+**Fixed-length requests, concurrency=1**:
+- DeepSeek-V3.1-W8A8:
+
+    | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
+    | ----------------------------- | ------------------------- | ------------------------- | 
+    | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |
+
+- Qwen3-235B:
+
+    | Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |
+    | ----------------------------- | ------------------------- | ------------------------- | 
+    | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |
+
+**Variable-length requests**:
+- DeepSeek-V3.1-W8A8:
+
+    | Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |
+    | ----------------------------- | ------------------------- | 
+    |  CPP2TP8   | Input throughput: 22424 tps/card |
+    |  DP2TP8   | Input throughput: 16150 tps/card |
+    |  PCP2TP8   | Input throughput: 18197 tps/card |
+    |  TP16   | Input throughput: 18875 tps/card |
+
 
 ## Constraints
 

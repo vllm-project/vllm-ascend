@@ -46,7 +46,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `layer_sharding`                    | dict | `{}`    | Configuration options for Layer Sharding Linear. Layer Sharding can only be enabled in PD-disaggregated's P node. |
 | `enable_sparse_c8`                  | bool | `False` | Whether to enable KV cache C8 in DSA models (e.g., DeepSeekV3.2 and GLM5). Not supported on A5 devices now |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. |
-| `profiling_chunk_config`            | dict | `{}`    | Configuration options for dynamic chunked pipeline parallel. See [Profiling Chunk Parallel](../feature_guide/profiling_chunk_parallel.md) for details. |
+| `profiling_chunk_config`            | dict | `{}`    | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 
 The details of each configuration option are as follows:
 
