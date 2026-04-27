@@ -94,7 +94,7 @@ Run the following script to execute online 128k inference On 1 Atlas 800 A3(64G 
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -158,7 +158,7 @@ Node 0
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -204,7 +204,7 @@ Node1
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -586,7 +586,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3.5-397B-A17B-w8a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -597,7 +597,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
