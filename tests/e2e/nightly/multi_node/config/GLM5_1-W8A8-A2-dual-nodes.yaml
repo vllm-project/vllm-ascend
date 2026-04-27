@@ -11,6 +11,7 @@ env_common:
   VLLM_ASCEND_BALANCE_SCHEDULING: 1
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_USE_MODELSCOPE: true
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
   SERVER_PORT: 8080
 
 special_dependencies:
@@ -24,7 +25,7 @@ deployment:
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
-      --tensor-parallel-size 8
+      --tensor-parallel-size 4
       --enable-expert-parallel
       --seed 1024
       --max-num-seqs 48
@@ -45,7 +46,7 @@ deployment:
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
-      --tensor-parallel-size 8
+      --tensor-parallel-size 4
       --enable-expert-parallel
       --seed 1024
       --max-num-seqs 48
