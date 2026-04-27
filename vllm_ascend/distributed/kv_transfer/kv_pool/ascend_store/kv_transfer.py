@@ -2,7 +2,7 @@ import queue
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List
+from typing import Any
 
 import torch
 from vllm.distributed.kv_events import BlockStored
@@ -24,6 +24,114 @@ def _circular_shift(lst: list, offset: int) -> list:
     if not lst or offset == 0:
         return lst
     return lst[offset:] + lst[:offset]
+
+
+def _get_or_init_layer_tracker(
+    trackers: dict[str, dict[int, dict]],
+    req_id: str,
+    layer_id: int,
+    tracker_key: str | None = None,
+    initial_processed_count: int = 0,
+) -> dict:
+    key = tracker_key if tracker_key else req_id
+    if key not in trackers:
+        trackers[key] = {}
+    if layer_id not in trackers[key]:
+        trackers[key][layer_id] = {
+            'processed_count': initial_processed_count,
+            'chunk_addr_list': [],
+            'chunk_size_list': [],
+            'chunk_gvas_list': [],
+            'last_block_addr': [],
+            'last_block_size': [],
+            'last_block_gvas': [],
+        }
+    return trackers[key][layer_id]
+
+
+def _process_chunks_incremental(
+    token_database: ChunkedTokenDatabase,
+    tracker: dict,
+    block_ids: list[int],
+    layer_id: int,
+    chunk_gvas: list[int],
+    num_blocks: int,
+    block_size: int,
+    num_ranks_per_layer: int,
+    my_key_index: int,
+    page_size_bytes: int,
+) -> None:
+    processed_count = tracker['processed_count']
+    if processed_count >= num_blocks:
+        return
+
+    rank_layer_offset = (
+        layer_id * num_ranks_per_layer + my_key_index) * page_size_bytes
+    blocks_to_process = num_blocks - processed_count
+    for block_idx in range(blocks_to_process):
+        start = (processed_count + block_idx) * block_size
+        end = start + block_size
+        addr, size = token_database.prepare_value_layer(
+            start, end, block_ids, layer_id)
+        tracker['chunk_addr_list'].extend(addr)
+        tracker['chunk_size_list'].extend(size)
+        base_gva = chunk_gvas[processed_count + block_idx]
+        offset = base_gva + rank_layer_offset
+        for s in size:
+            tracker['chunk_gvas_list'].append(offset)
+            offset += s
+
+    tracker['processed_count'] = num_blocks
+
+
+def _process_last_block(
+    token_database: ChunkedTokenDatabase,
+    tracker: dict,
+    block_ids: list[int],
+    layer_id: int,
+    last_block_gva: int,
+    num_blocks: int,
+    block_size: int,
+    num_ranks_per_layer: int,
+    my_key_index: int,
+    page_size_bytes: int,
+) -> None:
+    last_block_start = num_blocks * block_size
+    last_block_end = last_block_start + block_size
+
+    addr, size = token_database.prepare_value_layer(
+        last_block_start, last_block_end, block_ids, layer_id)
+    rank_layer_offset = (
+        layer_id * num_ranks_per_layer + my_key_index) * page_size_bytes
+    offset = last_block_gva + rank_layer_offset
+    last_block_gvas = []
+    for s in size:
+        last_block_gvas.append(offset)
+        offset += s
+
+    tracker['last_block_addr'] = addr
+    tracker['last_block_size'] = size
+    tracker['last_block_gvas'] = last_block_gvas
+
+
+def _build_layer_req_meta(
+    request: ReqMeta,
+    layer_id: int,
+    tracker: dict,
+    is_last_chunk: bool = False,
+) -> LayerMultiBlockReqMeta:
+    final_addr_list = tracker['chunk_addr_list'] + tracker['last_block_addr']
+    final_size_list = tracker['chunk_size_list'] + tracker['last_block_size']
+    final_gvas_list = tracker['chunk_gvas_list'] + tracker['last_block_gvas']
+
+    req_meta = LayerMultiBlockReqMeta(
+        request.req_id, request.block_ids, layer_id, is_last_chunk)
+    req_meta.chunk_gvas = request.chunk_gvas
+    req_meta.last_block_gva = request.last_block_gva
+    req_meta.addr_list = final_addr_list
+    req_meta.size_list = final_size_list
+    req_meta.gvas_list = final_gvas_list
+    return req_meta
 
 
 class KVTransferThread(threading.Thread):
@@ -286,7 +394,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         ready_event: threading.Event,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheStoreRecvingThread"
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            tp_size,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreRecvingThread",
         )
 
     def _handle_request(self, req_meta: ReqMeta):
@@ -325,13 +440,23 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         put_step: int,
         ready_event: threading.Event,
         num_layers: int,
-        layer_save_finished_events: List[threading.Event],
-        sync_save_events: List[torch.npu.Event],
+        layer_save_finished_events: list[threading.Event],
+        sync_save_events: list[torch.npu.Event],
+        num_ranks_per_layer: int,
+        my_key_index: int,
+        page_size_bytes: int,
         enable_kv_event: bool = False,
         layer_transfer_finished_events = None,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheStoreLayerSendingThread"
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            tp_size,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreLayerSendingThread",
         )
         self.final_layer_id = num_layers - 1
         self.put_step = put_step
@@ -340,6 +465,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.sync_save_events = sync_save_events
         self.stored_requests = defaultdict[str, int](int)
         self.layer_transfer_finished_events = layer_transfer_finished_events
+        self.num_ranks_per_layer = num_ranks_per_layer
+        self.my_key_index = my_key_index
+        self.page_size_bytes = page_size_bytes
+        self._request_addr_tracker: dict[str, dict[int, dict]] = {}
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -363,21 +492,36 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             return False
 
     def add_request(  # type: ignore[override]
-        self, req_meta: ReqMeta
+        self, req_meta: tuple[list[ReqMeta], int]
     ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
+    def cleanup_request_tracker(self, req_id: str) -> None:
+        self._request_addr_tracker.pop(req_id, None)
+
     def _handle_request(  # type: ignore[override]
-        self, req_metas: LayerMultiBlockReqMeta
+        self, data: tuple[list[ReqMeta], int]
     ):
+        req_metas, layer_id = data
         if len(req_metas) == 0:
             self.request_queue.task_done()
             return
         addr_list = []
         gvas_list = []
         size_list = []
-        layer_id = req_metas[0].layer_id
-        for req_meta in req_metas:
+        layer_req_metas = []
+        for request in req_metas:
+            req_meta = self._build_save_layer_req_meta(request, layer_id)
+            if req_meta is None:
+                continue
+            layer_req_metas.append(req_meta)
+
+        if len(layer_req_metas) == 0:
+            req_metas.clear()
+            self.request_queue.task_done()
+            return
+
+        for req_meta in layer_req_metas:
             is_last_chunk = req_meta.is_last_chunk
             if req_meta.addr_list is not None and req_meta.size_list is not None:
                 addr_list.extend(req_meta.addr_list[self.tp_rank % self.put_step::self.put_step])
@@ -404,6 +548,60 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
         self.request_queue.task_done()
 
+    def _build_save_layer_req_meta(
+        self,
+        request: ReqMeta,
+        layer_id: int,
+    ) -> LayerMultiBlockReqMeta | None:
+        if request.can_save is None or not request.can_save:
+            return None
+
+        num_cached_blocks = 0
+        if request.load_spec is not None:
+            num_cached_blocks = (
+                request.load_spec.kvpool_cached_tokens // self.block_size)
+
+        num_blocks = request.token_len_chunk // self.block_size
+        num_cached_blocks = min(num_cached_blocks, num_blocks)
+
+        tracker = _get_or_init_layer_tracker(
+            self._request_addr_tracker,
+            request.req_id,
+            layer_id,
+            initial_processed_count=num_cached_blocks,
+        )
+
+        _process_chunks_incremental(
+            self.token_database,
+            tracker,
+            request.block_ids,
+            layer_id,
+            request.chunk_gvas,
+            num_blocks,
+            self.block_size,
+            self.num_ranks_per_layer,
+            self.my_key_index,
+            self.page_size_bytes,
+        )
+
+        if request.token_len_chunk % self.block_size != 0:
+            assert request.last_block_gva is not None
+            _process_last_block(
+                self.token_database,
+                tracker,
+                request.block_ids,
+                layer_id,
+                request.last_block_gva,
+                num_blocks,
+                self.block_size,
+                self.num_ranks_per_layer,
+                self.my_key_index,
+                self.page_size_bytes,
+            )
+
+        return _build_layer_req_meta(
+            request, layer_id, tracker, request.is_last_chunk)
+
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def __init__(
@@ -416,25 +614,42 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         dcp_size: int,
         ready_event: threading.Event,
         get_event: threading.Event,
-        layer_load_finished_events: List[threading.Event],
-        layer_save_finished_events: List[threading.Event],
+        layer_load_finished_events: list[threading.Event],
+        layer_save_finished_events: list[threading.Event],
         num_layers: int,
+        num_ranks_per_layer: int,
+        my_key_index: int,
+        page_size_bytes: int,
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheStoreLayerRecvingThread"
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            tp_size,
+            dcp_size,
+            ready_event,
+            name="KVCacheStoreLayerRecvingThread",
         )
         self.get_event = get_event
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
         self.final_layer_id = num_layers - 1
+        self.num_ranks_per_layer = num_ranks_per_layer
+        self.my_key_index = my_key_index
+        self.page_size_bytes = page_size_bytes
+        self._request_addr_tracker: dict[str, dict[int, dict]] = {}
 
     def add_request(  # type: ignore[override]
-        self, req_meta: LayerMultiBlockReqMeta
+        self, req_meta: tuple[int | None, list[ReqMeta], int]
     ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
+    def cleanup_request_tracker(self, req_id: str) -> None:
+        self._request_addr_tracker.pop(f"{req_id}_load", None)
+
     def _handle_request(  # type: ignore[override]
-        self, data: LayerMultiBlockReqMeta
+        self, data: tuple[int | None, list[ReqMeta], int]
     ):
         wait_for_save, req_metas, layer_id = data
 
@@ -455,8 +670,22 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         addr_list = []
         gvas_list = []
         size_list = []
-        layer_id = req_metas[0].layer_id
-        for req_meta in req_metas:
+        layer_req_metas = []
+        for request in req_metas:
+            req_meta = self._build_load_layer_req_meta(request, layer_id)
+            if req_meta is None:
+                continue
+            layer_req_metas.append(req_meta)
+
+        if len(layer_req_metas) == 0:
+            assert not self.layer_load_finished_events[layer_id].is_set()
+            logger.debug(f">>>>>>>>>>>>>>>>>>>> set load layer {layer_id}")
+            self.layer_load_finished_events[layer_id].set()
+            req_metas.clear()
+            self.request_queue.task_done()
+            return
+
+        for req_meta in layer_req_metas:
             if req_meta.addr_list is not None and req_meta.size_list is not None:
                 addr_list.extend(req_meta.addr_list)
                 size_list.extend(req_meta.size_list)
@@ -477,3 +706,54 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         req_metas.clear()
         self.request_queue.task_done()
         self.get_event.set()
+
+    def _build_load_layer_req_meta(
+        self,
+        request: ReqMeta,
+        layer_id: int,
+    ) -> LayerMultiBlockReqMeta | None:
+        load_spec = request.load_spec
+        if load_spec is None or not load_spec.can_load:
+            return None
+
+        token_len = load_spec.kvpool_cached_tokens
+        num_saved_blocks = token_len // self.block_size
+        has_load_last_block = token_len % self.block_size != 0
+
+        load_tracker_key = f"{request.req_id}_load"
+        tracker = _get_or_init_layer_tracker(
+            self._request_addr_tracker,
+            request.req_id,
+            layer_id,
+            load_tracker_key,
+        )
+
+        _process_chunks_incremental(
+            self.token_database,
+            tracker,
+            request.block_ids,
+            layer_id,
+            request.chunk_gvas,
+            num_saved_blocks,
+            self.block_size,
+            self.num_ranks_per_layer,
+            self.my_key_index,
+            self.page_size_bytes,
+        )
+
+        if has_load_last_block:
+            assert request.last_block_gva is not None
+            _process_last_block(
+                self.token_database,
+                tracker,
+                request.block_ids,
+                layer_id,
+                request.last_block_gva,
+                num_saved_blocks,
+                self.block_size,
+                self.num_ranks_per_layer,
+                self.my_key_index,
+                self.page_size_bytes,
+            )
+
+        return _build_layer_req_meta(request, layer_id, tracker)

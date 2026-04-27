@@ -15,11 +15,11 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 
+from vllm_ascend.cpu_binding import bind_worker_threads_to_cpus
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerMultiBlockReqMeta,
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -166,9 +166,6 @@ class KVPoolWorker:
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
         self.layer_transfer_finished_events = None
-        # req_id, layer_id, block info
-        self._request_addr_tracker: dict[str, dict[int, dict]] = {}
-
         NUM_SHARED_BUFFERS = 2
         self.NUM_SHARED_BUFFERS = NUM_SHARED_BUFFERS
         INDEPENDENT_LAYER_INDICES = {0, self.num_layers - 1}
@@ -250,6 +247,9 @@ class KVPoolWorker:
                     self.num_layers,
                     self.layer_save_finished_events,
                     self.sync_save_events,
+                    self.num_ranks_per_layer,
+                    self.my_key_index,
+                    self.page_size_bytes,
                     self.enable_kv_events,
                     self.layer_transfer_finished_events
                 )
@@ -267,6 +267,9 @@ class KVPoolWorker:
                 self.layer_load_finished_events,
                 self.layer_save_finished_events,
                 self.num_layers,
+                self.num_ranks_per_layer,
+                self.my_key_index,
+                self.page_size_bytes,
             )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -289,7 +292,13 @@ class KVPoolWorker:
             if self.load_async:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store, self.token_database, self.block_size, self.tp_rank, self.tp_size, self.dcp_size, ready_event
+                    self.m_store,
+                    self.token_database,
+                    self.block_size,
+                    self.tp_rank,
+                    self.tp_size,
+                    self.dcp_size,
+                    ready_event,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -334,170 +343,20 @@ class KVPoolWorker:
                     size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
                     self.m_store.get(key_list_c, addr_list_c, size_list_c)
         # TODO 这里的请求释放可能有问题
-        # logger.info(f">>>>>>>>>>>> metadata.requests {len(metadata.requests)} metadata.unfinished_request_ids {metadata.unfinished_request_ids}")
         # TODO 把这个移到 independent layer attention 计算前
         if len(self.independent_layers)==0 and self.use_layerwise and metadata.unfinished_request_ids:
             for layer_id in self.offload_start_ids:
                 layer_load_task = self.layer_load_tasks[layer_id]
                 self.kv_recv_thread.add_request((None, layer_load_task, layer_id))
 
-    def _get_or_init_layer_tracker(self, req_id: str, layer_id: int, tracker_key: str | None = None, initial_processed_count: int = 0) -> dict:
-        key = tracker_key if tracker_key else req_id
-        if key not in self._request_addr_tracker:
-            self._request_addr_tracker[key] = {}
-        if layer_id not in self._request_addr_tracker[key]:
-            self._request_addr_tracker[key][layer_id] = {
-                'processed_count': initial_processed_count,
-                'chunk_addr_list': [],
-                'chunk_size_list': [],
-                'chunk_gvas_list': [],
-                'last_block_addr': [],
-                'last_block_size': [],
-                'last_block_gvas': [],
-            }
-        return self._request_addr_tracker[key][layer_id]
-
-    def _process_chunks_incremental(
-        self,
-        tracker: dict,
-        block_ids: list[int],
-        layer_id: int,
-        chunk_gvas: list[int],
-        num_blocks: int,
-    ) -> None:
-        processed_count = tracker['processed_count']
-        if processed_count >= num_blocks:
-            return
-
-        rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
-        blocks_to_process = num_blocks - processed_count
-        for block_idx in range(blocks_to_process):
-            start = (processed_count + block_idx) * self.block_size
-            end = start + self.block_size
-            addr, size = self.token_database.prepare_value_layer(
-                start, end, block_ids, layer_id)
-            tracker['chunk_addr_list'].extend(addr)
-            tracker['chunk_size_list'].extend(size)
-            base_gva = chunk_gvas[processed_count + block_idx]
-            offset = base_gva + rank_layer_offset
-            for s in size:
-                tracker['chunk_gvas_list'].append(offset)
-                offset += s
-
-        tracker['processed_count'] = num_blocks
-
-    def _process_last_block(
-        self,
-        tracker: dict,
-        block_ids: list[int],
-        layer_id: int,
-        last_block_gva: int,
-        num_blocks: int,
-    ) -> None:
-        last_block_start = num_blocks * self.block_size
-        last_block_end = last_block_start + self.block_size
-
-        addr, size = self.token_database.prepare_value_layer(
-            last_block_start, last_block_end, block_ids, layer_id)
-        rank_layer_offset = (layer_id * self.num_ranks_per_layer + self.my_key_index) * self.page_size_bytes
-        offset = last_block_gva + rank_layer_offset
-        last_block_gvas = []
-        for s in size:
-            last_block_gvas.append(offset)
-            offset += s
-
-        tracker['last_block_addr'] = addr
-        tracker['last_block_size'] = size
-        tracker['last_block_gvas'] = last_block_gvas
-
-    def _build_req_meta(
-        self,
-        request: ReqMeta,
-        layer_id: int,
-        tracker: dict,
-        is_last_chunk: bool = False,
-    ) -> LayerMultiBlockReqMeta:
-        final_addr_list = tracker['chunk_addr_list'] + tracker['last_block_addr']
-        final_size_list = tracker['chunk_size_list'] + tracker['last_block_size']
-        final_gvas_list = tracker['chunk_gvas_list'] + tracker['last_block_gvas']
-
-        req_meta = LayerMultiBlockReqMeta(
-            request.req_id,
-            request.block_ids, layer_id, is_last_chunk
-        )
-        req_meta.chunk_gvas = request.chunk_gvas
-        req_meta.last_block_gva = request.last_block_gva
-        req_meta.addr_list = final_addr_list
-        req_meta.size_list = final_size_list
-        req_meta.gvas_list = final_gvas_list
-        return req_meta
-
-    def _process_save_for_layer(
-        self,
-        request: ReqMeta,
-        layer_id: int,
-    ) -> None:
-        if request.can_save is None or not request.can_save:
-            return
-
-        num_cached_blocks = 0
-        if request.load_spec is not None:
-            num_cached_blocks = request.load_spec.kvpool_cached_tokens // self.block_size
-
-        num_blocks = request.token_len_chunk // self.block_size
-        num_cached_blocks = min(num_cached_blocks, num_blocks)
-
-        tracker = self._get_or_init_layer_tracker(
-            request.req_id, layer_id, initial_processed_count=num_cached_blocks)
-
-        has_last_block = request.token_len_chunk % self.block_size != 0
-        self._process_chunks_incremental(
-            tracker, request.block_ids, layer_id,
-            request.chunk_gvas, num_blocks)
-
-        if has_last_block:
-            self._process_last_block(
-                tracker, request.block_ids, layer_id,
-                request.last_block_gva, num_blocks)
-
-        req_meta = self._build_req_meta(
-            request, layer_id, tracker, request.is_last_chunk)
-        self.layer_save_tasks[layer_id].append(req_meta)
-
-    def _process_load_for_layer(
-        self,
-        request: ReqMeta,
-        layer_id: int,
-    ) -> None:
-        load_spec = request.load_spec
-        if load_spec is None or not load_spec.can_load:
-            return
-
-        token_len = load_spec.kvpool_cached_tokens
-        num_saved_blocks = token_len // self.block_size
-        has_load_last_block = token_len % self.block_size != 0
-
-        load_tracker_key = f"{request.req_id}_load"
-        tracker = self._get_or_init_layer_tracker(request.req_id, layer_id, load_tracker_key)
-
-        self._process_chunks_incremental(
-            tracker, request.block_ids, layer_id,
-            request.chunk_gvas, num_saved_blocks)
-
-        if has_load_last_block:
-            self._process_last_block(
-                tracker, request.block_ids, layer_id,
-                request.last_block_gva, num_saved_blocks)
-
-        req_meta = self._build_req_meta(request, layer_id, tracker)
-        self.layer_load_tasks[layer_id].append(req_meta)
-
     def process_layer_data(self, request: ReqMeta) -> None:
         for layer_id in range(self.num_layers):
             if layer_id in self.independent_layers:
                 continue
-            self._process_save_for_layer(request, layer_id)
-            self._process_load_for_layer(request, layer_id)
+            if request.can_save:
+                self.layer_save_tasks[layer_id].append(request)
+            if request.load_spec is not None and request.load_spec.can_load:
+                self.layer_load_tasks[layer_id].append(request)
 
     def wait_for_layer_load(self) -> None:
         if self.current_layer in self.independent_layers:
@@ -518,7 +377,8 @@ class KVPoolWorker:
         # Wait for KV cache saving to complete on the final layer that requires offloading.
         if self.current_layer in self.layers_need_to_save:
             self.sync_save_events[self.current_layer].record()
-            self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
+            self.kv_send_thread.add_request(
+                (self.layer_save_tasks[self.current_layer], self.current_layer))
             # add load task, in both prefill and decode stages
             # 1. wait for save, and clear save event
             # 2. start load, for prefill layer_load_tasks is None, skip load in the recv thread.
@@ -591,11 +451,11 @@ class KVPoolWorker:
         return done_sending, done_recving
 
     def _cleanup_request_tracker(self, req_id: str):
-        if req_id in self._request_addr_tracker:
-            del self._request_addr_tracker[req_id]
-        load_tracker_key = f"{req_id}_load"
-        if load_tracker_key in self._request_addr_tracker:
-            del self._request_addr_tracker[load_tracker_key]
+        if self.use_layerwise:
+            if self.kv_send_thread is not None and hasattr(self.kv_send_thread, "cleanup_request_tracker"):
+                self.kv_send_thread.cleanup_request_tracker(req_id)
+            if self.kv_recv_thread is not None and hasattr(self.kv_recv_thread, "cleanup_request_tracker"):
+                self.kv_recv_thread.cleanup_request_tracker(req_id)
 
 
 
@@ -718,3 +578,11 @@ class KVPoolWorker:
             events = self.kv_send_thread.get_kv_events()
             return events
         return []
+
+    def bind_transfer_threads_to_cpus(self, rank_id: int) -> None:
+        thread_ids = []
+        if self.kv_send_thread is not None and self.kv_send_thread.native_id is not None:
+            thread_ids.append((self.kv_send_thread.name, self.kv_send_thread.native_id))
+        if self.kv_recv_thread is not None and self.kv_recv_thread.native_id is not None:
+            thread_ids.append((self.kv_recv_thread.name, self.kv_recv_thread.native_id))
+        bind_worker_threads_to_cpus(rank_id, thread_ids)

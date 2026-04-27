@@ -546,10 +546,25 @@ class NPUWorker(WorkerBase):
                 bind_cpus(self.local_rank)
             except Exception as e:
                 logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
+            try:
+                self._bind_kv_transfer_threads_to_cpus()
+            except Exception as e:
+                logger.warning(
+                    "Bind KV transfer threads failed in rank%s: %s. Skip binding KV transfer threads.",
+                    self.local_rank,
+                    e,
+                )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
         return self.vllm_config.compilation_config.compilation_time
+
+    def _bind_kv_transfer_threads_to_cpus(self) -> None:
+        if not has_kv_transfer_group():
+            return
+        connector = get_kv_transfer_group()
+        if hasattr(connector, "bind_transfer_threads_to_cpus"):
+            connector.bind_transfer_threads_to_cpus(self.local_rank)
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()

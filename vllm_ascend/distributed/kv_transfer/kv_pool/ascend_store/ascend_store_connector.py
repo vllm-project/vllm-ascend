@@ -226,6 +226,11 @@ class AscendStoreConnector(KVConnectorBase_V1):
         ascend_store_kv_events.add_events(events)
         return ascend_store_kv_events
 
+    def bind_transfer_threads_to_cpus(self, rank_id: int) -> None:
+        if self.connector_worker is None:
+            return
+        self.connector_worker.bind_transfer_threads_to_cpus(rank_id)
+
 
 class LookupKeyServer:
     def __init__(

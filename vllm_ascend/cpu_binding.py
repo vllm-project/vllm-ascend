@@ -509,3 +509,45 @@ def bind_cpus(rank_id: int) -> None:
         return
     binder = CpuAlloc(rank_id)
     binder.run_all()
+
+
+def bind_worker_threads_to_cpus(
+    rank_id: int,
+    thread_ids: list[tuple[str, int]],
+) -> None:
+    if not is_arm_cpu():
+        logger.info("Worker thread CPU binding skipped: non-ARM CPU detected.")
+        return
+    if not thread_ids:
+        return
+
+    binder = CpuAlloc(rank_id)
+    binder.build_cpu_pools()
+    binder.allocate()
+
+    current_npu = binder.device_info.running_npu_list[rank_id]
+    main_cpus = binder.assign_main[current_npu]
+    if len(main_cpus) <= len(thread_ids):
+        logger.warning(
+            "Worker thread CPU binding skipped: insufficient main CPU pool "
+            "for rank %d, main_cpus=%s, threads=%s.",
+            rank_id,
+            main_cpus,
+            [name for name, _ in thread_ids],
+        )
+        return
+
+    thread_cpus = main_cpus[-len(thread_ids):]
+    remaining_main_cpus = main_cpus[:-len(thread_ids)]
+    main_pid = str(psutil.Process().pid)
+    binder.bind(main_pid, remaining_main_cpus, False)
+
+    for (thread_name, thread_id), cpu in zip(thread_ids, thread_cpus):
+        binder.bind(str(thread_id), [cpu], False)
+        logger.info(
+            "Bound worker thread %s(tid=%d) to CPU %d on rank %d.",
+            thread_name,
+            thread_id,
+            cpu,
+            rank_id,
+        )
