@@ -35,6 +35,9 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
     the 310P hardware.
     """
 
+    # 310P requires float16 for SWA mask due to hardware format requirements
+    swa_mask_dtype: torch.dtype = torch.float16
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
