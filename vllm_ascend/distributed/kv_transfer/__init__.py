@@ -57,3 +57,19 @@ def register_connector():
         "vllm_ascend.distributed.kv_transfer.kv_pool.lmcache_ascend_connector",
         "LMCacheConnectorV1",
     )
+
+    # Override the upstream SimpleCPUOffloadConnector with the NPU
+    # adaptation that uses aclrtMemcpyBatchAsync + torch.npu streams.
+    # Only override if the upstream module exists in this vLLM version.
+    try:
+        import vllm.v1.simple_kv_offload  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        if "SimpleCPUOffloadConnector" in KVConnectorFactory._registry:
+            KVConnectorFactory._registry.pop("SimpleCPUOffloadConnector")
+        KVConnectorFactory.register_connector(
+            "SimpleCPUOffloadConnector",
+            "vllm_ascend.simple_kv_offload.connector",
+            "AscendSimpleCPUOffloadConnector",
+        )
