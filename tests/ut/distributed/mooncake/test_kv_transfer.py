@@ -46,7 +46,22 @@ class _FakeTokenDatabase:
         for i, _ in enumerate(block_hashes):
             yield i * 16, (i + 1) * 16, _FakeKey(f"k{i}")
 
-    def prepare_value(self, start, end, block_ids):
+    def process_tokens_with_block_ids(
+        self,
+        token_len,
+        block_hashes,
+        block_ids,
+        mask_num=0,
+        kv_cache_group_id=0,
+        skip_null_blocks=False,
+    ):
+        for i, _ in enumerate(block_hashes):
+            block_id = block_ids[i]
+            if skip_null_blocks and block_id <= 0:
+                continue
+            yield i * 16, (i + 1) * 16, _FakeKey(f"k{i}"), block_id
+
+    def prepare_value(self, start, end, block_ids, kv_cache_group_id=0):
         block_id = start // 16
         return [1000 + block_id], [end - start], block_id
 
@@ -74,8 +89,9 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
         req_meta = ReqMeta(
             req_id="req-1",
             token_len_chunk=64,
-            block_ids=[0, 1, 2, 3],
+            block_ids_by_group=[[0, 1, 2, 3]],
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            kv_cache_group_ids=[0],
             current_event=None,
         )
         thread.add_stored_request("req-1")
@@ -108,7 +124,7 @@ class TestKVTransferMissingKeyPut(unittest.TestCase):
             keys=[_FakeKey("k0"), _FakeKey("k1"), _FakeKey("k2"), _FakeKey("k3")],  # type: ignore[arg-type]
             starts=[0, 16, 32, 48],
             ends=[16, 32, 48, 64],
-            block_ids=[0, 1, 2, 3],
+            block_ids_by_group=[[0, 1, 2, 3]],
             layer_id=1,
             is_last_chunk=False,
             current_event=None,

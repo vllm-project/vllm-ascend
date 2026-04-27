@@ -9,6 +9,7 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
@@ -17,12 +18,33 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LoadSpec,
     ReqMeta,
     RequestTracker,
+    normalize_block_ids_by_group,
 )
 
 
 class KVPoolScheduler:
-    def __init__(self, vllm_config: "VllmConfig", use_layerwise):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        use_layerwise,
+        kv_cache_config: KVCacheConfig | None = None,
+    ):
         self.use_layerwise = use_layerwise
+        self.kv_cache_config = kv_cache_config
+        self.kv_cache_group_ids = (
+            list(range(len(kv_cache_config.kv_cache_groups))) if kv_cache_config is not None else [0]
+        )
+        if kv_cache_config is not None:
+            for kv_cache_group in kv_cache_config.kv_cache_groups:
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                    kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+                if isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_cache_mode != "align":
+                    raise NotImplementedError(
+                        "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
+                    )
+        if self.use_layerwise and len(self.kv_cache_group_ids) > 1:
+            raise NotImplementedError("AscendStore layerwise mode does not yet support hybrid KV cache groups.")
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False
@@ -50,7 +72,7 @@ class KVPoolScheduler:
         self._discard_partial_chunks = vllm_config.kv_transfer_config.get_from_extra_config(
             "discard_partial_chunks", True
         )
-        self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
+        self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
     def get_num_new_matched_tokens(
@@ -81,7 +103,11 @@ class KVPoolScheduler:
         if token_len < self._block_size:
             return 0, False
 
-        num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
+        num_external_hit_tokens = self.client.lookup(
+            token_len,
+            request.block_hashes,
+            self.kv_cache_group_ids,
+        )
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
@@ -117,9 +143,9 @@ class KVPoolScheduler:
         For SharedStorageConnector, update _request_needs_load
         if the CacheManager this allocated blocks for us.
         """
-        local_block_ids = []
+        local_block_ids: list[list[int]] = [[] for _ in self.kv_cache_group_ids]
         if num_external_tokens > 0:
-            local_block_ids = blocks.get_block_ids()[0]
+            local_block_ids = normalize_block_ids_by_group(blocks.get_block_ids())
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -178,14 +204,10 @@ class KVPoolScheduler:
             num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
             request_tuple = self._unfinished_requests.get(request.req_id)
             request_real = request_tuple[0]  # type: ignore[index]
-            if not isinstance(request.block_ids[0], list):
-                unfolded_block_ids = request.block_ids.copy()
-            else:
-                unfolded_block_ids = request.block_ids[0].copy()
             request_tracker = RequestTracker(
                 req_id=request.req_id,
                 token_len=num_tokens_to_compute,
-                allocated_block_ids=unfolded_block_ids,
+                allocated_block_ids_by_group=normalize_block_ids_by_group(request.block_ids),
                 num_saved_tokens=0,
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
             )
@@ -217,10 +239,6 @@ class KVPoolScheduler:
                 if not new_block_ids:
                     continue
                 if req_id in self._preempted_req_ids:
-                    if isinstance(new_block_ids, tuple):
-                        new_block_ids = new_block_ids[0].copy()
-                    else:
-                        new_block_ids = new_block_ids.copy()
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
@@ -231,7 +249,7 @@ class KVPoolScheduler:
                     request_tracker = RequestTracker(
                         req_id=req_id,
                         token_len=num_tokens_to_compute,
-                        allocated_block_ids=new_block_ids,
+                        allocated_block_ids_by_group=normalize_block_ids_by_group(new_block_ids),
                         num_saved_tokens=0,
                         token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
                     )
@@ -300,12 +318,12 @@ class KVPoolScheduler:
                     num_tokens_to_compute == len(request.prompt_token_ids) - 1
                 ):
                     num_tokens_to_compute = num_tokens_to_compute + 1
-                request_tracker = RequestTracker(
-                    req_id=request_id,
-                    token_len=num_tokens_to_compute,
-                    allocated_block_ids=block_ids,
-                    num_saved_tokens=0,
-                )
+                    request_tracker = RequestTracker(
+                        req_id=request_id,
+                        token_len=num_tokens_to_compute,
+                        allocated_block_ids_by_group=block_ids,
+                        num_saved_tokens=0,
+                    )
 
                 self._request_trackers[request_id] = request_tracker
                 req_meta = ReqMeta.from_request_tracker(
@@ -339,6 +357,32 @@ class KVPoolScheduler:
             logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
 
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """
+        HMA path for hybrid KV cache groups.
+
+        Keep the grouped shape at the connector boundary instead of
+        flattening eagerly, so future per-group cleanup semantics can be
+        added without changing the API contract.
+        """
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+            return False, None
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is not None and tracker.num_saved_tokens <= 0:
+            return False, None
+        delay_free_blocks = any(len(group_block_ids) > 0 for group_block_ids in block_ids)
+        if delay_free_blocks:
+            logger.debug(
+                "Delaying free of %d KV cache groups for request %s",
+                sum(1 for group_block_ids in block_ids if group_block_ids),
+                request.request_id,
+            )
+        return delay_free_blocks, None
+
 
 class LookupKeyClient:
     def __init__(self, vllm_config: "VllmConfig"):
@@ -352,11 +396,17 @@ class LookupKeyClient:
             bind=False,
         )
 
-    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+    def lookup(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
+    ) -> int:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
+        group_frames = self.encoder.encode(kv_cache_group_ids)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        all_frames = [token_len_bytes] + list(hash_frames)
+        all_frames = [token_len_bytes] + list(group_frames) + list(hash_frames)
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")

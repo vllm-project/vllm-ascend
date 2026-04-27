@@ -15,6 +15,7 @@ from vllm.distributed import (
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
@@ -54,6 +55,7 @@ class KVPoolWorker:
         self,
         vllm_config: VllmConfig,
         use_layerwize: bool,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -63,6 +65,7 @@ class KVPoolWorker:
             self.use_mla = True
         self.use_sparse = hasattr(model_config.hf_text_config, "index_topk")
         self.use_layerwise = use_layerwize
+        self.kv_cache_config = kv_cache_config
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
@@ -108,6 +111,22 @@ class KVPoolWorker:
             self.dcp_rank,
             self.pp_rank,
         )
+        self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups) if self.kv_cache_config is not None else 1
+        self.group_uses_align_state = [False] * self.num_kv_cache_groups
+        if self.kv_cache_config is not None:
+            for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                    kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+                if isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_cache_mode != "align":
+                    raise NotImplementedError(
+                        "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
+                    )
+                self.group_uses_align_state[group_id] = (
+                    isinstance(kv_cache_spec, MambaSpec) and kv_cache_spec.mamba_cache_mode == "align"
+                )
+        if self.use_layerwise and self.num_kv_cache_groups > 1:
+            raise NotImplementedError("AscendStore layerwise mode does not yet support hybrid KV cache groups.")
 
         partitions = None
         if self.kv_role == "kv_consumer" and self.consumer_is_to_put:
@@ -185,21 +204,39 @@ class KVPoolWorker:
 
         self.kv_caches = kv_caches
         self.kv_caches_base_addr = []
+        self.group_kv_caches_base_addr: dict[int, list[int]] = {}
+        self.group_block_len: dict[int, list[int]] = {}
         ptrs = []
         lengths = []
-        length = len(self.block_len)
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
             for i, cache in enumerate(cache_or_caches, 0):
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len[i % length]
+                block_len = cache[0].numel() * cache.element_size()
+                region_len = self.num_blocks * block_len
                 self.kv_caches_base_addr.append(base_addr)
                 ptrs.append(base_addr)
                 lengths.append(region_len)
 
+        if self.kv_cache_config is not None:
+            for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
+                group_addrs: list[int] = []
+                group_block_lens: list[int] = []
+                for layer_name in group_spec.layer_names:
+                    cache_or_caches = kv_caches[layer_name]
+                    for cache in cache_or_caches:
+                        group_addrs.append(cache.data_ptr())
+                        group_block_lens.append(cache[0].numel() * cache.element_size())
+                self.group_kv_caches_base_addr[group_id] = group_addrs
+                self.group_block_len[group_id] = group_block_lens
+
         self.m_store.register_buffer(ptrs, lengths)
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
+        self.token_database.set_group_buffers(
+            self.group_kv_caches_base_addr,
+            self.group_block_len,
+        )
 
         if self.use_layerwise:
             self.get_event = threading.Event()
@@ -256,6 +293,7 @@ class KVPoolWorker:
         self.current_layer = 0
         self.layerwise_retrievers = []
         for request in metadata.requests:
+            request.skip_null_blocks_by_group = self.group_uses_align_state
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:  # load =0
                 continue
@@ -281,13 +319,25 @@ class KVPoolWorker:
                     size_list = []
                     key_list = []
                     mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
-                    for start, end, key in self.token_database.process_tokens(
-                        token_len, request.block_hashes, mask_num
-                    ):
-                        addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
-                        key_list.append(key.to_string())
-                        addr_list.append(addr)
-                        size_list.append(size)
+                    for group_id in request.kv_cache_group_ids or [0]:
+                        block_ids = request.block_ids_by_group[group_id]
+                        for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
+                            token_len,
+                            request.block_hashes,
+                            block_ids,
+                            mask_num,
+                            kv_cache_group_id=group_id,
+                            skip_null_blocks=self.group_uses_align_state[group_id],
+                        ):
+                            addr, size, _ = self.token_database.prepare_value(
+                                start,
+                                end,
+                                block_ids,
+                                kv_cache_group_id=group_id,
+                            )
+                            key_list.append(key.to_string())
+                            addr_list.append(addr)
+                            size_list.append(size)
                     key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
                     addr_list_c = (
                         addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
@@ -313,6 +363,7 @@ class KVPoolWorker:
                 can_save = request.can_save
                 if can_save is None or not can_save:
                     continue
+                request.skip_null_blocks_by_group = self.group_uses_align_state
                 current_event = torch.npu.Event()
                 current_event.record()
                 break
@@ -321,6 +372,7 @@ class KVPoolWorker:
                 if can_save is None or not can_save:
                     continue
 
+                request.skip_null_blocks_by_group = self.group_uses_align_state
                 layerwise_storer = self.store_layer(request, current_event)
                 self.layerwise_storers.append(layerwise_storer)
         for layerwise_storer in self.layerwise_storers:
@@ -345,6 +397,7 @@ class KVPoolWorker:
             if can_save is None or not can_save:
                 continue
 
+            request.skip_null_blocks_by_group = self.group_uses_align_state
             request.current_event = current_event
             self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
                 request.req_id
@@ -404,7 +457,12 @@ class KVPoolWorker:
                         logger.info("Layerwise get failed")
                 self.get_event.clear()
                 req_meta = LayerMultiBlockReqMeta(
-                    request.req_id, keys_multi_chunk, starts, ends, request.block_ids, layer_id
+                    request.req_id,
+                    keys_multi_chunk,
+                    starts,
+                    ends,
+                    request.block_ids_by_group,
+                    layer_id,
                 )
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr, call-arg]
                     req_meta
@@ -464,7 +522,7 @@ class KVPoolWorker:
                     keys_multi_chunk,
                     starts,
                     ends,
-                    request.block_ids,
+                    request.block_ids_by_group,
                     layer_id,
                     request.is_last_chunk,
                     current_event,
@@ -541,6 +599,7 @@ class KVPoolWorker:
         self,
         token_len: int,
         block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
         use_layerwise: bool,
     ) -> int:
         """
@@ -548,36 +607,58 @@ class KVPoolWorker:
         :param tokens: the input tokens, with shape [seq_len]
         :return: An int indicating how many prefix tokens are cached.
         """
-        end = 0
-        keys = []
         try:
-            starts = []
-            for start, end, key in self.token_database.process_tokens(token_len, block_hashes):
+            hits = []
+            for group_id in kv_cache_group_ids:
+                end = 0
+                keys = []
+                starts = []
+                ends = []
+                for start, end, key in self.token_database.process_tokens(
+                    token_len,
+                    block_hashes,
+                    kv_cache_group_id=group_id,
+                ):
+                    if use_layerwise:
+                        keys_multi_layer = key.split_layers(self.num_layers)
+                        for item in keys_multi_layer:
+                            keys.append(item.to_string())
+                    else:
+                        keys.append(key.to_string())
+                    starts.append(start)
+                    ends.append(end)
+
+                if not keys:
+                    hits.append(0)
+                    continue
+
+                res = self.m_store.exists(keys)  # type: ignore[assignment]
+
                 if use_layerwise:
-                    keys_multi_layer = key.split_layers(self.num_layers)
-                    for item in keys_multi_layer:
-                        keys.append(item.to_string())
+                    res = self.check_all_layers_exists(res, self.num_layers)
+                if self.group_uses_align_state[group_id]:
+                    hit_end = 0
+                    for index, value in enumerate(res):  # type: ignore[arg-type]
+                        if value != 1:
+                            break
+                        hit_end = ends[index]
                 else:
-                    keys.append(key.to_string())
-                starts.append(start)
-
-            res = self.m_store.exists(keys)  # type: ignore[assignment]
-
-            if use_layerwise:
-                res = self.check_all_layers_exists(res, self.num_layers)
-            for index, value in enumerate(res):  # type: ignore[arg-type]
-                if value != 1:
-                    return starts[index]
-            # all tokens where found, return the maximal end
+                    hit_end = end
+                    for index, value in enumerate(res):  # type: ignore[arg-type]
+                        if value != 1:
+                            hit_end = starts[index]
+                            break
+                hits.append(hit_end)
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
             return 0
-        return end
+        return min(hits) if hits else 0
 
     def lookup_scheduler(
         self,
         token_len: int,
         block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int],
         use_layerwise: bool,
     ) -> int:
         """
@@ -585,52 +666,71 @@ class KVPoolWorker:
         :param tokens: the input tokens, with shape [seq_len]
         :return: An int indicating how many prefix tokens are cached.
         """
-        end = 0
-        keys = []
         try:
-            starts = []
-            for start, end, key in self.token_database.process_tokens(token_len, block_hashes):
+            hits = []
+            for group_id in kv_cache_group_ids:
+                end = 0
+                keys = []
+                starts = []
+                ends = []
+                for start, end, key in self.token_database.process_tokens(
+                    token_len,
+                    block_hashes,
+                    kv_cache_group_id=group_id,
+                ):
+                    if use_layerwise:
+                        keys_multi_layer = key.split_layers(self.num_layers)
+                        for item in keys_multi_layer:
+                            keys.append(item.to_string())
+                    else:
+                        keys.append(key.to_string())
+                    starts.append(start)
+                    ends.append(end)
+
+                if not keys:
+                    hits.append(0)
+                    continue
+
+                multi_tp_keys = keys[:]
+                for i in range(1, min(self.tp_size, self.num_kv_head)):
+                    for item in keys:
+                        new_str = item.replace(  # type: ignore[attr-defined]
+                            "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1
+                        )
+                        multi_tp_keys.append(new_str)
+
+                pp_base_keys = multi_tp_keys.copy()
+                for i in range(1, self.pp_size):
+                    for item in pp_base_keys:
+                        new_str = item.replace(  # type: ignore[attr-defined]
+                            "@pp_rank:0", f"@pp_rank:{i}", 1
+                        )
+                        multi_tp_keys.append(new_str)
+
+                res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
+                num_block = len(keys)
                 if use_layerwise:
-                    keys_multi_layer = key.split_layers(self.num_layers)
-                    for item in keys_multi_layer:
-                        keys.append(item.to_string())
+                    res = self.check_all_layers_exists(res, self.num_layers)
+                    num_block = len(keys) // self.num_layers
+                multi_tp_values = [
+                    res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
+                    for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
+                ]
+                if self.group_uses_align_state[group_id]:
+                    exists_by_block = [all(values[idx] == 1 for values in multi_tp_values) for idx in range(num_block)]
+                    hit_end = 0
+                    for index, exists in enumerate(exists_by_block):
+                        if not exists:
+                            break
+                        hit_end = ends[index]
+                    hits.append(hit_end)
                 else:
-                    keys.append(key.to_string())
-                starts.append(start)
-
-            multi_tp_keys = keys[:]
-            for i in range(1, min(self.tp_size, self.num_kv_head)):
-                for item in keys:
-                    new_str = item.replace(  # type: ignore[attr-defined]
-                        "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1
-                    )
-                    multi_tp_keys.append(new_str)
-
-            pp_base_keys = multi_tp_keys.copy()
-            for i in range(1, self.pp_size):
-                for item in pp_base_keys:
-                    new_str = item.replace(  # type: ignore[attr-defined]
-                        "@pp_rank:0", f"@pp_rank:{i}", 1
-                    )
-                    multi_tp_keys.append(new_str)
-
-            res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
-            num_block = len(keys)
-            if use_layerwise:
-                res = self.check_all_layers_exists(res, self.num_layers)
-                num_block = len(keys) // self.num_layers
-            multi_tp_values = [
-                res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
-                for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
-            ]
-            index = self.find_min_first_non_one_index(multi_tp_values)
-            if index != -1:
-                return starts[index]
-        # all tokens where found, return the maximal end
+                    index = self.find_min_first_non_one_index(multi_tp_values)
+                    hits.append(starts[index] if index != -1 else end)
         except Exception as e:
             logger.error(f"Remote connection failed in contains: {e}")
             return 0
-        return end
+        return min(hits) if hits else 0
 
     def check_all_layers_exists(self, res: list[int], num_layers: int) -> list[int]:
         total_chunks = len(res) // num_layers
