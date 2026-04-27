@@ -53,11 +53,8 @@ class AscendSimpleCPUOffloadConnector(SimpleCPUOffloadConnector):
         # as None and the connector is a no-op — nothing to swap.
         if role == KVConnectorRole.WORKER and self.worker_handler is not None:
             cpu_capacity = self.worker_handler.cpu_capacity_bytes
-            self.worker_handler = SimpleCPUOffloadNPUWorker(
-                vllm_config, kv_cache_config, cpu_capacity
-            )
+            self.worker_handler = SimpleCPUOffloadNPUWorker(vllm_config, kv_cache_config, cpu_capacity)
             logger.info(
-                "AscendSimpleCPUOffloadConnector: swapped CUDA worker for "
-                "NPU worker (per_rank=%.2f GB)",
+                "AscendSimpleCPUOffloadConnector: swapped CUDA worker for NPU worker (per_rank=%.2f GB)",
                 cpu_capacity / (1024**3),
             )

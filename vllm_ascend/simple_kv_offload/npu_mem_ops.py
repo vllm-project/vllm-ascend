@@ -12,7 +12,6 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
-
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -48,9 +47,7 @@ def build_params(
     matching ``[num_blocks, block_bytes]`` layout (already prepared by
     :class:`SimpleCPUOffloadNPUWorker.register_kv_caches`).
     """
-    assert list(src_caches.keys()) == list(dst_caches.keys()), (
-        "src/dst cache key order must match"
-    )
+    assert list(src_caches.keys()) == list(dst_caches.keys()), "src/dst cache key order must match"
     src_tensors = _ordered_tensors(src_caches)
     dst_tensors = _ordered_tensors(dst_caches)
 
@@ -60,9 +57,7 @@ def build_params(
     for s, d in zip(src_tensors, dst_tensors):
         s_bpb = s.stride(0) * s.element_size()
         d_bpb = d.stride(0) * d.element_size()
-        assert s_bpb == d_bpb, (
-            f"per-block bytes mismatch src={s_bpb} dst={d_bpb}"
-        )
+        assert s_bpb == d_bpb, f"per-block bytes mismatch src={s_bpb} dst={d_bpb}"
         src_bases.append(s.data_ptr())
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
@@ -98,14 +93,10 @@ def copy_blocks(
     bpb_col = params.bpb[:, None]
     src_all = (params.src_bases[:, None] + src_ids[None, :] * bpb_col).ravel()
     dst_all = (params.dst_bases[:, None] + dst_ids[None, :] * bpb_col).ravel()
-    sz_all = np.broadcast_to(
-        bpb_col, (params.num_sub_tensors, n)
-    ).ravel().copy()
+    sz_all = np.broadcast_to(bpb_col, (params.num_sub_tensors, n)).ravel().copy()
 
     batch_src = torch.from_numpy(src_all)
     batch_dst = torch.from_numpy(dst_all)
     batch_sizes = torch.from_numpy(sz_all)
 
-    torch.ops._C_ascend.swap_blocks_batch(
-        batch_src, batch_dst, batch_sizes, params.direction
-    )
+    torch.ops._C_ascend.swap_blocks_batch(batch_src, batch_dst, batch_sizes, params.direction)

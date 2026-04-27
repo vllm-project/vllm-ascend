@@ -73,8 +73,7 @@ def test_simple_cpu_offload_accuracy() -> None:
                 success += 1
 
         assert success >= int(0.5 * attempts), (
-            f"CPU-load accuracy too low: {success}/{attempts} matched "
-            f"baseline output {expected!r}"
+            f"CPU-load accuracy too low: {success}/{attempts} matched baseline output {expected!r}"
         )
 
 

@@ -8,7 +8,6 @@ The scheduler-side metadata protocol is identical and reused as-is.
 from typing import TYPE_CHECKING
 
 import torch
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -37,9 +36,7 @@ def _flatten_kv_value(
     """
     if isinstance(value, torch.Tensor):
         return [value]
-    assert isinstance(value, (tuple, list)), (
-        f"unexpected kv_caches value type: {type(value)}"
-    )
+    assert isinstance(value, (tuple, list)), f"unexpected kv_caches value type: {type(value)}"
     return [t for t in value if isinstance(t, torch.Tensor)]
 
 
@@ -117,23 +114,14 @@ class SimpleCPUOffloadNPUWorker:
                     continue
                 seen_ptrs.add(ptr)
 
-                key = (
-                    layer_name if sub_idx == 0 else f"{layer_name}.{sub_idx}"
-                )
-                unique_caches.update(
-                    self._build_block_views(key, tensor, num_blocks)
-                )
+                key = layer_name if sub_idx == 0 else f"{layer_name}.{sub_idx}"
+                unique_caches.update(self._build_block_views(key, tensor, num_blocks))
 
-        per_tensor_bpb = [
-            t.stride(0) * t.element_size() for t in unique_caches.values()
-        ]
+        per_tensor_bpb = [t.stride(0) * t.element_size() for t in unique_caches.values()]
         total_bytes_per_block = sum(per_tensor_bpb)
-        self.num_cpu_blocks = max(
-            1, self.cpu_capacity_bytes // total_bytes_per_block
-        )
+        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
         logger.info(
-            "SimpleCPUOffloadNPUWorker: %d unique NPU KV tensors, "
-            "allocating %d CPU blocks (%.2f GB)",
+            "SimpleCPUOffloadNPUWorker: %d unique NPU KV tensors, allocating %d CPU blocks (%.2f GB)",
             len(unique_caches),
             self.num_cpu_blocks,
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
@@ -141,10 +129,7 @@ class SimpleCPUOffloadNPUWorker:
 
         pin_memory = is_pin_memory_available()
         if not pin_memory:
-            logger.warning(
-                "Pinned memory not available; CPU offload throughput "
-                "may be degraded on this host."
-            )
+            logger.warning("Pinned memory not available; CPU offload throughput may be degraded on this host.")
 
         self.npu_kv_caches = unique_caches
         self.cpu_kv_caches = {
@@ -186,16 +171,10 @@ class SimpleCPUOffloadNPUWorker:
         exists and we fall through to a single view.
         """
         storage = tensor.untyped_storage()
-        raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(
-            storage, 0, (storage.nbytes(),)
-        )
+        raw = torch.empty(0, dtype=torch.int8, device=tensor.device).set_(storage, 0, (storage.nbytes(),))
         el = tensor.element_size()
         page_size_bytes = storage.nbytes() // num_blocks
-        outer_dims = [
-            d
-            for d in range(tensor.ndim)
-            if tensor.stride(d) * el > page_size_bytes
-        ]
+        outer_dims = [d for d in range(tensor.ndim) if tensor.stride(d) * el > page_size_bytes]
         if not outer_dims:
             return {key: raw.view(num_blocks, -1)}
 
@@ -256,23 +235,15 @@ class SimpleCPUOffloadNPUWorker:
 
         if self._pending_load_event_indices:
             load_wm = self._poll_stream_events(is_store=False)
-            for j in [
-                j for j in self._pending_load_event_indices if j <= load_wm
-            ]:
+            for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
                 self._pending_load_event_indices.discard(j)
-                req_ids = (
-                    metadata.load_event_to_reqs.get(j)
-                    if metadata is not None
-                    else None
-                )
+                req_ids = metadata.load_event_to_reqs.get(j) if metadata is not None else None
                 if req_ids:
                     finished_recving.update(req_ids)
 
         if self._pending_store_event_indices:
             store_wm = self._poll_stream_events(is_store=True)
-            for j in [
-                j for j in self._pending_store_event_indices if j <= store_wm
-            ]:
+            for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
                 self._pending_store_event_indices.discard(j)
                 self._completed_store_events[j] = 1
 
@@ -289,9 +260,7 @@ class SimpleCPUOffloadNPUWorker:
         self._completed_store_events = {}
         return meta
 
-    def handle_preemptions(
-        self, kv_connector_metadata: SimpleCPUOffloadMetadata
-    ) -> None:
+    def handle_preemptions(self, kv_connector_metadata: SimpleCPUOffloadMetadata) -> None:
         if not kv_connector_metadata.need_flush:
             return
         self._flush_and_sync_all()

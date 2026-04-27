@@ -11,7 +11,6 @@ import queue
 import threading
 
 import torch
-
 from vllm.logger import init_logger
 
 from vllm_ascend.simple_kv_offload.npu_mem_ops import (
@@ -57,12 +56,8 @@ class NPUDmaCopyBackend:
         self._store_stream = store_stream
         self._device = device
         # Stores go NPU->CPU (D2H), loads go CPU->NPU (H2D).
-        self._store_params = build_params(
-            npu_caches, cpu_caches, DIRECTION_D2H
-        )
-        self._load_params = build_params(
-            cpu_caches, npu_caches, DIRECTION_H2D
-        )
+        self._store_params = build_params(npu_caches, cpu_caches, DIRECTION_D2H)
+        self._load_params = build_params(cpu_caches, npu_caches, DIRECTION_H2D)
 
         self._queue = queue.SimpleQueue()
         self._thread = threading.Thread(
@@ -82,9 +77,7 @@ class NPUDmaCopyBackend:
     ) -> None:
         params = self._store_params if is_store else self._load_params
         assert params is not None and self._queue is not None
-        self._queue.put(
-            (src_blocks, dst_blocks, params, is_store, event_idx, events_list)
-        )
+        self._queue.put((src_blocks, dst_blocks, params, is_store, event_idx, events_list))
 
     def shutdown(self) -> None:
         if self._shutdown:
