@@ -70,9 +70,7 @@ def test_qwen3_dense_eager_mode(
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config", [{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]}, {}]
-)
+@pytest.mark.parametrize("compilation_config", [{"cudagraph_mode": "FULL_DECODE_ONLY"}, {}])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_egale_spec_decoding(
     model: str,
@@ -92,6 +90,7 @@ def test_egale_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=1024,
+        max_num_seqs=8,
         enforce_eager=enforce_eager,
         async_scheduling=True,
         speculative_config={

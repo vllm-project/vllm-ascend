@@ -81,12 +81,15 @@ class EagleAclGraphManager(EagleCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
+
         if self.is_draft_model_prefill:
             logger.info_once(f"draft prefill run_fullgraph with num_tokens={num_tokens}")
         else:
             logger.info_once(f"draft run_fullgraph with num_tokens={num_tokens}")
 
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
+        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+            self.is_draft_model_prefill, desc.num_reqs, num_tokens
+        )
 
         ret = super().run_fullgraph(desc)
 

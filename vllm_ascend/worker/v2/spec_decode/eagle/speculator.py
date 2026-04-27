@@ -61,7 +61,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
         if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
             self.input_buffers.draft_seq_lens_cpus = [
-                torch.zeros(self.max_num_reqs, dtype=torch.int32, device="cpu")
+                torch.zeros(self.max_num_reqs + 1, dtype=torch.int32, device="cpu")
                 for _ in range(self.num_speculative_steps - 1)
             ]
 
@@ -172,8 +172,14 @@ class AscendEagleSpeculator(EagleSpeculator):
         attn_metadata is created in super propose method, it does not have some
         attribute that Ascend attention backend needs, so we update it.
         """
-        self._init_decode_attn_metadata(attn_metadata, num_reqs)
-        self._increment_decode_attn_metadata(attn_metadata)
+        self._set_seq_lens_cpu()
+
+        # in decodes scene, fia needs actual_seq_lengths_q's last element to be aligned with num_tokens_padded
+        # so, a dummy seq maybe added to keep actual_seq_lengths_q okay
+        num_reqs_padded = self._maybe_pad_req_for_decode_fia(num_reqs, num_tokens_padded)
+
+        self._init_decode_attn_metadata(attn_metadata, num_reqs_padded)
+        self._update_decode_attn_metadata(attn_metadata, 1, num_reqs, num_tokens_padded)
 
         # NOTE(drslark): following lines (from 145 to 184) come from raw gpu's generate_draft logic
         pos = self.input_buffers.positions[:num_reqs]
@@ -218,7 +224,7 @@ class AscendEagleSpeculator(EagleSpeculator):
                     self.block_tables.compute_slot_mappings(idx_mapping, query_start_loc, pos, num_tokens_padded)
 
                     # npu's own update logic
-                    self._increment_decode_attn_metadata(attn_metadata)
+                    self._update_decode_attn_metadata(attn_metadata, step + 1, num_reqs, num_tokens_padded)
 
     @torch.inference_mode()
     def run_model(
@@ -251,8 +257,10 @@ class AscendEagleSpeculator(EagleSpeculator):
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
         return last_hidden_states, hidden_states
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
+    def build_draft_attn_metadatas(self, is_draft_model_prefill, num_reqs_padded, num_tokens):
         """Build draft_attn_metadatas for partial-merged draft graph."""
+        self._set_seq_lens_cpu()
+
         attn_metadata = self.model_state.attn_metadata
         attn_metadata = {
             name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
@@ -261,21 +269,29 @@ class AscendEagleSpeculator(EagleSpeculator):
         if is_draft_model_prefill:
             return [attn_metadata]
 
+        num_reqs_padded = self._maybe_pad_req_for_decode_fia(num_reqs_padded, num_tokens)
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
 
         for i, per_step_attn_metadata in enumerate(draft_attn_metadatas):
             step = i + 1
             assert self.input_batch is not None
-            self._update_decode_attn_metadata(per_step_attn_metadata, step, self.input_batch.num_reqs)
+            self._update_decode_attn_metadata(per_step_attn_metadata, step, self.input_batch.num_reqs, num_tokens)
 
         return draft_attn_metadatas
+
+    def _maybe_pad_req_for_decode_fia(self, num_reqs: int, num_tokens_padded: int):
+        """Maybe pad dummy requests for decode fia."""
+        num_tokens_actual = num_reqs
+        if num_tokens_actual == num_tokens_padded:
+            return num_reqs
+        return num_reqs + 1
 
     def _init_decode_attn_metadata(self, attn_metadata: dict[str, Any], num_reqs: int):
         """Initialize attention metadata for decode phase on Ascend NPUs."""
         if attn_metadata is None:
             return
 
-        attn_state = AscendAttentionState.DecodeOnly
+        attn_state = AscendAttentionState.ChunkedPrefill
         seq_lens_cpu = self._get_seq_lens_cpu()[:num_reqs]
 
         # attn_metadata is build in vllm's super class.
@@ -289,7 +305,7 @@ class AscendEagleSpeculator(EagleSpeculator):
         if attn_metadata is None:
             return
 
-        attn_state = AscendAttentionState.DecodeOnly
+        attn_state = AscendAttentionState.ChunkedPrefill
 
         draft_attn_metadatas = []
         # attn_metadata is build in vllm's super class.
@@ -305,12 +321,9 @@ class AscendEagleSpeculator(EagleSpeculator):
 
         return draft_attn_metadatas
 
-    def _increment_decode_attn_metadata(self, attn_metadata: dict[str, Any]):
-        """Increment attention metadata for decode phase on Ascend NPUs."""
-        # in eager mode, attn_metadata's seq_lens_cpu and input_buffers's seq_lens_cpu shares the memory
-        self._update_decode_attn_metadata(attn_metadata, 1)
-
-    def _update_decode_attn_metadata(self, attn_metadata: dict[str, Any], step: int, num_reqs: int | None = None):
+    def _update_decode_attn_metadata(
+        self, attn_metadata: dict[str, Any], step: int, num_reqs: int | None = None, num_tokens: int | None = None
+    ):
         """Update attention metadata for decode phase on Ascend NPUs."""
         if attn_metadata is None:
             return
@@ -321,7 +334,11 @@ class AscendEagleSpeculator(EagleSpeculator):
             num_reqs = num_reqs_padded
         next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
 
-        query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
+        query_lens_list = [i for i in range(1, num_reqs + 1)]
+        if num_reqs_padded > num_reqs:
+            assert num_tokens is not None
+            query_lens_list.append(num_tokens)
+
         seq_lens_list = next_seq_lens_cpu.tolist()
         # attn_metadata is build in vllm's super class.
         # We need to update attn_state for each layer's metadata.
@@ -339,10 +356,15 @@ class AscendEagleSpeculator(EagleSpeculator):
         next_seqs_cpu[num_reqs:].fill_(0)
         return next_seqs_cpu
 
+    def _set_seq_lens_cpu(self) -> None:
+        assert self.input_buffers is not None
+        assert self.input_batch is not None
+        self.input_buffers.seq_lens_np[:] = self.input_batch.seq_lens_np
+
     def _get_seq_lens_cpu(self) -> torch.Tensor:
         """Get seq_lens_cpu from input_batch."""
-        assert self.input_batch is not None
-        seq_lens_cpu = torch.from_numpy(self.input_batch.seq_lens_np)
+        assert self.input_buffers is not None
+        seq_lens_cpu = torch.from_numpy(self.input_buffers.seq_lens_np)
         return seq_lens_cpu
 
 
