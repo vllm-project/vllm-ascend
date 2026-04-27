@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-27 02:14+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -63,15 +63,15 @@ msgstr "🚧 = 开发中"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:13
 msgid "1. Run docker container"
-msgstr "1. 运行 Docker 容器"
+msgstr "1.运行 Docker 容器"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:39
 msgid "2. Install dependencies"
-msgstr "2. 安装依赖项"
+msgstr "2.安装依赖项"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:47
 msgid "3. Run basic benchmarks"
-msgstr "3. 运行基础基准测试"
+msgstr "3.运行基础基准测试"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:49
 msgid ""
@@ -81,15 +81,15 @@ msgstr "本节介绍如何使用 VLLM 内置的基准测试套件进行性能测
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:51
 msgid "3.1 Dataset"
-msgstr "3.1 数据集"
+msgstr "3.1数据集"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:53
 msgid ""
 "VLLM supports a variety of [datasets](https://github.com/vllm-"
-"project/vllm/blob/main/vllm/benchmarks/datasets.py)."
+"project/vllm/blob/main/vllm/benchmarks/datasets/datasets.py)."
 msgstr ""
 "VLLM 支持多种[数据集](https://github.com/vllm-"
-"project/vllm/blob/main/vllm/benchmarks/datasets.py)。"
+"project/vllm/blob/main/vllm/benchmarks/datasets/datasets.py)。"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:15
 msgid "Dataset"
@@ -287,36 +287,36 @@ msgstr ""
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:93
 msgid "3.2 Run basic benchmark"
-msgstr "3.2 运行基础基准测试"
+msgstr "3.2运行基础基准测试"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:95
 msgid "3.2.1 Online serving"
-msgstr "3.2.1 在线服务"
+msgstr "3.2.1在线服务"
 
 #: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:97
 msgid "First start serving your model:"
 msgstr "首先启动模型服务："
 
-#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:103
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:104
 msgid "Then run the benchmarking script:"
 msgstr "然后运行基准测试脚本："
 
-#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:118
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:119
 msgid "If successful, you will see the following output:"
 msgstr "如果成功，您将看到以下输出："
 
-#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:147
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:148
 msgid "3.2.2 Offline Throughput Benchmark"
-msgstr "3.2.2 离线吞吐量基准测试"
+msgstr "3.2.2离线吞吐量基准测试"
 
-#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:158
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:159
 msgid "If successful, you will see the following output"
 msgstr "如果成功，您将看到以下输出："
 
-#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:167
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:168
 msgid "3.2.4 Multi-Modal Benchmark"
-msgstr "3.2.4 多模态基准测试"
+msgstr "3.2.4多模态基准测试"
 
-#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:216
+#: ../../source/developer_guide/performance_and_debug/performance_benchmark.md:217
 msgid "3.2.5 Embedding Benchmark"
-msgstr "3.2.5 嵌入基准测试"
+msgstr "3.2.5嵌入基准测试"
