@@ -14,6 +14,7 @@ test_cases:
       VLLM-ASCEND_ENABLE_NZ: "3"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       VLLM-ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_USE_MODELSCOPE: "true"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--tensor-parallel-size"
@@ -32,7 +33,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
       - "--speculative_config"
-      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/popowww/MiniMax-M2___5-Eagle3","num_speculative_tokens":3}'
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagel-model-0318","num_speculative_tokens":3}'
       - "--enable-expert-parallel"
       - "--max-num-seqs"
       - "32"
