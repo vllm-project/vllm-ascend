@@ -11,7 +11,6 @@ env_common:
   VLLM_ASCEND_BALANCE_SCHEDULING: 1
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_USE_MODELSCOPE: true
-  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
   SERVER_PORT: 8080
 
 special_dependencies:
@@ -25,11 +24,11 @@ deployment:
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
-      --tensor-parallel-size 4
+      --tensor-parallel-size 8
       --enable-expert-parallel
       --seed 1024
-      --max-num-seqs 48
-      --max-model-len 20480
+      --max-num-seqs 64
+      --max-model-len 38000
       --max-num-batched-tokens 4096
       --trust-remote-code
       --gpu-memory-utilization 0.95
@@ -37,8 +36,8 @@ deployment:
       --enable-chunked-prefill
       --no-enable-prefix-caching
       --async-scheduling
-      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"fuse_qknorm_rope":false}'
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,48,60,72]}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
   -
     server_cmd: >
@@ -46,11 +45,11 @@ deployment:
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 2
-      --tensor-parallel-size 4
+      --tensor-parallel-size 8
       --enable-expert-parallel
       --seed 1024
-      --max-num-seqs 48
-      --max-model-len 20480
+      --max-num-seqs 64
+      --max-model-len 38000
       --max-num-batched-tokens 4096
       --trust-remote-code
       --gpu-memory-utilization 0.95
@@ -58,8 +57,8 @@ deployment:
       --enable-chunked-prefill
       --no-enable-prefix-caching
       --async-scheduling
-      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true}'
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"fuse_qknorm_rope":false}'
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,48,60,72]}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 benchmarks:
   perf:
