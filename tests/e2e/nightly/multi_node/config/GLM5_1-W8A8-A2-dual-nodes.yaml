@@ -8,12 +8,13 @@ env_common:
   OMP_NUM_THREADS: 1
   HCCL_BUFFSIZE: 200
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_BALANCE_SCHEDULING: 0
+  VLLM_ASCEND_BALANCE_SCHEDULING: 1
   VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_USE_MODELSCOPE: true
-  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
-  VLLM_RPC_TIMEOUT: "600"
+  VLLM_ENGINE_READY_TIMEOUT_S: 3000
+  VLLM_RPC_TIMEOUT: 600
   SERVER_PORT: 8078
+
 special_dependencies:
   transformers: "5.2.0"
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
@@ -73,9 +74,9 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 72
+    num_prompts: 160
     max_out_len: 1500
-    batch_size: 18
+    batch_size: 40
     request_rate: 0
     baseline: 1
     threshold: 0.97
