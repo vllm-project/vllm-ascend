@@ -294,32 +294,21 @@ class NPUModelRunner(GPUModelRunner):
         if _is_ngram_gpu:
             vllm_config.speculative_config.method = "ngram_gpu"
 
-        # Pre-record all NPU events created during super().__init__() on
-        # the default stream so the first synchronize() call from
-        # upstream code does not fail. Unlike CUDA, NPU returns
-        # ``SUSPECT REMOTE ERROR (507057)`` on synchronize() of an event
-        # with no completion anchor. The default stream already has
-        # init-time work queued by super().__init__() so record() here
-        # gives every event a real anchor.
+        # Replace ``prepare_inputs_event`` (created by super().__init__()
+        # only when ``use_async_scheduling=True``) with a lazy-event
+        # proxy so the first ``synchronize_input_prep`` call -- which
+        # unconditionally syncs the event before any record() runs --
+        # is a no-op on NPU, matching CUDA's "synchronize on unrecorded
+        # event = no-op" semantic. Without this, NPU returns
+        # ``SUSPECT REMOTE ERROR (507057)``.
         #
-        # NOTE: We deliberately do NOT call ``synchronize()`` here ---
-        # that would block on init-time ops (model weight load, KV cache
-        # alloc) finishing, which can dramatically slow startup, and on
-        # NPU it can also itself surface as 507057 if any of those
-        # init-time ops error asynchronously. The host-side observation
-        # cache is not needed; upstream's later synchronize() will see
-        # a valid recorded event and become a fast no-op once the
-        # default stream has progressed past the recording point.
-        for attr in (
-            'prepare_inputs_event',
-            'num_accepted_tokens_event',
-            'draft_token_ids_event',
-            'valid_sampled_token_count_event',
-            'transfer_event',
-        ):
-            ev = getattr(self, attr, None)
-            if ev is not None and hasattr(ev, 'record'):
-                ev.record()
+        # The other events created by ``super().__init__()`` --
+        # ``draft_token_ids_event``, ``valid_sampled_token_count_event``,
+        # ``num_accepted_tokens_event``, ``transfer_event`` -- are always
+        # record()-ed before being synchronized in their own code paths,
+        # so they do not need this treatment.
+        if getattr(self, 'prepare_inputs_event', None) is not None:
+            self.prepare_inputs_event = _NPULazyEvent()
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -1455,23 +1444,26 @@ class NPUModelRunner(GPUModelRunner):
             # Also normalizes dtype to int32 (kernel's binding contract,
             # see csrc/ngram_spec_decode/ngram_spec_decode_torch_adpt.h).
             sampled_buf = self._sampled_token_ids_buf
-            sampled_buf.fill_(-1)
+            # Reset only the rows the kernel will read; the trailing
+            # (max_num_reqs - batch_size) rows act as a passive DMA
+            # over-read cushion and need not be cleared each step.
+            sampled_buf[:batch_size].fill_(-1)
             sampled_token_ids = valid_sampled_token_ids
             if isinstance(sampled_token_ids, list):
-                src_max_len = max(
-                    (len(sublist) for sublist in sampled_token_ids), default=0
-                )
-                if src_max_len > 0:
-                    cols = min(src_max_len, sampled_buf.shape[1])
-                    src_rows = min(len(sampled_token_ids), batch_size)
-                    for i in range(src_rows):
-                        row = sampled_token_ids[i]
-                        if not row:
-                            continue
-                        n = min(len(row), cols)
-                        sampled_buf[i, :n] = torch.tensor(
-                            row[:n], dtype=torch.int32, device=self.device
+                # Build a single padded [src_rows, num_spec+1] tensor in
+                # one go, avoiding O(B) small-tensor allocations.
+                src_rows = min(len(sampled_token_ids), batch_size)
+                cols = sampled_buf.shape[1]
+                if src_rows > 0:
+                    padded = [
+                        (row[:cols] + [-1] * (cols - len(row[:cols])))
+                        for row in sampled_token_ids[:src_rows]
+                    ]
+                    sampled_buf[:src_rows].copy_(
+                        torch.tensor(
+                            padded, dtype=torch.int32, device=self.device
                         )
+                    )
             else:
                 src = sampled_token_ids
                 if src.dtype != torch.int32:
@@ -1485,33 +1477,23 @@ class NPUModelRunner(GPUModelRunner):
             sampled_b = sampled_buf[:batch_size]
 
             # NOTE: do NOT call .contiguous() on token_ids_gpu_tensor's
-            # slice — the kernel writes in-place; .contiguous() on an
-            # already-contiguous leading slice is a no-op, but on a
-            # non-contiguous one it would silently redirect writes to a
-            # copy. Leading slices of a contiguous 2D tensor are
-            # contiguous by construction.
+            # slice — the kernel writes in-place; .contiguous() on a
+            # non-contiguous slice would silently redirect writes to a
+            # temporary copy. Leading slices of a contiguous 2D tensor
+            # are contiguous by construction.
             token_ids_b = self.token_ids_gpu_tensor[:batch_size]
             num_tokens_b = self.num_tokens_no_spec_gpu[:batch_size]
-
             # ``discard_request_mask.gpu`` is bool; the C++ binding
             # converts it to int32 (see ngram_spec_decode_torch_adpt.h).
-            # Pass the raw bool slice — the slice's underlying allocation
-            # is [max_num_reqs] so it has the same DMA over-read margin
-            # as token_ids_gpu_tensor.
+            # Underlying allocation is [max_num_reqs] so the slice has
+            # the same DMA over-read margin as token_ids_gpu_tensor.
             discard_b = self.discard_request_mask.gpu[:batch_size]
-
-            # Clamp num_tokens_no_spec into [0, max_seq_len] so the
-            # kernel's ``backup_pos = seq_len - 1`` and ngram-search
-            # indices stay within bounds. In-place to keep the kernel's
-            # in-place view of the same buffer consistent.
-            max_seq_len = self.token_ids_gpu_tensor.shape[1]
-            num_tokens_b.clamp_(min=0, max=max_seq_len)
 
             (_token_ids, next_token_ids, draft_token_ids,
              num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
                 token_ids_b,            # [B, max_seq_len], int32, in-place
-                num_tokens_b,           # [B], int32, clamped to [0, max_seq_len]
-                sampled_b,              # [B, num_spec+1], int32, persistent buffer
+                num_tokens_b,           # [B], int32
+                sampled_b,              # [B, num_spec+1], int32, persistent
                 discard_b,              # [B], bool (binding casts to int32)
                 vocab_size=vocab_size,
                 min_n=self.drafter.min_n,
@@ -1523,9 +1505,8 @@ class NPUModelRunner(GPUModelRunner):
             # num_computed_tokens correction.
             valid_mask = (sampled_b != -1) & (sampled_b < vocab_size)
             valid_sampled_tokens_count = valid_mask.sum(dim=1).to(torch.int32)
-            valid_sampled_tokens_count.masked_fill_(
-                self.discard_request_mask.gpu[:batch_size].bool(), 0
-            )
+            # discard_b is already bool — no need for an extra .bool() cast.
+            valid_sampled_tokens_count.masked_fill_(discard_b, 0)
             self._copy_valid_sampled_token_count(
                 next_token_ids, valid_sampled_tokens_count
             )
