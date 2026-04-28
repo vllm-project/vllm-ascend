@@ -81,6 +81,7 @@ class KVTransferThread(threading.Thread):
                 self._handle_request(request_data)
             except Exception as e:
                 logger.error(f"Error in KVCacheTransferThread: {e}")
+                self.request_queue.task_done()
 
     def _handle_request(self, req_meta: Any):
         pass
