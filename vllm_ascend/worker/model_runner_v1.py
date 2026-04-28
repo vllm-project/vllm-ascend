@@ -805,7 +805,7 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
-                if self.pcp_size > 1:
+                if self.common_pcp_size > 1:
                     # PCP can split one request into non-contiguous token positions.
                     # We must gather prompt embeds by actual scheduled positions.
                     req_positions_np = positions_np[output_idx : output_idx + num_sched]
@@ -990,7 +990,7 @@ class NPUModelRunner(GPUModelRunner):
         self._update_batch_req_cp_sizes(scheduler_output, num_cp_request)
         # Cache local scheduled token layout for PCP-aware multimodal preprocess.
         if (
-            self.pcp_size > 1
+            self.common_pcp_size > 1
             and self.supports_mm_inputs
             and get_pp_group().is_first_rank
             and not self.model_config.is_encoder_decoder
@@ -1026,7 +1026,7 @@ class NPUModelRunner(GPUModelRunner):
         # For PCP, local worker token count can differ from scheduler global count.
         # Multimodal preprocessing must use local scheduled token count.
         if (
-            self.pcp_size > 1
+            self.common_pcp_size > 1
             and self.supports_mm_inputs
             and get_pp_group().is_first_rank
             and not self.model_config.is_encoder_decoder
@@ -1053,7 +1053,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         finally:
             if (
-                self.pcp_size > 1
+                self.common_pcp_size > 1
                 and self.supports_mm_inputs
                 and get_pp_group().is_first_rank
                 and not self.model_config.is_encoder_decoder
@@ -1067,7 +1067,7 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        if self.pcp_size <= 1:
+        if self.common_pcp_size <= 1:
             return super()._gather_mm_embeddings(scheduler_output, shift_computed_tokens)
 
         local_num_scheduled_tokens, _ = self.pcp_manager.get_local_schedule_layout()
@@ -1395,7 +1395,7 @@ class NPUModelRunner(GPUModelRunner):
             # only for PCP (Parallel Context Processing) + Multi-Modal (MM) scenarios. 
             # It does not affect other use cases. This is a temporary workaround and 
             # will be removed once upstream vLLM provides native support for PCP + MM.
-            self.pcp_size > 1 and self.supports_mm_inputs and get_pp_group().is_first_rank
+            self.common_pcp_size > 1 and self.supports_mm_inputs and get_pp_group().is_first_rank
             and not self.model_config.is_encoder_decoder
         )):
             scheduler_output = deepcopy(scheduler_output)
