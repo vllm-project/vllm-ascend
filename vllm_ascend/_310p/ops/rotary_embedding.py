@@ -234,9 +234,7 @@ class AscendMRotaryEmbedding310(AscendMRotaryEmbedding):
         use_npu_apply = self.rotary_dim in (64, 128)
 
         if use_npu_apply:
-            q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(
-                q_rot, k_rot, cos, sin, rotary_mode=rotary_mode
-            )
+            q_rot, k_rot = torch_npu.npu_apply_rotary_pos_emb(q_rot, k_rot, cos, sin, rotary_mode=rotary_mode)
         else:
             q_rot, k_rot = _apply_rotary_mrope_torch(q_rot, k_rot, cos, sin, self.is_neox_style)
 
