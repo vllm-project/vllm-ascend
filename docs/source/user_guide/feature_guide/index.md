@@ -25,9 +25,9 @@ Fine_grained_TP
 layer_sharding
 speculative_decoding
 context_parallel
-npugraph_ex
 weight_prefetch
 sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment
+dynamic_chunk_pipeline_parallel
 :::

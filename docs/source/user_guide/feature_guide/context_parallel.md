@@ -79,7 +79,7 @@ The total world size is `tensor_parallel_size` * `prefill_context_parallel_size`
 
 ## Experimental Results
 
-To evaluate the effectiveness of Context Parallel in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD disaggregate instances in the environment of 64 cards Ascend 910C*64G (A3), the configuration and performance data are as follows.
+To evaluate the effectiveness of Context Parallel in long sequence LLM inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, deploy PD disaggregate instances in the environment of 64 cards Ascend Atlas A3 inference products*64G (A3), the configuration and performance data are as follows.
 
 - DeepSeek-R1-W8A8:
 

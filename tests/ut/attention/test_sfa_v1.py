@@ -2,29 +2,25 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm.distributed.parallel_state import GroupCoordinator
 
-if 'torch_npu._inductor' not in sys.modules:
-    sys.modules['torch_npu._inductor'] = MagicMock()
+if "torch_npu._inductor" not in sys.modules:
+    sys.modules["torch_npu._inductor"] = MagicMock()
 
-from vllm_ascend.attention.sfa_v1 import (AscendSFABackend, AscendSFAImpl,
-                                          AscendSFAMetadata,
-                                          AscendSFAMetadataBuilder)
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.utils import enable_dsa_cp
 
 
 class TestAscendSFABackend(TestBase):
-
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 
     def test_get_builder_cls(self):
-        self.assertEqual(AscendSFABackend.get_builder_cls(),
-                         AscendSFAMetadataBuilder)
+        self.assertEqual(AscendSFABackend.get_builder_cls(), AscendSFAMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
         result = AscendSFABackend.get_kv_cache_shape(2, 4, 8, 128)
@@ -36,7 +32,6 @@ class TestAscendSFABackend(TestBase):
 
 
 class TestAscendSFAMetadata(TestBase):
-
     def test_ascend_sfa_metadata_default(self):
         num_actual_tokens = 100
         slot_mapping = torch.randn(100, 4, 1024)
@@ -83,9 +78,7 @@ class TestAscendSFAMetadata(TestBase):
 
 
 class TestAscendSFAMetadataBuilder(TestBase):
-
-    @patch('vllm.distributed.parallel_state._TP',
-           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.parallel_state._TP", new_callable=lambda: MagicMock(spec=GroupCoordinator))
     def setUp(self, mock_tp):
         mock_tp.world_size = 2
         mock_tp.rank_in_group = MagicMock()
@@ -104,14 +97,14 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         self.mock_cfg.speculative_config.num_speculative_tokens = 0
 
-        self.patcher = patch("vllm.config.get_current_vllm_config",
-                             return_value=self.mock_cfg)
+        self.patcher = patch("vllm.config.get_current_vllm_config", return_value=self.mock_cfg)
         self.patcher.start()
 
         # Mock parent class __init__ to avoid complex initialization,
         # but still set the essential attributes that child class needs
-        def mock_parent_init(self, kv_cache_spec, layer_names, vllm_config,
-                             device, metadata_cls, supports_dcp_with_varlen):
+        def mock_parent_init(
+            self, kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen
+        ):
             self.metadata_cls = metadata_cls
             self.kv_cache_spec = kv_cache_spec
             self.model_config = vllm_config.model_config
@@ -119,15 +112,14 @@ class TestAscendSFAMetadataBuilder(TestBase):
             self.device = device
             self.chunked_prefill_workspace_size = 128 * 1024
             self.chunked_prefill_workspace = torch.empty(
-                (self.chunked_prefill_workspace_size,
-                 vllm_config.model_config.get_head_size()),
+                (self.chunked_prefill_workspace_size, vllm_config.model_config.get_head_size()),
                 dtype=vllm_config.model_config.dtype,
                 device=device,
             )
 
         self.parent_init_patcher = patch(
-            "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__",
-            mock_parent_init)
+            "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.__init__", mock_parent_init
+        )
         self.parent_init_patcher.start()
 
         if hasattr(enable_dsa_cp, "cache_clear"):
@@ -152,10 +144,9 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.speculative_config = speculative_config
         device = torch.device("cpu")
 
-        builder = AscendSFAMetadataBuilder(kv_cache_spec=kv_cache_spec,
-                                           layer_names=layer_names,
-                                           vllm_config=vllm_config,
-                                           device=device)
+        builder = AscendSFAMetadataBuilder(
+            kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
+        )
 
         assert builder.device == device
         assert builder.vllm_config == vllm_config
@@ -190,18 +181,15 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.speculative_config = speculative_config
         device = torch.device("cpu")
 
-        builder = AscendSFAMetadataBuilder(kv_cache_spec=kv_cache_spec,
-                                           layer_names=layer_names,
-                                           vllm_config=vllm_config,
-                                           device=device)
+        builder = AscendSFAMetadataBuilder(
+            kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
+        )
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor(
-            [0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor(
-            [0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
         common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
         common_attn_metadata.positions = torch.randn(100)
@@ -212,8 +200,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.sin = None
         common_attn_metadata.num_input_tokens = 100
 
-        mock_get_cos_and_sin_mla.return_value = (torch.randn(100),
-                                                 torch.randn(100))
+        mock_get_cos_and_sin_mla.return_value = (torch.randn(100), torch.randn(100))
 
         metadata = builder.build(
             common_prefix_len=10,
@@ -228,7 +215,8 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch_distributed_groups(dcp_size=2, pcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build_for_graph_capture(
-            self, mock_get_cos_and_sin_mla, mock_get_current_vllm_config):
+        self, mock_get_cos_and_sin_mla, mock_get_current_vllm_config
+    ):
         cfg = MagicMock()
         cfg.model_config = MagicMock()
         cfg.model_config.hf_text_config = MagicMock()
@@ -248,18 +236,15 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.speculative_config = speculative_config
         device = torch.device("cpu")
 
-        builder = AscendSFAMetadataBuilder(kv_cache_spec=kv_cache_spec,
-                                           layer_names=layer_names,
-                                           vllm_config=vllm_config,
-                                           device=device)
+        builder = AscendSFAMetadataBuilder(
+            kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
+        )
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
         common_attn_metadata.num_actual_tokens = 100
-        common_attn_metadata.query_start_loc = torch.tensor(
-            [0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
-        common_attn_metadata.query_start_loc_cpu = torch.tensor(
-            [0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+        common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
         common_attn_metadata.slot_mapping = torch.randn(100, 4, 1024)
         common_attn_metadata.seq_lens_cpu = torch.tensor([2] * 10)
         common_attn_metadata.positions = torch.randn(100)
@@ -270,8 +255,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         common_attn_metadata.sin = None
         common_attn_metadata.num_input_tokens = 100
 
-        mock_get_cos_and_sin_mla.return_value = (torch.randn(100),
-                                                 torch.randn(100))
+        mock_get_cos_and_sin_mla.return_value = (torch.randn(100), torch.randn(100))
 
         attn_metadata = builder.build_for_graph_capture(
             common_attn_metadata=common_attn_metadata,

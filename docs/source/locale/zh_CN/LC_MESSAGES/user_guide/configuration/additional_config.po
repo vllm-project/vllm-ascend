@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -119,6 +119,9 @@ msgstr "昇腾编译选项配置"
 msgid "`eplb_config`"
 msgstr "`eplb_config`"
 
+msgid "Configuration options for eplb"
+msgstr "EPLB 的配置选项"
+
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`refresh`"
 msgstr "`refresh`"
@@ -203,8 +206,12 @@ msgid "`recompute_scheduler_enable`"
 msgstr "`recompute_scheduler_enable`"
 
 #: ../../source/user_guide/configuration/additional_config.md
-msgid "Whether to enable recompute scheduler."
-msgstr "是否启用重计算调度器。"
+msgid ""
+"Whether to enable the recompute scheduler. **Only valid in PD-"
+"disaggregated mode** (`kv_role` is `kv_producer` or `kv_consumer`). **Do "
+"not enable in PD-mixed mode** (no `kv_transfer_config`, or `kv_role` is "
+"`kv_both`); startup will fail with a clear error."
+msgstr "是否启用重计算调度器。**仅在 PD 解耦模式下有效**（`kv_role` 为 `kv_producer` 或 `kv_consumer`）。**请勿在 PD 混合模式下启用**（无 `kv_transfer_config`，或 `kv_role` 为 `kv_both`）；启动将失败并显示明确的错误信息。"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_cpu_binding`"
@@ -346,7 +353,9 @@ msgstr "`prefetch_ratio`"
 msgid ""
 "`{\"attn\": {\"qkv\": 1.0, \"o\": 1.0}, \"moe\": {\"gate_up\": 0.8}, "
 "\"mlp\": { \"gate_up\": 1.0,  \"down\": 1.0}}`"
-msgstr "`{\"attn\": {\"qkv\": 1.0, \"o\": 1.0}, \"moe\": {\"gate_up\": 0.8}, \"mlp\": { \"gate_up\": 1.0,  \"down\": 1.0}}`"
+msgstr ""
+"`{\"attn\": {\"qkv\": 1.0, \"o\": 1.0}, \"moe\": {\"gate_up\": 0.8}, "
+"\"mlp\": { \"gate_up\": 1.0,  \"down\": 1.0}}`"
 
 #: ../../source/user_guide/configuration/additional_config.md
 msgid "Prefetch ratio of each weight."

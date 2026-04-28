@@ -50,6 +50,8 @@ All environment variables must be defined in `vllm_ascend/envs.py` using the cen
 **Example:**
 
 ```python
+import os
+
 env_variables = {
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # ...

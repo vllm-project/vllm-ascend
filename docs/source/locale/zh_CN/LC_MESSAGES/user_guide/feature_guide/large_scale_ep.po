@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-01-22 16:45+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -24,7 +24,7 @@ msgid "Distributed DP Server With Large-Scale Expert Parallelism"
 msgstr "大规模专家并行下的分布式 DP 服务端"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:3
-msgid "Getting Start"
+msgid "Getting Started"
 msgstr "快速开始"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:5
@@ -150,8 +150,8 @@ msgid ""
 " as the master node. This leads to differences in 'dp_size_local' and "
 "'dp_rank_start'"
 msgstr ""
-"请注意，预填充节点和解码节点可能具有不同的配置。在此示例中，每个预填充节点独立部署为主节点，而解码节点则使用 192.0.0.5 节点作为主节点。这导致了 "
-"'dp_size_local' 和 'dp_rank_start' 的差异。"
+"请注意，预填充节点和解码节点可能具有不同的配置。在此示例中，每个预填充节点独立部署为主节点，而解码节点则使用 192.0.0.5 "
+"节点作为主节点。这导致了 'dp_size_local' 和 'dp_rank_start' 的差异。"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:319
 msgid "Example proxy for Distributed DP Server"
@@ -273,7 +273,8 @@ msgid ""
 "[aisbench](https://gitee.com/aisbench/benchmark). Execute the following "
 "commands to install aisbench"
 msgstr ""
-"我们建议使用 aisbench 工具来评估性能。[aisbench](https://gitee.com/aisbench/benchmark)。执行以下命令安装 "
+"我们建议使用 aisbench "
+"工具来评估性能。[aisbench](https://gitee.com/aisbench/benchmark)。执行以下命令安装 "
 "aisbench"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:376
@@ -307,7 +308,9 @@ msgstr "以 gsm8k 数据集为例，执行以下命令评估性能。"
 msgid ""
 "For more details on commands and parameters for aisbench, refer to "
 "[aisbench](https://gitee.com/aisbench/benchmark)"
-msgstr "有关 aisbench 命令和参数的更多详细信息，请参阅 [aisbench](https://gitee.com/aisbench/benchmark)"
+msgstr ""
+"有关 aisbench 命令和参数的更多详细信息，请参阅 "
+"[aisbench](https://gitee.com/aisbench/benchmark)"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:419
 msgid "Prefill & Decode Configuration Details"
@@ -341,7 +344,7 @@ msgstr "'--additional-config' 参数示例如下："
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:446
 msgid "**decoder node**"
-msgstr "**Decoder 节点**"
+msgstr "**解码节点**"
 
 #: ../../source/user_guide/feature_guide/large_scale_ep.md:448
 msgid "set HCCL_BUFFSIZE=1024"

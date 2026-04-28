@@ -64,7 +64,7 @@ For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at
 
 ```shell
 #!/bin/sh
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 
 vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct --served-model-name qwen3-coder --tensor-parallel-size 4 --enable_expert_parallel
 ```

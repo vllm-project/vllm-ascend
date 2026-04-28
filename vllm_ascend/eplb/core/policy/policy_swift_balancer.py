@@ -5,8 +5,9 @@ from collections import defaultdict
 
 import numpy as np
 import torch
+import torch_npu  # noqa: F401
 
-from .policy_abstract import DynamicConfig, EplbPolicy
+from .policy_abstract import EplbPolicy
 
 
 class DynamicTable:
@@ -26,8 +27,7 @@ class DynamicTable:
 
 
 class SwiftBalanceEplb(EplbPolicy):
-    def __init__(self, config: DynamicConfig):
-        super().__init__(config)
+    def __init__(self):
         self.num_layers: int = 0
         self.num_original_experts: int = 0
         self.num_ranks: int = 0
@@ -39,6 +39,7 @@ class SwiftBalanceEplb(EplbPolicy):
         self.increment = 0.01
         self.swap_threshold: float = 0
         self.max_swap_times: int = 100
+        self.num_die_per_host = torch.npu.device_count()
 
     @staticmethod
     def calculate_max_heat_per_layer(workload_table: np.ndarray) -> list[float]:
@@ -468,7 +469,7 @@ class SwiftBalanceEplb(EplbPolicy):
         rev_expert_per_rank = []
 
         if self.is_node_redundant:
-            num_ranks_per_node = self.config.num_die_per_host
+            num_ranks_per_node = self.num_die_per_host
 
             for node_id in range(self.num_nodes):
                 cur_node_deployment = cur_layer_deployment[
@@ -688,7 +689,7 @@ class SwiftBalanceEplb(EplbPolicy):
         assert info.workload_table is not None and info.placement_table is not None
         self.is_node_redundant = is_node_redundant
         self.num_layers, self.num_ranks, self.num_experts_per_rank = info.placement_table.shape
-        self.num_nodes = self.num_ranks // self.config.num_die_per_host
+        self.num_nodes = self.num_ranks // self.num_die_per_host
         expert_ids, counts = np.unique(info.placement_table[0], return_counts=True)
         self.num_original_experts = len(expert_ids)
         layer_workloads = self.get_original_workload(

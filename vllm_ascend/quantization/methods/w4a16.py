@@ -107,7 +107,6 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.W4A16
 
     def __init__(self) -> None:
-        self.transpose_weight = True
         self.num_bits = 4  # dtype = torch.int4
         self.pack_factor = 8  # pack 8 of torch.int4 tensors to torch.int32
 
@@ -246,36 +245,35 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.transpose_weight:
-            w13_shape = layer.w13_weight_packed.data.shape
-            w2_shape = layer.w2_weight_packed.data.shape
-            unpacked_w13_weight = (
-                unpack_from_int32(
-                    layer.w13_weight_packed.data.flatten(0, 1),
-                    torch.Size([w13_shape[0] * w13_shape[1], w13_shape[2] * self.pack_factor]),
-                    self.num_bits,
-                )
-                .view(w13_shape[0], w13_shape[1], -1)
-                .transpose(1, 2)
-                .contiguous()
-                .int()
+        w13_shape = layer.w13_weight_packed.data.shape
+        w2_shape = layer.w2_weight_packed.data.shape
+        unpacked_w13_weight = (
+            unpack_from_int32(
+                layer.w13_weight_packed.data.flatten(0, 1),
+                torch.Size([w13_shape[0] * w13_shape[1], w13_shape[2] * self.pack_factor]),
+                self.num_bits,
             )
-            unpacked_w2_weight = (
-                unpack_from_int32(
-                    layer.w2_weight_packed.data.flatten(0, 1),
-                    torch.Size([w2_shape[0] * w2_shape[1], w2_shape[2] * self.pack_factor]),
-                    self.num_bits,
-                )
-                .view(w2_shape[0], w2_shape[1], -1)
-                .transpose(1, 2)
-                .contiguous()
-                .int()
+            .view(w13_shape[0], w13_shape[1], -1)
+            .transpose(1, 2)
+            .contiguous()
+            .int()
+        )
+        unpacked_w2_weight = (
+            unpack_from_int32(
+                layer.w2_weight_packed.data.flatten(0, 1),
+                torch.Size([w2_shape[0] * w2_shape[1], w2_shape[2] * self.pack_factor]),
+                self.num_bits,
             )
-            layer.w13_weight_packed.data = pack_to_int32(unpacked_w13_weight)
-            layer.w2_weight_packed.data = pack_to_int32(unpacked_w2_weight)
+            .view(w2_shape[0], w2_shape[1], -1)
+            .transpose(1, 2)
+            .contiguous()
+            .int()
+        )
+        layer.w13_weight_packed.data = pack_to_int32(unpacked_w13_weight)
+        layer.w2_weight_packed.data = pack_to_int32(unpacked_w2_weight)
 
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
 
-            layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(1, 2).contiguous()
-            layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(1, 2).contiguous()
+        layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(1, 2).contiguous()
+        layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(1, 2).contiguous()

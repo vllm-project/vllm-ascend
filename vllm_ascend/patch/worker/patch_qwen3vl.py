@@ -73,7 +73,7 @@ Qwen3VLForConditionalGeneration._get_deepstack_input_embeds = tensor_parallel_wr
     Qwen3VLForConditionalGeneration._get_deepstack_input_embeds
 )
 
-if not vllm_version_is("0.19.0"):
+if not vllm_version_is("0.19.1"):
     # Only patch for latest main
     from vllm.model_executor.models.qwen3_vl import pos_embed_interpolate_native
 

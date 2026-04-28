@@ -46,7 +46,7 @@ class MetadataServer:
         def __init__(self, identity=None):
             if identity is None:
                 identity = f"worker-{os.getpid()}-{id(self)}"
-            logger.info(f"metadata client for worker {identity} started")
+            logger.info("metadata client for worker %s started", identity)
             self.ctx = zmq.Context()  # type: ignore
             self.socket = make_zmq_socket(
                 self.ctx,
@@ -65,7 +65,7 @@ class MetadataServer:
             response = pickle.loads(self.socket.recv())
             result, error = response
             if error:
-                logger.exception(f"call metadata sever error: {error}")
+                logger.exception("call metadata sever error: %s", error)
                 raise error
             if func_name == "init_cpu_kv_caches":
                 (memory_dict, layer_size, layer_dtype, mla_config) = result
@@ -96,7 +96,7 @@ class MetadataServer:
             "cpu_swap_space_gb", MetadataServer.DEFAULT_CPU_SWAP_SPACE_GB
         )
         self.available_memory = available_memory_gb * 1024 * 1024 * 1024
-        logger.info(f"cpu swap space: {self.available_memory} bytes")
+        logger.info("cpu swap space: %s bytes", self.available_memory)
         self.ctx = zmq.Context()  # type: ignore
         self.socket = make_zmq_socket(
             self.ctx,
@@ -133,7 +133,7 @@ class MetadataServer:
         kv_cache_specs: dict[str, AttentionSpec],
         mla_config: MLAConfig,
     ) -> tuple[dict[str, SharedMemory], tuple[int, ...], torch.dtype, MLAConfig]:
-        logger.info(f"receive pp rank: {pp_rank}, tp rank: {tp_rank}")
+        logger.info("receive pp rank: %s, tp rank: %s", pp_rank, tp_rank)
         # follow the assumption that each layer has the same spec
         layer = next(iter(kv_cache_specs.values()))
         assert all([layer.page_size_bytes == any.page_size_bytes for any in kv_cache_specs.values()])
@@ -177,7 +177,7 @@ class MetadataServer:
         if hasattr(self, "cpu_block_manager"):
             return
         # do shared_memory() at least once
-        logger.info(f"assign cpu num blocks: {self.num_cpu_blocks}")
+        logger.info("assign cpu num blocks: %s", self.num_cpu_blocks)
         assert self.num_cpu_blocks >= 0
         self.cpu_block_manager = CPUKVCacheManager(self.layer, self.num_cpu_blocks)
         self.functions.update(
@@ -203,7 +203,7 @@ class MetadataServer:
                     result = self.functions[func_name](*args, **kwargs)
                     response = (result, None)  # type: ignore
                 except Exception as e:
-                    logger.exception(f"metadata execute error: {e}")
+                    logger.exception("metadata execute error: %s", e)
                     response = (None, e)  # type: ignore
             else:
                 response = (None, NameError(f"Function {func_name} not found"))
@@ -250,7 +250,7 @@ class MetadataServerProc:
             logger.info("Metadata server exiting.")
             raise
         except Exception as e:
-            logger.exception(f"Metadata server error: {e}.")
+            logger.exception("Metadata server error: %s.", e)
             raise e
         finally:
             if metadata_server is not None:

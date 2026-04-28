@@ -164,7 +164,7 @@ class AscendFusedMoE310(FusedMoE):
 
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        is_legacy = vllm_version_is("0.19.0")
+        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
             self if is_legacy else self.layer_name,
             self.moe_config,
@@ -285,7 +285,7 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
         # which at this point is still the stale runner built with shared_experts=None.
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 
-        is_legacy = vllm_version_is("0.19.0")
+        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
             self if is_legacy else self.layer_name,
             self.moe_config,

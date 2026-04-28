@@ -9,7 +9,7 @@
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * WITHOUT WARRANTIES OF CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
@@ -24,13 +24,14 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     const at::Tensor& expert_idx,
     const at::TensorList& scale1,
     const at::TensorList& scale2,
-    const at::TensorList& bias1,
-    const at::TensorList& bias2,
+    const c10::optional<at::TensorList>& bias1,
+    const c10::optional<at::TensorList>& bias2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
     at::Tensor& out,
-    at::Tensor& expert_token_nums
+    at::Tensor& expert_token_nums,
+    const c10::optional<at::Tensor>& x_active_mask
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
@@ -44,6 +45,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  scale1,
                  scale2,
                  probs,
+                 x_active_mask.has_value() ? x_active_mask.value() : at::Tensor(),
                  group_ep_ptr,
                  max_output_size,
                  out,

@@ -1,0 +1,14 @@
+# Tests that are known to fail on CPU runners and should be excluded
+# from CPU test groups. These tests require real NPU hardware or have
+# dependencies that cannot be satisfied in a CPU-only environment.
+#
+# Each entry is a file path relative to the repo root.
+
+- tests/ut/model_loader/netloader/test_netloader_elastic.py
+- tests/ut/kv_connector/test_remote_prefill_lifecycle.py
+- tests/ut/kv_connector/test_remote_decode_lifecycle.py
+- tests/ut/core/test_scheduler_dynamic_batch.py
+- tests/ut/kv_connector/test_mooncake_connector.py
+- tests/ut/worker/test_worker_v1.py
+- tests/ut/kv_connector/test_mooncake_layerwise_connector.py
+- tests/ut/worker/test_block_table.py

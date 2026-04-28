@@ -18,12 +18,12 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance currently requires Ascend 910B NPUs, because only the 910B supports batch invariance with HCCL communication for now.
+Batch invariance currently requires Ascend Atlas A2 inference products NPUs, because only the Atlas A2 inference products supports batch invariance with HCCL communication for now.
 We will support other NPUs in the future.
 
 ## Software Requirements
 
-Batch invariance requires a custom operator library for 910B.
+Batch invariance requires a custom operator library for Atlas A2 inference products.
 We will release the customed operator library in future versions.
 
 ## Enabling Batch Invariance

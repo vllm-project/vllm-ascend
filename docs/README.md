@@ -22,4 +22,4 @@ python -m http.server -d _build/html/
 Launch your browser and open:
 
 - English version: <http://localhost:8000>
-- Chinese version: <http://localhost:8000/zh_CN>
+- Chinese version: <http://localhost:8000/zh-cn>

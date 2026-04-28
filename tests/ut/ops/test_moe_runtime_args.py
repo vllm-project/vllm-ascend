@@ -166,17 +166,19 @@ class TestMoERuntimeArgs(unittest.TestCase):
 
     def test_build_fused_experts_input_requires_primitive_mxfp_params_for_mxfp_quant(self):
         for quant_type in (QuantType.MXFP8, QuantType.MXFP4):
-            with self.subTest(quant_type=quant_type):
-                with self.assertRaisesRegex(ValueError, "primitive MXFP params are required"):
-                    build_fused_experts_input(
-                        hidden_states=torch.randn(2, 8),
-                        topk_weights=torch.randn(2, 2),
-                        topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
-                        w1=torch.randn(2, 8, 16),
-                        w2=torch.randn(2, 16, 8),
-                        quant_type=quant_type,
-                        dynamic_eplb=False,
-                    )
+            with (
+                self.subTest(quant_type=quant_type),
+                self.assertRaisesRegex(ValueError, "primitive MXFP params are required"),
+            ):
+                build_fused_experts_input(
+                    hidden_states=torch.randn(2, 8),
+                    topk_weights=torch.randn(2, 2),
+                    topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
+                    w1=torch.randn(2, 8, 16),
+                    w2=torch.randn(2, 16, 8),
+                    quant_type=quant_type,
+                    dynamic_eplb=False,
+                )
 
     def test_build_mlp_compute_input_derives_fusion_and_preserves_mxfp_params(self):
         for quant_type, expected_fusion in ((QuantType.MXFP8, True), (QuantType.MXFP4, False)):

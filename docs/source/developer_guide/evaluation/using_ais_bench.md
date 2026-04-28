@@ -38,11 +38,11 @@ Run the vLLM server in the docker.
 
 ```{code-block} bash
    :substitutions:
-vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 35000 &
+vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 35000 &
 ```
 
 :::{note}
-`--max_model_len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
+`--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
 :::
 
 The vLLM server is started successfully, if you see logs as below:

@@ -41,18 +41,6 @@ class TestAttentionMaskBuilder310(TestBase):
         self.assertEqual(attn_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
 
     @patch("torch_npu.npu_format_cast")
-    def test_get_swa_mask_310(self, mock_format_cast):
-        mock_format_cast.side_effect = lambda x, y: x
-        swa_mask = self.attention_mask_builder.get_swa_mask(torch.float16, None)
-        self.assertIsNone(swa_mask)
-
-        sliding_window = 128
-        swa_mask = self.attention_mask_builder.get_swa_mask(torch.float16, sliding_window)
-        self.assertEqual(swa_mask.shape, (1, self.max_seqlen // 16, self.max_seqlen, 16))
-        self.assertEqual(swa_mask[0][-1][0][-1], torch.tensor(float("-inf"), dtype=torch.float16))
-        self.assertEqual(swa_mask[0][0][-1][0], torch.tensor(float("-inf"), dtype=torch.float16))
-
-    @patch("torch_npu.npu_format_cast")
     def test_get_splitfuse_attn_mask_310(self, mock_format_cast):
         mock_format_cast.side_effect = lambda x, y: x
         attn_metadata = MagicMock()

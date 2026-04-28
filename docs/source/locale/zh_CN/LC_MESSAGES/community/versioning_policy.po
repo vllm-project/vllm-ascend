@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-14 02:04+0000\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -716,8 +716,8 @@ msgid ""
 "releases of vLLM. For example, `releases/v0.13.0` is the dev branch for "
 "vLLM `v0.13.0` version."
 msgstr ""
-"**releases/vX.Y.Z**：开发分支，随 vLLM 的部分新版本创建。例如，`releases/v0.13.0` 是 vLLM `v0.13.0` "
-"版本的开发分支。"
+"**releases/vX.Y.Z**：开发分支，随 vLLM 的部分新版本创建。例如，`releases/v0.13.0` 是 vLLM "
+"`v0.13.0` 版本的开发分支。"
 
 #: ../../source/community/versioning_policy.md:111
 msgid ""
@@ -772,7 +772,7 @@ msgstr "接收错误修复；不生成发行版本；不承诺提供持续集成
 
 #: ../../source/community/versioning_policy.md:55
 msgid "End of Life (EOL)"
-msgstr "生命周期结束（EOL）"
+msgstr "生命周期结束 (EOL)"
 
 #: ../../source/community/versioning_policy.md:55
 msgid "N/A"
@@ -780,7 +780,7 @@ msgstr "不适用"
 
 #: ../../source/community/versioning_policy.md:55
 msgid "Branch no longer accepting changes"
-msgstr "该分支不再接受更改"
+msgstr "分支不再接受更改"
 
 #: ../../source/community/versioning_policy.md:123
 msgid "Branch states"
@@ -930,7 +930,9 @@ msgstr "向后兼容性"
 msgid ""
 "For main branch, vLLM Ascend should work with vLLM main branch and latest"
 " 1 or 2 releases. To ensure backward compatibility, do as follows:"
-msgstr "对于 main 分支，vLLM Ascend 应与 vLLM 的 main 分支以及最新的 1 至 2 个发行版本协同工作。为确保向后兼容性，请遵循以下步骤："
+msgstr ""
+"对于 main 分支，vLLM Ascend 应与 vLLM 的 main 分支以及最新的 1 至 2 "
+"个发行版本协同工作。为确保向后兼容性，请遵循以下步骤："
 
 #: ../../source/community/versioning_policy.md:154
 msgid ""
@@ -960,7 +962,7 @@ msgstr "文档变更应与最新的 1 至 2 个 vLLM 发行版本兼容。如有
 
 #: ../../source/community/versioning_policy.md:158
 msgid "Document branch policy"
-msgstr "文档分支政策"
+msgstr "文档分支策略"
 
 #: ../../source/community/versioning_policy.md:160
 msgid ""
@@ -970,9 +972,9 @@ msgid ""
 "ascend/blob/main/docs/source/conf.py)**. While this is not a simple task,"
 " it is a principle we should strive to follow."
 msgstr ""
-"为了减少维护成本，**所有分支的文档内容应保持一致，版本差异可以通过 "
+"为降低维护成本，**所有分支的文档内容应保持一致，版本差异可通过 "
 "[docs/source/conf.py](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/docs/source/conf.py) 中的变量进行控制**。尽管这并非易事，但这是我们应当努力遵循的原则。"
+"ascend/blob/main/docs/source/conf.py) 中的变量进行控制**。尽管这并非易事，但这是我们应努力遵循的原则。"
 
 #: ../../source/community/versioning_policy.md:55
 msgid "Version"
@@ -988,7 +990,7 @@ msgstr "代码分支"
 
 #: ../../source/community/versioning_policy.md:55
 msgid "latest"
-msgstr "最新"
+msgstr "latest"
 
 #: ../../source/community/versioning_policy.md:55
 msgid "Doc for the latest rc release of main branch"
@@ -1012,7 +1014,7 @@ msgstr "`vX.Y.ZrcN` --> `vX.Y.ZrcN` 标签"
 
 #: ../../source/community/versioning_policy.md:55
 msgid "version"
-msgstr "版本"
+msgstr "version"
 
 #: ../../source/community/versioning_policy.md:55
 msgid "Doc for historical released versions"
@@ -1047,51 +1049,14 @@ msgstr "软件依赖管理"
 #: ../../source/community/versioning_policy.md:176
 msgid ""
 "`torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable "
-"version to [PyPi](https://pypi.org/project/torch-npu) every 3 months, a "
+"version to [PyPI](https://pypi.org/project/torch-npu) every 3 months, a "
 "development version (aka the POC version) every month, and a nightly "
-"version every day. The PyPi stable version **CAN** be used in vLLM Ascend"
+"version every day. The PyPI stable version **CAN** be used in vLLM Ascend"
 " final version, the monthly dev version **ONLY CAN** be used in vLLM "
 "Ascend RC version for rapid iteration, and the nightly version **CANNOT**"
-" be used in vLLM Ascend any version or branch."
+" be used in any vLLM Ascend version or branch."
 msgstr ""
-"`torch-npu`：Ascend Extension for PyTorch（torch-npu）每 3 个月会在 "
-"[PyPi](https://pypi.org/project/torch-npu) 上发布一个稳定版本，每个月发布一个开发版本（即 POC "
-"版本），每天发布一个 nightly 版本。PyPi 上的稳定版本**可以**用于 vLLM Ascend "
-"的正式版本，月度开发版本**只能**用于 vLLM Ascend 的 RC（候选发布）版本以便快速迭代，nightly 版本**不能**用于 "
-"vLLM Ascend 的任何版本和分支。"
-
-#~ msgid "vX.Y.Z-dev (Will be `main` after the first final release)"
-#~ msgstr "vX.Y.Z-dev（在第一个正式版本发布后将成为 `main`）"
-
-#~ msgid "Git tags, like vX.Y.Z[rcN]"
-#~ msgstr "Git 标签，例如 vX.Y.Z[rcN]"
-
-#~ msgid "stable (not yet released)"
-#~ msgstr "稳定版（尚未发布）"
-
-#~ msgid "Will be `vX.Y.Z-dev` after the first official release"
-#~ msgstr "首个正式发布后将会是 `vX.Y.Z-dev`"
-
-#~ msgid ""
-#~ "`latest` documentation: Matches the current"
-#~ " maintenance branch `vX.Y.Z-dev` (will be"
-#~ " `main` after the first final "
-#~ "release). It is continuously updated to"
-#~ " ensure usability for the latest "
-#~ "release."
-#~ msgstr "`latest` 文档：匹配当前维护分支 `vX.Y.Z-dev`（在首次正式发布后将为 `main`）。持续更新，以确保适用于最新发布版本。"
-
-#~ msgid ""
-#~ "`stable` documentation (**not yet released**):"
-#~ " Official release documentation. Updates "
-#~ "are allowed in real-time after "
-#~ "release, typically based on vX.Y.Z-dev. "
-#~ "Once stable documentation is available, "
-#~ "non-stable versions should display a "
-#~ "header warning: `You are viewing the "
-#~ "latest developer preview docs. Click "
-#~ "here to view docs for the latest"
-#~ " stable release.`."
-#~ msgstr ""
-#~ "`stable` 文档（**尚未发布**）：官方发布版文档。发布后允许实时更新，通常基于 "
-#~ "vX.Y.Z-dev。一旦稳定版文档可用，非稳定版本应显示一个顶部警告：`您正在查看最新的开发预览文档。点击此处查看最新稳定版本文档。`"
+"`torch-npu`：Ascend Extension for PyTorch (torch-npu) 每 3 个月在 "
+"[PyPI](https://pypi.org/project/torch-npu) 发布一个稳定版本，每月发布一个开发版本（也称为 POC 版本），每日发布一个 "
+"nightly 版本。PyPI 稳定版本**可以**用于 vLLM Ascend 正式版本，月度开发版本**仅能**用于 vLLM Ascend RC "
+"版本以进行快速迭代，nightly 版本**不能**用于任何 vLLM Ascend 版本或分支。"

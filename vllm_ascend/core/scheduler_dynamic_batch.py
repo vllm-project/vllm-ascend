@@ -31,6 +31,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class BudgetRefiner:
     """This budget refiner can make dynamic adjustment to the token budget
@@ -41,8 +43,9 @@ class BudgetRefiner:
         if not self.enabled:
             return
         logger.info(
-            "Dynamic batch is enabled with SLO limit: {}, and chunked prefill is "
-            "forced to be activated because dynamic batch relies on it".format(str(slo_limit))
+            "Dynamic batch is enabled with SLO limit: %s, and chunked prefill is "
+            "forced to be activated because dynamic batch relies on it",
+            slo_limit,
         )
         self.lookup: dict[tuple[int, int], int] = {}
         self.context_keys: set[int] = set()
@@ -94,7 +97,7 @@ class BudgetRefiner:
             return self.default_budget
         budget = self.lookup.get((aligned_ctx, aligned_dnum), None)
         if budget is None:
-            logger.warn(f"Table miss for ctx,dnum{aligned_ctx, aligned_dnum}")
+            logger.warning("Table miss for ctx,dnum%s", (aligned_ctx, aligned_dnum))
             budget = self.default_budget
         # For debug.
         # logger.info(
@@ -324,7 +327,7 @@ class SchedulerDynamicBatch(Scheduler):
 
                 # Skip request if the structured output request is still waiting
                 # for FSM compilation.
-                if request.status == RequestStatus.WAITING_FOR_FSM:
+                if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
                     structured_output_req = request.structured_output_request
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
@@ -488,9 +491,10 @@ class SchedulerDynamicBatch(Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prefix cached tokens.
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = num_computed_tokens
+                if vllm_version_is("0.19.1"):
+                    # Count the number of prefix cached tokens.
+                    if request.num_cached_tokens < 0:
+                        request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = encoder_inputs_to_schedule

@@ -94,7 +94,7 @@ Run the following script to execute online 128k inference On 1 Atlas 800 A3(64G 
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE="AIV"
@@ -158,7 +158,7 @@ Node 0
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -204,7 +204,7 @@ Node1
 ```shell
 #!/bin/sh
 # Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 # To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # this obtained through ifconfig
@@ -289,7 +289,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
        # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export IP_ADDRESS=$local_ip
        export NETWORK_CARD_NAME=$nic_name
        export HCCL_IF_IP=$IP_ADDRESS
@@ -364,7 +365,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        node0_ip="xxxx"
 
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export MASTER_IP_ADDRESS=$node0_ip
        export IP_ADDRESS=$local_ip
 
@@ -444,7 +446,8 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
        node0_ip="xxxx"
 
        export VLLM_ENGINE_READY_TIMEOUT_S=30000
-       export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=30000
+       # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+       export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
        export MASTER_IP_ADDRESS=$node0_ip
        export IP_ADDRESS=$local_ip
 
@@ -583,7 +586,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Run performance evaluation of `Qwen3.5-397B-A17B-w8a8` as an example.
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
 
@@ -594,7 +597,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 

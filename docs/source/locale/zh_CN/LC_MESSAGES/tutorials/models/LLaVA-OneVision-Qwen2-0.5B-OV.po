@@ -1,0 +1,216 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-23 02:08+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:1
+msgid "LLaVA-OneVision-Qwen2-0.5B-OV"
+msgstr "LLaVA-OneVision-Qwen2-0.5B-OV"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:5
+msgid ""
+"`llava-hf/llava-onevision-qwen2-0.5b-ov-hf` is a compact multimodal model"
+" built on top of Qwen2. It supports text-only generation together with "
+"image understanding, multi-image reasoning, and visual dialogue."
+msgstr ""
+"`llava-hf/llava-onevision-qwen2-0.5b-ov-hf` 是一个基于 Qwen2 构建的紧凑型多模态模型。它支持纯文本生成，以及图像理解、多图像推理和视觉对话。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:7
+msgid ""
+"This document shows the main verification steps for the model on vLLM "
+"Ascend, including environment preparation, single-NPU deployment, "
+"functional verification, and the existing accuracy baseline used by the "
+"repository."
+msgstr ""
+"本文档展示了该模型在 vLLM Ascend 上的主要验证步骤，包括环境准备、单 NPU 部署、功能验证以及代码库使用的现有精度基准。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:9
+msgid "Supported Features"
+msgstr "支持的功能"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:11
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参考[支持的功能](../../user_guide/support_matrix/supported_models.md)以获取该模型支持的功能矩阵。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:13
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参考[功能指南](../../user_guide/feature_guide/index.md)以获取功能的配置方法。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:15
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:17
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:19
+msgid ""
+"`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`: [Download model "
+"weight](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf)"
+msgstr ""
+"`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`: [下载模型权重](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf)"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:21
+msgid ""
+"The verified single-card deployment uses one Atlas A2 NPU. It is "
+"recommended to cache model weights under `/root/.cache` in advance to "
+"reduce startup time."
+msgstr ""
+"已验证的单卡部署使用一个 Atlas A2 NPU。建议提前将模型权重缓存到 `/root/.cache` 目录下，以减少启动时间。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:23
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:25
+msgid ""
+"You can use the official docker image to run `LLaVA-OneVision-Qwen2-0.5B-"
+"OV` directly."
+msgstr ""
+"您可以使用官方的 docker 镜像直接运行 `LLaVA-OneVision-Qwen2-0.5B-OV`。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:27
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像并在节点上启动 docker 镜像，请参考[使用 docker](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:49
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:51
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:53
+msgid "Single NPU"
+msgstr "单 NPU"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:55
+msgid ""
+"Run the following script to start the vLLM service on a single Atlas A2 "
+"NPU:"
+msgstr ""
+"运行以下脚本在单个 Atlas A2 NPU 上启动 vLLM 服务："
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:68
+msgid "Multiple NPU"
+msgstr "多 NPU"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:70
+msgid "Single-NPU deployment is recommended for this 0.5B model."
+msgstr "对于这个 0.5B 的模型，建议使用单 NPU 部署。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:72
+msgid "Prefill-Decode Disaggregation"
+msgstr "Prefill-Decode 分离"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:74
+msgid "Not supported yet."
+msgstr "暂不支持。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:76
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:78
+msgid ""
+"If your service starts successfully, you can see logs similar to the "
+"following:"
+msgstr ""
+"如果您的服务启动成功，您将看到类似以下的日志："
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:86
+msgid ""
+"You can first verify that the model is exposed by the OpenAI-compatible "
+"API:"
+msgstr ""
+"您可以首先验证模型是否通过 OpenAI 兼容的 API 暴露："
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:92
+msgid "Text-only Request"
+msgstr "纯文本请求"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:110
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:145
+msgid "If the request succeeds, you can see a response similar to the following:"
+msgstr "如果请求成功，您将看到类似以下的响应："
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:116
+msgid "Image Understanding Request"
+msgstr "图像理解请求"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:151
+msgid "Accuracy Evaluation"
+msgstr "精度评估"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:153
+msgid ""
+"The repository already contains an end-to-end accuracy baseline for this "
+"model in `tests/e2e/models/configs/llava-onevision-qwen2-0.5b-ov-"
+"hf.yaml`."
+msgstr ""
+"代码库中已包含该模型的端到端精度基准，位于 `tests/e2e/models/configs/llava-onevision-qwen2-0.5b-ov-hf.yaml`。"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
+msgid "dataset"
+msgstr "数据集"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
+msgid "platform"
+msgstr "平台"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
+msgid "metric"
+msgstr "指标"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
+msgid "value"
+msgstr "值"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
+msgid "ceval-valid"
+msgstr "ceval-valid"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
+msgid "A2"
+msgstr "A2"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
+msgid "acc,none"
+msgstr "acc,none"
+
+#: ../../source/tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md:29
+msgid "0.42"
+msgstr "0.42"

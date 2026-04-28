@@ -16,12 +16,15 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextlib import contextmanager
 
 import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
@@ -41,6 +44,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_weight_prefetch_method
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -72,19 +76,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
-        del self.cudagraph_manager
         del self.req_states
         del self.input_buffers
         del self.speculator
-
-        # NPU specific initializations can be added below.
-        self.cudagraph_manager: ModelAclGraphManager = ModelAclGraphManager(
-            self.vllm_config,
-            self.device,
-            self.compilation_config.cudagraph_mode,
-            decode_query_len=self.decode_query_len,
-            model_runner=self,
-        )
 
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
         # init_speculator will return AscendEagleSpeculator when eagle is used.
@@ -127,6 +121,8 @@ class NPUModelRunner(GPUModelRunner):
         # set _WEIGHT_PREFETCH_METHOD, _mc2_tokens_capacity and _reserved_mc2_mask which
         # is necessary for weight_prfetching function, and MoE communication optimization.
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
+        # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
+        set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
 
@@ -143,6 +139,10 @@ class NPUModelRunner(GPUModelRunner):
         # we need to use input_batch to set forward_context in run_fullgraph.
         # so we can inherit `execute_model` method.
         self.input_batch: AscendInputBatch | None = None
+
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        with graph_manager_wrapper(self):
+            super().initialize_kv_cache(kv_cache_config)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -330,6 +330,10 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
+
+        # For mla/sfa, update cos/sin. Here is for execute_model.
+        update_cos_sin(self.input_batch.positions)
+
         return self.input_batch
 
     def postprocess(
@@ -425,3 +429,18 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs_padded = num_reqs_padded + 1
 
         return query_start_loc_np, num_reqs_padded
+
+
+@contextmanager
+def graph_manager_wrapper(model_runner):
+    """Context manager to override graph manager."""
+    original_graph_manager = vllm_model_runner.ModelCudaGraphManager
+
+    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
+        return ModelAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, model_runner)
+
+    try:
+        vllm_model_runner.ModelCudaGraphManager = factory
+        yield
+    finally:
+        vllm_model_runner.ModelCudaGraphManager = original_graph_manager
