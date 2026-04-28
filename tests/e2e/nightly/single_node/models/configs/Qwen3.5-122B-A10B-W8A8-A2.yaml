@@ -1,0 +1,72 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  SERVER_PORT: "DEFAULT_PORT"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "1024"
+  OMP_NUM_THREADS: "1"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
+
+_server_cmd: &server_cmd
+  - "--quantization"
+  - "ascend"
+  - "--no-enable-prefix-caching"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "133120"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--max-num-seqs"
+  - "128"
+  - "--trust-remote-code"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--async-scheduling"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--data-parallel-size"
+  - "1"
+  - "--additional-config"
+  - '{"enable_cpu_binding":true}'
+  - "--enable-expert-parallel"
+  - "--profiler-config"
+  - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
+  - "--compilation-config"
+  - '{"cudagraph_capture_sizes":[1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256,260,264,268,272,276,280,284,286,292,296,300,304,308,312,316,320,324,328,332,336,340], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+  - "--speculative_config"
+  - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+
+_benchmarks: &benchmarks
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 256
+    max_out_len: 1500
+    batch_size: 64
+    baseline: 1
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3.5-122B-A10B-W8A8-single-A2"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks

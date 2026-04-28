@@ -146,6 +146,9 @@ jobs:
           - name: multi-node-deepseek-v3.2-W8A8-EP-aime2025
             config_file_path: DeepSeek-V3_2-W8A8-EP-aime2025.yaml
             size: 4
+          - name: multi-node-Kimi-K2-5-W4A8-EP
+            config_file_path: Kimi-K2_5_W4A8_A3_EP.yaml
+            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -299,6 +302,9 @@ jobs:
           - name: Qwen3.5-397B-A17B-w8a8-mtp
             os: linux-aarch64-a3-16
             config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
+          - name: Qwen3.5-122B-A10B-W8A8-A3
+            os: linux-aarch64-a3-16
+            config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
           # pytest-driven tests
           - name: custom-multi-ops
             os: linux-aarch64-a3-16
