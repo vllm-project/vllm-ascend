@@ -62,11 +62,17 @@ class ACLGraphWrapper:
     """
 
     _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
-    _graph_pool: ClassVar[tuple[int, int]] = current_platform.get_global_graph_pool()
+    _graph_pool: ClassVar[tuple[int, int] | None] = None
+
+    @classmethod
+    def get_graph_pool(cls):
+        if cls._graph_pool is None:
+            cls._graph_pool = current_platform.get_global_graph_pool()
+        return cls._graph_pool
 
     @classmethod
     def clear_all_graphs(cls) -> None:
-        cls._graph_pool = (cls._graph_pool[0], cls._graph_pool[1] + 1)
+        cls._graph_pool = current_platform.graph_pool_handle()
         """Clear all graphs from all ACLGraphWrapper instances."""
         for instance in list(cls._all_instances):
             instance.clear_graphs()
@@ -93,7 +99,7 @@ class ACLGraphWrapper:
         # assert runtime_mode is not NONE(no aclgraph), otherwise, we don't
         # need to initialize a ACLGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
-        self.graph_pool = ACLGraphWrapper._graph_pool
+        self.graph_pool = ACLGraphWrapper.get_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()

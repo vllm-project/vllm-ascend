@@ -107,18 +107,26 @@ def ascend_batch_transfer_weights(
 
     state_dict = model.state_dict()
     all_params = []
+    all_params_ptrs = set()
 
     for name, param in state_dict.items():
         if name.endswith("expert_map"):
             continue
-        if param.data_ptr() not in expert_weights_set:
+        ptr = param.data_ptr()
+        if ptr not in expert_weights_set and ptr not in all_params_ptrs:
             all_params.append(param.data)
+            all_params_ptrs.add(ptr)
 
+    # if there are quantized weights, they are not in model.state_dict()
+    # and need to ve added to all_params separately.
     quant_weight_names = ["aclnn_input_scale", "aclnn_input_scale_reciprocal", "aclnn_input_offset"]
     for module in model.modules():
         for name in quant_weight_names:
             if (param := getattr(module, name, None)) is not None:
-                all_params.append(param)
+                ptr = param.data_ptr()
+                if ptr not in expert_weights_set and ptr not in all_params_ptrs:
+                    all_params.append(param)
+                    all_params_ptrs.add(ptr)
 
     assert len(all_params) > 0
     p2p_ops = []

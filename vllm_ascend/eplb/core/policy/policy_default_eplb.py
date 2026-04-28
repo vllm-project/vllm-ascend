@@ -1,7 +1,7 @@
 # Copyright Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this policy.
 from collections import defaultdict
-from typing import ClassVar, cast
+from typing import cast
 
 import numpy as np
 
@@ -25,11 +25,11 @@ class DynamicTable:
 
 
 class DefaultEplb(EplbPolicy):
-    _new_ep_size: ClassVar[int | None] = None
+    def __init__(self):
+        self._new_ep_size: int | None = None
 
-    @classmethod
-    def set_new_ep_size(cls, new_ep_size: int):
-        cls._new_ep_size = new_ep_size
+    def set_new_ep_size(self, new_ep_size: int):
+        self._new_ep_size = new_ep_size
 
     @staticmethod
     def add_redundant(current_expert_table, expert_workload, num_original_expert):
@@ -59,6 +59,7 @@ class DefaultEplb(EplbPolicy):
             index = 0
             while (len(route_expert_redundancy[weights[index][0]])) == card_num - 1:
                 index += 1
+                assert index < route_expert_num
             tmp_raw_weight = weights[index][1] * (len(route_expert_redundancy[weights[index][0]]) + 1)
             route_expert_redundancy[weights[index][0]].append(route_expert_num + i)
             avg_weight = tmp_raw_weight / (len(route_expert_redundancy[weights[index][0]]) + 1)
@@ -169,6 +170,8 @@ class DefaultEplb(EplbPolicy):
                         ):
                             break
                         index += 1
+
+                    assert index < len(weights)
 
                     boxes[i][cur_position] = weights[index][0]
                     tmp_raw_weight = weights[index][1] * (len(route_expert_redundancy[weights[index][0]]) + 1)
@@ -346,7 +349,11 @@ class DefaultEplb(EplbPolicy):
                 )
 
                 # 1. Identify experts that are not moved to other NPU.
-                mask_experts_not_move = np.isin(cur_expert_ids, new_expert_ids)
+                # If there have duplicate experts in cur_expert_ids, we choose the first occurrence.
+                _, first_occurrence_idx = np.unique(cur_expert_ids, return_index=True)
+                mask_experts_not_move = np.zeros(len(cur_expert_ids), dtype=bool)
+                mask_experts_not_move[first_occurrence_idx] = True
+                mask_experts_not_move &= np.isin(cur_expert_ids, new_expert_ids)
                 experts_not_move = cur_expert_ids[mask_experts_not_move]
 
                 # 2. Identify experts in the new list that are moved from other NPU.
@@ -376,9 +383,9 @@ class DefaultEplb(EplbPolicy):
         row = cast(np.ndarray, info.placement_table[0])
         expert_ids, counts = np.unique(row, return_counts=True)
         num_original_expert = len(expert_ids)
-        if DefaultEplb._new_ep_size:
+        if self._new_ep_size:
             # Elastic EP Scaling
-            num_npus = DefaultEplb._new_ep_size
+            num_npus = self._new_ep_size
             num_redundancy_expert = experts_per_npu * self._new_ep_size - num_original_expert
         else:
             num_redundancy_expert = self.get_redundant_num(num_npus, counts)
@@ -442,6 +449,6 @@ class DefaultEplb(EplbPolicy):
         if npu_heat_all_after < 0.95 * npu_heat_all_origin:
             change = 1
 
-        DefaultEplb._new_ep_size = None
+        self._new_ep_size = None
 
         return change, per_layer_priority, np.array(new_global_deployment).tolist()
