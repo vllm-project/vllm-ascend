@@ -640,6 +640,18 @@ class NPUModelRunner(GPUModelRunner):
             )
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
 
+        # PCP + eagle3 overlay: the SpecDecoding state needs to be downgraded
+        # for the per-layer attention metadata path. Returned `attn_state` keeps
+        # the original value for `with_prefill` derivation below.
+        # TODO: resolve the conflict between attn_state sunset and PCP needs.
+        if (
+            attn_state == AscendAttentionState.SpecDecoding
+            and self.speculative_config.method != "mtp"
+        ):
+            self.attn_state = AscendAttentionState.ChunkedPrefill
+        else:
+            self.attn_state = attn_state
+
         # Determine if it's a splitfuse batch
         with_prefill = attn_state not in [AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding]
         self.with_prefill = with_prefill
@@ -1170,34 +1182,23 @@ class NPUModelRunner(GPUModelRunner):
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
-            attn_state = AscendAttentionState.PrefillNoCache
+            return AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
-        elif np.all(num_scheduled_tokens == 1):
-            attn_state = AscendAttentionState.DecodeOnly
+        if np.all(num_scheduled_tokens == 1):
             if self.speculative_config and self.speculative_config.method == "mtp":
                 # SpecDecoding now supports seq_len=1 and seq_len=2
                 # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
-                attn_state = AscendAttentionState.SpecDecoding
+                return AscendAttentionState.SpecDecoding
+            return AscendAttentionState.DecodeOnly
         # Speculative decoding.
-        elif np.all(num_valid_tokens == 1):
+        if np.all(num_valid_tokens == 1):
             if self.speculative_config:
-                attn_state = AscendAttentionState.SpecDecoding
-            else:
-                attn_state = AscendAttentionState.ChunkedPrefill
+                return AscendAttentionState.SpecDecoding
+            return AscendAttentionState.ChunkedPrefill
         # splitfuse
-        elif self.scheduler_config.enable_chunked_prefill:
-            attn_state = AscendAttentionState.ChunkedPrefill
-        else:
-            attn_state = AscendAttentionState.PrefillCacheHit
-
-        # For the overlay of the PCP feature and the eagle3, attn_state needs to be recovered
-        # TODO: Resolved the conflict between the sunset of attn_state and the PCP that requires this interface.
-        if attn_state == AscendAttentionState.SpecDecoding and self.speculative_config.method != "mtp":
-            self.attn_state = AscendAttentionState.ChunkedPrefill  # type: ignore
-        else:
-            self.attn_state = attn_state  # type: ignore
-
-        return attn_state
+        if self.scheduler_config.enable_chunked_prefill:
+            return AscendAttentionState.ChunkedPrefill
+        return AscendAttentionState.PrefillCacheHit
 
     def _calc_spec_decode_metadata(
         self,

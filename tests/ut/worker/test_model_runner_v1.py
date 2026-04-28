@@ -2,9 +2,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -144,6 +146,110 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         actual_output_token_ids = actual_sampling_metadata.output_token_ids
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+
+class TestNPUModelRunnerBuildAttnState(unittest.TestCase):
+    """Pure logic tests for _build_attn_state — no device required.
+
+    `_build_attn_state` is a pure function: it does not mutate
+    ``self.attn_state``. The caller (``_prepare_inputs``) is responsible for
+    assigning the instance attribute and applying the PCP/eagle3 override.
+    """
+
+    def _make_runner(self, num_computed_tokens, spec_method, enable_chunked_prefill):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.input_batch = SimpleNamespace(
+            num_computed_tokens_cpu=np.array(num_computed_tokens, dtype=np.int32),
+        )
+        runner.scheduler_config = SimpleNamespace(enable_chunked_prefill=enable_chunked_prefill)
+        if spec_method is None:
+            runner.speculative_config = None
+        else:
+            runner.speculative_config = SimpleNamespace(method=spec_method, num_speculative_tokens=3)
+        return runner
+
+    def _run(self, num_computed_tokens, num_scheduled, num_valid, spec_method=None, enable_chunked_prefill=False):
+        runner = self._make_runner(num_computed_tokens, spec_method, enable_chunked_prefill)
+        num_reqs = len(num_computed_tokens)
+        return runner._build_attn_state(
+            num_reqs,
+            np.array(num_scheduled, dtype=np.int32),
+            np.array(num_valid, dtype=np.int32),
+        )
+
+    def test_prefill_no_cache(self):
+        # All num_computed_tokens == 0 wins, even with chunked_prefill enabled
+        for enable_chunked in (False, True):
+            ret = self._run(
+                [0, 0, 0],
+                [10, 10, 10],
+                [10, 10, 10],
+                enable_chunked_prefill=enable_chunked,
+            )
+            self.assertEqual(ret, AscendAttentionState.PrefillNoCache)
+
+    def test_decode_only(self):
+        # All num_scheduled_tokens == 1, no spec decode
+        ret = self._run([5, 10, 15], [1, 1, 1], [1, 1, 1])
+        self.assertEqual(ret, AscendAttentionState.DecodeOnly)
+
+    def test_decode_one_token_mtp_upgrades_to_spec(self):
+        # spec_decode method=mtp upgrades scheduled-1 batch to SpecDecoding
+        ret = self._run(
+            [5, 10, 15],
+            [1, 1, 1],
+            [1, 1, 1],
+            spec_method="mtp",
+        )
+        self.assertEqual(ret, AscendAttentionState.SpecDecoding)
+
+    def test_decode_one_token_non_mtp_stays_decode(self):
+        # Non-mtp spec decode does NOT upgrade scheduled-1 batch
+        ret = self._run(
+            [5, 10, 15],
+            [1, 1, 1],
+            [1, 1, 1],
+            spec_method="eagle",
+        )
+        self.assertEqual(ret, AscendAttentionState.DecodeOnly)
+
+    def test_spec_decoding_with_spec_config(self):
+        # num_valid_tokens all == 1 + spec_decode → SpecDecoding (any method)
+        for method in ("mtp", "eagle"):
+            ret = self._run(
+                [5, 10, 15],
+                [4, 4, 4],
+                [1, 1, 1],
+                spec_method=method,
+            )
+            self.assertEqual(ret, AscendAttentionState.SpecDecoding)
+
+    def test_valid_one_no_spec_is_chunked(self):
+        # num_valid_tokens all == 1 without spec_decode → ChunkedPrefill
+        ret = self._run([5, 10, 15], [4, 4, 4], [1, 1, 1])
+        self.assertEqual(ret, AscendAttentionState.ChunkedPrefill)
+
+    def test_chunked_prefill_enabled(self):
+        # Falls through to chunked_prefill branch
+        ret = self._run(
+            [5, 10, 15],
+            [10, 5, 1],
+            [10, 5, 1],
+            enable_chunked_prefill=True,
+        )
+        self.assertEqual(ret, AscendAttentionState.ChunkedPrefill)
+
+    def test_prefill_cache_hit_fallback(self):
+        # Default fallback when no other branch matches
+        ret = self._run([5, 10, 15], [10, 5, 1], [10, 5, 1])
+        self.assertEqual(ret, AscendAttentionState.PrefillCacheHit)
+
+    def test_does_not_mutate_self_attn_state(self):
+        # _build_attn_state must be a pure function
+        runner = self._make_runner([0, 0, 0], None, False)
+        runner.attn_state = "sentinel"
+        runner._build_attn_state(3, np.array([10, 10, 10]), np.array([10, 10, 10]))
+        self.assertEqual(runner.attn_state, "sentinel")
 
 
 if __name__ == "__main__":
