@@ -1,16 +1,21 @@
 # CohereLabs/c4ai-command-r-v01
+
 This tutorial shows how to run `CohereLabs/c4ai-command-r-v01` with vLLM-Ascend on Atlas A2.
 
 ## Introduction
+
 CohereLabs/c4ai-command-r-v01 is an open-weights instruction model optimized for reasoning, summarization, and question answering. It supports multilingual generation and long-context processing, and is suitable for enterprise-style assistant and RAG scenarios. This tutorial describes how to deploy and validate the model on vLLM-Ascend with Atlas A2.
 
 ## Prerequisites
+
 - Ascend driver/toolkit is installed and healthy.
 - vLLM-Ascend environment is ready.
 - Model files are available (local path or Hugging Face access).
 
 ## Installation
+
 Run in a Docker container:
+
 ```{code-block} bash
 :substitutions:
 
@@ -59,6 +64,7 @@ cd ..
 ## Setup and Deployment
 
 ### Environment Setup
+
 ```bash
 cd /data/vllm-ascend
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -85,7 +91,9 @@ vllm serve "CohereLabs/c4ai-command-r-v01" \
 ```
 
 ## Quick Verification
+
 Open another terminal and run:
+
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
 -H "Content-Type: application/json" \
@@ -98,9 +106,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 "temperature":0.2
 }'
 ```
+
 Expected result:
+
 - Response contains `choices`.
 - `finish_reason` is `stop`.
+
 ## Troubleshooting
 
 ### HCCL init failure (EI0010 / error code 5)
