@@ -42,7 +42,7 @@ test_cases:
       - "--async-scheduling"
       - "--mm-processor-cache-gb"
       - "0"
-      - "mm_processor_cache_type"
+      - "--mm_processor_cache_type"
       - "shm"
     benchmarks:
       perf:
