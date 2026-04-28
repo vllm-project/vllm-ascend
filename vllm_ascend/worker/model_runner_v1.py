@@ -2567,48 +2567,6 @@ class NPUModelRunner(GPUModelRunner):
             }
         )
 
-    def sync_and_slice_intermediate_tensors(
-        self,
-        num_tokens: int,
-        intermediate_tensors: IntermediateTensors | None,
-        sync_self: bool,
-    ) -> IntermediateTensors:
-        assert self.intermediate_tensors is not None
-        tp = self.vllm_config.parallel_config.tensor_parallel_size
-
-        # When sequence parallelism is enabled, the "residual" tensor is sharded
-        # across tensor parallel ranks, so each rank only needs its own slice.
-        if sync_self:
-            assert intermediate_tensors is not None
-            for k, v in intermediate_tensors.items():
-                if self.ubatch_slices is None:
-                    copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
-                else:
-                    copy_len = (
-                        ((self.ubatch_slices[0].num_tokens + tp - 1) // tp)
-                        + ((self.ubatch_slices[1].num_tokens + tp - 1) // tp)
-                        if enable_sp()
-                        else (self.ubatch_slices[0].num_tokens + self.ubatch_slices[1].num_tokens)
-                    )
-                    intermediate_tensor_size = next(iter(self.intermediate_tensors.tensors.values())).size(0)
-                    if intermediate_tensor_size < copy_len:
-                        self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                            batch_size=copy_len, dtype=self.dtype, device=self.device
-                        )
-
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
-                )
-
-        return IntermediateTensors(
-            {
-                k: v[: (num_tokens + tp - 1) // tp]
-                if enable_sp()
-                else v[:num_tokens]
-                for k, v in self.intermediate_tensors.items()
-            }
-        )
-
     def sync_and_gather_intermediate_tensors(
         self,
         num_tokens: int,
@@ -3024,7 +2982,6 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_gid, attn_gid, _cm, num_reqs_actual,
                             prefill_ratio_to_sas_metadata, decode_ratio_to_sas_metadata,
                             common_ratio_to_sas_metadata, ubid)
-                        _build_attn_group_metadata(kv_cache_gid, attn_gid, _cm, ubid)
                 else:
                     _build_attn_group_metadata(
                         kv_cache_gid, attn_gid, cm, num_reqs_actual,

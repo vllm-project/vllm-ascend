@@ -611,6 +611,7 @@ def _test_mla_attention_correctness(
         forward_ctx.capturing = False
         forward_ctx.flash_comm_v1_enabled = False
         forward_ctx.flashcomm_v2_enabled = False
+        forward_ctx.dbo_enabled = False
 
         backend_output, impl = run_mla_attention_backend(
             kv_cache_spec,
