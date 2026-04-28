@@ -29,7 +29,6 @@ def pytest_runtest_makereport(item, call):
     print(f"{time_stamp}")
 
     file_path = item.fspath
-    
     duration = time.time() - item.start_time
 
     if file_path not in _per_file_slow_cases:
