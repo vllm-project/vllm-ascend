@@ -61,6 +61,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
     if profiling_mgr._set_time_done and profiling_mgr.predictor.history_fitted:
         try:
             from vllm_ascend.ascend_config import get_ascend_config
+
             get_ascend_config().profiling_chunk_config.need_timing = False
         except RuntimeError:
             pass
@@ -116,8 +117,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
         if not request_chunks:
             # Cannot accurately attribute batch latency to individual
             # requests — skip this sample to avoid polluting the model.
-            logger.debug("[ProfilingChunk] Skipping timing sample: "
-                         "unable to extract per-request chunk info")
+            logger.debug("[ProfilingChunk] Skipping timing sample: unable to extract per-request chunk info")
             return
 
         if not profiling_mgr.predictor.history_fitted:
