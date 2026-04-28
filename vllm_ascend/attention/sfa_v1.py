@@ -459,6 +459,13 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # Enable layer sharding via DSA-CP on the P node in the PD-disaggregated setup.
         self.enable_dsa_cp_with_layer_shard = enable_dsa_cp_with_layer_shard()
+        
+        # Improves dsv3.2/glm5 accuracy after enabling dsa-cp in scenarios with strict accuracy requirements,
+        # especially for customized cases, at the cost of performance degradation due to extra communication.
+        self.enable_dsa_cp_strict_accuracy = (
+            self.enable_dsa_cp_with_layer_shard
+            and ascend_config.enable_dsa_cp_strict_accuracy
+        )
 
         # use original TP o_proj weight in PD mix stage, and full gather
         # for o_proj weight for prefill stage.
@@ -1062,6 +1069,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+
         if attn_metadata is None:
             # Profiling run.
             if self.enable_dsa_cp_with_layer_shard and not _EXTRA_CTX.in_profile_run:
@@ -1069,6 +1077,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                     if is_hidden_layer(layer):
                         reach_layer_for_shard_weight_series(layer)
             return output.fill_(0)
+
+        if self.enable_dsa_cp:
+            need_gather_q_kv = False
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), need_gather_q_kv)
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
@@ -1267,6 +1279,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             if not require_o_proj_forward:
                 return result
             attn_output = result
+
+        if self.enable_dsa_cp_strict_accuracy:
+            send = (
+                attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
+                .permute(1, 0, 2)
+                .reshape(-1, self.num_heads * self.v_head_dim)
+            )
+
+            attn_output = torch.empty_like(send)
+            torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
 
         output[...] = self.o_proj(attn_output)[0]
 

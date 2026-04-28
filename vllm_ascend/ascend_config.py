@@ -192,6 +192,10 @@ class AscendConfig:
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
 
+        # Improves dsv3.2/glm5 accuracy after enabling dsa-cp in scenarios with strict accuracy requirements,
+        # especially for customized cases, at the cost of performance degradation due to extra communication.
+        self.enable_dsa_cp_strict_accuracy = additional_config.get("enable_dsa_cp_strict_accuracy", False)
+
     def _check_mix_placement(self):
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
