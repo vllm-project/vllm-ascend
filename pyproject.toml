@@ -92,6 +92,7 @@ docstring-code-format = true
 
 [tool.check_docs_yaml_sync]
 exclude = [
+    "docs/source/tutorials/models/chameleon.md",
     "docs/source/tutorials/models/DeepSeek-R1.md",
     "docs/source/tutorials/models/DeepSeek-V3.1.md",
     "docs/source/tutorials/models/DeepSeek-V3.2.md",
