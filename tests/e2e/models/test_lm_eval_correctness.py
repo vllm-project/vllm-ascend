@@ -55,6 +55,9 @@ def build_model_args(eval_config, tp_size):
         "enforce_eager",
         "enable_thinking",
         "quantization",
+        "tokenizer_mode",
+        "tokenizer",
+        "tokenizer_revision",
     ]:
         val = serve_cfg.get(s, None)
         if val is not None:
@@ -133,7 +136,19 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     print("Eval Parameters:")
     print(eval_params)
 
-    results = lm_eval.simple_evaluate(**eval_params)
+    try:
+        results = lm_eval.simple_evaluate(**eval_params)
+    except Exception as exc:
+        report_data["rows"].append(
+            {
+                "task": "lm_eval",
+                "metric": "run_status",
+                "value": "❌failed",
+                "stderr": str(exc),
+            }
+        )
+        generate_report(tp_size, eval_config, report_data, report_dir, env_config)
+        raise
 
     for task in eval_config["tasks"]:
         task_name = task["name"]
