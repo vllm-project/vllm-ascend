@@ -204,6 +204,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             num_input_tokens=self.num_input_tokens,
             prefill_context_parallel_metadata=self.prefill_context_parallel_metadata,
             max_seq_len=self.max_seq_len,
+            is_prefilling=self.is_prefilling[:num_actual_reqs] if self.is_prefilling is not None else None,
         )
 
 

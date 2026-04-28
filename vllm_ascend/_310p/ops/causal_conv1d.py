@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -62,6 +64,7 @@ def causal_conv1d_fn(
     cache_indices: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     pad_slot_id: int = PAD_SLOT_ID,
+    **_: Any,
 ):
     """
     PyTorch implementation of causal_conv1d_fn for 310P.
@@ -166,6 +169,7 @@ def causal_conv1d_update(
     num_accepted_tokens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
     pad_slot_id: int = PAD_SLOT_ID,
+    **_: Any,
 ):
     """
     PyTorch implementation of causal_conv1d_update for 310P.

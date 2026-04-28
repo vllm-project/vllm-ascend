@@ -20,8 +20,17 @@ from vllm.triton_utils import HAS_TRITON
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 if HAS_TRITON:
+    import vllm_ascend.patch.worker.patch_mamba_ssd  # noqa
     import vllm_ascend.patch.worker.patch_triton
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+else:
+    import vllm.model_executor.layers.mamba.ops.causal_conv1d
+
+    from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn as _ascend_causal_conv1d_fn
+    from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_update as _ascend_causal_conv1d_update
+
+    vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_fn = _ascend_causal_conv1d_fn
+    vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = _ascend_causal_conv1d_update
 
 
 # isort: off
@@ -32,6 +41,7 @@ import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
+import vllm_ascend.patch.worker.patch_mamba_weights  # noqa
 import vllm_ascend.patch.worker.patch_multimodal_merge  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
@@ -40,7 +50,12 @@ if not is_310p():
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
 
     if not vllm_version_is("0.19.1"):
-        import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+        try:
+            import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+        except ModuleNotFoundError:
+            # Some vLLM builds (e.g. specific 0.19.x variants) do not ship qwen3_dflash.
+            # Skip this optional patch to keep unrelated models available.
+            pass
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
