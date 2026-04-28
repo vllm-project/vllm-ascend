@@ -656,7 +656,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             weak_ref_tensors(key),
             weak_ref_tensors(value),
             weak_ref_tensors(block_table),
-            weak_ref_tensors(attn_metadata.attn_mask) if attn_metadata.attn_mask is not None else None,
+            weak_ref_tensors(attn_metadata.attn_mask) if attn_mask is not None else None,
             block_size,
             actual_seq_lengths_kv,
             actual_seq_lengths_q,
