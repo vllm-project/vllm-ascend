@@ -77,6 +77,8 @@ jobs:
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
               - 'packages.txt'
+            ut_tracker:
+              - 'tests/ut/**'
             _310_tracker:
               - 'vllm_ascend/_310p/**'
               - 'tests/e2e/310p/**'
@@ -87,6 +89,7 @@ jobs:
               - 'CMakeLists.txt'
 
       - name: Determine smart UT test scope
+        if: ${{ steps.filter.outputs.ut_tracker == 'true' || steps.filter.outputs.e2e_tracker == 'true' }}
         id: scope
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
