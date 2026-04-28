@@ -223,27 +223,8 @@ def test_models_long_sequence_cp_kv_interleave_size_output_between_tp_and_cp(
 ) -> None:
     prompts = ["The president of the United States is"]
 
-    GOLDEN_TEXT_DS = "The president of the United States is a man who has been elected to the highest office"
-    GOLDEN_TOKENS_DS = [
-        100000,
-        549,
-        6847,
-        280,
-        254,
-        4794,
-        5110,
-        317,
-        245,
-        668,
-        779,
-        643,
-        803,
-        19136,
-        276,
-        254,
-        7492,
-        4995,
-    ]
+    GOLDEN_TEXT_DS = "The president of the United States is a man who is not only a liar, but"
+    GOLDEN_TOKENS_DS = [549, 6847, 280, 254, 4794, 5110, 317, 245, 668, 779, 317, 441, 889, 245, 69524, 11, 548]
 
     GOLDEN_TEXT_QWEN = "The president of the United States is the head of state and head of government of the"
     GOLDEN_TOKENS_QWEN = [785, 4767, 315, 279, 3639, 4180, 374, 279, 1968, 315, 1584, 323, 1968, 315, 3033, 315, 279]

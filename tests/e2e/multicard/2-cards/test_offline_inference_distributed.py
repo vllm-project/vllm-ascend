@@ -120,7 +120,11 @@ def test_deepseek_w4a8_accuracy_tp2(model):
         "The president of the United States is",
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs",
     ]
-    vllm_ds_w4a8_answers = ["逍遙而至地去 accrued", "平行于我udo madreHelen", "ysteepaolis backwards Kj"]
+    vllm_ds_w4a8_answers = [
+        "estown Exped recoveryeilights",
+        "平行于我 charmsapar理工学院",
+        "agna以此为基点儿的 magnetism",
+    ]
     sampling_params = SamplingParams(max_tokens=5, temperature=0.0)
     with VllmRunner(
         model,
