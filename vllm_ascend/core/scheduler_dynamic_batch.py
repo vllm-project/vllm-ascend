@@ -327,7 +327,7 @@ class SchedulerDynamicBatch(Scheduler):
 
                 # Skip request if the structured output request is still waiting
                 # for FSM compilation.
-                if request.status == RequestStatus.WAITING_FOR_FSM:
+                if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
                     structured_output_req = request.structured_output_request
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
@@ -491,7 +491,7 @@ class SchedulerDynamicBatch(Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if vllm_version_is("0.19.0"):
+                if vllm_version_is("0.19.1"):
                     # Count the number of prefix cached tokens.
                     if request.num_cached_tokens < 0:
                         request.num_cached_tokens = num_computed_tokens
