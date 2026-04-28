@@ -122,10 +122,8 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
         self.num_decodes_flatten = query_lens[:num_decodes].sum().item()
         if common_attn_metadata._seq_lens_cpu is not None:
             seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
         if num_actual_tokens_pcp_padded is None:
