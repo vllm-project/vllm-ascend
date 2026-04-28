@@ -42,6 +42,7 @@ from vllm_ascend.ops.layer_shard_linear import (
     post_process_after_loading_for_shard_weight_series,
     reach_layer_for_shard_weight_series,
     register_all_layers_to_shard_weight_series,
+    wait_all_layers,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
@@ -476,6 +477,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                             f"[SFAImpl init] Layer '{layer_name}' not found in kwargs for layer sharding, "
                             "skipping sharding configuration"
                         )
+                self.layer_sharding_kwargs.sort(key=lambda x: x.prefix)
                 register_all_layers_to_shard_weight_series(self.layer_sharding_kwargs)
 
     @staticmethod
@@ -1271,5 +1273,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        wait_all_layers()
 
         return output_padded
