@@ -2517,7 +2517,11 @@ class NPUModelRunner(GPUModelRunner):
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs_padded
         ]
+        num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
+            :num_reqs_padded
+        ]
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
+        is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
             seq_lens_cpu = None
@@ -2545,6 +2549,7 @@ class NPUModelRunner(GPUModelRunner):
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
+            is_prefilling=is_prefilling,
             num_input_tokens=num_tokens_padded,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
             positions=self.positions,
@@ -3208,11 +3213,28 @@ class NPUModelRunner(GPUModelRunner):
                     use_mamba = True
                 if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
-            self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
+            self.hybrid_with_attn_and_mamba = (
+                self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
+            )
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
-                if (
+                is_unallocated_mamba = (
+                    isinstance(layer_kv_cache_spec.get(layer_name), MambaSpec)
+                    and layer_name not in kv_cache_raw_tensors
+                )
+                if is_unallocated_mamba:
+                    # Pure Mamba models do not use attn-style layer names, so they need
+                    # an explicit branch instead of relying on string matching.
+                    if self.vllm_config.kv_transfer_config is None:
+                        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                    else:
+                        cache_size_aligned = kv_cache_tensor.size + alignment
+                        tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+
+                    for layer_name_inner in kv_cache_tensor.shared_by:
+                        kv_cache_raw_tensors[layer_name_inner] = tensor
+                elif (
                     "linear_attn" in layer_name
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
