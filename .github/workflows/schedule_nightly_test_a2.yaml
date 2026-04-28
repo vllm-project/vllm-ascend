@@ -203,6 +203,9 @@ jobs:
           - name: multi-node-qwen3-235b-dp
             config_file_path: Qwen3-235B-A22B-A2.yaml
             size: 2
+          - name: multi-node-Kimi-K2.5-W4A8-A2
+            config_file_path: Kimi-K2_5-W4A8-A2-dual-nodes.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
