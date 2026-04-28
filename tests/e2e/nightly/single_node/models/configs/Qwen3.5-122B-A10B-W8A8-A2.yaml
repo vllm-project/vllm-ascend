@@ -7,10 +7,10 @@ _envs: &envs
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   SERVER_PORT: "DEFAULT_PORT"
-  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-  HCCL_BUFFSIZE: 1024
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "1024"
   OMP_NUM_THREADS: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: 0
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
 
 _server_cmd: &server_cmd
   - "--quantization"

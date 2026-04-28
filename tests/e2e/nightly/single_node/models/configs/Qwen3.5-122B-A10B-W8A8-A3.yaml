@@ -6,12 +6,12 @@ test_cases:
   - name: "Qwen3.5-122B-A10B-W8A8-A3"
     model: "metax-tech/Qwen3.5-122B-A10B-W8A8"
     envs:
-      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-      HCCL_OP_EXPANSION_MODE: AIV
-      HCCL_BUFFSIZE: 1024
-      OMP_NUM_THREADS: 1
-      TASK_QUEUE_ENABLE: 1
-      VLLM_ASCEND_ENABLE_FUSED_MC2: 1
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "1024"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
