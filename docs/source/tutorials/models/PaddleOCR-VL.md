@@ -72,7 +72,7 @@ Run the following script to start the vLLM server on single 910B4:
 
 ```shell
 #!/bin/sh
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 export TASK_QUEUE_ENABLE=1
 export CPU_AFFINITY_CONF=1
@@ -97,7 +97,7 @@ Run the following script to start the vLLM server on single Atlas 300 inference 
 
 ```shell
 #!/bin/sh
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
 
 vllm serve ${MODEL_PATH} \

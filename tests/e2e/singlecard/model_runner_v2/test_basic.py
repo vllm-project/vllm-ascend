@@ -30,7 +30,7 @@ MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
 
 
-@pytest.mark.skipif(vllm_version_is("0.19.0"), reason="no need to support model_runner for v0.19.0")
+@pytest.mark.skipif(vllm_version_is("0.19.1"), reason="no need to support model_runner for v0.19.1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -65,17 +65,21 @@ def test_qwen3_dense_eager_mode(
         runner.model.generate(prompts, sampling_params)
 
 
-@pytest.mark.skipif(vllm_version_is("0.19.0"), reason="no need to support model_runner for v0.19.0")
+@pytest.mark.skipif(vllm_version_is("0.19.1"), reason="no need to support model_runner for v0.19.1")
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config", [{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]}, {}]
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_egale_spec_decoding(
     model: str,
     eagle_model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -95,11 +99,12 @@ def test_egale_spec_decoding(
             "method": "eagle",
             "num_speculative_tokens": 3,
         },
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
 
 
-@pytest.mark.skipif(vllm_version_is("0.19.0"), reason="no need to support model_runner for v0.19.0")
+@pytest.mark.skipif(vllm_version_is("0.19.1"), reason="no need to support model_runner for v0.19.1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
