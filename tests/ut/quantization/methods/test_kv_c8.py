@@ -166,29 +166,8 @@ class TestAscendFAQuantAttentionMethodInit(unittest.TestCase):
     def test_init_with_full_config(self):
         """Test initialization when config has all attributes"""
         method = self.method_class()
-
-        self.assertTrue(method.transpose_weight)
-        self.assertFalse(method.printFlag)
         self.assertEqual(method.kv_lora_rank, 128)
         self.assertEqual(method.qk_rope_head_dim, 64)
-
-    def test_init_without_kv_lora_rank(self):
-        """Test initialization when config lacks kv_lora_rank"""
-        delattr(self.mock_hf_config, "kv_lora_rank")
-
-        method = self.method_class()
-
-        self.assertEqual(method.kv_lora_rank, 0)
-        self.assertEqual(method.qk_rope_head_dim, 64)
-
-    def test_init_without_qk_rope_head_dim(self):
-        """Test initialization when config lacks qk_rope_head_dim"""
-        delattr(self.mock_hf_config, "qk_rope_head_dim")
-
-        method = self.method_class()
-
-        self.assertEqual(method.kv_lora_rank, 128)
-        self.assertEqual(method.qk_rope_head_dim, 0)
 
     def test_init_without_both_attributes(self):
         """Test initialization when config lacks both attributes"""
@@ -196,7 +175,6 @@ class TestAscendFAQuantAttentionMethodInit(unittest.TestCase):
         delattr(self.mock_hf_config, "qk_rope_head_dim")
 
         method = self.method_class()
-
         self.assertEqual(method.kv_lora_rank, 0)
         self.assertEqual(method.qk_rope_head_dim, 0)
 

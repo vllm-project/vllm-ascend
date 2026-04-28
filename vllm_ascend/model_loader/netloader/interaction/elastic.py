@@ -59,7 +59,7 @@ class ElasticClient:
                 ip, port_str = source.split(":")
                 port = int(port_str)
             except Exception as e:
-                logger.info(f"IP format error: {source}, detail: {e}")
+                logger.info("IP format error: %s, detail: %s", source, e)
                 continue
 
             self.server_addr = ip
@@ -67,16 +67,16 @@ class ElasticClient:
 
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                logger.info(f"Start connection to server: {self.server_addr}:{self.server_port}")
+                logger.info("Start connection to server: %s:%s", self.server_addr, self.server_port)
                 sock.connect((self.server_addr, self.server_port))
-                logger.info(f"Finish connection to server: {self.server_addr}:{self.server_port}")
+                logger.info("Finish connection to server: %s:%s", self.server_addr, self.server_port)
                 sock.settimeout(60)
 
                 self.s = sock
                 self.ack = self.register(device_id, model_path, tp, pp)
                 break
             except Exception as e:
-                logger.error(f"Connect to {source} fails, detail: {e}")
+                logger.error("Connect to %s fails, detail: %s", source, e)
                 if sock is not None:
                     with suppress(Exception):
                         sock.close()
@@ -93,7 +93,7 @@ class ElasticClient:
             try:
                 self.s.close()
             except Exception as e:
-                logger.error(f"Error closing socket: {e}")
+                logger.error("Error closing socket: %s", e)
             finally:
                 self.s = None
 
@@ -176,7 +176,7 @@ class ElasticClient:
         except Exception as e:
             raise RuntimeError(f"Receive data {ack_str} cannot be converted to JSON format, detail: {e}")
 
-        logger.info(f"Receive ack: {ack}")
+        logger.info("Receive ack: %s", ack)
 
         if (
             "label" in ack
@@ -247,7 +247,7 @@ class ElasticServer:
                         try:
                             self.original_int8[name] = param.data.clone().detach()
                         except RuntimeError as e:
-                            logger.error(f"Failed to cache int8 tensor {name} to HBM, change to DRAM, due to {e}")
+                            logger.error("Failed to cache int8 tensor %s to HBM, change to DRAM, due to %s", name, e)
                             self.original_int8[name] = param.data.cpu()
 
                 elif int8_cache == "dram":
@@ -259,13 +259,19 @@ class ElasticServer:
                     pass
                 else:
                     logger.warning(
-                        f"int8_cache should be selected in [HBM, DRAM], but got {int8_cache}, change to no cache"
+                        "int8_cache should be selected in [HBM, DRAM], but got %s, change to no cache", int8_cache
                     )
 
         logger.info(
-            f"Server {self.addr}:{self.port} starts, device id: {self.device_id}, "
-            f"model path: {self.model_path}, tp: {self.tp}, pp: {self.pp}, "
-            f"int8 params {list(self.original_int8)} are saved to {int8_cache}"
+            "Server %s:%s starts, device id: %s, model path: %s, tp: %s, pp: %s, int8 params %s are saved to %s",
+            self.addr,
+            self.port,
+            self.device_id,
+            self.model_path,
+            self.tp,
+            self.pp,
+            list(self.original_int8),
+            int8_cache,
         )
 
     def __del__(self):
@@ -290,7 +296,7 @@ class ElasticServer:
         """
         while True:
             conn, addr = self.s.accept()
-            logger.info("Accept new connection from {}:{}...".format(*addr))
+            logger.info("Accept new connection from %s:%s...", *addr)
             self.register_handler(conn, addr)
 
     def register_handler(self, conn, addr, buffer_size=1024):
@@ -308,7 +314,7 @@ class ElasticServer:
         try:
             data = json.loads(data_str)
         except Exception:
-            logger.error(f"Failed to load {data_str} as JSON string")
+            logger.error("Failed to load %s as JSON string", data_str)
             conn.close()
             return
 
@@ -360,20 +366,20 @@ class ElasticServer:
                     "content": msg,
                 }
         else:
-            logger.warning(f"Received data does not contain required fields: {data}")
+            logger.warning("Received data does not contain required fields: %s", data)
             ack = {"label": "JOIN_NACK", "content": f"Received data does not contain required fields: {data}"}
 
         try:
             ack_str = json.dumps(ack).encode("utf-8")
         except Exception as e:
-            logger.error(f"Failed to convert {ack} to JSON format, details: {e}")
+            logger.error("Failed to convert %s to JSON format, details: %s", ack, e)
             conn.close()
             return
 
         try:
             conn.send(ack_str)
         except Exception as e:
-            logger.error(f"Failed to send {ack} to {addr}, details: {e}")
+            logger.error("Failed to send %s to %s, details: %s", ack, addr, e)
             conn.close()
             return
 
@@ -382,5 +388,5 @@ class ElasticServer:
                 p2psend = P2PSend(self.addr, data["content"]["port"], ack["content"]["name"])
                 p2psend.send(self.model, self.original_int8)
             except Exception as e:
-                logger.error(f"P2PSend Failed to send model to {self.addr}, details: {e}")
+                logger.error("P2PSend Failed to send model to %s, details: %s", self.addr, e)
         conn.close()

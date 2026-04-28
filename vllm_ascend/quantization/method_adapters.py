@@ -112,7 +112,6 @@ class AscendLinearMethod(LinearMethodBase):
                 or is_mx_quant_type(self.quant_method)
             ):
                 param.input_dim = 1
-                param.input_dim = 1
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
