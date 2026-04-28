@@ -81,12 +81,11 @@ ignore = [
     "B007",
     # f-string format
     "UP032",
-    # TODO: FIE ME
-    "G004",
     "B904",
     "SIM108",
     "SIM102"
 ]
+logger-objects = ["vllm.logger.logger"]
 
 [tool.ruff.format]
 docstring-code-format = true

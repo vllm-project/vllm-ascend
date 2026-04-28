@@ -43,8 +43,9 @@ class BudgetRefiner:
         if not self.enabled:
             return
         logger.info(
-            "Dynamic batch is enabled with SLO limit: {}, and chunked prefill is "
-            "forced to be activated because dynamic batch relies on it".format(str(slo_limit))
+            "Dynamic batch is enabled with SLO limit: %s, and chunked prefill is "
+            "forced to be activated because dynamic batch relies on it",
+            slo_limit,
         )
         self.lookup: dict[tuple[int, int], int] = {}
         self.context_keys: set[int] = set()
@@ -96,7 +97,7 @@ class BudgetRefiner:
             return self.default_budget
         budget = self.lookup.get((aligned_ctx, aligned_dnum), None)
         if budget is None:
-            logger.warn(f"Table miss for ctx,dnum{aligned_ctx, aligned_dnum}")
+            logger.warning("Table miss for ctx,dnum%s", (aligned_ctx, aligned_dnum))
             budget = self.default_budget
         # For debug.
         # logger.info(

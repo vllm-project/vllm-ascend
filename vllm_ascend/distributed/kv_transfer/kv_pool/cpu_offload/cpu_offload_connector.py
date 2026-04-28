@@ -152,7 +152,7 @@ class CPUOffloadingConnectorScheduler:
             self.swap_in_threshold = vllm_config.kv_transfer_config.get_from_extra_config("swap_in_threshold", 0)
         else:
             self.swap_in_threshold = 0
-        logger.info(f"swap_in_threshold: {self.swap_in_threshold}")
+        logger.info("swap_in_threshold: %s", self.swap_in_threshold)
 
     def get_num_new_matched_tokens(self, ori_request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         request = copy.deepcopy(ori_request)
@@ -271,7 +271,7 @@ class CPUOffloadingConnectorWorker:
                 if self.zmq_rpc_client.call("ready"):
                     break
             except Exception as e:
-                logger.info(f"wait for metadata server to start, error: {e}")
+                logger.info("wait for metadata server to start, error: %s", e)
                 time.sleep(1)
 
     def bind_connector_metadata(self, connector_metadata: CPUOffloadingConnectorMetadata) -> None:
@@ -367,7 +367,7 @@ class CPUOffloadingConnectorWorker:
 
     def _sending_finished(self, all_done_sending):
         for req_id in all_done_sending:
-            logger.debug(f"call cache_and_free_slots for req_id: {req_id}")
+            logger.debug("call cache_and_free_slots for req_id: %s", req_id)
             self.zmq_rpc_client.call("cache_and_free_slots", req_id)
 
     def _save_listener(self):

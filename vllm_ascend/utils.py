@@ -1124,7 +1124,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     if not flashcomm2_enable():
         return 0
 
-    logger.info(f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}")
+    logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
 
     layer_sharding = ascend_config.layer_sharding or []
     if layer_sharding:

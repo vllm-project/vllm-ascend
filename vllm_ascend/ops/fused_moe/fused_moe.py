@@ -639,7 +639,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         if not torch.allclose(integrated_out, split_out):
             diff = (integrated_out - split_out).abs()
             logger.error("SharedFusedMoE shared experts split computation does not match the integrated computation.")
-            logger.error(f"Max absolute difference: {diff.max().item()}")
+            logger.error("Max absolute difference: %s", diff.max().item())
             logger.error(
                 "Integrated output - sum: %s, norm: %s", integrated_out.sum().item(), integrated_out.norm().item()
             )

@@ -72,9 +72,10 @@ class AscendConfig:
         self.layer_sharding = additional_config.get("layer_sharding", None)
         if self.layer_sharding:
             logger.info_once(
-                f"Linear layer sharding enabled with config: {self.layer_sharding}. "
+                "Linear layer sharding enabled with config: %s. "
                 "Note: This feature works optimally with FLASHCOMM2 and DSA-CP enabled; "
-                "using it without these features may result in significant performance degradation."
+                "using it without these features may result in significant performance degradation.",
+                self.layer_sharding,
             )
 
         self.enable_shared_expert_dp = (
@@ -97,9 +98,10 @@ class AscendConfig:
                     cdiv(vllm_config.scheduler_config.max_num_batched_tokens, tp_pcp_size) * tp_pcp_size
                 )
                 logger.warning_once(
-                    f"When using FLASHCOMM1, the max_num_batched_tokens should be divisible"
-                    f"by tp_size * pcp_size ({tp_pcp_size}). It has been adjusted to"
-                    f"{vllm_config.scheduler_config.max_num_batched_tokens}."
+                    "When using FLASHCOMM1, the max_num_batched_tokens should be divisible "
+                    "by tp_size * pcp_size (%s). It has been adjusted to %s.",
+                    tp_pcp_size,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
                 )
         self.multistream_overlap_shared_expert = additional_config.get("multistream_overlap_shared_expert", False)
         self.multistream_overlap_gate = additional_config.get("multistream_overlap_gate", False)
@@ -323,7 +325,7 @@ class FinegrainedTPConfig:
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
                 raise AssertionError("module tp sizes must divide data_parallel_size")
         if any(size > 0 for size in module_tp_sizes) and enabled_configs:
-            logger.info(f"finegrained_tp_config enabled: {', '.join(enabled_configs)}")
+            logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
 
 class AscendCompilationConfig:
@@ -416,8 +418,9 @@ class XliteGraphConfig:
                 )
             if vllm_config.cache_config.block_size != 128:
                 logger.warning(
-                    f"Current cache block size is {vllm_config.cache_config.block_size}, which may not be optimal or "
-                    f"compatible with xlite graph mode. The recommended block size for xlite graph mode is 128."
+                    "Current cache block size is %s, which may not be optimal or compatible with xlite graph mode. "
+                    "The recommended block size for xlite graph mode is 128.",
+                    vllm_config.cache_config.block_size,
                 )
 
 
@@ -505,7 +508,7 @@ class EplbConfig:
 
     def _validate_config(self):
         if self.expert_map_path is not None:
-            logger.info(f"The expert_map is {self.expert_map_path}")
+            logger.info("The expert_map is %s", self.expert_map_path)
             if self.expert_map_path[-5:] != ".json":
                 raise TypeError("The expert_map is not json.")
             if not (os.path.exists(self.expert_map_path) and os.access(self.expert_map_path, os.R_OK)):
@@ -529,8 +532,8 @@ class EplbConfig:
                 or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
             ), "The environment variable DYNAMIC_EPLB or EXPERT_MAP_RECORD of the EPLB must be set to true."
 
-        logger.info(f"Dynamic EPLB is {self.config['dynamic_eplb']}")
-        logger.info(f"The number of redundant experts is {self.config['num_redundant_experts']}")
+        logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
+        logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

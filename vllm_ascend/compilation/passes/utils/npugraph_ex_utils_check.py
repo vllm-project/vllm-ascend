@@ -36,17 +36,17 @@ def extra_stream_scope_check(match: Match) -> bool:
                 non_default_streams.add(current_stream)
                 if len(non_default_streams) > 1:
                     logger.debug(
-                        f"Cross-stream operation detected in pattern match for AddRMSNormQuant. "
-                        f"Multiple streams found: {non_default_streams}. "
-                        f"Fusion is not supported for cross-stream operations."
+                        "Cross-stream operation detected in pattern match for AddRMSNormQuant. "
+                        "Multiple streams found: %s. Fusion is not supported for cross-stream operations.",
+                        non_default_streams,
                     )
                     return False
 
     if has_default and len(non_default_streams) > 0:
         logger.debug(
-            f"Cross-stream operation detected in pattern match for AddRMSNormQuant. "
-            f"Multiple streams found: {non_default_streams}. "
-            f"Fusion is not supported for cross-stream operations."
+            "Cross-stream operation detected in pattern match for AddRMSNormQuant. "
+            "Multiple streams found: %s. Fusion is not supported for cross-stream operations.",
+            non_default_streams,
         )
         return False
 
@@ -69,7 +69,7 @@ def check_and_register_fusion_pass(pattern_class: type, **kwargs):
         _register_patterns.add(pattern_key)
     except RuntimeError as e:
         if "Duplicate pattern" in str(e):
-            logger.warning(f"Pattern {pattern_class.__name__} eps {eps} has been registered")
+            logger.warning("Pattern %s eps %s has been registered", pattern_class.__name__, eps)
             _register_patterns.add(pattern_key)
         else:
             raise e
