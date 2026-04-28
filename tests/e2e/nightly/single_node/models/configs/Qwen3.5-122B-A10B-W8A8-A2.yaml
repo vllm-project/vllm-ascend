@@ -17,7 +17,7 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--no-enable-prefix-caching"
   - "--tensor-parallel-size"
-  - "8"
+  - "4"
   - "--port"
   - "$SERVER_PORT"
   - "--max-model-len"
@@ -47,7 +47,6 @@ _server_cmd: &server_cmd
   - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
 
 _benchmarks: &benchmarks
-
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs400
