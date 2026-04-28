@@ -42,6 +42,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
+from vllm_ascend.attention.kvcomp_attn.attention_utils import (
+    get_kvcomp_decode_params,
+    is_enable_hamming_sparse,
+    reshape_and_cache_kvcomp,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_cp,
@@ -58,6 +63,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -201,8 +207,7 @@ class AscendMetadata:
     # prefill reshape_and_cache event
     reshape_cache_event: torch.npu.Event = None
 
-    # sliding window attention mask
-    swa_mask: torch.Tensor | None = None
+    kvcomp_metadata: KVCompMetaData | None = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -299,15 +304,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_state = common_attn_metadata.attn_state
 
-        # Get attn_mask and swa_mask from singleton AttentionMaskBuilder
+        # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(self.model_config)
-
-        swa_mask = None
-        is_swa = hasattr(self.model_config.hf_text_config, "sliding_window")
-        if self.model_config is not None and is_swa:
-            swa_mask = self.attn_mask_builder.get_swa_mask(
-                self.model_config.dtype, self.model_config.hf_text_config.sliding_window
-            )
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -324,12 +322,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
-            swa_mask=swa_mask,
             attn_state=attn_state,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
+            kvcomp_metadata=common_attn_metadata.kvcomp_metadata,
         )
         return attn_metadata
 
@@ -396,6 +394,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
         self.sinks = sinks
+        self.layerIndex = 0
+        self.enable_hamming_sparse = is_enable_hamming_sparse()
 
     @staticmethod
     def update_graph_params(
@@ -579,7 +579,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
+        passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        if self.enable_hamming_sparse and attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+            reshape_and_cache_kvcomp(attn_metadata.kvcomp_metadata, self.layerIndex, passed_key)
+        elif self.enable_hamming_sparse:
+            block_table, actual_seq_lengths_kv = get_kvcomp_decode_params(
+                self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
+            )
 
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         if _EXTRA_CTX.is_draft_model:
@@ -872,9 +879,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sinks is None
         ):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
+        passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
         )
+        if self.enable_hamming_sparse and attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+            reshape_and_cache_kvcomp(attn_metadata.kvcomp_metadata, self.layerIndex, passed_key)
+        elif self.enable_hamming_sparse:
+            block_table, actual_seq_lengths_kv = get_kvcomp_decode_params(
+                self.layerIndex, attn_metadata.kvcomp_metadata, query, passed_key, block_table, actual_seq_lengths_kv
+            )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         if (
@@ -889,10 +903,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
             if self.sliding_window is not None:
-                atten_mask = attn_metadata.swa_mask
                 sparse_mode = 4
             else:
-                atten_mask = attn_metadata.attn_mask
                 sparse_mode = 3
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
@@ -903,7 +915,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 input_layout="TND",
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
-                atten_mask=atten_mask,
+                atten_mask=attn_metadata.attn_mask,
                 sparse_mode=sparse_mode,
                 softmax_scale=self.scale,
                 block_table=block_table,
@@ -1086,6 +1098,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+        if self.enable_hamming_sparse:
+            self.layerIndex = int(layer.layer_name.split(".")[2])
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
