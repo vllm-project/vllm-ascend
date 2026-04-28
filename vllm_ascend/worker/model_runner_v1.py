@@ -589,6 +589,21 @@ class NPUModelRunner(GPUModelRunner):
                 self.token_ids_gpu_tensor = torch.zeros(
                     self.max_num_reqs, self.max_model_len,
                     dtype=torch.int32, device=self.device)
+                # Persistent sampled-token buffer used as kernel input.
+                # Pre-allocated with ``max_num_reqs`` rows so the NPU
+                # ngram kernel's row-by-row ``DataCopyPad`` (whose 32-byte
+                # aligned MTE2 fetch can over-read past the apparent
+                # ``[batch_size, num_spec+1]`` size when batch_size <
+                # max_num_reqs) always lands inside this allocation.
+                # Per-step ``propose_draft_token_ids`` copies the current
+                # sampler output into the leading rows and slices
+                # ``[:batch_size]`` to feed the kernel — slicing keeps the
+                # underlying allocation intact, providing a guaranteed
+                # ``(max_num_reqs - batch_size)`` row over-read margin.
+                self._sampled_token_ids_buf = torch.full(
+                    (self.max_num_reqs, spec_token_num + 1),
+                    -1, dtype=torch.int32, device=self.device,
+                )
                 self._ngram_pinned_idx_buf = torch.zeros(
                     self.max_num_reqs, dtype=torch.long, pin_memory=True)
                 self._ngram_pinned_val_buf = torch.zeros(
@@ -1409,83 +1424,125 @@ class NPUModelRunner(GPUModelRunner):
         elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
             draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
         elif isinstance(self.drafter, AscendNgramProposerNPU):
-            batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
+            batch_size = min(
+                self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0]
+            )
+            vocab_size = self.model_config.get_vocab_size()
 
-            # Prepare sampled_token_ids as a contiguous int32 tensor.
-            # The NPU ngram kernel strictly interprets this buffer as
-            # int32 (see csrc/ngram_spec_decode/...); passing the raw
-            # int64 sampler output would alias high/low halves and walk
-            # past row strides, surfacing as an aivec MTE OOB on device.
+            # --- Stage sampled tokens into the persistent
+            # ``_sampled_token_ids_buf`` (allocated [max_num_reqs,
+            # num_spec+1] in ``_set_up_drafter``).
+            #
+            # Why a persistent buffer: the NPU ngram kernel issues
+            # row-by-row ``DataCopyPad`` reads on the sampled GM tensor
+            # with ``srcRowBytes = max_new_tokens * 4``. When that's
+            # less than the 32-byte MTE alignment, the underlying
+            # MTE2 burst can fetch past the per-step sampled tensor's
+            # tight allocation. Routing through a buffer of shape
+            # [max_num_reqs, num_spec+1] guarantees ``(max_num_reqs -
+            # batch_size)`` rows of trailing valid memory under the
+            # ``[:batch_size]`` slice we hand to the kernel — eliminating
+            # the multi-core MTE OOB observed in CI (fixp_error0 cluster
+            # around 0x30Xb6b9).
+            #
+            # Also normalizes dtype to int32 (kernel's binding contract,
+            # see csrc/ngram_spec_decode/ngram_spec_decode_torch_adpt.h).
+            sampled_buf = self._sampled_token_ids_buf
+            sampled_buf.fill_(-1)
             sampled_token_ids = valid_sampled_token_ids
             if isinstance(sampled_token_ids, list):
-                max_len = max(
+                src_max_len = max(
                     (len(sublist) for sublist in sampled_token_ids), default=0
                 )
-                max_len = max(max_len, 1)
-                padded_list = [
-                    sublist + [-1] * (max_len - len(sublist))
-                    for sublist in sampled_token_ids
-                ]
-                sampled_token_ids_tensor = torch.tensor(
-                    padded_list, dtype=torch.int32, device=self.device
-                )
+                if src_max_len > 0:
+                    cols = min(src_max_len, sampled_buf.shape[1])
+                    src_rows = min(len(sampled_token_ids), batch_size)
+                    for i in range(src_rows):
+                        row = sampled_token_ids[i]
+                        if not row:
+                            continue
+                        n = min(len(row), cols)
+                        sampled_buf[i, :n] = torch.tensor(
+                            row[:n], dtype=torch.int32, device=self.device
+                        )
             else:
-                # sampler_output.sampled_token_ids is torch.long; cast
-                # to int32 to match the kernel's binding contract.
-                sampled_token_ids_tensor = sampled_token_ids
-                if sampled_token_ids_tensor.dtype != torch.int32:
-                    sampled_token_ids_tensor = sampled_token_ids_tensor.to(
-                        torch.int32
+                src = sampled_token_ids
+                if src.dtype != torch.int32:
+                    src = src.to(torch.int32)
+                src_rows = min(src.shape[0], batch_size)
+                src_cols = min(src.shape[1], sampled_buf.shape[1])
+                if src_rows > 0 and src_cols > 0:
+                    sampled_buf[:src_rows, :src_cols].copy_(
+                        src[:src_rows, :src_cols]
                     )
-                if not sampled_token_ids_tensor.is_contiguous():
-                    sampled_token_ids_tensor = (
-                        sampled_token_ids_tensor.contiguous()
-                    )
+            sampled_b = sampled_buf[:batch_size]
+
+            # NOTE: do NOT call .contiguous() on token_ids_gpu_tensor's
+            # slice — the kernel writes in-place; .contiguous() on an
+            # already-contiguous leading slice is a no-op, but on a
+            # non-contiguous one it would silently redirect writes to a
+            # copy. Leading slices of a contiguous 2D tensor are
+            # contiguous by construction.
+            token_ids_b = self.token_ids_gpu_tensor[:batch_size]
+            num_tokens_b = self.num_tokens_no_spec_gpu[:batch_size]
+
+            # ``discard_request_mask.gpu`` is bool; the C++ binding
+            # converts it to int32 (see ngram_spec_decode_torch_adpt.h).
+            # Pass the raw bool slice — the slice's underlying allocation
+            # is [max_num_reqs] so it has the same DMA over-read margin
+            # as token_ids_gpu_tensor.
+            discard_b = self.discard_request_mask.gpu[:batch_size]
+
+            # Clamp num_tokens_no_spec into [0, max_seq_len] so the
+            # kernel's ``backup_pos = seq_len - 1`` and ngram-search
+            # indices stay within bounds. In-place to keep the kernel's
+            # in-place view of the same buffer consistent.
+            max_seq_len = self.token_ids_gpu_tensor.shape[1]
+            num_tokens_b.clamp_(min=0, max=max_seq_len)
 
             (_token_ids, next_token_ids, draft_token_ids,
              num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
-                self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
-                self.num_tokens_no_spec_gpu[:batch_size],      # [B]
-                sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
-                self.discard_request_mask.gpu[:batch_size],    # [B]
-                vocab_size=self.model_config.get_vocab_size(),
+                token_ids_b,            # [B, max_seq_len], int32, in-place
+                num_tokens_b,           # [B], int32, clamped to [0, max_seq_len]
+                sampled_b,              # [B, num_spec+1], int32, persistent buffer
+                discard_b,              # [B], bool (binding casts to int32)
+                vocab_size=vocab_size,
                 min_n=self.drafter.min_n,
                 max_n=self.drafter.max_n,
                 k=self.drafter.k,
             )
 
-            # Compute valid_sampled_tokens_count for async num_computed_tokens
-            # correction: count accepted tokens per request, zeroing discarded.
-            vocab_size = self.model_config.get_vocab_size()
-            valid_mask = (sampled_token_ids_tensor[:batch_size] != -1) & \
-                         (sampled_token_ids_tensor[:batch_size] < vocab_size)
+            # --- Compute valid_sampled_tokens_count for async
+            # num_computed_tokens correction.
+            valid_mask = (sampled_b != -1) & (sampled_b < vocab_size)
             valid_sampled_tokens_count = valid_mask.sum(dim=1).to(torch.int32)
             valid_sampled_tokens_count.masked_fill_(
-                self.discard_request_mask.gpu[:batch_size], 0)
+                self.discard_request_mask.gpu[:batch_size].bool(), 0
+            )
             self._copy_valid_sampled_token_count(
-                next_token_ids, valid_sampled_tokens_count)
+                next_token_ids, valid_sampled_tokens_count
+            )
 
             # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
 
-            # Async D2H copy of num_valid_draft_tokens on a dedicated NPU
-            # stream.  Use NPU-native stream / event APIs (mirroring
-            # _copy_draft_token_ids_to_cpu) instead of upstream's CUDA-based
-            # copy_num_valid_draft_tokens helper, whose torch.cuda.stream /
-            # torch.cuda.current_stream calls do not bind reliably to NPU
-            # events under the cuda->npu monkey-patch and surface as
-            # "SUSPECT REMOTE ERROR" (507057) on the next event.synchronize().
+            # Async D2H copy on a dedicated NPU stream + record event
+            # via the lazy-event proxy. Wait_stream ensures the copy
+            # observes the kernel's writes.
             if num_valid_draft_tokens is not None:
                 num_reqs_to_copy = min(
-                    batch_size, num_valid_draft_tokens.shape[0])
+                    batch_size, num_valid_draft_tokens.shape[0]
+                )
                 if num_reqs_to_copy > 0:
                     default_stream = torch.npu.current_stream()
                     with torch.npu.stream(
                             self._num_valid_draft_tokens_copy_stream):
                         self._num_valid_draft_tokens_copy_stream.wait_stream(
-                            default_stream)
+                            default_stream
+                        )
                         self._num_valid_draft_tokens_cpu[
-                            :num_reqs_to_copy].copy_(
+                            :num_reqs_to_copy
+                        ].copy_(
                             num_valid_draft_tokens[:num_reqs_to_copy],
                             non_blocking=True,
                         )
