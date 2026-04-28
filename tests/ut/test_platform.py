@@ -23,6 +23,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config = MagicMock()
         mock_vllm_config.compilation_config = MagicMock()
         mock_vllm_config.model_config = MagicMock()
+        mock_vllm_config.device_config = MagicMock()
+        mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
@@ -213,6 +215,21 @@ class TestNPUPlatform(TestBase):
         mock_get_device_name.return_value = device_name
         self.assertEqual(self.platform.get_device_name(device_id), device_name)
         mock_get_device_name.assert_called_once_with(0)
+
+    @patch("torch.npu.get_device_properties")
+    @patch("vllm_ascend.platform.subprocess.check_output")
+    def test_get_device_total_memory_prefers_npu_smi(self, mock_check_output, mock_get_device_properties):
+        mock_check_output.return_value = (
+            "        DDR Capacity(MB)               : 0\n        HBM Capacity(MB)               : 32768\n"
+        )
+
+        self.assertEqual(self.platform.get_device_total_memory(0), 32768 * 1024 * 1024)
+        mock_check_output.assert_called_once_with(
+            ["npu-smi", "info", "-t", "memory", "-i", "0", "-c", "0"],
+            stderr=-3,
+            text=True,
+        )
+        mock_get_device_properties.assert_not_called()
 
     @patch("torch.npu.get_device_properties")
     def test_get_device_uuid(self, mock_get_device_properties):
