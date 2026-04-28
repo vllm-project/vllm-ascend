@@ -63,5 +63,9 @@ test_cases:
         max_out_len: 1500
         batch_size: 35
         request_rate: 0
+<<<<<<< HEAD:tests/e2e/weekly/single_node/configs/Qwen3.5-27B-w8a8-A3.yaml
         baseline: 895
+=======
+        baseline: 1
+>>>>>>> aa693b25 (add nightly Qwen3.5-27B-w8a8-A3 Qwen3.5-27B-w8a8-A2):tests/e2e/nightly/single_node/models/configs/Qwen3.5-27B-w8a8-A3.yaml
         threshold: 0.97
