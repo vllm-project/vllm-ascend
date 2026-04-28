@@ -31,7 +31,6 @@ test_cases:
       - "0.9"
       - "--quantization"
       - "ascend"
-      - "--no-enable-prefix-caching"
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
       - "--model-loader-extra-config"
