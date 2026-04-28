@@ -29,8 +29,7 @@ deployment:
       --tensor-parallel-size 8
       --data-parallel-rpc-port 13389
       --data-parallel-size-local 1
-      --data-parallel-start-rank 1
-      --data-parallel-address $MASTER_IP
+      --data-parallel-address $LOCAL_IP
       --enable-expert-parallel
       --seed 1024
       --max-num-seqs 64
@@ -39,7 +38,6 @@ deployment:
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
-      --enable-chunked-prefill
       --no-enable-prefix-caching
       --async-scheduling
       --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"fuse_qknorm_rope":false}'
@@ -53,7 +51,9 @@ deployment:
       --data-parallel-size 2
       --tensor-parallel-size 8
       --data-parallel-size-local 1
-      --data-parallel-address $LOCAL_IP
+      --data-parallel-start-rank 1
+      --headless
+      --data-parallel-address $MASTER_IP
       --data-parallel-rpc-port 13389
       --enable-expert-parallel
       --seed 1024
@@ -63,7 +63,6 @@ deployment:
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
-      --enable-chunked-prefill
       --no-enable-prefix-caching
       --async-scheduling
       --additional-config '{"enable_npugraph_ex": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"fuse_qknorm_rope":false}'
