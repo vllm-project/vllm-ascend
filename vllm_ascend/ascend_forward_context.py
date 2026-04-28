@@ -211,8 +211,24 @@ def create_ascend_forward_context(
     dbo_template: Any = None,
     skip_compiled: bool = False,
 ):
+    all_moe_layers = getattr(cur_forward_context, "all_moe_layers", None)
+    if all_moe_layers is None:
+        all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
+    if not all_moe_layers:
+        try:
+            from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+            all_moe_layers = [
+                name
+                for name, layer in vllm_config.compilation_config.static_forward_context.items()
+                if isinstance(layer, FusedMoE)
+            ]
+        except Exception:
+            all_moe_layers = None
+
     new_forward_context = ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
+        all_moe_layers=all_moe_layers,
         attn_metadata=attn_metadata,
         slot_mapping={},
         dp_metadata=dp_metadata,
@@ -235,7 +251,8 @@ def create_ascend_forward_context(
         new_forward_context.pad_size = pad_size
 
     if dp_world_size > 1 and new_forward_context.dp_metadata is not None:
-        max_tokens_across_dp = new_forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
+        dp_meta = new_forward_context.dp_metadata
+        max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
         if new_forward_context.flash_comm_v1_enabled or new_forward_context.flashcomm_v2_enabled:
             new_forward_context.padded_length = (
                 (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
