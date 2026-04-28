@@ -378,6 +378,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.hidden_size = self.num_heads * self.head_size
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = sliding_window
+        self.kv_share_target_layer_name = kv_sharing_target_layer_name
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
         self.alibi_slopes = alibi_slopes
@@ -396,6 +397,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.sinks = sinks
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
+
+    def _use_shared_kv_cache(self) -> bool:
+        return(
+            self.kv_share_target_layer_name is not None
+            and self.key_cache is not None
+            and self.value_cache is not None
+        )
 
     @staticmethod
     def update_graph_params(
@@ -847,11 +855,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            block_size = 128
-            block_table = None
-            actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
-            if self.attn_type == AttentionType.ENCODER_DECODER:
-                actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
+            if self._use_shared_kv_cache():
+                batch_size = attn_metadata.seq_lens.shape[0]
+                block_table = attn_metadata.block_tables[:batch_size, :]
+                num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+                key = self.key_cache.view(  # type: ignore
+                    num_block, block_size, -1
+                )
+                value = self.value_cache.view(  # type: ignore
+                    num_block, block_size, -1
+                )
+                actual_seq_lengths_kv = attn_metadata.seq_lens_list
+            else:
+                block_size = 128
+                block_table = None
+                actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
+                if self.attn_type == AttentionType.ENCODER_DECODER:
+                    actual_seq_lengths_kv = torch.cumsum(attn_metadata.seq_lens, dim=0).tolist()
         elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.seq_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
@@ -1250,6 +1270,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.reshape_cache_event = torch.npu.Event()
             if self.key_cache is None:
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.kv_share_target_layer_name is not None:
+                return query, key, value, output
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             DeviceOperator.reshape_and_cache(
