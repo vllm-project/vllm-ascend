@@ -172,15 +172,15 @@ class KVPoolScheduler:
         ]
         remaining_keys = keys_to_check
         tracker = self._get_or_create_request_tracker(request.request_id)
-        cached_gvas = tracker.chunk_gvas
-        if cached_gvas:
-            cached_keys = keys_to_check[:len(cached_gvas)]
-            if not all(self.store_scheduler.batch_is_exist(cached_keys)):
-                raise ValueError(
-                    f"Request {request.request_id}: cached gvas key(s) no longer exist in store")
-            remaining_keys = remaining_keys[len(cached_gvas):]
-
-        num_hit_blocks = len(cached_gvas)
+        # cached_gvas = tracker.chunk_gvas
+        # if cached_gvas:
+        #     cached_keys = keys_to_check[:len(cached_gvas)]
+        #     if not all(self.store_scheduler.batch_is_exist(cached_keys)):
+        #         raise ValueError(
+        #             f"Request {request.request_id}: cached gvas key(s) no longer exist in store")
+        #     remaining_keys = remaining_keys[len(cached_gvas):]
+        cached_gvas = []
+        num_hit_blocks = 0
         if remaining_keys:
             key_infos = self.store_scheduler.batch_get_key_info(remaining_keys)
             for key_info in key_infos:
@@ -191,6 +191,8 @@ class KVPoolScheduler:
                 else:
                     break
         num_external_hit_tokens = num_hit_blocks * self._block_size
+        tracker.block_keys = keys_to_check[:num_hit_blocks]
+        tracker.chunk_gvas = cached_gvas[:num_hit_blocks]
         # TODO 这里没有命中的可以提前申请空间，避免后面申请的时候掩盖不住，这个可以异步进行。
         # 先exists判断是否存在，然后异步获取地址和申请空间，这样是否更高效一点？
         if num_external_hit_tokens == request.num_tokens:
@@ -297,7 +299,10 @@ class KVPoolScheduler:
                 allocated_block_ids=unfolded_block_ids,
                 num_saved_tokens=0,
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
+                block_keys=self._request_trackers[request.req_id].block_keys,
+                chunk_gvas=self._request_trackers[request.req_id].chunk_gvas,
             )
+            num_hit_blocks = len(request_tracker.block_keys)
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
                 (len(request.prompt_token_ids) // self._block_size * self._block_size)
@@ -309,7 +314,7 @@ class KVPoolScheduler:
             has_last_block = num_tokens_to_compute % self._block_size != 0
 
             self._generate_keys_and_alloc(
-                request_real.block_hashes[:num_blocks],
+                request_real.block_hashes[num_hit_blocks:num_blocks],
                 request_tracker=request_tracker,
                 has_last_block=has_last_block,
             )
