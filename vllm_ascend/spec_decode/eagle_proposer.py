@@ -944,7 +944,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # However, when lmhead_tp_enable() is disabled, the batch size uses the length after padding.
         # To decouple the scenarios, a judgment is required.
         # That is, the batch size needs to be modified only when lmhead_tp_enable() is enabled.
-        if lmhead_tp_enable():
+        if lmhead_tp_enable() and self.method == "mtp":
             batch_size = draft_token_ids.shape[0]
 
         # Generate the remaining draft tokens.
