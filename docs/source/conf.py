@@ -82,7 +82,7 @@ myst_substitutions = {
     # vLLM commit hash for main branch
     "main_vllm_commit": "6f786f2c506cb07f4566771fdc62e640e2c4a176",
     # vLLM tag for main branch
-    "main_vllm_tag": "v0.19.0",
+    "main_vllm_tag": "v0.19.1",
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.12",
     # CANN version for main branch

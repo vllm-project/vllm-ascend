@@ -228,7 +228,7 @@ class AscendMoERunner(DefaultMoERunner):
         chunked path. Always return False to stay on forward_impl."""
         return False
 
-    # TODO: Remove this after drop v0.19.0 support
+    # TODO: Remove this after drop v0.19.1 support
     def forward_impl(
         self,
         layer: torch.nn.Module,
@@ -357,7 +357,7 @@ class AscendFusedMoE(FusedMoE):
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 
-        is_legacy = vllm_version_is("0.19.0")
+        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
             self if is_legacy else self.layer_name,
             self.moe_config,
@@ -583,7 +583,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # NOTE: must use self._shared_experts here, not self.shared_experts —
         # FusedMoE.shared_experts is a property that reads self.runner.shared_experts,
         # which at this point is still the stale runner built with shared_experts=None.
-        is_legacy = vllm_version_is("0.19.0")
+        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
             self if is_legacy else self.layer_name,
             self.moe_config,

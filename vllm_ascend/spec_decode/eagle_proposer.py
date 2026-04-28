@@ -49,7 +49,7 @@ from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kerne
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
-if not vllm_version_is("0.19.0"):
+if not vllm_version_is("0.19.1"):
     from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 else:
     DFlashQwen3ForCausalLM = None
