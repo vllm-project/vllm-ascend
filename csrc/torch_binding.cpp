@@ -987,6 +987,80 @@ std::vector<at::Tensor> moe_grouped_matmul(
     return y;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h(
+    const at::Tensor &k,
+    const at::Tensor &w,
+    const at::Tensor &u,
+    const at::Tensor &g,
+    const c10::optional<at::Tensor> &initial_state,
+    const c10::optional<at::Tensor> &cu_seqlens,
+    const c10::optional<at::Tensor> &chunk_indices,
+    c10::optional<bool> output_final_state,
+    c10::optional<int64_t> chunk_size)
+{
+    bool output_final_state_ = output_final_state.has_value() ? output_final_state.value() : false;
+    const at::Tensor &initial_state_ = c10::value_or_else(initial_state, [] { return at::Tensor(); });
+    const at::Tensor &cu_seqlens_ = c10::value_or_else(cu_seqlens, [] { return at::Tensor(); });
+    const at::Tensor &chunk_indices_ = c10::value_or_else(chunk_indices, [] { return at::Tensor(); });
+    int64_t chunk_size_ = chunk_size.has_value() ? chunk_size.value() : 64;
+
+    //cu_seqlens ´æÔÚÊ±£¬NT Îª cu_seqlensµÄµÚÒ»Î¬¶È£¬²»´æÔÚÊ±Îª T / chunk_size
+    auto k_sizes = k.sizes();
+    auto u_sizes = u.sizes();
+    int K = k_sizes[3];
+    int B = k_sizes[0];
+    int T = k_sizes[2];
+    int HV = u_sizes[1];
+    int V = u_sizes[3];
+    int NT = 0;
+    int N = cu_seqlens.has_value() ? cu_seqlens_.sizes()[0] - 1 : B;
+    if(cu_seqlens.has_value()) {
+        auto cu_seqlens_sizes = chunk_indices_.sizes();
+        NT = cu_seqlens_sizes[0];
+    } else {
+        NT = (T + chunk_size_ - 1) / chunk_size_;
+    }
+
+    at::Tensor h_out = at::zeros({B, HV, NT, K, V}, k.options());
+    at::Tensor v_new_out = at::zeros(u.sizes(), u.options());
+    at::Tensor final_state_out;
+    if(output_final_state_) {
+    	auto state_options = initial_state.has_value() ? initial_state->options() : h_out.options();
+        final_state_out = at::empty({N, HV, K, V}, state_options);
+    } else {
+        final_state_out = at::empty({1}, k.options());
+    }
+
+    EXEC_NPU_CMD(aclnnChunkGatedDeltaRuleFwdH,
+        k, w, u, g, initial_state_, cu_seqlens_, chunk_indices_, output_final_state_, chunk_size_, h_out, v_new_out, final_state_out);
+    if (output_final_state_) {
+        return std::make_tuple(h_out, v_new_out, final_state_out);
+    } else {
+        return std::make_tuple(h_out, v_new_out, at::Tensor());
+    }
+}
+
+at::Tensor chunk_fwd_o(
+    const at::Tensor &q,
+    const at::Tensor &k,
+    const at::Tensor &v,
+    const at::Tensor &h,
+    const at::Tensor &g,
+    double scale,
+    const c10::optional<at::Tensor> &cu_seqlens,
+    const c10::optional<at::Tensor> &chunk_indices,
+    c10::optional<int64_t> chunk_size)
+{
+
+    at::Tensor o = at::zeros(v.sizes(), v.options());
+    const at::Tensor &cu_seqlens_ = c10::value_or_else(cu_seqlens, [] { return at::Tensor(); });
+    const at::Tensor &chunk_indices_ = c10::value_or_else(chunk_indices, [] { return at::Tensor(); });
+    int64_t chunk_size_ = chunk_size.has_value() ? chunk_size.value() : 64;
+    EXEC_NPU_CMD(aclnnChunkFwdO,
+        q, k, v, h, g, cu_seqlens_, chunk_indices_, scale, chunk_size_, o);
+    return o;
+}
+
 } // namespace vllm_ascend
 
 #ifdef ASCEND_PLATFORM_310P
@@ -1279,5 +1353,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
+
+    ops.def(
+    "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor g, *, "
+    "                            Tensor? initial_state=None, "
+    "                            Tensor? cu_seqlens=None, "
+    "                            Tensor? chunk_indices=None, "
+    "                            bool? output_final_state=False, "
+    "                            int? chunk_size=64) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
+    );
+    ops.impl("chunk_gated_delta_rule_fwd_h", torch::kPrivateUse1, &vllm_ascend::chunk_gated_delta_rule_fwd_h);
+
+    ops.def(
+        "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, Tensor g,float scale, "
+        "            Tensor? cu_seqlens=None, Tensor? chunk_indices=None,int? chunk_size=64) -> Tensor"
+    );
+    ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
 }
 #endif
