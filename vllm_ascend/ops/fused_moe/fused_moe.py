@@ -29,7 +29,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
-from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 
 import vllm_ascend.envs as envs_ascend
@@ -49,7 +49,6 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
-    vllm_version_is,
 )
 
 
@@ -220,47 +219,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
-# Please remove this inheritance after extending vllm, todo(wxs)
-class AscendMoERunner(DefaultMoERunner):
-    @property
-    def use_dp_chunking(self) -> bool:
-        """Ascend uses its own forward_impl path, not the FlashInfer Cutlass
-        chunked path. Always return False to stay on forward_impl."""
-        return False
-
-    # TODO: Remove this after drop v0.19.1 support
-    def forward_impl(
-        self,
-        layer: torch.nn.Module,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        shared_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """
-        Override the default forward_impl to use Ascend-specific implementation.
-        This delegates to the layer's forward_impl method which contains the
-        Ascend-specific MoE computation logic.
-        """
-        result = layer.forward_impl(hidden_states, router_logits)
-        # If the layer has shared experts, forward_impl returns a tuple (shared_out, routed_out)
-        # Otherwise, it returns just routed_out
-        # The torch op expects the same return type based on whether it's moe_forward or moe_forward_shared
-        return result
-
-    def forward_dispatch(
+class AscendMoERunner(MoERunner):
+    def _forward_impl(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
-            return self.forward_impl(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
+            return layer.forward_impl(hidden_states, router_logits)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -357,16 +326,14 @@ class AscendFusedMoE(FusedMoE):
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 
-        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
+            self.layer_name,
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self.gate if is_legacy else kwargs.pop("gate", None),
-            self.shared_experts if is_legacy else kwargs.pop("shared_experts", None),
+            kwargs.pop("gate", None),
+            kwargs.pop("shared_experts", None),
             self.quant_method,
-            self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
         )
 
@@ -583,16 +550,14 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # NOTE: must use self._shared_experts here, not self.shared_experts —
         # FusedMoE.shared_experts is a property that reads self.runner.shared_experts,
         # which at this point is still the stale runner built with shared_experts=None.
-        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
+            self.layer_name,
             self.moe_config,
             self.router,
             self._routed_input_transform,
             self.gate,
             self._shared_experts,
             self.quant_method,
-            self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
         )
 
