@@ -31,8 +31,8 @@ GLM4.x.md
 GLM5.md
 Kimi-K2-Thinking.md
 Kimi-K2.5.md
-Qwen2.5-7B.md
-Qwen2.5-Omni.md
 PaddleOCR-VL.md
 MiniMax-M2.5.md
+Qwen2.5-7B.md
+Qwen2.5-Omni.md
 :::

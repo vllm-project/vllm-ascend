@@ -1,11 +1,12 @@
-model_name: "facebook/chameleon-7b"
+model_name: "LLM-Research/chameleon-7b"
 hardware: "Atlas A2 Series"
 model: "vllm-vlm"
 tasks:
-- name: "ceval-valid"
+- name: "lambada_openai"
   metrics:
   - name: "acc,none"
-    value: 0.42
+    value: 0.58
+num_fewshot: 0
 trust_remote_code: True
 max_model_len: 2048
 dtype: "bfloat16"
