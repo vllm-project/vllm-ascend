@@ -320,6 +320,7 @@ class ProfilingChunkManager:
 
         self.predictor = ChunkSizePredictor(smooth_factor=smooth_factor, min_chunk=min_chunk)
         self._profiling_done = False
+        self._set_time_count = 0
         self._set_time_done = False
 
     @property
