@@ -146,6 +146,38 @@ class HCCLLibrary:
                 aclrtStream_t,
             ],
         ),
+        # HcclResult HcclSend(
+        #   void *buf, uint64_t count,
+        #   HcclDataType dataType, uint32_t root,
+        #   HcclComm comm, aclrtStream steam);
+        Function(
+            "HcclSend",
+            hcclResult_t,
+            [
+                buffer_type,
+                ctypes.c_size_t,
+                hcclDataType_t,
+                ctypes.c_int,
+                hcclComm_t,
+                aclrtStream_t,
+            ],
+        ),
+        # HcclResult HcclRecv(
+        #   void *buf, uint64_t count,
+        #   HcclDataType dataType, uint32_t root,
+        #   HcclComm comm, aclrtStream steam);
+        Function(
+            "HcclRecv",
+            hcclResult_t,
+            [
+                buffer_type,
+                ctypes.c_size_t,
+                hcclDataType_t,
+                ctypes.c_int,
+                hcclComm_t,
+                aclrtStream_t,
+            ],
+        ),
         # HcclResult HcclBroadcast(
         #   void *buf, uint64_t count,
         #   HcclDataType dataType, uint32_t root,
@@ -242,6 +274,28 @@ class HCCLLibrary:
         # when we pass int to a function, it will be converted to `ctypes.c_int`
         # by ctypes automatically
         self.HCCL_CHECK(self._funcs["HcclAllReduce"](sendbuff, recvbuff, count, datatype, op, comm, stream))
+
+    def hcclSend(
+        self,
+        sendbuff: buffer_type,
+        count: int,
+        datatype: int,
+        dest: int,
+        comm: hcclComm_t,
+        stream: aclrtStream_t,
+    ) -> None:
+        self.HCCL_CHECK(self._funcs["HcclSend"](sendbuff, count, datatype, dest, comm, stream))
+
+    def hcclRecv(
+        self,
+        sendbuff: buffer_type,
+        count: int,
+        datatype: int,
+        dest: int,
+        comm: hcclComm_t,
+        stream: aclrtStream_t,
+    ) -> None:
+        self.HCCL_CHECK(self._funcs["HcclRecv"](sendbuff, count, datatype, dest, comm, stream))
 
     def hcclBroadcast(
         self, buf: buffer_type, count: int, datatype: int, root: int, comm: hcclComm_t, stream: aclrtStream_t
