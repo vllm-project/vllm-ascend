@@ -62,7 +62,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
         extra = load_config.model_loader_extra_config
         if extra and "CONFIG_FILE" in extra:
             try:
-                logger.info(f"Reading configs in file {load_config.model_loader_extra_config['CONFIG_FILE']} ...")
+                logger.info("Reading configs in file %s ...", load_config.model_loader_extra_config["CONFIG_FILE"])
                 with open(extra["CONFIG_FILE"]) as f:
                     config = json.load(f)
             except FileNotFoundError:
@@ -70,7 +70,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
             except json.JSONDecodeError:
                 logger.error("CONFIG_FILE is not a valid JSON file")
             except Exception as e:
-                logger.error(f"Unexpected error while reading CONFIG_FILE: {e}")
+                logger.error("Unexpected error while reading CONFIG_FILE: %s", e)
 
         if config is None and extra:
             logger.info("Reading configs in model_loader_extra_config ...")
@@ -142,7 +142,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
         if self.model_path is None:
             self.model_path = model_config.model
-            logger.info(f"model_path is set to {self.model_path}")
+            logger.info("model_path is set to %s", self.model_path)
 
         device_id = torch.distributed.get_rank()
 
@@ -179,7 +179,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     pp=parallel_config.pipeline_parallel_size,
                 )
                 end_elastic_load = time.perf_counter()
-                logger.info(f"Elastic load time: {end_elastic_load - start_elastic_load}, rank: {device_id}")
+                logger.info("Elastic load time: %s, rank: %s", end_elastic_load - start_elastic_load, device_id)
                 need_process_weights_after_loading = True
 
                 if model is None:
@@ -219,24 +219,29 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     self.listen_port += device_id
 
                 logger.info(
-                    f"Start elastic Netloader server, rank: {device_id}, listen port: {driver_ip}:{self.listen_port}"
+                    "Start elastic Netloader server, rank: %s, listen port: %s:%s",
+                    device_id,
+                    driver_ip,
+                    self.listen_port,
                 )
 
                 if self.output_prefix is not None:
                     try:
                         with open(self.output_prefix + str(device_id) + ".txt", "w") as file:
                             file.write(f"{driver_ip}:{self.listen_port}")
-                        logger.info(f"Successfully wrote server address to file: {self.output_prefix + str(device_id)}")
+                        logger.info(
+                            "Successfully wrote server address to file: %s", self.output_prefix + str(device_id)
+                        )
                     except FileNotFoundError:
-                        logger.error(f"File path {self.output_prefix + str(device_id)} does not exist.")
+                        logger.error("File path %s does not exist.", self.output_prefix + str(device_id))
                     except PermissionError:
-                        logger.error(f"No permission to write to file {self.output_prefix + str(device_id)}.")
+                        logger.error("No permission to write to file %s.", self.output_prefix + str(device_id))
                     except OSError as e:
                         logger.error(
-                            f"I/O error occurred while writing to file {self.output_prefix + str(device_id)}: {e}"
+                            "I/O error occurred while writing to file %s: %s", self.output_prefix + str(device_id), e
                         )
                     except Exception as e:
-                        logger.error(f"Unknown error: {e}")
+                        logger.error("Unknown error: %s", e)
 
                 try:
                     assert isinstance(self.listen_port, int), f"listen port should be int but get {self.listen_port}"
@@ -254,12 +259,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     )
                     elastic_server.start()
                 except Exception as e:
-                    logger.error(f"Failed to start Netloader server for rank: {device_id}, details: {e}")
+                    logger.error("Failed to start Netloader server for rank: %s, details: %s", device_id, e)
         else:
             logger.info("Skip to start Netloader server")
 
         end_elastic_server = time.perf_counter()
-        logger.info(f"Elastic server start time: {end_elastic_server - start_elastic_server}, rank: {device_id}")
+        logger.info("Elastic server start time: %s, rank: %s", end_elastic_server - start_elastic_server, device_id)
 
         if need_process_weights_after_loading:
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
