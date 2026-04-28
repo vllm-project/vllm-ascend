@@ -1,15 +1,35 @@
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.model_executor.models.qwen3 import Qwen3Attention
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeAttention
-from vllm.model_executor.models.qwen3_vl import (
-    Qwen3_VisionTransformer,
-    Qwen3VLForConditionalGeneration,
-    pos_embed_interpolate_native,
-)
+
+# Upstream vLLM may rename/remove qwen3_vl related classes across versions.
+# Import defensively and only apply patches when the required symbols exist.
+try:
+    from vllm.model_executor.models.qwen3 import Qwen3Attention
+except Exception:
+    Qwen3Attention = None
+
+try:
+    from vllm.model_executor.models.qwen3_moe import Qwen3MoeAttention
+except Exception:
+    Qwen3MoeAttention = None
+
+try:
+    from vllm.model_executor.models.qwen3_vl import (
+        Qwen3_VisionTransformer,
+        Qwen3VLForConditionalGeneration,
+    )
+except Exception:
+    Qwen3_VisionTransformer = None
+    Qwen3VLForConditionalGeneration = None
+
+try:
+    from vllm.model_executor.models.qwen3_vl import pos_embed_interpolate_native
+except Exception:
+    pos_embed_interpolate_native = None
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.utils import vllm_version_is
 
 
 def tensor_parallel_wrap(func):
@@ -67,28 +87,35 @@ def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_s
     return output
 
 
-Qwen3Attention.forward = forward_with_split_qkv_rmsnorm_mrope
-Qwen3MoeAttention.forward = forward_with_split_qkv_rmsnorm_mrope
-Qwen3VLForConditionalGeneration._get_deepstack_input_embeds = tensor_parallel_wrap(
-    Qwen3VLForConditionalGeneration._get_deepstack_input_embeds
-)
+if Qwen3Attention is not None:
+    Qwen3Attention.forward = forward_with_split_qkv_rmsnorm_mrope
 
+if Qwen3MoeAttention is not None:
+    Qwen3MoeAttention.forward = forward_with_split_qkv_rmsnorm_mrope
 
-def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
-    outputs = []
-    for t, h, w in grid_thw:
-        outputs.append(
-            pos_embed_interpolate_native(
-                self.pos_embed.weight,
-                t,
-                h,
-                w,
-                self.num_grid_per_side,
-                self.spatial_merge_size,
-                self.dtype,
-            )
-        )
-    return torch.cat(outputs, dim=0)
+if Qwen3VLForConditionalGeneration is not None:
+    Qwen3VLForConditionalGeneration._get_deepstack_input_embeds = tensor_parallel_wrap(
+        Qwen3VLForConditionalGeneration._get_deepstack_input_embeds
+    )
 
+if not vllm_version_is("0.19.1") and Qwen3_VisionTransformer is not None:
+    # Only patch for latest main and when the vision transformer exists upstream
+    if pos_embed_interpolate_native is not None:
 
-Qwen3_VisionTransformer.fast_pos_embed_interpolate = _fast_pos_embed_interpolate
+        def _fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+            outputs = []
+            for t, h, w in grid_thw:
+                outputs.append(
+                    pos_embed_interpolate_native(
+                        self.pos_embed.weight,
+                        t,
+                        h,
+                        w,
+                        self.num_grid_per_side,
+                        self.spatial_merge_size,
+                        self.dtype,
+                    )
+                )
+            return torch.cat(outputs, dim=0)
+
+        Qwen3_VisionTransformer.fast_pos_embed_interpolate = _fast_pos_embed_interpolate

@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from importlib.util import find_spec
+import importlib.util
 
 from vllm.triton_utils import HAS_TRITON
 
@@ -40,7 +40,7 @@ import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
-    if not vllm_version_is("0.19.0") and find_spec("vllm.model_executor.models.qwen3_dflash"):
+    if not vllm_version_is("0.19.1") and importlib.util.find_spec("vllm.model_executor.models.qwen3_dflash"):
         import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
