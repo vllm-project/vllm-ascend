@@ -87,7 +87,6 @@ jobs:
               - 'CMakeLists.txt'
 
       - name: Determine smart UT test scope
-        if: ${{ steps.filter.outputs.e2e_tracker == 'true' }}
         id: scope
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
