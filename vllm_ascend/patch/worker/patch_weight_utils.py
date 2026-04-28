@@ -29,7 +29,7 @@ class ImportPatchDecorator:
                 try:
                     patch_func(module)
                 except Exception as e:
-                    logger.error(f"Patch application failed {module_name}: {e}")
+                    logger.error("Patch application failed %s: %s", module_name, e)
 
 
 @ImportPatchDecorator.register("vllm.model_executor.models.deepseek_v2")
@@ -83,7 +83,7 @@ def patched_import(name, globals=None, locals=None, fromlist=(), level=0):
         try:
             ImportPatchDecorator._patches[name](module)
         except Exception as e:
-            logger.error(f"Patch application failed during import {name}: {e}")
+            logger.error("Patch application failed during import %s: %s", name, e)
 
     return module
 
