@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import logging
 from types import NoneType
 
 import torch
@@ -545,7 +546,7 @@ class NPUWorker(WorkerBase):
             try:
                 bind_cpus(self.local_rank)
             except Exception as e:
-                logger.warning(f"Bind cpus failed in rank{self.local_rank}: {e} Skip binding cpu.")
+                logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -613,12 +614,13 @@ class NPUWorker(WorkerBase):
 
         # Log for debugging in PP mode
         if not is_first_pp_rank:
-            logger.debug(
-                "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
-                get_pp_group().rank_in_group,
-                num_tokens,
-                latency_ms,
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[ProfilingChunk] PP rank %d: profiled %d tokens, latency=%.2f ms (not used)",
+                    get_pp_group().rank_in_group,
+                    num_tokens,
+                    latency_ms,
+                )
 
         return latency_ms
 
@@ -792,13 +794,13 @@ class NPUWorker(WorkerBase):
                 parse_text_output(result.stdout)
                 logger.info("check_health success!")
             else:
-                logger.info(f"query NPU card {self.local_rank} fail: {result.stderr}")
+                logger.info("query NPU card %s fail: %s", self.local_rank, result.stderr)
         except subprocess.TimeoutExpired:
-            logger.info(f"query NPU card  {self.local_rank} timeout.")
+            logger.info("query NPU card  %s timeout.", self.local_rank)
         except FileNotFoundError:
             logger.info("npu-smi tool not found.")
         except Exception as e:
-            logger.info(f"query NPU card {self.local_rank} fail: {e}")
+            logger.info("query NPU card %s fail: %s", self.local_rank, e)
         return
 
 

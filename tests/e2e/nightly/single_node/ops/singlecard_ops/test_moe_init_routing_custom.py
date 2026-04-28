@@ -233,7 +233,7 @@ def cmp_out_golden(x_golden, x_out, dtype):
     return np.all(cmp)
 
 
-def test_moe_npu(x, expert_idx, scale, offset, active_num, expert_capacity,
+def run_moe_npu(x, expert_idx, scale, offset, active_num, expert_capacity,
                  expert_num, drop_pad_mode, expert_tokens_num_type,
                  expert_tokens_num_flag, quant_mode, active_expert_range,
                  row_idx_type):
@@ -339,7 +339,7 @@ def test_moe_init_routing_custom():
                                      dtype=torch.float)
             offset_ = None
 
-        result_pta = test_moe_npu(x_, expert_idx_, scale_, offset_,
+        result_pta = run_moe_npu(x_, expert_idx_, scale_, offset_,
                                   active_num_, expert_capacity_, expert_num_,
                                   drop_pad_mode_, expert_tokens_num_type_,
                                   expert_tokens_num_flag_, quant_mode_,

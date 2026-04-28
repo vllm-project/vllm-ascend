@@ -186,9 +186,9 @@ class SequenceParallelismMoePass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        logger.debug(f"before apply replacement {graph}")
+        logger.debug("before apply replacement %s", graph)
         self.matched_count = self.patterns.apply(graph)
-        logger.debug(f"after apply replacement {graph}")
+        logger.debug("after apply replacement %s", graph)
         logger.debug("SequenceParallelismMoePass replaced %s patterns", self.matched_count)
         pattern_idx = 0
         for pattern_entry in self.patterns.patterns.values():
@@ -200,5 +200,5 @@ class SequenceParallelismMoePass(VllmInductorPass):
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         applicable = compile_range.start >= self.min_tokens
-        logger.debug(f"SequenceParallelismMoePass {compile_range=} {applicable=}")
+        logger.debug("SequenceParallelismMoePass compile_range=%r applicable=%r", compile_range, applicable)
         return applicable
