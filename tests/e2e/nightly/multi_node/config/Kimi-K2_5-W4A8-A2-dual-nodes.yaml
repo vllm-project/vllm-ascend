@@ -72,6 +72,7 @@ deployment:
         --mm-encoder-tp-mode data
 
 benchmarks:
+
   perf:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
