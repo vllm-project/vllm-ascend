@@ -186,6 +186,16 @@ def _format_command_token(token: str) -> str:
 # Single Node Converter
 # ============================================================================
 
+SINGLE_NODE_DEFAULT_SERVER_PORT = "8000"
+SINGLE_NODE_AUTO_SERVER_PORT = "DEFAULT_PORT"
+
+
+def _resolve_single_node_server_port(envs: Mapping[str, ScalarValue]) -> ScalarValue:
+    server_port = envs.get("SERVER_PORT")
+    if server_port is None or server_port == SINGLE_NODE_AUTO_SERVER_PORT:
+        return SINGLE_NODE_DEFAULT_SERVER_PORT
+    return server_port
+
 
 def _convert_single_node_case(
     loaded_yaml: LoadedYaml,
@@ -214,7 +224,7 @@ def _convert_single_node_case(
         envs,
         ["vllm", "serve", model, *server_cmd, *server_cmd_extra],
         block=block,
-        env_defaults={"SERVER_PORT": "8000"},
+        env_defaults={"SERVER_PORT": _resolve_single_node_server_port(envs)},
     )
 
 
