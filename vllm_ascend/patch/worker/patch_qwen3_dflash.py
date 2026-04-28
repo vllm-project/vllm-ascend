@@ -1,6 +1,9 @@
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+try:
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+except ImportError:
+    DFlashQwen3Model = None
 
 
 def precompute_and_store_context_kv(
@@ -59,4 +62,5 @@ def precompute_and_store_context_kv(
         )
 
 
-DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
+if DFlashQwen3Model is not None:
+    DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
