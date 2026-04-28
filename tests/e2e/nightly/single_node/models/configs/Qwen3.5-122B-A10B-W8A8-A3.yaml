@@ -12,7 +12,7 @@ test_cases:
       OMP_NUM_THREADS: 1
       TASK_QUEUE_ENABLE: 1
       VLLM_ASCEND_ENABLE_FUSED_MC2: 1
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--port"
