@@ -30,13 +30,13 @@ In most deployments, these commands are executed inside a container. When creati
 Run the following commands from the vLLM-Ascend repository root:
 
 ```bash
-cmake -S csrc/ai_qos -B csrc/ai_qos/build \
+cmake -S tools/ai_qos -B tools/ai_qos/build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=${PWD}/vllm_ascend \
   -DDSMI_INCLUDE_DIR=YOUR_DSMI_INCLUDE_DIR \
   -DDSMI_LIBRARY=YOUR_DSMI_LIBRARY_FILE
-cmake --build csrc/ai_qos/build -j
-cmake --install csrc/ai_qos/build
+cmake --build tools/ai_qos/build -j
+cmake --install tools/ai_qos/build
 ```
 
 ## Usage Instruction
