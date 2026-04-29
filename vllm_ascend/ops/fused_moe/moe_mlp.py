@@ -320,6 +320,67 @@ def quant_apply_mlp(
     return hidden_states
 
 
+def unquant_apply_mlp_w1(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    group_list: torch.Tensor,
+    w1_bias: torch.Tensor = None,
+    group_list_type: int = 1,
+    need_trans: bool = True,
+) -> torch.Tensor:
+    if need_trans:
+        w1 = w1.transpose(1, 2)
+    gate_up_out = torch_npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[w1],
+        bias=[w1_bias.to(dtype=torch.float32)] if w1_bias is not None else None,
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+    )[0]
+    return gate_up_out
+
+
+def unquant_apply_mlp_activation(
+    gate_up_out: torch.Tensor,
+    w1: torch.Tensor,
+    topk_scales: torch.Tensor | None = None,
+    activation: str | None = None,
+) -> torch.Tensor:
+    act_name = getattr(activation, "value", activation)
+    if act_name == "swigluoai":
+        num_experts, _, hidden_size = w1.shape
+        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
+    else:
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    if topk_scales is not None:
+        gate_up_out *= topk_scales
+    return gate_up_out
+
+
+def unquant_apply_mlp_w2(
+    gate_up_out: torch.Tensor,
+    w2: torch.Tensor,
+    group_list: torch.Tensor,
+    w2_bias: torch.Tensor = None,
+    group_list_type: int = 1,
+    need_trans: bool = True,
+) -> torch.Tensor:
+    if need_trans:
+        w2 = w2.transpose(1, 2)
+    hidden_states = torch_npu.npu_grouped_matmul(
+        x=[gate_up_out],
+        weight=[w2],
+        bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+    )[0]
+    return hidden_states
+
+
 def unquant_apply_mlp(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -332,40 +393,28 @@ def unquant_apply_mlp(
     topk_scales: torch.Tensor | None = None,
     need_trans: bool = True,
 ) -> torch.Tensor:
-    if need_trans:
-        w1 = w1.transpose(1, 2)
-        w2 = w2.transpose(1, 2)
-
-    act_name = getattr(activation, "value", activation)
-
-    gate_up_out = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        bias=[w1_bias.to(dtype=torch.float32)] if w1_bias is not None else None,
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
+    gate_up_out = unquant_apply_mlp_w1(
+        hidden_states=hidden_states,
+        w1=w1,
         group_list=group_list,
-    )[0]
-
-    if act_name == "swigluoai":
-        num_experts, _, hidden_size = w1.shape
-        gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
-    else:
-        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
-
-    if topk_scales is not None:
-        gate_up_out *= topk_scales
-
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[gate_up_out],
-        weight=[w2],
-        bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
-        split_item=2,
+        w1_bias=w1_bias,
         group_list_type=group_list_type,
-        group_type=0,
+        need_trans=need_trans,
+    )
+    gate_up_out = unquant_apply_mlp_activation(
+        gate_up_out=gate_up_out,
+        w1=w1,
+        topk_scales=topk_scales,
+        activation=activation,
+    )
+    hidden_states = unquant_apply_mlp_w2(
+        gate_up_out=gate_up_out,
+        w2=w2,
         group_list=group_list,
-    )[0]
+        w2_bias=w2_bias,
+        group_list_type=group_list_type,
+        need_trans=need_trans,
+    )
     return hidden_states
 
 
