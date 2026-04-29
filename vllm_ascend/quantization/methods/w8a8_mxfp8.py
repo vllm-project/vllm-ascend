@@ -229,7 +229,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -246,8 +246,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        expected = global_num_experts - global_redundant_expert_num
-        assert router_logits.shape[1] == expected, "Number of global experts mismatch (excluding redundancy)"
+        assert router_logits.shape[1] == num_experts, "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -259,16 +258,14 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(
-                topk_ids.size(0), global_num_experts - global_redundant_expert_num, device=topk_ids.device
-            )
+            random_matrix = torch.rand(topk_ids.size(0), num_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         topk_weights = topk_weights.to(x.dtype)
