@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.nn as nn
 
+from tests.ut.conftest import npu_test
+from tests.ut.quantization.conftest_quantization import create_linear_layer
 from vllm_ascend.quantization.methods.w4a4_flatquant import (
     KRONECKER_QUANT_MAX_BATCH_SIZE,
     AscendW4A4FlatQuantDynamicLinearMethod,
@@ -214,6 +216,22 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         self.assertTrue(layer.aclnn_clip_ratio - 0.9 < 0.01)
         self.assertEqual(layer.left_trans.shape, (24, 24))
         self.assertTrue(layer.left_trans.is_contiguous())
+
+    @npu_test(num_npus=1, npu_type="a3")
+    def test_apply_with_npu(self):
+        """Tests the apply method with NPU."""
+        batch_size = 16
+        input_size = self.input_size
+        output_size = self.output_size
+        params_dtype = torch.bfloat16
+        layer = create_linear_layer(self.method, input_size, output_size, params_dtype)
+        self.method.process_weights_after_loading(layer)
+
+        x = torch.randn(batch_size, input_size, dtype=params_dtype).npu()
+        output = self.method.apply(layer, x)
+
+        self.assertEqual(output.shape, (batch_size, output_size))
+        self.assertEqual(output.dtype, params_dtype)
 
 
 if __name__ == "__main__":

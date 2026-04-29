@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, Mock, patch
 import torch
 
 from tests.ut.base import TestBase
+from tests.ut.conftest import npu_test
 from tests.ut.quantization.conftest_quantization import identity
 from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
@@ -101,6 +102,21 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         x = torch.randn(32, 256)
         self.method.apply(layer, x)
         mock_matmul.assert_called_once()
+
+    @npu_test(num_npus=1, npu_type="a3")
+    def test_apply_with_npu(self):
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(
+            torch.randint(-128, 127, (128, 32), dtype=torch.int32).npu(), requires_grad=False
+        )
+        layer.weight_scale_second = torch.nn.Parameter(
+            torch.randn(2, 256, dtype=torch.bfloat16).npu(), requires_grad=False
+        )
+
+        x = torch.randn(32, 128, dtype=torch.bfloat16).npu()
+        self.method.group_size = 64
+        output = self.method.apply(layer, x)
+        self.assertEqual(output.shape, (32, 256))
 
 
 class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
