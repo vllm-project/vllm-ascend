@@ -147,7 +147,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             router_logits=router_logits,
             top_k=2,
             renormalize=True,
-            global_num_experts=self.num_experts,
+            num_experts=self.num_experts,
             activation="gelu",
             apply_router_weight_on_input=True,
             mc2_mask=mc2_mask,

@@ -120,7 +120,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -144,7 +144,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
@@ -158,7 +158,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=global_num_experts,
+                num_experts=num_experts,
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
@@ -168,7 +168,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), global_num_experts, device=topk_ids.device)
+            random_matrix = torch.rand(topk_ids.size(0), num_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
@@ -459,7 +459,7 @@ class AscendFusedMoE(FusedMoE):
                     scoring_func=self.scoring_func,
                     routed_scaling_factor=self.routed_scaling_factor,
                     e_score_correction_bias=self.e_score_correction_bias,
-                    global_num_experts=self.global_num_experts,
+                    num_experts=self.moe_config.num_experts,
                 )
 
                 if isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl):
@@ -494,7 +494,7 @@ class AscendFusedMoE(FusedMoE):
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
+            num_experts=self.moe_config.num_experts,
             expert_map=self._expert_map,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,
