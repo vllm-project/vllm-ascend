@@ -1482,7 +1482,34 @@ class NPUModelRunner(GPUModelRunner):
             # temporary copy. Leading slices of a contiguous 2D tensor
             # are contiguous by construction.
             token_ids_b = self.token_ids_gpu_tensor[:batch_size]
-            num_tokens_b = self.num_tokens_no_spec_gpu[:batch_size]
+
+            # Clamp num_tokens_no_spec into [0, max_seq_len] before
+            # passing to the kernel. **REQUIRED** for the
+            # async + ngram_gpu path: upstream's ``_update_states``
+            # optimistically does
+            # ``num_tokens_no_spec[i] += optimistic_num_accepted``
+            # BEFORE the actual acceptance count is known. The synced
+            # ``num_tokens_no_spec_gpu`` value can therefore briefly
+            # exceed ``max_model_len`` when a request is near the
+            # window boundary.
+            #
+            # The kernel uses ``backup_pos = seq_len - 1`` to index into
+            # the per-row UB tile of width ``max_seq_len_align``; when
+            # ``seq_len > max_seq_len`` that index walks past the per-row
+            # UB region, surfacing on NPU as an MTE-OOB DDR fault
+            # (CI signature: fixp_error0 = 0x30266b9 across cores).
+            #
+            # Use the non-in-place ``clamp`` so we do NOT mutate the
+            # persistent ``num_tokens_no_spec_gpu`` buffer.  Next step's
+            # ``update_ngram_gpu_tensors_incremental`` would overwrite
+            # the persistent buffer anyway, but mutating in-place here
+            # would still be a correctness foot-gun for any read between
+            # this point and the next sync.
+            max_seq_len = self.token_ids_gpu_tensor.shape[1]
+            num_tokens_b = self.num_tokens_no_spec_gpu[:batch_size].clamp(
+                min=0, max=max_seq_len
+            )
+
             # ``discard_request_mask.gpu`` is bool; the C++ binding
             # converts it to int32 (see ngram_spec_decode_torch_adpt.h).
             # Underlying allocation is [max_num_reqs] so the slice has
@@ -1492,7 +1519,7 @@ class NPUModelRunner(GPUModelRunner):
             (_token_ids, next_token_ids, draft_token_ids,
              num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
                 token_ids_b,            # [B, max_seq_len], int32, in-place
-                num_tokens_b,           # [B], int32
+                num_tokens_b,           # [B], int32, clamped to [0, max_seq_len]
                 sampled_b,              # [B, num_spec+1], int32, persistent
                 discard_b,              # [B], bool (binding casts to int32)
                 vocab_size=vocab_size,

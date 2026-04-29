@@ -37,9 +37,37 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_ngram_spec
         ? discard_request_mask.to(at::kInt)
         : discard_request_mask;
 
-    at::Tensor next_token_ids = at::empty({batch_size}, at::dtype(at::kInt).device(device));
-    at::Tensor draft_token_ids = at::empty({batch_size, k}, at::dtype(at::kInt).device(device));
-    at::Tensor num_valid_draft_tokens = at::empty({batch_size}, at::dtype(at::kInt).device(device));
+    // Allocate outputs with a trailing over-write cushion. The kernel's
+    // CopyOut path issues DataCopyPad GM writes whose burst length can
+    // be smaller than the NPU's 32-byte MTE alignment; under that
+    // alignment the underlying MTE3 burst can write past the apparent
+    // tensor end on the last row. Tightly-sized allocations (the original
+    // ``at::empty({batch_size}, ...)``) leave no room for that
+    // alignment-driven over-write, surfacing as a multi-core MTE OOB on
+    // device (CI signature: fixp_error0 = 0x30266b9 across cores).
+    //
+    // We therefore allocate ``batch_size + OVER_WRITE_MARGIN`` rows /
+    // ``(batch_size + OVER_WRITE_MARGIN) * k`` elements and ``narrow``
+    // back to the user-visible shape. The narrowed view shares storage
+    // with the larger allocation, so any kernel-side alignment
+    // over-write lands inside owned memory rather than off the end.
+    constexpr int64_t OVER_WRITE_MARGIN = 8;  // 32 bytes / sizeof(int32) = 8 ints
+
+    at::Tensor next_token_ids_storage = at::empty(
+        {batch_size + OVER_WRITE_MARGIN},
+        at::dtype(at::kInt).device(device));
+    at::Tensor next_token_ids = next_token_ids_storage.narrow(0, 0, batch_size);
+
+    at::Tensor draft_token_ids_storage = at::empty(
+        {batch_size + OVER_WRITE_MARGIN, k},
+        at::dtype(at::kInt).device(device));
+    at::Tensor draft_token_ids = draft_token_ids_storage.narrow(0, 0, batch_size);
+
+    at::Tensor num_valid_draft_tokens_storage = at::empty(
+        {batch_size + OVER_WRITE_MARGIN},
+        at::dtype(at::kInt).device(device));
+    at::Tensor num_valid_draft_tokens =
+        num_valid_draft_tokens_storage.narrow(0, 0, batch_size);
 
     EXEC_NPU_CMD(aclnnNgramSpecDecode,
         token_ids, num_tokens_no_spec, sampled_token_ids, discard_mask_int,
