@@ -27,7 +27,7 @@ test_cases:
       - "--quantization"
       - "ascend"
       - "--max-model-len"
-      - "133000"
+      - "133120"
       - "--max-num-batched-tokens"
       - "16384"
       - "--trust-remote-code"
@@ -38,7 +38,7 @@ test_cases:
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,6,12,18,24,30,36,42,48,54,72,78,84,90,96,102,108,144,192], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
@@ -47,7 +47,7 @@ test_cases:
     benchmarks:
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
+        dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 8
