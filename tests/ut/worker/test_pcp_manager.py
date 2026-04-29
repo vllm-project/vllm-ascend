@@ -175,7 +175,7 @@ def test_generate_pcp_metadata_mla_tail_projection_indices(pcp_size, pcp_rank, q
     assert tail_idx.min().item() >= 0
     assert tail_idx.max().item() < full_kv_len
 
-    expected_tail_idx = []
+    expected_tail_idx: list[int] = []
     expected_head_attn_idx_in_tail = []
     expected_tail_attn_idx_in_tail = []
     expected_head_actual_seq_lengths_kv = []

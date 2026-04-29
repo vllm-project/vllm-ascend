@@ -20,7 +20,7 @@ def get_pcp_split_info(pcp_rank, pcp_size, seq_lens):
     q_head_idx, q_tail_idx = [], []
     kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
     kv_with_q_tail_nomask_idx, kv_with_q_tail_mask_idx = [], []
-    kv_tail_proj_idx = []
+    kv_tail_proj_idx: list[int] = []
     kv_with_q_head_attn_idx_in_tail = []
     kv_with_q_tail_attn_idx_in_tail = []
     chunk_seqlens = []
