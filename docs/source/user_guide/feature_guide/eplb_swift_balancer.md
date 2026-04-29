@@ -26,7 +26,7 @@ W8A8-Dynamic
 
 ### Dynamic EPLB
 
-We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns.
+We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vLLM EPLB. Enable dynamic balancing with auto-tuned parameters. Adjust expert_heat_collection_interval and algorithm_execution_interval based on workload patterns. In the current version, we recommend using the following: policy of swift balancer(2).
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
@@ -34,8 +34,10 @@ vllm serve Qwen/Qwen3-235B-A22 \
   --enable-expert-parallel \
   --additional-config '{ "eplb_config": {
     "dynamic_eplb": true,
-    "expert_heat_collection_interval": 400,
-    "algorithm_execution_interval": 30
+    "expert_heat_collection_interval": 600,
+    "algorithm_execution_interval": 50,
+    "eplb_policy_type": 2,
+    "num_redundant_experts": {ep_size},
     }}'
 ```
 
