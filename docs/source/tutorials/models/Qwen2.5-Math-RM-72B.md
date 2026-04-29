@@ -29,7 +29,6 @@ It is recommended to download the model weights to a local directory (e.g., `./Q
 
 You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly. For optimal performance, it is recommended to use:
 
-- PyTorch version: 2.10.0+cpu
 - torch_npu version: 2.10.0rc2
 
 These versions support multi-NPU deployment, allowing the model to utilize all available NPU devices (e.g., 4 NPUs) for improved performance.
@@ -84,14 +83,6 @@ vllm serve ${MODEL_PATH} \
 The `--task reward` parameter is required to run the model in reward model mode for scoring mathematical solutions.
 :::
 
-### Multi-node Deployment
-
-Single-node deployment is recommended for Qwen2.5-Math-RM-72B.
-
-### Prefill-Decode Disaggregation
-
-Not supported for reward models.
-
 ## Functional Verification
 
 After starting the service, verify functionality using a `curl` request:
@@ -119,39 +110,35 @@ You can also score multiple responses for comparison:
 curl http://localhost:8000/v1/reward/batch \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "qwen2.5-math-rm-72b",
-        "conversations": [
-            [
-                {"role": "system", "content": "You are a helpful math assistant."},
-                {"role": "user", "content": "What is 2+2?"},
-                {"role": "assistant", "content": "2+2 equals 4."}
-            ],
-            [
-                {"role": "system", "content": "You are a helpful math assistant."},
-                {"role": "user", "content": "What is 2+2?"},
-                {"role": "assistant", "content": "2+2 equals 5."}
-            ]
-        ]
-    }'
+  "model": "qwen2.5-math-rm-72b",
+  "conversations": [
+    [
+      {"role": "system", "content": "You are a helpful math assistant."},
+      {"role": "user", "content": "What is 2+2?"},
+      {"role": "assistant", "content": "2+2 equals 4."}
+    ],
+    [
+      {"role": "system", "content": "You are a helpful math assistant."},
+      {"role": "user", "content": "What is 2+2?"},
+      {"role": "assistant", "content": "2+2 equals 5."}
+    ]
+  ],
+  "batch_rewards": [
+    {
+      "index": 0,
+      "score": 9.85,
+      "reasoning": "The answer is mathematically correct and concise."
+    },
+    {
+      "index": 1,
+      "score": 1.20,
+      "reasoning": "The answer contains a factual mathematical error (2+2 is not 5)."
+    }
+  ]
+}'
 ```
 
 ## Accuracy Evaluation
-
-### Using AISBench
-
-Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
-
-Results and logs are saved to `benchmark/outputs/default/`. A sample accuracy report is shown below:
-
-| dataset | version | metric | mode | vllm-api-reward |
-|----- | ----- | ----- | ----- |--------------|
-| math_reward | - | accuracy | gen | 85.50  |
-
-## Performance
-
-### Using AISBench
-
-Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 
@@ -184,20 +171,6 @@ After about several minutes, you can get the performance evaluation result.
 ## Troubleshooting
 
 ### Common Issues
-
-**Issue**: Model fails to load with OOM error
-
-**Solution**: Use `device_map="balanced"` with CPU offloading:
-
-```python
-model = AutoModel.from_pretrained(
-    model_path,
-    device_map="balanced",
-    torch_dtype=torch.bfloat16,
-    trust_remote_code=True,
-    offload_folder="./offload"
-).eval()
-```
 
 **Issue**: `pad_token_id` missing error
 
