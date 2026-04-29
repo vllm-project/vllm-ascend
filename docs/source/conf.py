@@ -51,6 +51,7 @@ release = ""
 extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
+    "sphinx.ext.mathjax",
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -61,7 +62,7 @@ extensions = [
     "sphinx_substitution_extensions",
 ]
 
-myst_enable_extensions = ["colon_fence", "substitution"]
+myst_enable_extensions = ["colon_fence", "dollarmath", "substitution"]
 
 # Change this when cut down release
 myst_substitutions = {
