@@ -638,23 +638,9 @@ class NPUModelRunner(GPUModelRunner):
                 ],
                 dtype=np.int32,
             )
-        attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
-
-        # PCP + eagle3 overlay: the SpecDecoding state needs to be downgraded
-        # for the per-layer attention metadata path. Returned `attn_state` keeps
-        # the original value for `with_prefill` derivation below.
-        # TODO: resolve the conflict between attn_state sunset and PCP needs.
-        if (
-            attn_state == AscendAttentionState.SpecDecoding
-            and self.speculative_config.method != "mtp"
-        ):
-            self.attn_state = AscendAttentionState.ChunkedPrefill
-        else:
-            self.attn_state = attn_state
-
-        # Determine if it's a splitfuse batch
-        with_prefill = attn_state not in [AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding]
-        self.with_prefill = with_prefill
+        self.attn_state, with_prefill = self._resolve_batch_attn_state(
+            num_reqs, num_scheduled_tokens, num_valid_tokens
+        )
 
         # Get positions.
         cu_num_tokens = self._get_cumsum_and_arange(
@@ -1180,7 +1166,43 @@ class NPUModelRunner(GPUModelRunner):
 
         return mm_embeds, is_mm_embed
 
-    def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
+    def _resolve_batch_attn_state(
+        self, num_reqs, num_scheduled_tokens, num_valid_tokens
+    ) -> tuple[AscendAttentionState, bool]:
+        """Pure function: derive (attn_state, with_prefill) for the current batch.
+
+        Returns:
+            attn_state: the value to assign to ``self.attn_state``. The
+                PCP+eagle3 overlay (SpecDecoding -> ChunkedPrefill) is applied
+                here so downstream consumers (attn_metadata.attn_state) see
+                the downgraded value.
+            with_prefill: whether the batch contains any prefill work,
+                derived from the *raw* state before the PCP override so
+                splitfuse batch detection stays correct in PCP+eagle3.
+        """
+        raw_state = self._get_attn_state(
+            num_reqs, num_scheduled_tokens, num_valid_tokens
+        )
+        with_prefill = raw_state not in (
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding,
+        )
+        # PCP + eagle3 overlay: downgrade SpecDecoding to ChunkedPrefill for
+        # the per-layer attention metadata path while keeping with_prefill
+        # derived from the raw state.
+        # TODO: resolve the conflict between attn_state sunset and PCP needs.
+        if (
+            raw_state == AscendAttentionState.SpecDecoding
+            and self.speculative_config is not None
+            and self.speculative_config.method != "mtp"
+        ):
+            return AscendAttentionState.ChunkedPrefill, with_prefill
+        return raw_state, with_prefill
+
+    def _get_attn_state(
+        self, num_reqs, num_scheduled_tokens, num_valid_tokens
+    ) -> AscendAttentionState:
+        """Pure branch table — returns the raw attn state without overrides."""
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
             return AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
