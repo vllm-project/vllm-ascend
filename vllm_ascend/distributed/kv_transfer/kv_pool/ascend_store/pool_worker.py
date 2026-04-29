@@ -479,19 +479,18 @@ class KVPoolWorker:
 
     def _process_transfer_for_layer_batch(
         self,
-        request_token_lens: list[tuple[ReqMeta, int]],
+        request_block_ranges: list[tuple[ReqMeta, int, int, int | None]],
         layer_id: int,
         layer_tasks: list[list[LayerBatchReqMeta]],
     ) -> None:
-        if not request_token_lens:
+        if not request_block_ranges:
             return
 
         total_blocks = 0
         total_last_blocks = 0
-        for _, token_len in request_token_lens:
-            num_blocks = token_len // self.block_size
-            total_blocks += num_blocks
-            if token_len % self.block_size != 0:
+        for _, start_block, end_block, last_block_index in request_block_ranges:
+            total_blocks += end_block - start_block
+            if last_block_index is not None:
                 total_last_blocks += 1
 
         (
@@ -500,22 +499,24 @@ class KVPoolWorker:
             last_block_ids_arr,
             last_gvas_arr,
         ) = self._get_transfer_scratch_arrays(total_blocks, total_last_blocks)
-        req_ids = [request.req_id for request, _ in request_token_lens]
-        is_last_chunks = [
-            request.is_last_chunk for request, _ in request_token_lens]
+        req_ids = []
+        is_last_chunks = []
         offset = 0
         last_offset = 0
-        for request, token_len in request_token_lens:
-            num_blocks = token_len // self.block_size
+        for request, start_block, end_block, last_block_index in request_block_ranges:
+            req_ids.append(request.req_id)
+            is_last_chunks.append(request.is_last_chunk)
+            num_blocks = end_block - start_block
             block_ids_np, chunk_gvas_np = self._require_request_arrays(request)
             if num_blocks > 0:
                 end = offset + num_blocks
-                block_ids_arr[offset:end] = block_ids_np[:num_blocks]
-                chunk_gvas_arr[offset:end] = chunk_gvas_np[:num_blocks]
+                block_ids_arr[offset:end] = block_ids_np[start_block:end_block]
+                chunk_gvas_arr[offset:end] = chunk_gvas_np[start_block:end_block]
                 offset = end
 
-            if token_len % self.block_size != 0:
-                last_block_ids_arr[last_offset] = block_ids_np[num_blocks]
+            if last_block_index is not None:
+                assert request.last_block_gva is not None
+                last_block_ids_arr[last_offset] = block_ids_np[last_block_index]
                 last_gvas_arr[last_offset] = request.last_block_gva
                 last_offset += 1
 
@@ -540,13 +541,17 @@ class KVPoolWorker:
         requests: list[ReqMeta],
         layer_id: int,
     ) -> None:
-        request_token_lens = [
-            (request, request.token_len_chunk)
-            for request in requests
-            if request.can_save is not None and request.can_save
-        ]
+        request_block_ranges = []
+        for request in requests:
+            if request.can_save is None or not request.can_save:
+                continue
+            save_start_block = request.save_start_token // self.block_size
+            save_end_block = request.token_len_chunk // self.block_size
+            partial_block_index = request.partial_block_index
+            request_block_ranges.append(
+                (request, save_start_block, save_end_block, partial_block_index))
         self._process_transfer_for_layer_batch(
-            request_token_lens,
+            request_block_ranges,
             layer_id,
             self.layer_save_tasks,
         )
@@ -556,13 +561,16 @@ class KVPoolWorker:
         requests: list[ReqMeta],
         layer_id: int,
     ) -> None:
-        request_token_lens = [
-            (request, request.load_spec.kvpool_cached_tokens)
-            for request in requests
-            if request.load_spec is not None and request.load_spec.can_load
-        ]
+        request_block_ranges = []
+        for request in requests:
+            if request.load_spec is None or not request.load_spec.can_load:
+                continue
+            cached_tokens = request.load_spec.kvpool_cached_tokens
+            full_blocks = cached_tokens // self.block_size
+            partial_block_index = full_blocks if cached_tokens % self.block_size != 0 else None
+            request_block_ranges.append((request, 0, full_blocks, partial_block_index))
         self._process_transfer_for_layer_batch(
-            request_token_lens,
+            request_block_ranges,
             layer_id,
             self.layer_load_tasks,
         )

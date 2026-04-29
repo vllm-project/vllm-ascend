@@ -339,6 +339,9 @@ class ReqMeta:
 
     block_hashes: list[BlockHash]
 
+    # First token that has not been saved before this metadata was built.
+    save_start_token: int = 0
+
     can_save: bool | None = None
     # load_spec
     load_spec: LoadSpec | None = None
@@ -353,6 +356,7 @@ class ReqMeta:
     original_block_size: int | None = None
 
     last_block_gva: int | None = None
+    partial_block_index: int | None = None
 
     starts: list[int] | None = None
     ends: list[int] | None = None
@@ -391,6 +395,7 @@ class ReqMeta:
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
+        previous_saved_tokens = tracker.num_saved_tokens
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -399,8 +404,13 @@ class ReqMeta:
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
         num_tokens_to_save = (input_token_len // block_size * block_size) if discard_partial_chunks else input_token_len
+        partial_block_index = (
+            input_token_len // block_size
+            if input_token_len % block_size != 0 and tracker.last_block_gva is not None
+            else None
+        )
 
-        skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        skip_save = skip_save or (num_tokens_to_save < chunk_boundary and partial_block_index is None)
         if skip_save and load_spec is None:
             return None
 
@@ -427,6 +437,7 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
+            save_start_token=previous_saved_tokens,
             block_ids=tracker.allocated_block_ids,
             can_save=not skip_save,
             load_spec=load_spec,
@@ -435,6 +446,7 @@ class ReqMeta:
             token_ids=token_ids,
             original_block_size=original_block_size,
             last_block_gva=tracker.last_block_gva,
+            partial_block_index=partial_block_index,
             block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
             chunk_gvas_np=np.asarray(tracker.chunk_gvas, dtype=np.int64),
         )
