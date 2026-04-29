@@ -478,24 +478,21 @@ class KVPoolWorker:
             gvas_array=gvas_array,
         )
 
-    def _process_save_for_layer_batch(
+    def _process_transfer_for_layer_batch(
         self,
-        requests: list[ReqMeta],
+        request_token_lens: list[tuple[ReqMeta, int]],
         layer_id: int,
+        layer_tasks: list[list[LayerBatchReqMeta]],
     ) -> None:
-        requests_to_save = [
-            request for request in requests
-            if request.can_save is not None and request.can_save
-        ]
-        if not requests_to_save:
+        if not request_token_lens:
             return
 
         total_blocks = 0
         total_last_blocks = 0
-        for request in requests_to_save:
-            num_blocks = request.token_len_chunk // self.block_size
+        for _, token_len in request_token_lens:
+            num_blocks = token_len // self.block_size
             total_blocks += num_blocks
-            if request.token_len_chunk % self.block_size != 0:
+            if token_len % self.block_size != 0:
                 total_last_blocks += 1
 
         (
@@ -504,13 +501,13 @@ class KVPoolWorker:
             last_block_ids_arr,
             last_gvas_arr,
         ) = self._get_transfer_scratch_arrays(total_blocks, total_last_blocks)
-        req_ids = [request.req_id for request in requests_to_save]
+        req_ids = [request.req_id for request, _ in request_token_lens]
         is_last_chunks = [
-            request.is_last_chunk for request in requests_to_save]
+            request.is_last_chunk for request, _ in request_token_lens]
         offset = 0
         last_offset = 0
-        for request in requests_to_save:
-            num_blocks = request.token_len_chunk // self.block_size
+        for request, token_len in request_token_lens:
+            num_blocks = token_len // self.block_size
             block_ids_np, chunk_gvas_np = self._require_request_arrays(request)
             if num_blocks > 0:
                 end = offset + num_blocks
@@ -518,7 +515,7 @@ class KVPoolWorker:
                 chunk_gvas_arr[offset:end] = chunk_gvas_np[:num_blocks]
                 offset = end
 
-            if request.token_len_chunk % self.block_size != 0:
+            if token_len % self.block_size != 0:
                 last_block_ids_arr[last_offset] = block_ids_np[num_blocks]
                 last_gvas_arr[last_offset] = request.last_block_gva
                 last_offset += 1
@@ -537,72 +534,39 @@ class KVPoolWorker:
             self._concat_transfer_arrays(gvas_array, last_gvas_array),
         )
         if req_meta is not None:
-            self.layer_save_tasks[layer_id].append(req_meta)
+            layer_tasks[layer_id].append(req_meta)
+
+    def _process_save_for_layer_batch(
+        self,
+        requests: list[ReqMeta],
+        layer_id: int,
+    ) -> None:
+        request_token_lens = [
+            (request, request.token_len_chunk)
+            for request in requests
+            if request.can_save is not None and request.can_save
+        ]
+        self._process_transfer_for_layer_batch(
+            request_token_lens,
+            layer_id,
+            self.layer_save_tasks,
+        )
 
     def _process_load_for_layer_batch(
         self,
         requests: list[ReqMeta],
         layer_id: int,
     ) -> None:
-        requests_to_load = [
-            request for request in requests
+        request_token_lens = [
+            (request, request.load_spec.kvpool_cached_tokens)
+            for request in requests
             if request.load_spec is not None and request.load_spec.can_load
         ]
-        if not requests_to_load:
-            return
-
-        total_blocks = 0
-        total_last_blocks = 0
-        for request in requests_to_load:
-            load_spec = request.load_spec
-            token_len = load_spec.kvpool_cached_tokens
-            num_saved_blocks = token_len // self.block_size
-            total_blocks += num_saved_blocks
-            if token_len % self.block_size != 0:
-                total_last_blocks += 1
-
-        (
-            block_ids_arr,
-            chunk_gvas_arr,
-            last_block_ids_arr,
-            last_gvas_arr,
-        ) = self._get_transfer_scratch_arrays(total_blocks, total_last_blocks)
-        req_ids = [request.req_id for request in requests_to_load]
-        is_last_chunks = [
-            request.is_last_chunk for request in requests_to_load]
-        offset = 0
-        last_offset = 0
-        for request in requests_to_load:
-            load_spec = request.load_spec
-            token_len = load_spec.kvpool_cached_tokens
-            num_saved_blocks = token_len // self.block_size
-            block_ids_np, chunk_gvas_np = self._require_request_arrays(request)
-            if num_saved_blocks > 0:
-                end = offset + num_saved_blocks
-                block_ids_arr[offset:end] = block_ids_np[:num_saved_blocks]
-                chunk_gvas_arr[offset:end] = chunk_gvas_np[:num_saved_blocks]
-                offset = end
-
-            if token_len % self.block_size != 0:
-                last_block_ids_arr[last_offset] = block_ids_np[num_saved_blocks]
-                last_gvas_arr[last_offset] = request.last_block_gva
-                last_offset += 1
-
-        addr_array, size_array, gvas_array = self._build_transfer_arrays(
-            block_ids_arr, chunk_gvas_arr, layer_id)
-        last_addr_array, last_size_array, last_gvas_array = (
-            self._build_transfer_arrays(last_block_ids_arr, last_gvas_arr, layer_id))
-
-        req_meta = self._build_layer_batch_meta(
-            req_ids,
-            is_last_chunks,
+        self._process_transfer_for_layer_batch(
+            request_token_lens,
             layer_id,
-            self._concat_transfer_arrays(addr_array, last_addr_array),
-            self._concat_transfer_arrays(size_array, last_size_array),
-            self._concat_transfer_arrays(gvas_array, last_gvas_array),
+            self.layer_load_tasks,
         )
-        if req_meta is not None:
-            self.layer_load_tasks[layer_id].append(req_meta)
 
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
