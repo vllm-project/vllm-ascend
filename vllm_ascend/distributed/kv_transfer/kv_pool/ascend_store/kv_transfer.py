@@ -5,6 +5,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import numpy as np
 import torch
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
@@ -27,8 +28,14 @@ def _circular_shift(lst: list, offset: int) -> list:
     return lst[offset:] + lst[:offset]
 
 
-def _to_list(value) -> list:
-    return value.tolist()
+def _circular_shift_to_list(value: np.ndarray, offset: int) -> list:
+    length = len(value)
+    if length == 0:
+        return []
+    offset %= length
+    if offset == 0:
+        return value.tolist()
+    return np.concatenate((value[offset:], value[:offset])).tolist()
 
 
 def _select_rank_data(value, start: int, step: int) -> list:
@@ -396,25 +403,24 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         if len(req_metas) == 0:
             self.request_queue.task_done()
             return
-        addr_list = []
-        gvas_list = []
-        size_list = []
-        layer_id = req_metas[0].layer_id
-        for req_meta in req_metas:
-            rank_start = self.tp_rank % self.put_step
-            addr_list.extend(_select_rank_data(req_meta.addr_array,
-                                               rank_start, self.put_step))
-            size_list.extend(_select_rank_data(req_meta.size_array,
-                                               rank_start, self.put_step))
-            gvas_list.extend(_select_rank_data(req_meta.gvas_array,
-                                               rank_start, self.put_step))
-            if layer_id == self.final_layer_id:
-                for req_id, is_last_chunk in zip(req_meta.req_ids,
-                                                 req_meta.is_last_chunks):
-                    if is_last_chunk:
-                        self.set_finished_request(req_id)
-            for req_id in req_meta.req_ids:
-                self.dec_stored_request(req_id)
+        if len(req_metas) > 1:
+            raise ValueError(f"Expected at most one layer batch request, got {len(req_metas)}")
+        req_meta = req_metas[0]
+        layer_id = req_meta.layer_id
+        rank_start = self.tp_rank % self.put_step
+        addr_list = _select_rank_data(req_meta.addr_array,
+                                      rank_start, self.put_step)
+        size_list = _select_rank_data(req_meta.size_array,
+                                      rank_start, self.put_step)
+        gvas_list = _select_rank_data(req_meta.gvas_array,
+                                      rank_start, self.put_step)
+        if layer_id == self.final_layer_id:
+            for req_id, is_last_chunk in zip(req_meta.req_ids,
+                                             req_meta.is_last_chunks):
+                if is_last_chunk:
+                    self.set_finished_request(req_id)
+        for req_id in req_meta.req_ids:
+            self.dec_stored_request(req_id)
         self.sync_save_events[layer_id].synchronize()
         res = self.m_store.store.batch_copy(gvas_list, addr_list, size_list, 0)
         # wait for KV transfer (PD)
@@ -514,23 +520,28 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             self.request_queue.task_done()
             return
 
-        addr_list = []
-        gvas_list = []
-        size_list = []
-        layer_id = req_metas[0].layer_id
-        for req_meta in req_metas:
-            addr_list.extend(_to_list(req_meta.addr_array))
-            size_list.extend(_to_list(req_meta.size_array))
-            gvas_list.extend(_to_list(req_meta.gvas_array))
-            if layer_id == self.final_layer_id:
-                for req_id, is_last_chunk in zip(req_meta.req_ids,
-                                                 req_meta.is_last_chunks):
-                    if is_last_chunk:
-                        self.set_finished_request(req_id)
+        if len(req_metas) > 1:
+            raise ValueError(f"Expected at most one layer batch request, got {len(req_metas)}")
+        req_meta = req_metas[0]
+        layer_id = req_meta.layer_id
+        if layer_id == self.final_layer_id:
+            for req_id, is_last_chunk in zip(req_meta.req_ids,
+                                             req_meta.is_last_chunks):
+                if is_last_chunk:
+                    self.set_finished_request(req_id)
 
-        gvas_list_c = _circular_shift(gvas_list, (self.tp_rank * len(gvas_list)) // self.tp_size)
-        addr_list_c = _circular_shift(addr_list, (self.tp_rank * len(addr_list)) // self.tp_size)
-        size_list_c = _circular_shift(size_list, (self.tp_rank * len(size_list)) // self.tp_size)
+        gvas_list_c = _circular_shift_to_list(
+            req_meta.gvas_array,
+            (self.tp_rank * len(req_meta.gvas_array)) // self.tp_size,
+        )
+        addr_list_c = _circular_shift_to_list(
+            req_meta.addr_array,
+            (self.tp_rank * len(req_meta.addr_array)) // self.tp_size,
+        )
+        size_list_c = _circular_shift_to_list(
+            req_meta.size_array,
+            (self.tp_rank * len(req_meta.size_array)) // self.tp_size,
+        )
         self._stagger_h2d_submit(layer_id, len(gvas_list_c))
         res = self.m_store.store.batch_copy(gvas_list_c, addr_list_c, size_list_c, 1)
         if res != 0:
