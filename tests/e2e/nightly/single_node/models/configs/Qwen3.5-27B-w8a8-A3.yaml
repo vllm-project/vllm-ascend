@@ -52,12 +52,12 @@ test_cases:
         threshold: 5
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+        dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 140
         max_out_len: 1500
         batch_size: 35
         request_rate: 0
-        baseline: 1
+        baseline: 605.0224
         threshold: 0.97
