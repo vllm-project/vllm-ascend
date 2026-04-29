@@ -1126,7 +1126,7 @@ class PCPManager:
             )
             if self.pcp_world_size > 1:
                 q_head_idx, q_tail_idx = [], []
-                kv_tail_proj_idx: list[int]= []
+                kv_tail_proj_idx: list[int] = []
                 kv_with_q_head_nomask_idx_in_tail, kv_with_q_head_mask_idx_in_tail = [], []
                 kv_with_q_tail_nomask_idx_in_tail, kv_with_q_tail_mask_idx_in_tail = [], []
                 kv_with_q_head_attn_idx_in_tail, kv_with_q_tail_attn_idx_in_tail = [], []
