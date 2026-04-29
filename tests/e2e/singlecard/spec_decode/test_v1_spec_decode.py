@@ -406,8 +406,7 @@ def test_qwen3_eagle3_pcp2_tp1(
         max_model_len=2048,
         enforce_eager=True,
         tensor_parallel_size=1,
-        prompt_context_parallel_size=2,
-        enable_decode_context_parallel=False,
+        prefill_context_parallel_size=2,
     ) as runner:
         runner.model.chat(test_prompts, sampling_config)
 
