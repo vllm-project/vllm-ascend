@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import contextlib
+
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
@@ -50,12 +52,8 @@ if not is_310p():
     import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
 
     if not vllm_version_is("0.19.1"):
-        try:
+        with contextlib.suppress(ModuleNotFoundError):
             import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
-        except ModuleNotFoundError:
-            # Some vLLM builds (e.g. specific 0.19.x variants) do not ship qwen3_dflash.
-            # Skip this optional patch to keep unrelated models available.
-            pass
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
 import vllm_ascend.patch.worker.patch_huanyuan_vl  # noqa
