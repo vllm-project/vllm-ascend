@@ -10,7 +10,7 @@ from jinja2 import Environment, FileSystemLoader
 
 warnings.filterwarnings(
     "ignore",
-    message=".*swigvarlink.*",
+    message=r"builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute",
     category=DeprecationWarning,
 )
 
