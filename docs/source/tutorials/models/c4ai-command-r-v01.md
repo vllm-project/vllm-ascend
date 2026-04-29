@@ -112,6 +112,28 @@ Expected result:
 - Response contains `choices`.
 - `finish_reason` is `stop`.
 
+## Accuracy Evaluation
+
+Run the LM-Eval correctness test with the model config:
+```bash
+python -m pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
+  --config tests/e2e/models/configs/c4ai-command-r-v01.yaml \
+  --tp-size 4 \
+  --report-dir ./benchmarks/accuracy
+```
+Reference thresholds (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
+
+| Task  | Metric                        | Value   |
+|-------|-------------------------------|---------|
+| gsm8k | exact_match, strict-match     | >= 0.20 |
+| gsm8k | exact_match, flexible-extract | >= 0.15 |
+
+Notes:
+
+- The values above are configuration thresholds used for pass/fail checks.
+- If runtime engine errors occur (for example, `EngineDeadError`), re-validate in a clean CI-aligned environment.
+- For HCCL topology mismatch (`EI0010 / error code 5`), set `HCCL_INTRA_ROCE_ENABLE=1` and ensure visible devices match `--tp-size`.
+
 ## Troubleshooting
 
 ### HCCL init failure (EI0010 / error code 5)
