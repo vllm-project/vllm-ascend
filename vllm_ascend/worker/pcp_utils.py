@@ -1205,10 +1205,6 @@ class PCPManager:
                     "kv_with_q_tail_nomask_idx_tensor": kv_with_q_tail_nomask_idx,
                     "kv_with_q_tail_mask_idx_tensor": kv_with_q_tail_mask_idx,
                     "kv_tail_proj_idx_tensor": kv_tail_proj_idx,
-                    "kv_with_q_head_nomask_idx_in_tail_tensor": kv_with_q_head_nomask_idx_in_tail,
-                    "kv_with_q_head_mask_idx_in_tail_tensor": kv_with_q_head_mask_idx_in_tail,
-                    "kv_with_q_tail_nomask_idx_in_tail_tensor": kv_with_q_tail_nomask_idx_in_tail,
-                    "kv_with_q_tail_mask_idx_in_tail_tensor": kv_with_q_tail_mask_idx_in_tail,
                     "kv_with_q_head_attn_idx_in_tail_tensor": kv_with_q_head_attn_idx_in_tail,
                     "kv_with_q_tail_attn_idx_in_tail_tensor": kv_with_q_tail_attn_idx_in_tail,
                 }
@@ -1259,18 +1255,6 @@ class PCPManager:
                 ]
                 long_seq_metadata.kv_with_q_tail_mask_idx_tensor = self.kv_idx_names["kv_with_q_tail_mask_idx_tensor"]
                 long_seq_metadata.kv_tail_proj_idx_tensor = self.kv_idx_names["kv_tail_proj_idx_tensor"]
-                long_seq_metadata.kv_with_q_head_nomask_idx_in_tail_tensor = self.kv_idx_names[
-                    "kv_with_q_head_nomask_idx_in_tail_tensor"
-                ]
-                long_seq_metadata.kv_with_q_head_mask_idx_in_tail_tensor = self.kv_idx_names[
-                    "kv_with_q_head_mask_idx_in_tail_tensor"
-                ]
-                long_seq_metadata.kv_with_q_tail_nomask_idx_in_tail_tensor = self.kv_idx_names[
-                    "kv_with_q_tail_nomask_idx_in_tail_tensor"
-                ]
-                long_seq_metadata.kv_with_q_tail_mask_idx_in_tail_tensor = self.kv_idx_names[
-                    "kv_with_q_tail_mask_idx_in_tail_tensor"
-                ]
                 long_seq_metadata.kv_with_q_head_attn_idx_in_tail_tensor = self.kv_idx_names[
                     "kv_with_q_head_attn_idx_in_tail_tensor"
                 ]
