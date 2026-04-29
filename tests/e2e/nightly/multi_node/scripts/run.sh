@@ -166,7 +166,7 @@ install_aisbench() {
 
     cd "$WORKSPACE/vllm-ascend"
 
-    mv benchmark benchmark_bk
+    [ -d benchmark ] && mv benchmark benchmark_bk
 
     GIT_CONFIG_GLOBAL=/dev/null git clone -b v3.1-20260429-master https://github.com/AISBench/benchmark.git
 
