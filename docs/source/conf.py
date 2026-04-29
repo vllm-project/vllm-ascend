@@ -62,7 +62,7 @@ extensions = [
     "sphinx_substitution_extensions",
 ]
 
-myst_enable_extensions = ["colon_fence", "dollarmath", "substitution"]
+myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
 myst_substitutions = {
