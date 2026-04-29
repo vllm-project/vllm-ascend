@@ -19,7 +19,7 @@ env_common:
 
 deployment:
   - server_cmd: >
-      vllm serve Eco-Tech/Kimi-K2.5-W4A8xxx
+      vllm serve Eco-Tech/Kimi-K2.5-W4A8
         --host 0.0.0.0
         --port $SERVER_PORT
         --quantization ascend
@@ -45,7 +45,7 @@ deployment:
         --mm-encoder-tp-mode data
 
   - server_cmd: >
-      vllm serve Eco-Tech/Kimi-K2.5-W4A8xxx
+      vllm serve Eco-Tech/Kimi-K2.5-W4A8
         --host 0.0.0.0
         --headless
         --port $SERVER_PORT
