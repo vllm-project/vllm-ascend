@@ -269,6 +269,7 @@
       "vllm-ascend/prefix75-in3500-bs210",
       "vllm-ascend/textvqa-lite",
       "vllm-ascend/textvqa-perf-1080p",
-      "vllm-ascend/gpqa"
+      "vllm-ascend/gpqa",
+      "vllm-ascend/GSM8K-in131072-bs100-qwen3"
     ]
   }
