@@ -1226,7 +1226,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         num_draft_tokens: np.ndarray,
         cu_num_scheduled_tokens: np.ndarray,
-        num_pcp_pads: np.ndarray | None,
+        num_pcp_pads: np.ndarray | None = None,
     ) -> SpecDecodeMetadata:
         # Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
@@ -1264,17 +1264,15 @@ class NPUModelRunner(GPUModelRunner):
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
         # Compute the draft logits indices.
-        # [3, 3, 5, 5, 6]
-        cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
-        total_num_draft_tokens = cu_num_draft_tokens[-1]
-        # [0, 0, 0, 3, 3, 5]
-        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens, num_draft_tokens)
-        # [0, 1, 2, 0, 1, 0]
-        arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
+        # cu_num_draft_tokens: [3, 3, 5, 5, 6]
+        # _arange_scratch[:6]: [0, 1, 2, 0, 1, 0]
+        cu_num_draft_tokens = self._get_cumsum_and_arange(
+            num_draft_tokens, self._arange_scratch, cumsum_dtype=np.int32
+        )
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
         # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += arange
+        target_logits_indices += self._arange_scratch[: cu_num_draft_tokens[-1]]
 
         # TODO: Optimize the CPU -> NPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).pin_memory().to(self.device, non_blocking=True)
