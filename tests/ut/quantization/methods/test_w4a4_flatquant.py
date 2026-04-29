@@ -217,21 +217,32 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         self.assertEqual(layer.left_trans.shape, (24, 24))
         self.assertTrue(layer.left_trans.is_contiguous())
 
-    @npu_test(num_npus=1, npu_type="a3")
+
+@npu_test(num_npus=1, npu_type="a2")
+class TestW4A4FlatQuantDynamicWithNpu(unittest.TestCase):
+    """
+    Unit test suite for AscendW4A4FlatQuantDynamicLinearMethod and its helper functions.
+    """
+
+    def setUp(self):
+        """Set up the test environment before each test."""
+        self.method = AscendW4A4FlatQuantDynamicLinearMethod()
+        self.output_size = 64
+        self.input_size = 768  # 768 = 24 * 32, divisible by 8
+        self.params_dtype = torch.bfloat16
+
     def test_apply_with_npu(self):
         """Tests the apply method with NPU."""
         batch_size = 16
-        input_size = self.input_size
-        output_size = self.output_size
-        params_dtype = torch.bfloat16
-        layer = create_linear_layer(self.method, input_size, output_size, params_dtype)
+        layer = create_linear_layer(self.method, self.input_size, self.output_size, self.params_dtype)
+        layer.clip_ratio = nn.Parameter(torch.tensor([0.95], dtype=torch.float32).npu(), requires_grad=False)
         self.method.process_weights_after_loading(layer)
 
-        x = torch.randn(batch_size, input_size, dtype=params_dtype).npu()
+        x = torch.randn(batch_size, self.input_size, dtype=self.params_dtype).npu()
         output = self.method.apply(layer, x)
 
-        self.assertEqual(output.shape, (batch_size, output_size))
-        self.assertEqual(output.dtype, params_dtype)
+        self.assertEqual(output.shape, (batch_size, self.output_size))
+        self.assertEqual(output.dtype, self.params_dtype)
 
 
 if __name__ == "__main__":

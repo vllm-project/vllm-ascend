@@ -66,7 +66,12 @@ class TestAscendW8A8DynamicLinearMethod(TestBase):
         self.assertEqual(layer.weight_offset.data.shape, (256,))
         self.assertEqual(layer.weight.data.shape, (256, 128))
 
-    @npu_test(num_npus=1, npu_type="a3")
+
+@npu_test(num_npus=1, npu_type="a2")
+class TestAscendW8A8DynamicLinearMethodWithNpu(TestBase):
+    def setUp(self):
+        self.method = AscendW8A8DynamicLinearMethod()
+
     def test_apply_with_npu(self):
         input_size, output_size = 128, 256
         params_dtype = torch.bfloat16

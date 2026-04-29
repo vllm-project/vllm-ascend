@@ -103,7 +103,18 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.method.apply(layer, x)
         mock_matmul.assert_called_once()
 
-    @npu_test(num_npus=1, npu_type="a3")
+
+@npu_test(num_npus=1, npu_type="a2")
+class TestAscendW4A8DynamicLinearMethodWithNpu(TestBase):
+    @patch("vllm.distributed.get_tensor_model_parallel_world_size")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
+    def setUp(self, mock_get_current_vllm_config, mock_get_tp_world_size):
+        mock_get_tp_world_size.return_value = 1
+        mock_vllm_config = Mock()
+        mock_vllm_config.quant_config = Mock(quant_description={"group_size": 64})
+        mock_get_current_vllm_config.return_value = mock_vllm_config
+        self.method = AscendW4A8DynamicLinearMethod()
+
     def test_apply_with_npu(self):
         layer = torch.nn.Module()
         layer.weight = torch.nn.Parameter(
@@ -114,7 +125,6 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         )
 
         x = torch.randn(32, 128, dtype=torch.bfloat16).npu()
-        self.method.group_size = 64
         output = self.method.apply(layer, x)
         self.assertEqual(output.shape, (32, 256))
 

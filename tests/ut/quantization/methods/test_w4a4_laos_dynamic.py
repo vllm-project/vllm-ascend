@@ -61,7 +61,12 @@ class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
             self.assertEqual(layer.weight_scale.data.dtype, torch.float32)
             self.assertEqual(layer.weight.shape, (input_size // 8, output_size))
 
-    @npu_test(num_npus=1, npu_type="a3")
+
+@npu_test(num_npus=1, npu_type="a2")
+class TestAscendW4A4LaosDynamicLinearMethodWithNpu(TestBase):
+    def setUp(self):
+        self.method = AscendW4A4LaosDynamicLinearMethod()
+
     def test_apply_with_npu(self):
         token_num = 32
         input_size, output_size = 128, 256

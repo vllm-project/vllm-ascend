@@ -150,8 +150,12 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_npu_format_cast.assert_called_once()
         self.assertFalse(isinstance(layer.deq_scale, MagicMock))
 
+@npu_test(num_npus=1, npu_type="a2")
+class TestAscendW8A8LinearMethodWithNpu(TestBase):
+    def setUp(self):
+        self.method = AscendW8A8LinearMethod()
+
     @patch("vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method")
-    @npu_test(num_npus=1, npu_type="a3")
     def test_apply_with_npu(self, mock_get_weight_prefetch_method):
         mock_get_weight_prefetch_method.return_value = MagicMock()
 

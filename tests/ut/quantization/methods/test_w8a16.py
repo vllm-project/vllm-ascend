@@ -67,7 +67,12 @@ class TestAscendW8A16LinearMethod(TestBase):
         self.assertEqual(layer.weight_offset.data.shape, (128,))
         mock_npu_format_cast.assert_called_once()
 
-    @npu_test(num_npus=1, npu_type="a3")
+
+@npu_test(num_npus=1, npu_type="a2")
+class TestAscendW8A16LinearMethodWithNpu(TestBase):
+    def setUp(self):
+        self.method = AscendW8A16LinearMethod()
+
     def test_apply_with_npu(self):
         input_size, output_size = 128, 256
         params_dtype = torch.bfloat16
