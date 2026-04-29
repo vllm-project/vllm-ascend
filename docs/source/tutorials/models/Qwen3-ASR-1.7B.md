@@ -6,18 +6,6 @@ The released Qwen3-ASR-1.7B is a lightweight, high-performance automatic speech 
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node deployment, accuracy and performance evaluation.
 
-## Supported Features
-
-| Feature | Description |
-|---------|-------------|
-| **Model Type** | Automatic Speech Recognition (ASR) |
-| **Parameter Scale** | 1.7B |
-| **Input Modality** | Audio |
-| **Output Modality** | Text transcription |
-| **Serving Interface** | OpenAI-compatible API |
-| **Deployment** | vLLM-based online serving |
-| **Typical Use Cases** | Speech transcription, ASR service verification, benchmarking |
-
 ## Environment Preparation
 
 ### Model Weight
@@ -32,7 +20,8 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `Qwen3-ASR-1.7B` directly.
 
-```bash
+```{code-block} bash
+   :substitutions:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
   --name vllm-ascend \
@@ -58,7 +47,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 ## Deployment
 
-```bash
+```{test} bash
 :sync-yaml: tests/e2e/models/configs/Qwen3-ASR-1.7B.yaml
 :sync-target: test_cases[0].model test_cases[0].server_cmd
 :sync-class: cmd
@@ -100,19 +89,10 @@ The current evaluation results are:
 
 | Category | Dataset | Metric | Result |
 |----------|---------|--------|--------|
-| Accuracy | librispeech_asr / clean / test | Total Samples | 100 |
-| Accuracy | librispeech_asr / clean / test | Success | 100 |
+| Accuracy | librispeech_asr / clean / test | Total Samples | 500 |
+| Accuracy | librispeech_asr / clean / test | Success | 500 |
 | Accuracy | librispeech_asr / clean / test | Failure | 0 |
-| Accuracy | librispeech_asr / clean / test | WER | 0.1283 |
-| Accuracy | librispeech_asr / clean / test | CER | 0.2479 |
-
-| Category | Dataset | Metric | Result |
-|----------|---------|--------|--------|
-| Accuracy | librispeech_asr / other / test | Total Samples | 100 |
-| Accuracy | librispeech_asr / other / test | Success | 100 |
-| Accuracy | librispeech_asr / other / test | Failure | 0 |
-| Accuracy | librispeech_asr / other / test | WER | 0.1639 |
-| Accuracy | librispeech_asr / other / test | CER | 0.3212 |
+| Accuracy | librispeech_asr / clean / test | WER | 0.035 |
 
 ## Performance
 
@@ -123,8 +103,8 @@ In the current evaluation, **Qwen3-ASR-1.7B** processed **100 samples** in appro
 | Category | Dataset | Metric | Result |
 |----------|---------|--------|--------|
 | Performance | LibriSpeech test/clean (100 samples) | Total Samples | 100 |
-| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | ~57 s |
-| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | ~1.73 samples/s |
+| Performance | LibriSpeech test/clean (100 samples) | Total Runtime | 57 s |
+| Performance | LibriSpeech test/clean (100 samples) | Average Throughput | 1.73 samples/s |
 
 ### Remarks
 
