@@ -28,29 +28,28 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### Installation
 
-`Qwen3-ASR-1.7B` is supported in `vllm-ascend:v0.13.0`, please run this model using a later version.
+`Qwen3-ASR-1.7B` is supported in `vllm-ascend`.
 
 You can use our official docker image to run `Qwen3-ASR-1.7B` directly.
 
-```{code-block} bash
-   :substitutions:
-# Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:v0.13.0
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
---name vllm-ascend \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--p 8000:8000 \
--it $IMAGE bash
+  --name vllm-ascend \
+  --shm-size=1g \
+  --device /dev/davinci0 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -v /data/vllm-workspace/models:/data/vllm-workspace/models \
+  -p 8000:8000 \
+  -it $IMAGE bash
 ```
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
@@ -60,9 +59,16 @@ In addition, if you don't want to use the docker image as above, you can also bu
 ## Deployment
 
 ```bash
-export VLLM_USE_MODELSCOPE=true
+:sync-yaml: tests/e2e/models/configs/Qwen3-ASR-1.7B.yaml
+:sync-target: test_cases[0].model test_cases[0].server_cmd
+:sync-class: cmd
 
-vllm serve Qwen/Qwen3-ASR-1.7B --served-model-name qwen3-asr --tensor-parallel-size 1 --max-model-len 448 --gpu-memory-utilization 0.8 --port 8000
+vllm serve "Qwen/Qwen3-ASR-1.7B" \
+  --tensor-parallel-size 1 \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.9 \
+  --enforce-eager \
+  --port 8000
 ```
 
 ## Functional Verification
