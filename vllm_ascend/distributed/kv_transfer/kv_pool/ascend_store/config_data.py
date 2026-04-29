@@ -481,7 +481,21 @@ class LayerBatchReqMeta:
 
 
 @dataclass
+class LayerBlockRange:
+    request: ReqMeta
+    start_block: int
+    end_block: int
+    partial_block_index: int | None = None
+
+
+@dataclass
+class LayerTransferTask:
+    layer_id: int
+    block_ranges: list[LayerBlockRange]
+
+
+@dataclass
 class LayerLoadTask:
     wait_for_save_layer: int | None
-    req_metas: list[LayerBatchReqMeta]
+    transfer_tasks: list[LayerTransferTask]
     layer_id: int
