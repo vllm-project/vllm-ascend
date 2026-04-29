@@ -1126,9 +1126,7 @@ class PCPManager:
             )
             if self.pcp_world_size > 1:
                 q_head_idx, q_tail_idx = [], []
-                kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
-                kv_with_q_tail_nomask_idx, kv_with_q_tail_mask_idx = [], []
-                kv_tail_proj_idx = []
+                kv_tail_proj_idx: list[int]= []
                 kv_with_q_head_nomask_idx_in_tail, kv_with_q_head_mask_idx_in_tail = [], []
                 kv_with_q_tail_nomask_idx_in_tail, kv_with_q_tail_mask_idx_in_tail = [], []
                 kv_with_q_head_attn_idx_in_tail, kv_with_q_tail_attn_idx_in_tail = [], []
@@ -1181,23 +1179,6 @@ class PCPManager:
                     tail_proj_offset = len(kv_tail_proj_idx)
                     tail_proj_len = chunk_len * (q_tail_chunk_id + 1)
                     kv_tail_proj_idx.extend(list(range(kv_req_offset, kv_req_offset + tail_proj_len)))
-                    kv_with_q_head_nomask_idx_in_tail.extend(
-                        list(range(tail_proj_offset, tail_proj_offset + chunk_len * q_head_chunk_id))
-                    )
-                    kv_with_q_head_mask_idx_in_tail.extend(
-                        list(
-                            range(
-                                tail_proj_offset + chunk_len * q_head_chunk_id,
-                                tail_proj_offset + chunk_len * (q_head_chunk_id + 1),
-                            )
-                        )
-                    )
-                    kv_with_q_tail_nomask_idx_in_tail.extend(
-                        list(range(tail_proj_offset, tail_proj_offset + chunk_len * q_tail_chunk_id))
-                    )
-                    kv_with_q_tail_mask_idx_in_tail.extend(
-                        list(range(tail_proj_offset + chunk_len * q_tail_chunk_id, tail_proj_offset + tail_proj_len))
-                    )
                     kv_with_q_head_attn_idx_in_tail.extend(
                         list(range(tail_proj_offset, tail_proj_offset + chunk_len * (q_head_chunk_id + 1)))
                     )

@@ -90,14 +90,6 @@ class AscendPrefillContextParallelMetadata:
 
     kv_tail_proj_idx_tensor: torch.Tensor = None
 
-    kv_with_q_head_nomask_idx_in_tail_tensor: torch.Tensor = None
-
-    kv_with_q_head_mask_idx_in_tail_tensor: torch.Tensor = None
-
-    kv_with_q_tail_nomask_idx_in_tail_tensor: torch.Tensor = None
-
-    kv_with_q_tail_mask_idx_in_tail_tensor: torch.Tensor = None
-
     kv_with_q_head_attn_idx_in_tail_tensor: torch.Tensor = None
 
     kv_with_q_tail_attn_idx_in_tail_tensor: torch.Tensor = None
