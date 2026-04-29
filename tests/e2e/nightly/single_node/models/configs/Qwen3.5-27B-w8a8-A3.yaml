@@ -25,7 +25,7 @@ test_cases:
       - "--quantization"
       - "ascend"
       - "--max-model-len"
-      - "8000"
+      - "128000"
       - "--max-num-batched-tokens"
       - "16384"
       - "--trust-remote-code"
