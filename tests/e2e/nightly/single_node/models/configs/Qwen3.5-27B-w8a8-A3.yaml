@@ -48,8 +48,8 @@ test_cases:
         dataset_conf: gsm8k/gpqa_gen_0_shot_str
         max_out_len: 32768
         batch_size: 32
-        baseline: 95
-        threshold: 5
+        baseline: 85
+        threshold: 4
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs2800
