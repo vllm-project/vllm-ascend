@@ -41,7 +41,6 @@ import psutil
 import pytest
 import requests
 import torch
-from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 from requests.exceptions import RequestException
 from torch import nn
@@ -58,6 +57,15 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.model_utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
 from tests.e2e.nightly.multi_node.scripts.multi_node_config import DisaggregatedPrefillCfg, NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
+
+try:
+    from modelscope import snapshot_download  # type: ignore[import-untyped]
+except ModuleNotFoundError:
+    def snapshot_download(*args, **kwargs):
+        raise ModuleNotFoundError(
+            "modelscope is required for tests that download models dynamically, "
+            "but it is not needed for local-path E2E tests like test_precision_probe."
+        )
 
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless

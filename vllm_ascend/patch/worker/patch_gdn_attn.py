@@ -14,9 +14,20 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+import logging
+import os
 
 import torch
 import vllm.v1.attention.backends.gdn_attn as gdn_attn
+
+logger = logging.getLogger(__name__)
+_GDN_DEBUG = bool(os.environ.get("GDN_DEBUG", ""))
+
+
+def _dbg(msg: str, *args) -> None:
+    """Print debug message only when GDN_DEBUG env var is set."""
+    if _GDN_DEBUG:
+        print(msg % args if args else msg, flush=True)
 
 from vllm_ascend.ops.triton.gdn_chunk_meta import (
     _build_seq_lens,
@@ -548,6 +559,185 @@ def _build_non_spec_chunked_prefill_meta(
     return _build_chunked_prefill_metadata(builder, tensors, slot=slot)
 
 
+def _compute_all_mode_metadata(builder, attn_metadata, m):
+    """Compute all-mode prefix caching metadata and attach to attn_metadata.
+
+    In "all" mode, each sequence may span multiple blocks. We compute:
+    - SOURCE pool slots (where initial state was last written)
+    - DEST pool slots (where final state will be written) — overrides
+      non_spec_state_indices_tensor
+    - Block indices for scatter of intermediate block boundary states
+    - Chunk offsets for mapping FLA h-tensor to block boundaries
+
+    All fields are batch-wide [num_seqs]; forward code slices with
+    [:num_decodes] / [num_decodes:] as needed.
+    """
+    block_size = builder.kv_cache_spec.block_size
+    chunk_size = _GDN_CHUNK_SIZE
+    num_decodes = attn_metadata.num_decodes
+    num_prefills = attn_metadata.num_prefills
+    num_seqs = num_decodes + num_prefills
+    device = m.query_start_loc.device
+
+    if attn_metadata.spec_state_indices_tensor is not None:
+        raise NotImplementedError(
+            "all-mode prefix caching with spec decode not yet supported"
+        )
+
+    # In "all" mode, mamba_get_block_table_tensor returns the full table
+    block_table_2d = m.block_table_tensor[:num_seqs]  # [num_seqs, max_blocks]
+
+    seq_lens = m.seq_lens[:num_seqs]
+    query_lens = (
+        m.query_start_loc[1:num_seqs + 1] - m.query_start_loc[:num_seqs]
+    )
+    context_lens = seq_lens - query_lens
+
+    # DEST block index: last block containing scheduled tokens
+    block_idx_last_scheduled = (seq_lens - 1) // block_size
+    # First block that needs writing (first block with new tokens)
+    block_idx_first_scheduled = context_lens // block_size
+
+    # SOURCE pool slots: block containing the last computed token
+    has_context = context_lens > 0
+    source_block_idx = torch.where(
+        has_context,
+        (context_lens - 1) // block_size,
+        torch.zeros_like(context_lens),  # placeholder for gather
+    )
+    block_state_indices = torch.where(
+        has_context,
+        block_table_2d.gather(
+            1, source_block_idx.unsqueeze(1).long()
+        ).squeeze(1),
+        torch.full((num_seqs,), -1, dtype=block_table_2d.dtype, device=device),
+    )
+
+    # DEST pool slots: block containing the last scheduled token
+    dest_slots = block_table_2d.gather(
+        1, block_idx_last_scheduled.unsqueeze(1).long()
+    ).squeeze(1)
+
+    # Override non_spec_state_indices_tensor:
+    # upstream set it to block_table[:, 0] (block 0), we need DEST block
+    attn_metadata.non_spec_state_indices_tensor = dest_slots
+
+    # Prefill chunk computation for intermediate state scatter
+    # Each decode seq contributes 1 chunk to the FLA h tensor
+    chunks_per_block = block_size // chunk_size
+    prefill_chunk_start = num_decodes
+    prefill_chunk_offsets = None
+    scatter_src_indices = torch.empty(0, dtype=torch.long, device=device)
+    scatter_dst_slots = torch.empty(0, dtype=torch.long, device=device)
+    if num_prefills > 0:
+        prefill_query_lens = query_lens[num_decodes:]
+        prefill_context_lens = context_lens[num_decodes:]
+        prefill_block_first = block_idx_first_scheduled[num_decodes:]
+        prefill_block_last = block_idx_last_scheduled[num_decodes:]
+        prefill_chunk_counts = (
+            (prefill_query_lens + chunk_size - 1) // chunk_size
+        )
+        offsets = torch.zeros(
+            num_prefills + 1, dtype=torch.long, device=device
+        )
+        torch.cumsum(prefill_chunk_counts, dim=0, out=offsets[1:])
+        prefill_chunk_offsets = offsets
+
+        unaligned_prefills = torch.nonzero(
+            prefill_context_lens.remainder(block_size) != 0,
+            as_tuple=False,
+        ).flatten()
+        if unaligned_prefills.numel() > 0:
+            bad_idx = int(unaligned_prefills[0].item())
+            raise AssertionError(
+                "Scheduler must guarantee block-aligned context for all-mode "
+                f"scatter: seq_idx={bad_idx}, "
+                f"context_len={int(prefill_context_lens[bad_idx].item())}, "
+                f"block_size={block_size}"
+            )
+
+        scatter_counts = torch.clamp(
+            prefill_block_last - prefill_block_first,
+            min=0,
+        ).to(torch.long)
+        scatter_seq_ids = torch.repeat_interleave(
+            torch.arange(num_prefills, device=device, dtype=torch.long),
+            scatter_counts,
+        )
+        if scatter_seq_ids.numel() > 0:
+            scatter_prefix = torch.cumsum(scatter_counts, dim=0) - scatter_counts
+            local_offsets = (
+                torch.arange(scatter_seq_ids.numel(), device=device, dtype=torch.long)
+                - torch.repeat_interleave(scatter_prefix, scatter_counts)
+            )
+            scatter_rows = block_table_2d[num_decodes:].index_select(0, scatter_seq_ids)
+            scatter_block_indices = (
+                prefill_block_first.to(torch.long).index_select(0, scatter_seq_ids)
+                + local_offsets
+            )
+            scatter_dst_slots = scatter_rows.gather(
+                1, scatter_block_indices.unsqueeze(1)
+            ).squeeze(1).to(torch.long)
+            scatter_src_indices = (
+                prefill_chunk_offsets[:-1].index_select(0, scatter_seq_ids)
+                + prefill_chunk_start
+                + (local_offsets + 1) * chunks_per_block
+            )
+            valid_scatter = torch.nonzero(
+                scatter_dst_slots >= 0,
+                as_tuple=False,
+            ).flatten()
+            if valid_scatter.numel() != scatter_dst_slots.numel():
+                scatter_dst_slots = scatter_dst_slots.index_select(0, valid_scatter)
+                scatter_src_indices = scatter_src_indices.index_select(0, valid_scatter)
+
+    attn_metadata.is_all_mode = True
+    attn_metadata.mamba_block_size = block_size
+    attn_metadata.all_mode_chunk_size = chunk_size
+    attn_metadata.block_table_2d = block_table_2d
+    # SOURCE: pool slot of last-computed block (for reading initial state)
+    attn_metadata.block_state_indices = block_state_indices
+    attn_metadata.block_idx_first_scheduled_token = block_idx_first_scheduled
+    attn_metadata.block_idx_last_scheduled_token = block_idx_last_scheduled
+    attn_metadata.num_computed_tokens_all = context_lens
+    attn_metadata.prefill_chunk_start = prefill_chunk_start
+    attn_metadata.prefill_chunk_offsets = prefill_chunk_offsets
+    attn_metadata.scatter_src_indices_tensor = scatter_src_indices
+    attn_metadata.scatter_dst_slots_tensor = scatter_dst_slots
+
+    # Clean block-level debug: one line per step showing scheduling behavior
+    if _GDN_DEBUG and num_prefills > 0:
+        for si in range(num_prefills):
+            idx = num_decodes + si
+            new_tok = query_lens[idx].item()
+            ctx = context_lens[idx].item()
+            hit = bool(has_context[idx].item())
+            src = block_state_indices[idx].item()
+            dst = dest_slots[idx].item()
+            blk_first = block_idx_first_scheduled[idx].item()
+            blk_last = block_idx_last_scheduled[idx].item()
+            n_scatter = max(0, blk_last - blk_first)
+            scat_slots = block_table_2d[idx, blk_first:blk_last].tolist() if n_scatter > 0 else []
+            n_total = blk_last + 1
+            all_slots = block_table_2d[idx, :n_total].tolist()
+            valid_set = set(scat_slots + [dst])
+            valid_ann = [
+                f"s{s}+" if s in valid_set else f"s{s}-"
+                for s in all_slots
+            ]
+            print(
+                f"[GDN-ALL] prefill seq{si}: "
+                f"new={new_tok} ctx={ctx} | "
+                f"{'HIT' if hit else 'no-hit'} | "
+                f"src={'slot' + str(src) if src >= 0 else '-'} "
+                f"dest=slot{dst} | "
+                f"scatter={n_scatter}blk{scat_slots}\n"
+                f"  block_table={all_slots} -> "
+                f"state_valid={valid_ann} (scatter+running)",
+                flush=True,
+            )
+
+
 def _patched_build(
     self,
     common_prefix_len: int,
@@ -565,6 +755,47 @@ def _patched_build(
         fast_build=fast_build,
     )
     attn_metadata.non_spec_prefill_fallback_meta = None
+    attn_metadata.is_all_mode = False
+
+    mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+    if mamba_cache_mode == "all":
+        _compute_all_mode_metadata(self, attn_metadata, common_attn_metadata)
+
+    # Align-mode block table debug: show full allocation + running block
+    if (
+        _GDN_DEBUG
+        and mamba_cache_mode != "all"
+        and attn_metadata.num_prefills > 0
+    ):
+        _nd = attn_metadata.num_decodes
+        _np = attn_metadata.num_prefills
+        _ns = _nd + _np
+        _m = common_attn_metadata
+        _bs = self.kv_cache_spec.block_size
+        _full_bt = _m.block_table_tensor
+        _sl = _m.seq_lens[:_ns]
+        _ql = _m.query_start_loc[1:_ns + 1] - _m.query_start_loc[:_ns]
+        _cl = _sl - _ql
+        for _si in range(_np):
+            _idx = _nd + _si
+            _stok = _sl[_idx].item()
+            _ctx = _cl[_idx].item()
+            _ntok = _ql[_idx].item()
+            _nblk = (_stok + _bs - 1) // _bs
+            _slots = _full_bt[_idx, :_nblk].tolist()
+            _run = attn_metadata.non_spec_state_indices_tensor[_idx].item()
+            _ann = [
+                f"s{s}+" if s == _run else f"s{s}-"
+                for s in _slots
+            ]
+            print(
+                f"[GDN-ALIGN] prefill seq{_si}: "
+                f"new={_ntok} ctx={_ctx} -> {_nblk} blocks\n"
+                f"  block_table={_slots} -> "
+                f"state_valid={_ann} (running=slot{_run} only)",
+                flush=True,
+            )
+
     if attn_metadata.num_prefills <= 0:
         return attn_metadata
 
