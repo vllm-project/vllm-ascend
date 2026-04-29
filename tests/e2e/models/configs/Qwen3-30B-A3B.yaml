@@ -1,5 +1,15 @@
 model_name: "Qwen/Qwen3-30B-A3B"
+model_type: "vllm"
 hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 2
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.6
+  trust_remote_code: false
+  enable_expert_parallel: true
+
 tasks:
 - name: "gsm8k"
   metrics:
@@ -11,9 +21,8 @@ tasks:
   metrics:
   - name: "acc,none"
     value: 0.84
+
 num_fewshot: 5
-gpu_memory_utilization: 0.6
-enable_expert_parallel: True
-tensor_parallel_size: 2
-apply_chat_template: False
-fewshot_as_multiturn: False
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"

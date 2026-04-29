@@ -225,7 +225,7 @@ class AscendMoEScheme(ABC):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -251,7 +251,7 @@ class AscendMoEScheme(ABC):
             top_k: Number of experts to select per token.
             renormalize: Whether to renormalize expert weights.
             use_grouped_topk: Whether to use grouped top-k selection.
-            global_num_experts: Total number of experts globally.
+            num_experts: Number of experts.
             expert_map: Mapping from local to global expert indices.
             topk_group: Group size for grouped top-k.
             num_expert_group: Number of expert groups.
