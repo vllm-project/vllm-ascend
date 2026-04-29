@@ -162,7 +162,7 @@ install_vllm_ascend() {
 }
 
 install_aisbench() {
-    echo "====> Install AISBench benchmark"
+    echo "====> Install AISBench benchmark1"
 
     cd "$WORKSPACE/vllm-ascend"
 
