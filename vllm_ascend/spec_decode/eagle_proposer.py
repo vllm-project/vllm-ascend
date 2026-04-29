@@ -939,6 +939,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_token_ids_list.append(draft_token_ids)
             return torch.stack(draft_token_ids_list, dim=1)
 
+        # The logits are split and then merged only when lmhead_tp_enable() is enabled.
+        # As a result, the batch size length becomes the actual length 32.
+        # However, when lmhead_tp_enable() is disabled, the batch size uses the length after padding.
+        # To decouple the scenarios, a judgment is required.
+        # That is, the batch size needs to be modified only when lmhead_tp_enable() is enabled.
+        if lmhead_tp_enable() and self.method == "mtp":
+            batch_size = draft_token_ids.shape[0]
+
         # Generate the remaining draft tokens.
         draft_token_ids_tensor = torch.zeros(
             (self.num_speculative_tokens, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
