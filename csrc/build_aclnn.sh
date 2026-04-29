@@ -116,6 +116,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
         "ngram_spec_decode"
+        "gumbel_sample"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
     )
@@ -199,6 +200,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
         "ngram_spec_decode"
+        "gumbel_sample"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
     )
