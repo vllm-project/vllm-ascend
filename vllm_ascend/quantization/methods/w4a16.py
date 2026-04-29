@@ -182,7 +182,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         topk_group: int | None = None,
         num_expert_group: int | None = None,
@@ -199,9 +199,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
-            "Number of global experts mismatch (excluding redundancy)"
-        )
+        assert router_logits.shape[1] == num_experts, "Number of global experts mismatch (excluding redundancy)"
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -214,7 +212,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
 
         topk_ids = topk_ids.to(torch.int32)
