@@ -330,7 +330,7 @@ class AscendFusedMoE(FusedMoE):
             self.layer_name,
             self.moe_config,
             self.router,
-            self._routed_input_transform,
+            self.runner.routed_input_transform,
             kwargs.pop("gate", None),
             kwargs.pop("shared_experts", None),
             self.quant_method,
