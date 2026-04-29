@@ -16,7 +16,7 @@ _envs: &envs
 
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"
-  - "-no-enable-prefix-caching"
+  - "--no-enable-prefix-caching"
   - "--enable-chunked-prefill"
   - "--allowed-local-media-path"
   - "/"
