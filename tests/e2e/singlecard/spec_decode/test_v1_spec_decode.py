@@ -381,15 +381,15 @@ def test_suffix_logprobs(
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 
-def test_qwen3_eagle3_dcp_tp8(
+def test_qwen3_eagle3_pcp2_tp1(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
 ):
     """
-    Test Qwen3-8B with Eagle3 speculative decoding under DCP + TP8 configuration.
+    Test Qwen3-8B with Eagle3 speculative decoding under PCP + TP1 configuration.
     This test verifies that eagle3 spec decode works correctly with:
-    - DCP enabled (decode_context_parallel_size=2)
-    - Tensor Parallel size = 8
+    - PCP enabled (prompt_context_parallel_size=2)
+    - Tensor Parallel size = 1
     - num_speculative_tokens = 3
     - enforce_eager = True
     """
@@ -405,8 +405,9 @@ def test_qwen3_eagle3_dcp_tp8(
         },
         max_model_len=2048,
         enforce_eager=True,
-        tensor_parallel_size=8,
-        decode_context_parallel_size=2,
+        tensor_parallel_size=1,
+        prompt_context_parallel_size=2,
+        enable_decode_context_parallel=False,
     ) as runner:
         runner.model.chat(test_prompts, sampling_config)
 
