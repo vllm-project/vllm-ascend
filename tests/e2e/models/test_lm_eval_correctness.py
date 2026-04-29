@@ -10,7 +10,7 @@ from jinja2 import Environment, FileSystemLoader
 
 warnings.filterwarnings(
     "ignore",
-    message="swigvarlink object is not an iterator",
+    message=".*swigvarlink.*",
     category=DeprecationWarning,
 )
 
