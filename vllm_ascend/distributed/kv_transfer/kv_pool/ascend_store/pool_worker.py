@@ -21,6 +21,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerBatchReqMeta,
+    LayerLoadTask,
     ReqMeta,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -338,9 +339,7 @@ class KVPoolWorker:
             self.process_layer_data(metadata.requests)
             if len(self.independent_layers) == 0 and metadata.unfinished_request_ids:
                 for layer_id in self.offload_start_ids:
-                    layer_load_task = self.layer_load_tasks[layer_id]
-                    self.kv_recv_thread.add_request(
-                        (None, layer_load_task, layer_id))
+                    self._submit_layer_load(None, layer_id)
             return
 
         for request in metadata.requests:
@@ -575,13 +574,33 @@ class KVPoolWorker:
             self._process_save_for_layer_batch(requests, layer_id)
             self._process_load_for_layer_batch(requests, layer_id)
 
-    def wait_for_layer_load(self) -> None:
+    def _submit_layer_load(self, wait_for_save: int | None, layer_id: int) -> None:
+        assert self.kv_recv_thread is not None
+        layer_load_task = self.layer_load_tasks[layer_id]
+        self.kv_recv_thread.add_request(
+            LayerLoadTask(
+                wait_for_save_layer=wait_for_save,
+                req_metas=layer_load_task,
+                layer_id=layer_id,
+            )
+        )
+
+    def _submit_ready_layer_loads(self) -> None:
         if self.current_layer in self.independent_layers:
             if self.current_layer == self.independent_layers[0]:
                 for layer_id in self.offload_start_ids:
                     logger.debug(f">>>>>>>>>>>>>>>>>>>> load layer {layer_id}")
-                    layer_load_task = self.layer_load_tasks[layer_id]
-                    self.kv_recv_thread.add_request((None, layer_load_task, layer_id))
+                    self._submit_layer_load(None, layer_id)
+            return
+
+        prev_layer = self.current_layer - 1
+        if prev_layer in self.layer_next_map:
+            next_layer = self.layer_next_map[prev_layer]
+            self._submit_layer_load(prev_layer, next_layer)
+
+    def wait_for_layer_load(self) -> None:
+        self._submit_ready_layer_loads()
+        if self.current_layer in self.independent_layers:
             self.layer_load_finished_events[self.current_layer].clear()
             return
         is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)
@@ -595,14 +614,6 @@ class KVPoolWorker:
         if self.current_layer in self.layers_need_to_save:
             self.sync_save_events[self.current_layer].record()
             self.kv_send_thread.add_request(self.layer_save_tasks[self.current_layer])
-            # add load task, in both prefill and decode stages
-            # 1. wait for save, and clear save event
-            # 2. start load, for prefill layer_load_tasks is None, skip load in the recv thread.
-            # 3. set layer_load_finished_events (both prefill & decode)
-            if self.current_layer in self.layer_next_map:
-                next_layer = self.layer_next_map[self.current_layer]
-                self.kv_recv_thread.add_request(
-                    (self.current_layer, self.layer_load_tasks[next_layer], next_layer))
         if self.current_layer == self.num_layers - 1:
             is_finish = self.layer_save_finished_events[self.layers_need_to_save[-1]].wait(timeout=10)
             if not is_finish:

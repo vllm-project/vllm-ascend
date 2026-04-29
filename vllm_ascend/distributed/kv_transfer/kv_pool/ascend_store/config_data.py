@@ -466,3 +466,10 @@ class LayerBatchReqMeta:
         default_factory=lambda: np.empty(0, dtype=np.int64))
     gvas_array: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int64))
+
+
+@dataclass
+class LayerLoadTask:
+    wait_for_save_layer: int | None
+    req_metas: list[LayerBatchReqMeta]
+    layer_id: int

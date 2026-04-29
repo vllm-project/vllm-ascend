@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend im
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     LayerBatchReqMeta,
+    LayerLoadTask,
     ReqMeta,
 )
 # isort: on
@@ -478,7 +479,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.h2d_stagger_max_us = h2d_stagger_max_us
 
     def add_request(  # type: ignore[override]
-        self, req_meta: LayerBatchReqMeta
+        self, req_meta: LayerLoadTask
     ) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
@@ -502,14 +503,15 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             time.sleep(delay_us / 1_000_000)
 
     def _handle_request(  # type: ignore[override]
-        self, data: tuple[int | None, list[LayerBatchReqMeta], int]
+        self, data: LayerLoadTask
     ):
-        wait_for_save, req_metas, layer_id = data
+        wait_for_save = data.wait_for_save_layer
+        req_metas = data.req_metas
+        layer_id = data.layer_id
 
         if wait_for_save is not None:
-            is_finish = self.layer_save_finished_events[wait_for_save].wait(timeout=10)
-            if not is_finish:
-                logger.info("Layerwise %d save wait timed out", wait_for_save)
+            while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
+                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
             logger.debug(f">>>>>>>>>>>>>>>>>>>> clear save layer {wait_for_save}")
             self.layer_save_finished_events[wait_for_save].clear()
 

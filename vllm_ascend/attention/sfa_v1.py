@@ -1102,8 +1102,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
 
-            wait_for_kv_layer_from_connector(layer_name)
-
             if self.enable_dsa_cp:
                 assert slot_mapping_cp is not None
                 k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
@@ -1207,6 +1205,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
 
+        wait_for_kv_layer_from_connector(layer_name)
         topk_indices = self.indexer_select_post_process(
             x=hidden_states,
             q_c=q_c,
