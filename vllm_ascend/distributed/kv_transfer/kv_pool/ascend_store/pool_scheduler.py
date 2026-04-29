@@ -369,19 +369,23 @@ class KVPoolScheduler:
                     num_tokens_to_compute = (
                         request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
                     )
+                    previous_tracker = self._request_trackers.get(req_id)
                     request_tracker = RequestTracker(
                         req_id=req_id,
                         token_len=num_tokens_to_compute,
                         allocated_block_ids=new_block_ids,
                         num_saved_tokens=0,
                         token_ids=request_real.prompt_token_ids[:num_tokens_to_compute].copy(),
+                        block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
+                        chunk_gvas=(previous_tracker.chunk_gvas.copy() if previous_tracker else []),
                     )
                     self._request_trackers[req_id] = request_tracker
+                    num_hit_blocks = len(request_tracker.block_keys)
 
                     num_blocks = len(new_block_ids)
                     has_last_block = num_tokens_to_compute % self._block_size != 0
                     self._generate_keys_and_alloc(
-                        request_real.block_hashes[:num_blocks],
+                        request_real.block_hashes[num_hit_blocks:num_blocks],
                         request_tracker=request_tracker,
                         has_last_block=has_last_block,
                     )
