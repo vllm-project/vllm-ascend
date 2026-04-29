@@ -122,20 +122,12 @@ jobs:
           uv pip install -r requirements-dev.txt
           uv pip install -v -e .
 
-      - name: Checkout AISBench/benchmark repo
-        if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v6
-        with:
-          ref: v3.1-20260429-master
-          repository: AISBench/benchmark
-          path: /vllm-workspace/vllm-ascend
-          fetch-depth: 1
-
       - name: Install aisbench
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash -l {0}
         run: |
-          cd /vllm-workspace/vllm-ascend/benchmark
+          cd /vllm-workspace/vllm-ascend
+          GIT_CONFIG_GLOBAL=/dev/null git clone -b v3.1-20260429-master https://github.com/AISBench/benchmark.git
           pip install pytest asyncio pytest-asyncio
           pip install -e . -r requirements/api.txt -r requirements/extra.txt
           python3 -m pip cache purge

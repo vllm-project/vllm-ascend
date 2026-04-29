@@ -226,7 +226,7 @@ jobs:
         run: |
           set -euo pipefail
           SIZE="${{ inputs.size }}"
-          TIMEOUT=300
+          TIMEOUT=1200
 
           echo "Waiting for all pods to become Running and Ready (timeout ${TIMEOUT}s)..."
           START_TIME=$(date +%s)

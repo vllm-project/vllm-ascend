@@ -45,15 +45,6 @@ test_cases:
       - "--additional-config"
       - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}'
     benchmarks:
-      acc:
-        case_type: accuracy
-        dataset_path: vllm-ascend/gsm8k-lite
-        request_conf: vllm_api_general_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-        max_out_len: 8192
-        batch_size: 32
-        baseline: 95
-        threshold: 5
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs400
@@ -65,3 +56,21 @@ test_cases:
         request_rate: 0
         baseline: 1
         threshold: 0.97
+      acc_GPQA:
+        case_type: accuracy
+        dataset_path: vllm-ascend/gpqa
+        request_conf: vllm_api_general_chat
+        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+        max_out_len: 4096
+        batch_size: 32
+        baseline: 90
+        threshold: 5
+      acc_aime2025:
+        case_type: accuracy
+        dataset_path: vllm-ascend/aime2025
+        request_conf: vllm_api_general_chat
+        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+        max_out_len: 4096
+        batch_size: 32
+        baseline: 90
+        threshold: 5
