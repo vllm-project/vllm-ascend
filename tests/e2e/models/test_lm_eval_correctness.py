@@ -1,11 +1,12 @@
+import os
+import warnings
+from dataclasses import dataclass
+
 import lm_eval
 import numpy as np
 import pytest
 import yaml
 from jinja2 import Environment, FileSystemLoader
-import os
-import warnings
-from dataclasses import dataclass
 
 warnings.filterwarnings(
     "ignore",
