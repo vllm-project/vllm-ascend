@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -61,7 +63,15 @@ def causal_conv1d_fn(
     has_initial_state: torch.Tensor | None = None,
     cache_indices: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
+    metadata: Any | None = None,
     pad_slot_id: int = PAD_SLOT_ID,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
+    block_size_to_align: int = 0,
+    batch_ptr: torch.Tensor | None = None,
+    token_chunk_offset_ptr: torch.Tensor | None = None,
 ):
     """
     PyTorch implementation of causal_conv1d_fn for 310P.
@@ -80,6 +90,18 @@ def causal_conv1d_fn(
     Returns:
         out: (batch, dim, seqlen)
     """
+    del metadata, block_size_to_align, batch_ptr, token_chunk_offset_ptr
+
+    if (
+        (cache_indices is not None and cache_indices.dim() == 2)
+        or block_idx_first_scheduled_token is not None
+        or block_idx_last_scheduled_token is not None
+        or initial_state_idx is not None
+        or num_computed_tokens is not None
+    ):
+        raise RuntimeError(
+            "310P causal_conv1d_fn does not support APC-style block-table inputs."
+        )
 
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")

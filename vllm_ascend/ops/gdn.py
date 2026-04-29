@@ -37,7 +37,7 @@ from vllm_ascend.ops.triton.fla.sigmoid_gating import fused_sigmoid_gating_delta
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.mamba.causal_conv1d import (
-    causal_conv1d_fwd_npu,
+    causal_conv1d_fn,
     causal_conv1d_update_npu,
 )
 from vllm_ascend.utils import enable_sp
@@ -388,8 +388,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     (num_comp - 1) // attn_metadata.mamba_block_size,
                     torch.zeros_like(num_comp),  # placeholder; has_initial_state=False skips read
                 )
-                # Prefill: Triton causal_conv1d_fwd_npu with APC params
-                mixed_qkv_non_spec = causal_conv1d_fwd_npu(
+                # Prefill: route APC metadata through the shared conv1d API.
+                mixed_qkv_non_spec = causal_conv1d_fn(
                     x=mixed_qkv_non_spec,
                     weight=conv_weights,
                     bias=self.conv1d.bias,

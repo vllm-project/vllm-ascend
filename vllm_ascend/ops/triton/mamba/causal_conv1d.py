@@ -59,6 +59,22 @@ def causal_conv1d_ref(
     return (out, None) if not return_final_states else (out, final_states_out)
 
 
+def _uses_apc_prefill_path(
+    cache_indices: torch.Tensor | None,
+    block_idx_first_scheduled_token: torch.Tensor | None,
+    block_idx_last_scheduled_token: torch.Tensor | None,
+    initial_state_idx: torch.Tensor | None,
+    num_computed_tokens: torch.Tensor | None,
+) -> bool:
+    return (
+        (cache_indices is not None and cache_indices.dim() == 2)
+        or block_idx_first_scheduled_token is not None
+        or block_idx_last_scheduled_token is not None
+        or initial_state_idx is not None
+        or num_computed_tokens is not None
+    )
+
+
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -70,6 +86,13 @@ def causal_conv1d_fn(
     query_start_loc: torch.Tensor | None = None,
     metadata: Any | None = None,
     pad_slot_id: int = PAD_SLOT_ID,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
+    block_size_to_align: int = 0,
+    batch_ptr: torch.Tensor | None = None,
+    token_chunk_offset_ptr: torch.Tensor | None = None,
 ):
     """
     x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
@@ -81,12 +104,16 @@ def causal_conv1d_fn(
         the batch, used to index into sequence. prepended by 0.
         for example: query_start_loc = torch.Tensor([0,10,16,17]),
         x.shape=(dim,17)
-    cache_indices: (batch)  int32
-        indicates the corresponding state index,
-        like so: conv_state = conv_states[cache_indices[batch_id]]
+    cache_indices: (batch) int32 for the standard path, or
+        (batch, max_blocks) int32 block table for APC all-mode prefill
     has_initial_state: (batch) bool
         indicates whether should the kernel take the current state as initial
         state for the calculations
+    block_idx_first_scheduled_token / block_idx_last_scheduled_token /
+    initial_state_idx / num_computed_tokens:
+        APC all-mode prefill metadata. When provided, causal_conv1d_fn routes
+        to the NPU APC prefill implementation while keeping this public API
+        aligned with upstream.
     conv_states: (...,dim,width - 1) itype
         updated inplace if provided
     activation: either None or "silu" or "swish"
@@ -108,6 +135,61 @@ def causal_conv1d_fn(
 
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
+
+    if _uses_apc_prefill_path(
+        cache_indices,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+        initial_state_idx,
+        num_computed_tokens,
+    ):
+        if query_start_loc is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires query_start_loc for varlen inputs."
+            )
+        if cache_indices is None or cache_indices.dim() != 2:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires 2D cache_indices block tables."
+            )
+        if has_initial_state is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires has_initial_state."
+            )
+        if conv_states is None:
+            raise RuntimeError("APC causal_conv1d_fn requires conv_states.")
+        if block_idx_first_scheduled_token is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires block_idx_first_scheduled_token."
+            )
+        if block_idx_last_scheduled_token is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires block_idx_last_scheduled_token."
+            )
+        if initial_state_idx is None:
+            raise RuntimeError("APC causal_conv1d_fn requires initial_state_idx.")
+        if num_computed_tokens is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires num_computed_tokens."
+            )
+        return _causal_conv1d_fwd_npu(
+            x=x,
+            weight=weight,
+            bias=bias,
+            conv_states=conv_states,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            activation=activation,
+            pad_slot_id=pad_slot_id,
+            block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            initial_state_idx=initial_state_idx,
+            num_computed_tokens=num_computed_tokens,
+            block_size_to_align=block_size_to_align,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
+        )
+
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
@@ -1065,7 +1147,7 @@ def compute_conv1d_grid_npu(
     pad_slot_id: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Precompute grid scheduling tensors for causal_conv1d_fwd_npu.
+    """Precompute grid scheduling tensors for the APC prefill conv1d path.
 
     Returns:
         batch_ptr: (num_programs,) seq index per program
@@ -1087,7 +1169,7 @@ def compute_conv1d_grid_npu(
     return batch_ptr, token_chunk_offset_ptr, total
 
 
-def causal_conv1d_fwd_npu(
+def _causal_conv1d_fwd_npu(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
@@ -1108,10 +1190,12 @@ def causal_conv1d_fwd_npu(
     """NPU causal conv1d forward for all-mode prefix caching.
 
     Ported from upstream _causal_conv1d_fwd_kernel (KERNEL_WIDTH=4 only).
+    This is intentionally kept behind causal_conv1d_fn so callers can stay on
+    the existing public conv1d interface.
 
     Args:
-        x: (num_tokens, dim) input, row-major contiguous
-        weight: (dim, width=4) conv weights
+        x: (num_tokens, dim) row-major input or (dim, num_tokens) input
+        weight: (dim, width=4) conv weights, or the transposed (width, dim)
         bias: (dim,) optional bias
         conv_states: (N, dim, state_len=3) pool view (transposed from gdn.py)
         query_start_loc: (batch+1,) cumulative sequence lengths
@@ -1130,12 +1214,52 @@ def causal_conv1d_fwd_npu(
     Returns:
         (num_tokens, dim) output tensor
     """
-    original_dtype = x.dtype
-    x = x.to(conv_states.dtype)
-    out = torch.empty_like(x)
+    if x.dim() != 2:
+        raise RuntimeError(
+            f"APC causal_conv1d_fn expects 2D input, got x.dim()={x.dim()}"
+        )
 
-    num_tokens, dim_val = x.shape
-    _, width = weight.shape
+    input_is_dim_major = False
+    if weight.shape[0] == x.shape[1]:
+        x_row_major = x
+        weight_row_major = weight
+    elif weight.shape[1] == x.shape[1]:
+        x_row_major = x
+        weight_row_major = weight.transpose(0, 1)
+    elif weight.shape[0] == x.shape[0]:
+        input_is_dim_major = True
+        x_row_major = x.transpose(0, 1)
+        weight_row_major = weight
+    elif weight.shape[1] == x.shape[0]:
+        input_is_dim_major = True
+        x_row_major = x.transpose(0, 1)
+        weight_row_major = weight.transpose(0, 1)
+    else:
+        raise RuntimeError(
+            "APC causal_conv1d_fn could not infer input layout: "
+            f"x.shape={tuple(x.shape)}, weight.shape={tuple(weight.shape)}"
+        )
+
+    if x_row_major.stride(-1) != 1:
+        x_row_major = x_row_major.contiguous()
+    weight_row_major = weight_row_major.contiguous()
+    bias = bias.contiguous() if bias is not None else None
+
+    dim_val = x_row_major.shape[1]
+    if conv_states.shape[-2] != dim_val and conv_states.shape[-1] == dim_val:
+        conv_states = conv_states.transpose(-1, -2)
+    if conv_states.shape[-2] != dim_val:
+        raise RuntimeError(
+            "APC causal_conv1d_fn: conv_states dim mismatch, "
+            f"expected dim={dim_val}, conv_states.shape={tuple(conv_states.shape)}"
+        )
+
+    original_dtype = x_row_major.dtype
+    x_row_major = x_row_major.to(conv_states.dtype)
+    out = torch.empty_like(x_row_major)
+
+    num_tokens, _ = x_row_major.shape
+    _, width = weight_row_major.shape
     assert width == 4, f"Only KERNEL_WIDTH=4 supported, got {width}"
     state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
@@ -1144,10 +1268,10 @@ def causal_conv1d_fwd_npu(
     BLOCK_N = 256
 
     # Strides for (num_tokens, dim) row-major layout
-    stride_x_dim = x.stride(1)      # 1 (feature contiguous)
-    stride_x_token = x.stride(0)    # dim
-    stride_w_dim = weight.stride(0)
-    stride_w_width = weight.stride(1)
+    stride_x_dim = x_row_major.stride(1)      # 1 (feature contiguous)
+    stride_x_token = x_row_major.stride(0)    # dim
+    stride_w_dim = weight_row_major.stride(0)
+    stride_w_width = weight_row_major.stride(1)
     stride_o_dim = out.stride(1)
     stride_o_token = out.stride(0)
 
@@ -1175,7 +1299,7 @@ def causal_conv1d_fwd_npu(
     if batch_ptr is None or token_chunk_offset_ptr is None:
         batch_ptr, token_chunk_offset_ptr, num_programs = (
             compute_conv1d_grid_npu(
-                query_start_loc, BLOCK_M, pad_slot_id, x.device))
+                query_start_loc, BLOCK_M, pad_slot_id, x_row_major.device))
     else:
         num_programs = int(
             (batch_ptr != pad_slot_id).sum().item())
@@ -1184,7 +1308,7 @@ def causal_conv1d_fwd_npu(
 
     _causal_conv1d_fwd_kernel_npu[grid](
         # Pointers
-        x, weight, bias, conv_states, cache_indices,
+        x_row_major, weight_row_major, bias, conv_states, cache_indices,
         has_initial_state, query_start_loc,
         batch_ptr, token_chunk_offset_ptr,
         block_idx_first_scheduled_token,
@@ -1211,4 +1335,7 @@ def causal_conv1d_fwd_npu(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
     )
-    return out.to(original_dtype)
+    out = out.to(original_dtype)
+    if input_is_dim_major:
+        return out.transpose(0, 1).contiguous()
+    return out
