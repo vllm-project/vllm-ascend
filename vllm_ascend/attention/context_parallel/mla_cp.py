@@ -521,6 +521,8 @@ class AscendMlaCPImpl(AscendMLAImpl):
         attn_mask_seqlens = pcp_metadata.attn_mask_seqlens
         head_actual_seq_lengths_kv = pcp_metadata.head_actual_seq_lengths_kv
         tail_actual_seq_lengths_kv = pcp_metadata.tail_actual_seq_lengths_kv
+        assert head_actual_seq_lengths_kv is not None
+        assert tail_actual_seq_lengths_kv is not None
 
         output_head, lse_head = self._attention_with_optional_kv_select(
             q_nope=torch.index_select(q_nope, 0, q_head_idx),
