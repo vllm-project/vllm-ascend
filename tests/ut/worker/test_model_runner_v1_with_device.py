@@ -175,8 +175,6 @@ class TestDetermineBatchExecutionAndPadding:
         # cudagraph_metrics disabled by default
         assert cudagraph_stats is None
 
-    # ---------- force_eager=True: bypass cudagraph dispatch ----------
-
     def test_prefill_eager(self, model_runner):
         """All requests are fresh prefill (num_computed=0); force_eager bypasses dispatch."""
         self._set_spec_decode(model_runner, 0)
@@ -218,8 +216,6 @@ class TestDetermineBatchExecutionAndPadding:
             force_eager=True,
         )
         self._assert_common(model_runner, result, num_tokens=12, force_eager=True)
-
-    # ---------- force_eager=False: go through real dispatch path ----------
 
     def test_prefill_dispatch(self, model_runner):
         """All-prefill batch goes through the real cudagraph dispatcher."""
@@ -291,8 +287,6 @@ class TestDetermineBatchExecutionAndPadding:
         )
         self._assert_common(model_runner, result, num_tokens=1, force_eager=False)
 
-    # ---------- cascade attention ----------
-
     def test_prefill_cascade_attn(self, model_runner):
         """use_cascade_attn=True disables FULL cudagraph in dispatch."""
         self._set_spec_decode(model_runner, 0)
@@ -306,8 +300,6 @@ class TestDetermineBatchExecutionAndPadding:
             force_eager=False,
         )
         self._assert_common(model_runner, result, num_tokens=30, force_eager=False)
-
-    # ---------- force_uniform_decode override ----------
 
     def test_decode_force_uniform_true(self, model_runner):
         """Explicit force_uniform_decode=True overrides auto-detection."""
@@ -338,8 +330,6 @@ class TestDetermineBatchExecutionAndPadding:
             force_uniform_decode=False,
         )
         self._assert_common(model_runner, result, num_tokens=3, force_eager=False)
-
-    # ---------- spec_decode: uniform_decode depends on is_all_decode ----------
 
     def test_spec_decode_all_decode(self, model_runner):
         """Spec decode + all-decode batch; uniform_decode requires is_all_decode."""
@@ -391,8 +381,6 @@ class TestDetermineBatchExecutionAndPadding:
             self._assert_common(model_runner, result, num_tokens=12, force_eager=False)
         finally:
             self._set_spec_decode(model_runner, 0)
-
-    # ---------- large batch ----------
 
     def test_large_prefill_dispatch(self, model_runner):
         """5-request prefill batch with 100 total tokens."""

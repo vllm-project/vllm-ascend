@@ -177,8 +177,6 @@ class TestNPUModelRunnerResolveBatchAttnState(unittest.TestCase):
             np.array(num_valid, dtype=np.int32),
         )
 
-    # ---- Branch table coverage (no PCP override path) ----
-
     def test_prefill_no_cache_wins_over_chunked(self):
         # All num_computed_tokens == 0 wins, even with chunked_prefill enabled
         for enable_chunked in (False, True):
@@ -239,8 +237,6 @@ class TestNPUModelRunnerResolveBatchAttnState(unittest.TestCase):
         self.assertEqual(state, AscendAttentionState.PrefillCacheHit)
         self.assertTrue(with_prefill)
 
-    # ---- PCP override layer ----
-
     def test_spec_decoding_mtp_no_override(self):
         # mtp method does NOT trigger PCP override: state stays SpecDecoding
         state, with_prefill = self._resolve(
@@ -253,8 +249,6 @@ class TestNPUModelRunnerResolveBatchAttnState(unittest.TestCase):
         self.assertFalse(with_prefill)
 
     def test_spec_decoding_non_mtp_pcp_override(self):
-        # PCP+eagle3 override: SpecDecoding -> ChunkedPrefill,
-        # but with_prefill stays False (derived from the *raw* state).
         state, with_prefill = self._resolve(
             [5, 10, 15],
             [4, 4, 4],
@@ -264,11 +258,7 @@ class TestNPUModelRunnerResolveBatchAttnState(unittest.TestCase):
         self.assertEqual(state, AscendAttentionState.ChunkedPrefill)
         self.assertFalse(with_prefill)
 
-    # ---- Pure function contract ----
-
     def test_does_not_mutate_self_attn_state(self):
-        # _resolve_batch_attn_state must be a pure function — caller is
-        # responsible for assigning self.attn_state.
         runner = _make_attn_state_runner([0, 0, 0], None, False)
         runner.attn_state = "sentinel"
         runner._resolve_batch_attn_state(3, np.array([10, 10, 10]), np.array([10, 10, 10]))
