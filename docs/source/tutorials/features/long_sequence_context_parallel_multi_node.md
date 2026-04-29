@@ -250,7 +250,7 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
       --trust-remote-code \
       --gpu-memory-utilization 0.96 \
       --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}' \
-      --compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4]}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4]}' \
       --kv-transfer-config \
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
@@ -302,7 +302,7 @@ bash proxy.sh
 The parameters are explained as follows:
 
 - `--tensor-parallel-size` 16 are common settings for tensor parallelism (TP) sizes.
-- `--prefill-context-parallel-size` 2 are common settings for prefill context parallelism (PCP) sizes.
+- `--prefill-context-parallel-size` 2 is common setting for prefill context parallelism (PCP) sizes.
 - `--decode-context-parallel-size` 8 are common settings for decode context parallelism (DCP) sizes.
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
 - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
@@ -326,8 +326,6 @@ The parameters are explained as follows:
 - decode-context-parallel-size must be less than or equal to tensor-parallel-size.
 
 ## Accuracy Evaluation
-
-Here are two accuracy evaluation methods.
 
 ### Using AISBench
 
@@ -360,7 +358,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model /path_to_weight/DeepSeek-V3.1_w8a8mix_mtp  --dataset-name random --random-input 131072 --num-prompts 20 --request-rate 0 --save-result --result-dir ./
 ```
 

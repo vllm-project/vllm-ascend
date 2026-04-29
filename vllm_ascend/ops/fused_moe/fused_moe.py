@@ -228,7 +228,7 @@ class AscendMoERunner(DefaultMoERunner):
         chunked path. Always return False to stay on forward_impl."""
         return False
 
-    # TODO: Remove this after drop v0.19.0 support
+    # TODO: Remove this after drop v0.19.1 support
     def forward_impl(
         self,
         layer: torch.nn.Module,
@@ -357,7 +357,7 @@ class AscendFusedMoE(FusedMoE):
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 
-        is_legacy = vllm_version_is("0.19.0")
+        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
             self if is_legacy else self.layer_name,
             self.moe_config,
@@ -419,7 +419,7 @@ class AscendFusedMoE(FusedMoE):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice (compilation + capture),
         # causing moe_layer_index to overflow. Wrap the index to prevent out-of-bounds errors.
-        if self.enable_npugraph_ex_static_kernel:
+        if self.enable_npugraph_ex_static_kernel and forward_context.all_moe_layers:
             moe_layer_index = forward_context.moe_layer_index % (len(forward_context.all_moe_layers))
             forward_context.moe_layer_index = moe_layer_index
 
@@ -583,7 +583,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # NOTE: must use self._shared_experts here, not self.shared_experts —
         # FusedMoE.shared_experts is a property that reads self.runner.shared_experts,
         # which at this point is still the stale runner built with shared_experts=None.
-        is_legacy = vllm_version_is("0.19.0")
+        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
             self if is_legacy else self.layer_name,
             self.moe_config,
@@ -639,7 +639,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         if not torch.allclose(integrated_out, split_out):
             diff = (integrated_out - split_out).abs()
             logger.error("SharedFusedMoE shared experts split computation does not match the integrated computation.")
-            logger.error(f"Max absolute difference: {diff.max().item()}")
+            logger.error("Max absolute difference: %s", diff.max().item())
             logger.error(
                 "Integrated output - sum: %s, norm: %s", integrated_out.sum().item(), integrated_out.norm().item()
             )

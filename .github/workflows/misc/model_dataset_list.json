@@ -118,6 +118,7 @@
       "Shanghai_AI_Laboratory/internlm-7bi-chat",
       "Shanghai_AI_Laboratory/internlm-chat-7b",
       "Tencent-Hunyuan/HunyuanOCR",
+      "Tencent-Hunyuan/Hunyuan-A13B-Instruct",
       "Tengyunw/qwen3_8b_eagle3",
       "Tongyi-MAI/Z-Image-Turbo",
       "baichuan-inc/Baichuan2-7B-Chat",
@@ -159,6 +160,7 @@
       "nv-community/audio-flamingo-3",
       "nv-community/audio-flamingo-3-hf",
       "nvidia/audio-flamingo-3-hf",
+      "nv-community/Minitron-8B-Base",
       "openbmb/MiniCPM-2B-sft-bf16",
       "openbmb/MiniCPM-V-2_6",
       "openbmb/MiniCPM-V-4_5",
@@ -250,7 +252,8 @@
       "MiniMax/MiniMax-M2.5",
       "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
       "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
-      "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+      "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
+      "z-lab/Qwen3-8B-DFlash-b16"
     ], 
     "datasets": [
       "vllm-ascend/GSM8K-in1024-bs210",

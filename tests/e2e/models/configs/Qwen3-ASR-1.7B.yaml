@@ -1,27 +1,21 @@
 model_name: "Qwen/Qwen3-ASR-1.7B"
+model_type: "vllm-asr"
 hardware: "Atlas A2 Series"
-trust_remote_code: true
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.8
+  trust_remote_code: false
+
 tasks:
-- name: "librispeech_asr"
-  dataset_config: "clean"
-  dataset_split: "test"
-  metrics:
-  - name: "wer"
-    value: 0.1283
-  - name: "cer"
-    value: 0.2479
-- name: "librispeech_asr"
-  dataset_config: "other"
-  dataset_split: "test"
-  metrics:
-  - name: "wer"
-    value: 0.1639
-  - name: "cer"
-    value: 0.3212
-num_samples: 100
-apply_chat_template: false
-max_model_len: 448
-temperature: 0.0
-max_completion_tokens: 64
-input_format: "base64_wav"
-api_base: "http://localhost:8000/v1"
+  - name: "librispeech_test_clean"
+    dataset: "openslr/librispeech_asr"
+    split: "test"
+    dataset_config: "clean"
+    metrics:
+      - name: "wer"
+        value: 0.035
+
+limit: 500

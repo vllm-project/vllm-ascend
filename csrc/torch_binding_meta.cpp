@@ -193,13 +193,14 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& expert_idx,
     const at::TensorList& scale1,
     const at::TensorList& scale2,
-    const at::TensorList& bias1,
-    const at::TensorList& bias2,
+    const c10::optional<at::TensorList>& bias1,
+    const c10::optional<at::TensorList>& bias2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
     at::Tensor& out,
-    at::Tensor& expert_token_nums
+    at::Tensor& expert_token_nums,
+    const c10::optional<at::Tensor> &x_active_mask
 ) {
     return {out, expert_token_nums};
 }
@@ -428,6 +429,53 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     at::Tensor y = at::empty_symint(x1.sym_sizes(), x1.options());
     at::Tensor x = at::empty_symint(x1.sym_sizes(), x1.options());
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
+}
+
+at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq, 
+                                           const at::Tensor& hashkCache,
+                                           const at::Tensor& slotMapping,
+                                           const at::Tensor& seqLen,
+                                           const at::Tensor& hashkCacheOut) {
+    at::Tensor output = at::empty(hashkCache.sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));                                        
+    return output;
+}
+
+
+at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq, 
+                                       const at::Tensor &hashkCache,
+                                       const at::Tensor& hashkCacheRope,
+                                       const at::Tensor &topN,
+                                       const at::Tensor &seqLen, 
+                                       const c10::optional<at::Tensor> &chunkSize,
+                                       const c10::optional<int64_t> maxSeqLen, 
+                                       const c10::optional<int64_t> sink, 
+                                       const c10::optional<int64_t> recent, 
+                                       const c10::optional<int64_t> supportOffload,
+                                       const c10::optional<at::Tensor> &blockTable,
+                                       const c10::optional<at::Tensor> &mask,
+                                       const c10::optional<at::Tensor>& indices) {
+    if (indices.has_value()) {
+        return at::empty_like(indices.value());
+    }
+    uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
+
+    auto n_bs = hashq.size(0);
+    auto n_kv_heads = hashkCache.size(1); 
+    auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
+    at::Tensor out = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
+    return out;
+}
+
+at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input, 
+                                   const int64_t size) {
+    int64_t ySize = (input.size(0) + 7) / 8;
+    int64_t outDim = 0;
+    if (size != 0) {
+        outDim = ySize / size;
+    }
+
+    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));                                 
+    return out;
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_gemma_rms_norm_meta(
@@ -674,6 +722,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
+    // hamming_dist_top_k
+    ops.impl("npu_hamming_dist_top_k", &vllm_ascend::meta::npu_hamming_dist_top_k_meta);
+    // reshape_and_cache_bnsd
+    ops.impl("npu_reshape_and_cache_bnsd", &vllm_ascend::meta::npu_reshape_and_cache_bnsd_meta);
+    // npu_sign_bits_pack
+    ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn

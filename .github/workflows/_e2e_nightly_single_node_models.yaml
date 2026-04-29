@@ -40,6 +40,11 @@ on:
       is_run:
         required: true
         type: boolean
+    secrets:
+      OBS_ACCESS_KEY:
+        required: false
+      OBS_SECRET_KEY:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -208,8 +213,18 @@ jobs:
           any_failure=0
           for model in $models; do
             echo "Running test for model: $model"
-            pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
-              --config "tests/e2e/models/configs/${model}.yaml" || {
+            config_path="./tests/e2e/models/configs/${model}.yaml"
+            model_type=$(python3 -c "import yaml,sys; c=yaml.safe_load(open('${config_path}')); print(c.get('model_type','vllm'))" 2>/dev/null || echo "vllm")
+            if [[ "$model_type" == "vllm-asr" ]]; then
+              test_script="./tests/e2e/models/test_asr_eval_correctness.py"
+            elif [[ "$model_type" == "vllm-rm" ]]; then
+              test_script="./tests/e2e/models/test_rm_eval_correctness.py"
+            else
+              test_script="./tests/e2e/models/test_lm_eval_correctness.py"
+            fi
+            echo "  model_type=${model_type} → ${test_script}"
+            pytest -sv "${test_script}" \
+              --config "${config_path}" || {
               echo "Test failed for model: $model"
               any_failure=1
             }
@@ -237,6 +252,19 @@ jobs:
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY }}
+          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
+          path: ./benchmarks/accuracy/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload Report (GitHub Artifacts)
+        if: ${{ inputs.upload == true }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}

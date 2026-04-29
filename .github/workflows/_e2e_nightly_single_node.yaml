@@ -44,6 +44,11 @@ on:
         type: string
         default: ''
         description: branch name used as prefix in artifact/benchmark names to distinguish dual-branch test runs
+    secrets:
+      OBS_ACCESS_KEY:
+        required: false
+      OBS_SECRET_KEY:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -63,7 +68,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: 120
+    timeout-minutes: 600
     container:
       image: ${{ inputs.image }}
     env:
@@ -224,7 +229,20 @@ jobs:
 
       - name: Upload benchmark results
         if: ${{ always() && inputs.config_file_path != '' }}
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY }}
+          secret_key: ${{ secrets.OBS_SECRET_KEY }}
+          name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload benchmark results (GitHub Artifacts)
+        if: ${{ always() && inputs.config_file_path != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-test-benchmark-results-${{ steps.bench_ts.outputs.effective_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
           path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
