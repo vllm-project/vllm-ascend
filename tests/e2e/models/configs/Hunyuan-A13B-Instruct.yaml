@@ -1,6 +1,7 @@
 model_name: "Tencent-Hunyuan/Hunyuan-A13B-Instruct"
+model_type: "vllm"
 hardware: "Atlas A2 Series"
-trust_remote_code: true
+
 test_cases:
   - model: "Tencent-Hunyuan/Hunyuan-A13B-Instruct"
     server_cmd:
@@ -15,18 +16,25 @@ test_cases:
       - --enforce-eager
       - --port
       - "8000"
+
+serve:
+  tensor_parallel_size: 4
+  dtype: auto
+  max_model_len: 32768
+  gpu_memory_utilization: 0.90
+  enforce_eager: true
+  trust_remote_code: true
+
 tasks:
-- name: "gsm8k"
-  metrics:
-  - name: "exact_match,strict-match"
-    value: 0.37
-  - name: "exact_match,flexible-extract"
-    value: 0.28
-tensor_parallel_size: 4
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.37
+      - name: "exact_match,flexible-extract"
+        value: 0.28
+
 num_fewshot: 5
-num_samples: 1000
-max_model_len: 32768
-max_num_batched_tokens: 32768
+limit: 1000
 apply_chat_template: false
 fewshot_as_multiturn: false
-gpu_memory_utilization: 0.90
+batch_size: "auto"

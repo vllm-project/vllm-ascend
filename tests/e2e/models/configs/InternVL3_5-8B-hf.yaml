@@ -1,10 +1,21 @@
 model_name: "OpenGVLab/InternVL3_5-8B-hf"
+model_type: "vllm-vlm"
 hardware: "Atlas A2 Series"
-model: "vllm-vlm"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 40960
+  gpu_memory_utilization: 0.8
+  trust_remote_code: true
+
 tasks:
   - name: "mmmu_val"
     metrics:
     - name: "acc,none"
       value: 0.58
-max_model_len: 40960
-trust_remote_code: True
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"
