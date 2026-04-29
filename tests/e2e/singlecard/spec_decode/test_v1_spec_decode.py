@@ -493,6 +493,7 @@ def test_llama_qwen_eagle_acceptance(
 
     assert match
 
+
 @pytest.mark.parametrize("method", DRAFT_PARALLEL_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
