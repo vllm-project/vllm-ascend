@@ -262,8 +262,8 @@ class MockQuantMethod(nn.Module):
 
 
 class TestExpertsSelector:
-    @pytest.mark.parametrize("global_num_experts", [256, 128])
-    def test_select_experts(self, mock_dist_env, mock_moe_env, global_num_experts):
+    @pytest.mark.parametrize("num_experts", [256, 128])
+    def test_select_experts(self, mock_dist_env, mock_moe_env, num_experts):
         x = torch.randn(8, 2)
         router_logits = torch.randn(8, 2)
         topk_weights, topk_ids = select_experts(
@@ -277,7 +277,7 @@ class TestExpertsSelector:
             custom_routing_function=None,
             scoring_func="softmax",
             e_score_correction_bias=None,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
 
         assert topk_weights.shape == (8, 2)
