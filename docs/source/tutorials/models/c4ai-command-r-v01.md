@@ -119,12 +119,14 @@ Expected result:
 ## Accuracy Evaluation
 
 Run the LM-Eval correctness test with the model config:
+
 ```bash
 python -m pytest -sv tests/e2e/models/test_lm_eval_correctness.py \
   --config tests/e2e/models/configs/c4ai-command-r-v01.yaml \
   --tp-size 4 \
   --report-dir ./benchmarks/accuracy
 ```
+
 Reference thresholds (from `tests/e2e/models/configs/c4ai-command-r-v01.yaml`):
 
 | Task  | Metric                        | Value   |
