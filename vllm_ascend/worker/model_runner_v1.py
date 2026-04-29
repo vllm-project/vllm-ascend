@@ -24,7 +24,6 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
-from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -39,7 +38,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
-from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -78,6 +77,7 @@ from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -129,7 +129,6 @@ from vllm_ascend.utils import (
     check_gdn_layer,
     enable_sp,
     enable_sp_by_pass,
-    get_c_env,
     global_stream,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
@@ -227,77 +226,6 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
-class _NPULazyEvent:
-    """``torch.npu.Event`` proxy with CUDA-equivalent unrecorded-sync.
-
-    Used for events that **need to actually synchronize** (async
-    scheduling depends on them) but where the upstream code path may
-    call ``synchronize()`` once before any ``record()`` has run -- e.g.
-    ``synchronize_input_prep`` on the very first step.
-
-    On CUDA, ``synchronize()`` of a never-recorded event is a no-op.
-    On NPU, the same call returns
-    ``RuntimeError: SUSPECT REMOTE ERROR (507057)``. This proxy bridges
-    the gap: it is a no-op until the first ``record()``, then delegates
-    every subsequent call to a real ``torch.npu.Event``.
-    """
-
-    __slots__ = ("_event",)
-
-    def __init__(self) -> None:
-        self._event: torch.npu.Event | None = None
-
-    def record(self, *args, **kwargs) -> None:
-        if self._event is None:
-            self._event = torch.npu.Event()
-        self._event.record(*args, **kwargs)
-
-    def synchronize(self) -> None:
-        if self._event is not None:
-            self._event.synchronize()
-
-    def query(self) -> bool:
-        return True if self._event is None else self._event.query()
-
-    def wait(self, *args, **kwargs) -> None:
-        if self._event is not None:
-            self._event.wait(*args, **kwargs)
-
-
-class _NoOpNPUEvent:
-    """``torch.npu.Event``-shaped permanent no-op.
-
-    Used for events whose synchronization is **structurally
-    unnecessary** because the corresponding D2H copy is already issued
-    synchronously on the host's compute path. The CPU-side data is
-    therefore guaranteed to be ready before any caller could read it,
-    and ``synchronize()`` has nothing to wait on.
-
-    Currently used for ``_num_valid_draft_tokens_event``: the
-    ``num_valid_draft_tokens_cpu`` buffer is filled by a synchronous
-    blocking ``copy_`` in ``propose_draft_token_ids`` (see comment
-    there for rationale), so upstream's
-    ``update_scheduler_for_invalid_drafts.synchronize()`` is a true
-    no-op every step. This guarantees we never enter
-    ``torch_npu``'s ``rtEventSynchronize`` path -- the documented
-    source of intermittent ``SUSPECT REMOTE ERROR (507057)`` on NPU.
-    """
-
-    __slots__ = ()
-
-    def record(self, *args, **kwargs) -> None:
-        return None
-
-    def synchronize(self) -> None:
-        return None
-
-    def query(self) -> bool:
-        return True
-
-    def wait(self, *args, **kwargs) -> None:
-        return None
-
-
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -308,37 +236,8 @@ class NPUModelRunner(GPUModelRunner):
             vllm_config.parallel_config.prefill_context_parallel_size * 2 * vllm_config.scheduler_config.max_num_seqs
         )
         vllm_config.scheduler_config.max_num_batched_tokens += max_pcp_pad_tokens
-        # Temporarily switch method from "ngram_gpu" to "ngram" during
-        # super().__init__() to prevent the upstream from creating
-        # NgramProposerGPU (which compiles and runs GPU-specific
-        # NgramGPUKernel via torch.compile, incompatible with NPU).
-        # The CPU-only NgramProposer created instead is harmless and will
-        # be replaced by AscendNgramProposerNPU in _set_up_drafter().
-        # The GPU tensors needed by the ngram_gpu path are created there too.
-        _is_ngram_gpu = (vllm_config.speculative_config is not None
-                         and vllm_config.speculative_config.use_ngram_gpu())
-        if _is_ngram_gpu:
-            vllm_config.speculative_config.method = "ngram"
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
-        if _is_ngram_gpu:
-            vllm_config.speculative_config.method = "ngram_gpu"
-
-        # Replace ``prepare_inputs_event`` (created by super().__init__()
-        # only when ``use_async_scheduling=True``) with a lazy-event
-        # proxy so the first ``synchronize_input_prep`` call -- which
-        # unconditionally syncs the event before any record() runs --
-        # is a no-op on NPU, matching CUDA's "synchronize on unrecorded
-        # event = no-op" semantic. Without this, NPU returns
-        # ``SUSPECT REMOTE ERROR (507057)``.
-        #
-        # The other events created by ``super().__init__()`` --
-        # ``draft_token_ids_event``, ``valid_sampled_token_count_event``,
-        # ``num_accepted_tokens_event``, ``transfer_event`` -- are always
-        # record()-ed before being synchronized in their own code paths,
-        # so they do not need this treatment.
-        if getattr(self, 'prepare_inputs_event', None) is not None:
-            self.prepare_inputs_event = _NPULazyEvent()
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -443,7 +342,7 @@ class NPUModelRunner(GPUModelRunner):
             self.input_ids = self._make_buffer(max_buffer_num_tokens, dtype=torch.int32)
             self.positions = torch.zeros(
                 max_buffer_num_tokens, dtype=torch.int64, device=self.device)
-            
+
         # Create a CPU numpy buffer for positions computation when
         # self.positions is a plain tensor (non-CpuGpuBuffer case).
         self._positions_cpu_buf = torch.zeros(
@@ -451,16 +350,6 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
         )
         self._positions_np_buf = self._positions_cpu_buf.numpy()
-
-        self.use_eagle = (
-            vllm_config.speculative_config.use_eagle()
-            if vllm_config.speculative_config
-            else None
-        )
-        # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
-        # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
-        _enpu = get_c_env("ENPU_ENABLE")
-        self.enable_enpu = _enpu is not None and _enpu.lower() == "true"
 
         self._set_up_drafter()
 
@@ -564,13 +453,6 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
-        self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
-        self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
-        if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import initialize_kvcomp_metadata
-            self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
-                block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
-                parallel_config=self.parallel_config, dtype=self.dtype)
 
     @property
     def use_cp(self) -> bool:
@@ -606,48 +488,6 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(self.drafter, AscendEagleProposer)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
                 self.rejection_sampler = RejectionSampler(self.sampler)
-            # For ngram_gpu, create the GPU tensors and async D2H buffers
-            # that the upstream normally creates in GPUModelRunner.__init__
-            # but were skipped because we temporarily set method="ngram".
-            if self.speculative_config.use_ngram_gpu():
-                self.num_tokens_no_spec_gpu = torch.zeros(
-                    self.max_num_reqs, dtype=torch.int32, device=self.device)
-                self.token_ids_gpu_tensor = torch.zeros(
-                    self.max_num_reqs, self.max_model_len,
-                    dtype=torch.int32, device=self.device)
-                # Persistent sampled-token buffer used as kernel input.
-                # Pre-allocated with ``max_num_reqs`` rows so the NPU
-                # ngram kernel's row-by-row ``DataCopyPad`` (whose 32-byte
-                # aligned MTE2 fetch can over-read past the apparent
-                # ``[batch_size, num_spec+1]`` size when batch_size <
-                # max_num_reqs) always lands inside this allocation.
-                # Per-step ``propose_draft_token_ids`` copies the current
-                # sampler output into the leading rows and slices
-                # ``[:batch_size]`` to feed the kernel — slicing keeps the
-                # underlying allocation intact, providing a guaranteed
-                # ``(max_num_reqs - batch_size)`` row over-read margin.
-                self._sampled_token_ids_buf = torch.full(
-                    (self.max_num_reqs, spec_token_num + 1),
-                    -1, dtype=torch.int32, device=self.device,
-                )
-                self._ngram_pinned_idx_buf = torch.zeros(
-                    self.max_num_reqs, dtype=torch.long, pin_memory=True)
-                self._ngram_pinned_val_buf = torch.zeros(
-                    self.max_num_reqs, dtype=torch.int32, pin_memory=True)
-                self._num_valid_draft_tokens_cpu = torch.empty(
-                    self.max_num_reqs, dtype=torch.int32,
-                    pin_memory=self.pin_memory)
-                # Permanent no-op event for ``_num_valid_draft_tokens``.
-                # The host-side buffer is populated by a synchronous
-                # blocking D2H ``copy_`` in ``propose_draft_token_ids``
-                # (see the rationale comment there), so upstream's
-                # ``update_scheduler_for_invalid_drafts.synchronize()``
-                # has nothing to wait on. Routing it to a no-op
-                # eliminates the ``rtEventSynchronize`` code path on NPU
-                # entirely, sidestepping intermittent
-                # ``SUSPECT REMOTE ERROR (507057)`` failures observed in
-                # CI under torch_npu's NPU event sync implementation.
-                self._num_valid_draft_tokens_event = _NoOpNPUEvent()
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
@@ -1420,27 +1260,6 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices=logits_indices,
         )
 
-    def _copy_valid_sampled_token_count(
-        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
-    ) -> None:
-        if self.valid_sampled_token_count_event is None:
-            return
-
-        # Initialize a new stream to overlap the copy operation with
-        # prepare_input of draft model.
-        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):  
-            self.valid_sampled_token_count_copy_stream.wait_stream(torch.npu.current_stream())  
-            counts = valid_sampled_tokens_count
-            counts_cpu = self.valid_sampled_token_count_cpu
-            assert counts_cpu is not None
-            counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
-            self.valid_sampled_token_count_event.record()
-
-        if self.use_async_spec_decode:
-            # Stash for GPU-side correction in _prepare_inputs.
-            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
-        self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
-
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
@@ -1462,163 +1281,50 @@ class NPUModelRunner(GPUModelRunner):
         elif isinstance(self.drafter, (AscendNgramProposer, AscendSuffixDecodingProposer)):
             draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
         elif isinstance(self.drafter, AscendNgramProposerNPU):
-            batch_size = min(
-                self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0]
-            )
-            vocab_size = self.model_config.get_vocab_size()
+            batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
-            # --- Stage sampled tokens into the persistent
-            # ``_sampled_token_ids_buf`` (allocated [max_num_reqs,
-            # num_spec+1] in ``_set_up_drafter``).
-            #
-            # Why a persistent buffer: the NPU ngram kernel issues
-            # row-by-row ``DataCopyPad`` reads on the sampled GM tensor
-            # with ``srcRowBytes = max_new_tokens * 4``. When that's
-            # less than the 32-byte MTE alignment, the underlying
-            # MTE2 burst can fetch past the per-step sampled tensor's
-            # tight allocation. Routing through a buffer of shape
-            # [max_num_reqs, num_spec+1] guarantees ``(max_num_reqs -
-            # batch_size)`` rows of trailing valid memory under the
-            # ``[:batch_size]`` slice we hand to the kernel — eliminating
-            # the multi-core MTE OOB observed in CI (fixp_error0 cluster
-            # around 0x30Xb6b9).
-            #
-            # Also normalizes dtype to int32 (kernel's binding contract,
-            # see csrc/ngram_spec_decode/ngram_spec_decode_torch_adpt.h).
-            sampled_buf = self._sampled_token_ids_buf
-            # Reset only the rows the kernel will read; the trailing
-            # (max_num_reqs - batch_size) rows act as a passive DMA
-            # over-read cushion and need not be cleared each step.
-            sampled_buf[:batch_size].fill_(-1)
+            # prepare sampled_token_ids tensor（list → padded tensor）
             sampled_token_ids = valid_sampled_token_ids
             if isinstance(sampled_token_ids, list):
-                # Build a single padded [src_rows, num_spec+1] tensor in
-                # one go, avoiding O(B) small-tensor allocations.
-                src_rows = min(len(sampled_token_ids), batch_size)
-                cols = sampled_buf.shape[1]
-                if src_rows > 0:
-                    padded = [
-                        (row[:cols] + [-1] * (cols - len(row[:cols])))
-                        for row in sampled_token_ids[:src_rows]
-                    ]
-                    sampled_buf[:src_rows].copy_(
-                        torch.tensor(
-                            padded, dtype=torch.int32, device=self.device
-                        )
-                    )
+                max_len = max((len(sublist) for sublist in sampled_token_ids), default=0)
+                max_len = max(max_len, 1)
+                padded_list = [
+                    sublist + [-1] * (max_len - len(sublist))
+                    for sublist in sampled_token_ids
+                ]
+                sampled_token_ids_tensor = torch.tensor(
+                    padded_list, dtype=torch.int32, device=self.device
+                )
             else:
-                src = sampled_token_ids
-                if src.dtype != torch.int32:
-                    src = src.to(torch.int32)
-                src_rows = min(src.shape[0], batch_size)
-                src_cols = min(src.shape[1], sampled_buf.shape[1])
-                if src_rows > 0 and src_cols > 0:
-                    sampled_buf[:src_rows, :src_cols].copy_(
-                        src[:src_rows, :src_cols]
-                    )
-            sampled_b = sampled_buf[:batch_size]
-
-            # NOTE: do NOT call .contiguous() on token_ids_gpu_tensor's
-            # slice — the kernel writes in-place; .contiguous() on a
-            # non-contiguous slice would silently redirect writes to a
-            # temporary copy. Leading slices of a contiguous 2D tensor
-            # are contiguous by construction.
-            token_ids_b = self.token_ids_gpu_tensor[:batch_size]
-
-            # Clamp num_tokens_no_spec into [0, max_seq_len] before
-            # passing to the kernel. **REQUIRED** for the
-            # async + ngram_gpu path: upstream's ``_update_states``
-            # optimistically does
-            # ``num_tokens_no_spec[i] += optimistic_num_accepted``
-            # BEFORE the actual acceptance count is known. The synced
-            # ``num_tokens_no_spec_gpu`` value can therefore briefly
-            # exceed ``max_model_len`` when a request is near the
-            # window boundary.
-            #
-            # The kernel uses ``backup_pos = seq_len - 1`` to index into
-            # the per-row UB tile of width ``max_seq_len_align``; when
-            # ``seq_len > max_seq_len`` that index walks past the per-row
-            # UB region, surfacing on NPU as an MTE-OOB DDR fault
-            # (CI signature: fixp_error0 = 0x30266b9 across cores).
-            #
-            # Use the non-in-place ``clamp`` so we do NOT mutate the
-            # persistent ``num_tokens_no_spec_gpu`` buffer.  Next step's
-            # ``update_ngram_gpu_tensors_incremental`` would overwrite
-            # the persistent buffer anyway, but mutating in-place here
-            # would still be a correctness foot-gun for any read between
-            # this point and the next sync.
-            max_seq_len = self.token_ids_gpu_tensor.shape[1]
-            num_tokens_b = self.num_tokens_no_spec_gpu[:batch_size].clamp(
-                min=0, max=max_seq_len
-            )
-
-            # ``discard_request_mask.gpu`` is bool; the C++ binding
-            # converts it to int32 (see ngram_spec_decode_torch_adpt.h).
-            # Underlying allocation is [max_num_reqs] so the slice has
-            # the same DMA over-read margin as token_ids_gpu_tensor.
-            discard_b = self.discard_request_mask.gpu[:batch_size]
+                sampled_token_ids_tensor = sampled_token_ids
 
             (_token_ids, next_token_ids, draft_token_ids,
              num_valid_draft_tokens) = torch.ops._C_ascend.npu_ngram_spec_decode(
-                token_ids_b,            # [B, max_seq_len], int32, in-place
-                num_tokens_b,           # [B], int32, clamped to [0, max_seq_len]
-                sampled_b,              # [B, num_spec+1], int32, persistent
-                discard_b,              # [B], bool (binding casts to int32)
-                vocab_size=vocab_size,
+                self.token_ids_gpu_tensor[:batch_size],       # [B, max_seq_len], in-place
+                self.num_tokens_no_spec_gpu[:batch_size],      # [B]
+                sampled_token_ids_tensor[:batch_size],         # [B, max_new_tokens]
+                self.discard_request_mask.gpu[:batch_size],    # [B]
+                vocab_size=self.model_config.get_vocab_size(),
                 min_n=self.drafter.min_n,
                 max_n=self.drafter.max_n,
                 k=self.drafter.k,
             )
 
-            # --- Compute valid_sampled_tokens_count for async
-            # num_computed_tokens correction.
-            valid_mask = (sampled_b != -1) & (sampled_b < vocab_size)
-            valid_sampled_tokens_count = valid_mask.sum(dim=1).to(torch.int32)
-            # discard_b is already bool — no need for an extra .bool() cast.
-            valid_sampled_tokens_count.masked_fill_(discard_b, 0)
-            self._copy_valid_sampled_token_count(
-                next_token_ids, valid_sampled_tokens_count
-            )
+            # only async scheduling, set prev_sampled_token_ids，
+            if self.use_async_scheduling:
+                self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
             # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
 
-            # Synchronous D2H copy of num_valid_draft_tokens.
-            #
-            # We deliberately use a *blocking* copy (no non_blocking,
-            # no separate stream, no event.record()) to bypass NPU's
-            # ``rtEventSynchronize`` path entirely. CI repeatedly fails
-            # at upstream's ``update_scheduler_for_invalid_drafts``'s
-            # ``num_valid_draft_tokens_event.synchronize()`` with NPU
-            # error 507057 ("rtEventSynchronize execution failed,
-            # reason=suspect remote error") even when the kernel itself
-            # ran successfully and the event was properly recorded on a
-            # dedicated copy stream — this is a runtime/API-level
-            # reliability issue with ``torch.npu.Event.synchronize()``
-            # in this code path, distinct from any kernel OOB.
-            #
-            # By making the copy synchronous, the CPU buffer is
-            # populated immediately on the host side. We pair this with
-            # ``_num_valid_draft_tokens_event = _NoOpNPUEvent()`` (set
-            # in ``_set_up_drafter``) so upstream's later
-            # ``num_valid_draft_tokens_event.synchronize()`` is a true
-            # permanent no-op — never reaching ``torch_npu`` and never
-            # producing 507057.
-            #
-            # Performance impact: a B*4-byte (a few hundred bytes)
-            # blocking D2H per step, well below 1 µs on Ascend — small
-            # and bounded compared to model forward / sampling. We
-            # trade a tiny amount of compute/copy overlap for total
-            # elimination of an entire class of NPU event-sync
-            # failures.
-            if num_valid_draft_tokens is not None:
-                num_reqs_to_copy = min(
-                    batch_size, num_valid_draft_tokens.shape[0]
-                )
-                if num_reqs_to_copy > 0:
-                    self._num_valid_draft_tokens_cpu[
-                        :num_reqs_to_copy
-                    ].copy_(num_valid_draft_tokens[:num_reqs_to_copy])
+            # async D2H copy num_valid_draft_tokens
+            copy_num_valid_draft_tokens(
+                self._num_valid_draft_tokens_cpu,
+                self._num_valid_draft_tokens_copy_stream,
+                self._num_valid_draft_tokens_event,
+                self._num_valid_draft_tokens,
+                batch_size,
+            )
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
@@ -2233,7 +1939,7 @@ class NPUModelRunner(GPUModelRunner):
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
 
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -2528,31 +2234,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
 
-    def _update_full_graph_params_if_needed(
-        self,
-        forward_context: ForwardContext,
-        num_tokens_padded: int,
-        positions: torch.Tensor | None,
-    ) -> None:
-        if (
-            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and not forward_context.capturing
-            and not self.use_sparse
-        ):
-            if self.enable_enpu:
-                torch.npu.current_stream().synchronize()
-
-            assert positions is not None
-            update_full_graph_params(
-                self.attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens_padded,
-                self.vllm_config,
-                self.speculative_config,
-                positions.shape[0],
-            )
-
     def _model_forward(
         self,
         num_tokens_padded: int,
@@ -2563,31 +2244,27 @@ class NPUModelRunner(GPUModelRunner):
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **model_kwargs,
+        )
         forward_context = get_forward_context()
         assert forward_context is not None
-
-        model_inputs: dict[str, Any] = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "intermediate_tensors": intermediate_tensors,
-            "inputs_embeds": inputs_embeds,
-            **model_kwargs,
-        }
-        run_model = partial(self.model, **model_inputs)
-
-        if self.enable_enpu:
-            # The soft segmentation scenario requires event.record first, then event.wait
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not forward_context.capturing:
+            assert positions is not None
+            update_full_graph_params(
+                self.attn_backend,
+                self.update_stream,
+                forward_context,
+                num_tokens_padded,
+                self.vllm_config,
+                self.speculative_config,
+                positions.shape[0],
             )
-            hidden_states = run_model()
-        else:
-            hidden_states = run_model()
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
-            )
-
-        if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
+        if get_forward_context().flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
@@ -2893,7 +2570,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
                 )
 
-            # add kvcomp_metadata into common_attn_metadata
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
@@ -2951,9 +2627,7 @@ class NPUModelRunner(GPUModelRunner):
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
-            if self.enable_hamming_sparse is True:
-                from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
-                build_kvcomp_metadata(self.kvcomp_meta_data, cm)
+
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
         if self.is_mm_prefix_lm:
@@ -3173,7 +2847,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
+            if self.is_multimodal_model and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
@@ -3350,13 +3024,7 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
-            self.model = ACLGraphWrapper(
-                self.model,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
+            self.model = ACLGraphWrapper(self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -3426,18 +3094,6 @@ class NPUModelRunner(GPUModelRunner):
 
         num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches, num_attn_module)
-
-        if self.enable_hamming_sparse is True:
-            from vllm_ascend.worker.kvcomp_utils import init_and_bind_hashk_cache
-            init_and_bind_hashk_cache(
-                kv_caches=kv_caches,
-                num_attn_module=num_attn_module,
-                vllm_config=self.vllm_config,
-                device=self.device,
-                compilation_config=self.compilation_config,
-                kvcomp_meta_data=self.kvcomp_meta_data
-            )
-
         return kv_caches
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
@@ -3693,26 +3349,13 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
-                            if not isinstance(current_kv_cache_spec, MLAAttentionSpec):
-                                attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
-                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                                raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
-                                raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
-                            else:
-                                k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                                nope_page_size = int(np.prod(kv_cache_shape[:-1])) * k_dim * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                rope_page_size = int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                conv_block_padding_size = raw_k_tensor.numel() - nope_page_size - rope_page_size
-                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                                raw_k_tensor = raw_kv_tensor[:nope_page_size]
-                                raw_v_tensor = raw_kv_tensor[nope_page_size:]
+                            attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
+                                current_kv_cache_spec.dtype
+                            )
+                            conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
+                            raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
+                            raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
+                            raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
                     else:
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks,
@@ -4078,7 +3721,6 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
                     )
-                    attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
