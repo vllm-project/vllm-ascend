@@ -33,7 +33,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
       - "--speculative_config"
-      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagel-model-0318","num_speculative_tokens":3}'
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
       - "--enable-expert-parallel"
       - "--max-num-seqs"
       - "32"
