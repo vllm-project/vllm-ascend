@@ -51,6 +51,10 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
     - PyTorch == 2.9.0, torch-npu == 2.9.0
     - vLLM (与vllm-ascend版本一致)
 
+## 访问昇腾NPU
+如果您需要访问昇腾NPU算力资源进行开发或测试，请进入华为HiDevLab平台的[HiDevLab-在线开发](https://hidevlab.huawei.com/online-develop-intro) 页面申请并使用算力。
+
+
 ## 开始使用
 
 推荐您使用以下版本快速开始使用：
