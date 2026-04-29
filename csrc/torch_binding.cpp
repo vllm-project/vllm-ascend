@@ -1082,6 +1082,20 @@ at::Tensor chunk_fwd_o(
     return o;
 }
 
+at::Tensor npu_gumbel_sample(
+    const at::Tensor& logits,
+    const at::Tensor& temperature,
+    const at::Tensor& seeds,
+    const at::Tensor& pos,
+    bool apply_temperature)
+{
+    int64_t num_reqs = logits.size(0);
+    auto device = logits.device();
+    at::Tensor sampled = at::empty({num_reqs}, at::dtype(at::kLong).device(device));
+    EXEC_NPU_CMD(aclnnGumbelSample, logits, temperature, seeds, pos, apply_temperature, sampled);
+    return sampled;
+}
+
 } // namespace vllm_ascend
 
 #ifdef ASCEND_PLATFORM_310P
@@ -1384,5 +1398,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
+
+    ops.def(
+        "npu_gumbel_sample(Tensor logits, Tensor temperature, Tensor seeds, Tensor pos, "
+        "bool apply_temperature=True) -> Tensor"
+    );
+    ops.impl("npu_gumbel_sample", torch::kPrivateUse1, &vllm_ascend::npu_gumbel_sample);
 }
 #endif

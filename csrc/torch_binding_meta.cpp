@@ -746,6 +746,17 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
+at::Tensor npu_gumbel_sample_meta(
+    const at::Tensor& logits,
+    const at::Tensor& temperature,
+    const at::Tensor& seeds,
+    const at::Tensor& pos,
+    bool apply_temperature)
+{
+    int64_t num_reqs = logits.size(0);
+    return at::empty({num_reqs}, logits.options().dtype(at::kLong));
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -821,6 +832,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // GumbelSample
+    ops.impl("npu_gumbel_sample", &vllm_ascend::meta::npu_gumbel_sample_meta);
 }
 }
 #endif
