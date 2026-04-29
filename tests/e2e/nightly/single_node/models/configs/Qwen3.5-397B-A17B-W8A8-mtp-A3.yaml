@@ -14,7 +14,6 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd:
       - "--tensor-parallel-size"
       - "16"
