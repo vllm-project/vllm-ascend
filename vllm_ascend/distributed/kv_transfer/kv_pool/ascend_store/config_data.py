@@ -352,7 +352,6 @@ class ReqMeta:
     token_ids: list[int] | None = None
     original_block_size: int | None = None
 
-    chunk_gvas: list[int] = field(default_factory=list)
     last_block_gva: int | None = None
 
     starts: list[int] | None = None
@@ -425,7 +424,6 @@ class ReqMeta:
             # Do not load if not in `can_load` state
             load_spec = None
         logger.debug(f"request:{tracker.req_id}, meta save spec:{not skip_save}, meta load spec:{load_spec}")
-        chunk_gvas = tracker.chunk_gvas.copy()
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
@@ -436,11 +434,9 @@ class ReqMeta:
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
             original_block_size=original_block_size,
-            # TODO is this necessary?
-            chunk_gvas=chunk_gvas,
             last_block_gva=tracker.last_block_gva,
             block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
-            chunk_gvas_np=np.asarray(chunk_gvas, dtype=np.int64),
+            chunk_gvas_np=np.asarray(tracker.chunk_gvas, dtype=np.int64),
         )
 
 
@@ -460,24 +456,13 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 
 
 @dataclass
-class LasyerMultiBlockReqMeta:
-    req_id: str
-    block_ids: list[int]
-    layer_id: int
-    is_last_chunk: bool | None = True
-    current_event: torch.npu.Event | None = None
-    chunk_gvas: list[int] = field(default_factory=list)
-    last_block_gva: int | None = None
-    addr_list: list[int] | None = None
-    size_list: list[int] | None = None
-    gvas_list: list[int] | None = None
-
-
-@dataclass
 class LayerBatchReqMeta:
     req_ids: list[str]
     layer_id: int
     is_last_chunks: list[bool | None] = field(default_factory=list)
-    addr_list: list[int] | None = None
-    size_list: list[int] | None = None
-    gvas_list: list[int] | None = None
+    addr_array: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
+    size_array: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
+    gvas_array: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))

@@ -175,9 +175,6 @@ class KVPoolWorker:
         self.layer_load_finished_events = None
         self.layer_save_finished_events = None
         self.layer_transfer_finished_events = None
-        # req_id, layer_id, block info
-        self._request_addr_tracker: dict[str, dict[int, dict]] = {}
-
         NUM_SHARED_BUFFERS = 2
         self.NUM_SHARED_BUFFERS = NUM_SHARED_BUFFERS
         INDEPENDENT_LAYER_INDICES = {0, self.num_layers - 1}
@@ -204,6 +201,10 @@ class KVPoolWorker:
         self._block_len_np: np.ndarray | None = None
         self._kv_caches_base_addr_np: np.ndarray | None = None
         self._full_block_inner_offsets_np: np.ndarray | None = None
+        self._block_ids_scratch_np: np.ndarray | None = None
+        self._chunk_gvas_scratch_np: np.ndarray | None = None
+        self._last_block_ids_scratch_np: np.ndarray | None = None
+        self._last_gvas_scratch_np: np.ndarray | None = None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
@@ -211,6 +212,11 @@ class KVPoolWorker:
 
         self.num_blocks = first_kv_cache.shape[0]
         logger.info("num_blocks: %s", self.num_blocks)
+        self._block_ids_scratch_np = np.empty(self.num_blocks, dtype=np.int64)
+        self._chunk_gvas_scratch_np = np.empty(self.num_blocks, dtype=np.int64)
+        self._last_block_ids_scratch_np = np.empty(
+            self.num_blocks, dtype=np.int64)
+        self._last_gvas_scratch_np = np.empty(self.num_blocks, dtype=np.int64)
         block_rank = 3
         self.block_len = []
         for i in range(len(first_kv_cache_tuple)):
@@ -376,151 +382,51 @@ class KVPoolWorker:
                 layer_load_task = self.layer_load_tasks[layer_id]
                 self.kv_recv_thread.add_request((None, layer_load_task, layer_id))
 
-    def _get_or_init_layer_tracker(
+    def _ensure_scratch_array(self, attr_name: str, capacity: int) -> np.ndarray:
+        array = getattr(self, attr_name, None)
+        if array is None or array.shape[0] < capacity:
+            array = np.empty(capacity, dtype=np.int64)
+            setattr(self, attr_name, array)
+        return array[:capacity]
+
+    def _get_transfer_scratch_arrays(
         self,
-        req_id: str,
-        layer_id: int,
-        tracker_key: str | None = None,
-        initial_processed_count: int = 0,
-    ) -> dict:
-        key = tracker_key if tracker_key else req_id
-        if key not in self._request_addr_tracker:
-            self._request_addr_tracker[key] = {}
-        if layer_id not in self._request_addr_tracker[key]:
-            self._request_addr_tracker[key][layer_id] = {
-                'processed_count': initial_processed_count,
-            }
-        return self._request_addr_tracker[key][layer_id]
-
-    def _process_chunks_incremental(
-        self,
-        tracker: dict,
-        block_ids: list[int],
-        layer_id: int,
-        chunk_gvas: list[int],
-        num_blocks: int,
-        block_ids_np: np.ndarray | None = None,
-        chunk_gvas_np: np.ndarray | None = None,
-    ) -> tuple[list[int], list[int], list[int]]:
-        return self._process_chunks_incremental_batch([(
-            tracker,
-            block_ids,
-            chunk_gvas,
-            num_blocks,
-            block_ids_np,
-            chunk_gvas_np,
-        )], layer_id)
-
-    def _process_chunks_incremental_batch(
-        self,
-        items: list[tuple[
-            dict,
-            list[int],
-            list[int],
-            int,
-            np.ndarray | None,
-            np.ndarray | None,
-        ]],
-        layer_id: int,
-    ) -> tuple[list[int], list[int], list[int]]:
-        if not items:
-            return [], [], []
-
-        if (self._block_len_np is None or
-                self._kv_caches_base_addr_np is None or
-                self._full_block_inner_offsets_np is None):
-            raise RuntimeError("KV cache numpy metadata is not initialized")
-
-        active_items = []
-        block_parts = []
-        chunk_gva_parts = []
-        block_counts = []
-        for tracker, block_ids, chunk_gvas, num_blocks, block_ids_np, chunk_gvas_np in items:
-            processed_count = tracker['processed_count']
-            if processed_count >= num_blocks:
-                continue
-
-            if block_ids_np is None:
-                block_ids_arr = np.asarray(
-                    block_ids[processed_count:num_blocks], dtype=np.int64)
-            else:
-                block_ids_arr = block_ids_np[processed_count:num_blocks]
-            if chunk_gvas_np is None:
-                chunk_gvas_arr = np.asarray(
-                    chunk_gvas[processed_count:num_blocks], dtype=np.int64)
-            else:
-                chunk_gvas_arr = chunk_gvas_np[processed_count:num_blocks]
-
-            active_items.append((tracker, num_blocks))
-            block_parts.append(block_ids_arr)
-            chunk_gva_parts.append(chunk_gvas_arr)
-            block_counts.append(num_blocks - processed_count)
-
-        if not active_items:
-            return [], [], []
-
-        block_len_np = self._block_len_np
-        length = block_len_np.shape[0]
-        base_offset = layer_id * length
-        layer_base_addrs = self._kv_caches_base_addr_np[
-            base_offset:base_offset + length]
-        rank_layer_offset = (
-            layer_id * self.num_ranks_per_layer + self.my_key_index
-        ) * self.page_size_bytes
-        block_ids_arr = np.concatenate(block_parts)
-        chunk_gvas_arr = np.concatenate(chunk_gva_parts)
-
-        addr_arr = (
-            layer_base_addrs[None, :]
-            + block_ids_arr[:, None] * block_len_np[None, :]
-        )
-        size_arr = np.broadcast_to(block_len_np, addr_arr.shape)
-        gvas_arr = (
-            chunk_gvas_arr[:, None]
-            + rank_layer_offset
-            + self._full_block_inner_offsets_np[None, :]
-        )
-
-        for tracker, num_blocks in active_items:
-            tracker['processed_count'] = num_blocks
-
+        total_blocks: int,
+        total_last_blocks: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         return (
-            addr_arr.ravel().tolist(),
-            size_arr.ravel().tolist(),
-            gvas_arr.ravel().tolist(),
+            self._ensure_scratch_array("_block_ids_scratch_np", total_blocks),
+            self._ensure_scratch_array("_chunk_gvas_scratch_np", total_blocks),
+            self._ensure_scratch_array(
+                "_last_block_ids_scratch_np", total_last_blocks),
+            self._ensure_scratch_array("_last_gvas_scratch_np",
+                                       total_last_blocks),
         )
 
-    def _process_last_blocks_batch(
+    def _concat_transfer_arrays(
         self,
-        items: list[tuple[
-            dict,
-            list[int],
-            int,
-            int,
-            np.ndarray | None,
-        ]],
-        layer_id: int,
-    ) -> tuple[list[int], list[int], list[int]]:
-        if not items:
-            return [], [], []
+        first: np.ndarray,
+        second: np.ndarray,
+    ) -> np.ndarray:
+        if first.size == 0:
+            return second
+        if second.size == 0:
+            return first
+        return np.concatenate((first, second))
 
+    def _build_transfer_arrays(
+        self,
+        block_ids_arr: np.ndarray,
+        base_gvas_arr: np.ndarray,
+        layer_id: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if (self._block_len_np is None or
                 self._kv_caches_base_addr_np is None or
                 self._full_block_inner_offsets_np is None):
             raise RuntimeError("KV cache numpy metadata is not initialized")
-
-        block_id_parts = []
-        last_gvas = []
-        for _, block_ids, last_block_gva, num_blocks, block_ids_np in items:
-            if block_ids_np is None:
-                block_id = block_ids[num_blocks]
-            else:
-                block_id = block_ids_np[num_blocks]
-            block_id_parts.append(block_id)
-            last_gvas.append(last_block_gva)
-
         block_len_np = self._block_len_np
         length = block_len_np.shape[0]
+        # TODO 这里后面可以改成异步，可以提前为结果分配buffer
         base_offset = layer_id * length
         layer_base_addrs = self._kv_caches_base_addr_np[
             base_offset:base_offset + length]
@@ -528,240 +434,174 @@ class KVPoolWorker:
             layer_id * self.num_ranks_per_layer + self.my_key_index
         ) * self.page_size_bytes
 
-        block_ids_arr = np.asarray(block_id_parts, dtype=np.int64)
-        last_gvas_arr = np.asarray(last_gvas, dtype=np.int64)
         addr_arr = (
             layer_base_addrs[None, :]
             + block_ids_arr[:, None] * block_len_np[None, :]
         )
         size_arr = np.broadcast_to(block_len_np, addr_arr.shape)
         gvas_arr = (
-            last_gvas_arr[:, None]
+            base_gvas_arr[:, None]
             + rank_layer_offset
             + self._full_block_inner_offsets_np[None, :]
         )
 
         return (
-            addr_arr.ravel().tolist(),
-            size_arr.ravel().tolist(),
-            gvas_arr.ravel().tolist(),
+            addr_arr.ravel(),
+            size_arr.ravel(),
+            gvas_arr.ravel(),
         )
+
+    def _require_request_arrays(
+        self,
+        request: ReqMeta,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if request.block_ids_np is None or request.chunk_gvas_np is None:
+            raise RuntimeError("ReqMeta numpy block metadata is not initialized")
+        return request.block_ids_np, request.chunk_gvas_np
 
     def _build_layer_batch_meta(
         self,
-        requests: list[ReqMeta],
+        req_ids: list[str],
+        is_last_chunks: list[bool | None],
         layer_id: int,
-        addr_list: list[int],
-        size_list: list[int],
-        gvas_list: list[int],
+        addr_array: np.ndarray,
+        size_array: np.ndarray,
+        gvas_array: np.ndarray,
     ) -> LayerBatchReqMeta | None:
-        if not requests:
+        if not req_ids:
             return None
 
         return LayerBatchReqMeta(
-            req_ids=[request.req_id for request in requests],
+            req_ids=req_ids,
             layer_id=layer_id,
-            is_last_chunks=[request.is_last_chunk for request in requests],
-            addr_list=addr_list,
-            size_list=size_list,
-            gvas_list=gvas_list,
+            is_last_chunks=is_last_chunks,
+            addr_array=addr_array,
+            size_array=size_array,
+            gvas_array=gvas_array,
         )
-
-    def _process_save_for_layer(
-        self,
-        request: ReqMeta,
-        layer_id: int,
-    ) -> None:
-        if request.can_save is None or not request.can_save:
-            return
-
-        num_cached_blocks = 0
-        if request.load_spec is not None:
-            num_cached_blocks = request.load_spec.kvpool_cached_tokens // self.block_size
-
-        num_blocks = request.token_len_chunk // self.block_size
-        num_cached_blocks = min(num_cached_blocks, num_blocks)
-
-        tracker = self._get_or_init_layer_tracker(
-            request.req_id, layer_id, initial_processed_count=num_cached_blocks)
-
-        has_last_block = request.token_len_chunk % self.block_size != 0
-        addr_list, size_list, gvas_list = self._process_chunks_incremental(
-            tracker, request.block_ids, layer_id,
-            request.chunk_gvas, num_blocks,
-            request.block_ids_np, request.chunk_gvas_np)
-
-        last_addr_list = []
-        last_size_list = []
-        last_gvas_list = []
-        if has_last_block:
-            last_addr_list, last_size_list, last_gvas_list = (
-                self._process_last_blocks_batch([(
-                    tracker,
-                    request.block_ids,
-                    request.last_block_gva,
-                    num_blocks,
-                    request.block_ids_np,
-                )], layer_id))
-
-        req_meta = LayerBatchReqMeta(
-            req_ids=[request.req_id],
-            layer_id=layer_id,
-            is_last_chunks=[request.is_last_chunk],
-            addr_list=addr_list + last_addr_list,
-            size_list=size_list + last_size_list,
-            gvas_list=gvas_list + last_gvas_list,
-        )
-        self.layer_save_tasks[layer_id].append(req_meta)
 
     def _process_save_for_layer_batch(
         self,
         requests: list[ReqMeta],
         layer_id: int,
     ) -> None:
-        batch_items = []
-        reqs_to_save = []
-        last_block_items = []
-        for request in requests:
-            if request.can_save is None or not request.can_save:
-                continue
+        requests_to_save = [
+            request for request in requests
+            if request.can_save is not None and request.can_save
+        ]
+        if not requests_to_save:
+            return
 
-            num_cached_blocks = 0
-            if request.load_spec is not None:
-                num_cached_blocks = (
-                    request.load_spec.kvpool_cached_tokens // self.block_size)
-
+        total_blocks = 0
+        total_last_blocks = 0
+        for request in requests_to_save:
             num_blocks = request.token_len_chunk // self.block_size
-            num_cached_blocks = min(num_cached_blocks, num_blocks)
-            tracker = self._get_or_init_layer_tracker(
-                request.req_id,
-                layer_id,
-                initial_processed_count=num_cached_blocks,
-            )
-            batch_items.append((
-                tracker,
-                request.block_ids,
-                request.chunk_gvas,
-                num_blocks,
-                request.block_ids_np,
-                request.chunk_gvas_np,
-            ))
-            reqs_to_save.append(request)
+            total_blocks += num_blocks
             if request.token_len_chunk % self.block_size != 0:
-                last_block_items.append((
-                    tracker,
-                    request.block_ids,
-                    request.last_block_gva,
-                    num_blocks,
-                    request.block_ids_np,
-                ))
+                total_last_blocks += 1
 
-        addr_list, size_list, gvas_list = self._process_chunks_incremental_batch(
-            batch_items, layer_id)
-        last_addr_list, last_size_list, last_gvas_list = (
-            self._process_last_blocks_batch(last_block_items, layer_id))
+        (
+            block_ids_arr,
+            chunk_gvas_arr,
+            last_block_ids_arr,
+            last_gvas_arr,
+        ) = self._get_transfer_scratch_arrays(total_blocks, total_last_blocks)
+        req_ids = [request.req_id for request in requests_to_save]
+        is_last_chunks = [
+            request.is_last_chunk for request in requests_to_save]
+        offset = 0
+        last_offset = 0
+        for request in requests_to_save:
+            num_blocks = request.token_len_chunk // self.block_size
+            block_ids_np, chunk_gvas_np = self._require_request_arrays(request)
+            if num_blocks > 0:
+                end = offset + num_blocks
+                block_ids_arr[offset:end] = block_ids_np[:num_blocks]
+                chunk_gvas_arr[offset:end] = chunk_gvas_np[:num_blocks]
+                offset = end
+
+            if request.token_len_chunk % self.block_size != 0:
+                last_block_ids_arr[last_offset] = block_ids_np[num_blocks]
+                last_gvas_arr[last_offset] = request.last_block_gva
+                last_offset += 1
+
+        addr_array, size_array, gvas_array = self._build_transfer_arrays(
+            block_ids_arr, chunk_gvas_arr, layer_id)
+        last_addr_array, last_size_array, last_gvas_array = (
+            self._build_transfer_arrays(last_block_ids_arr, last_gvas_arr, layer_id))
 
         req_meta = self._build_layer_batch_meta(
-            reqs_to_save,
+            req_ids,
+            is_last_chunks,
             layer_id,
-            addr_list + last_addr_list,
-            size_list + last_size_list,
-            gvas_list + last_gvas_list,
+            self._concat_transfer_arrays(addr_array, last_addr_array),
+            self._concat_transfer_arrays(size_array, last_size_array),
+            self._concat_transfer_arrays(gvas_array, last_gvas_array),
         )
         if req_meta is not None:
             self.layer_save_tasks[layer_id].append(req_meta)
-
-    def _process_load_for_layer(
-        self,
-        request: ReqMeta,
-        layer_id: int,
-    ) -> None:
-        load_spec = request.load_spec
-        if load_spec is None or not load_spec.can_load:
-            return
-
-        token_len = load_spec.kvpool_cached_tokens
-        num_saved_blocks = token_len // self.block_size
-        has_load_last_block = token_len % self.block_size != 0
-
-        load_tracker_key = f"{request.req_id}_load"
-        tracker = self._get_or_init_layer_tracker(request.req_id, layer_id, load_tracker_key)
-
-        addr_list, size_list, gvas_list = self._process_chunks_incremental(
-            tracker, request.block_ids, layer_id,
-            request.chunk_gvas, num_saved_blocks,
-            request.block_ids_np, request.chunk_gvas_np)
-
-        last_addr_list = []
-        last_size_list = []
-        last_gvas_list = []
-        if has_load_last_block:
-            last_addr_list, last_size_list, last_gvas_list = (
-                self._process_last_blocks_batch([(
-                    tracker,
-                    request.block_ids,
-                    request.last_block_gva,
-                    num_saved_blocks,
-                    request.block_ids_np,
-                )], layer_id))
-
-        req_meta = LayerBatchReqMeta(
-            req_ids=[request.req_id],
-            layer_id=layer_id,
-            is_last_chunks=[request.is_last_chunk],
-            addr_list=addr_list + last_addr_list,
-            size_list=size_list + last_size_list,
-            gvas_list=gvas_list + last_gvas_list,
-        )
-        self.layer_load_tasks[layer_id].append(req_meta)
 
     def _process_load_for_layer_batch(
         self,
         requests: list[ReqMeta],
         layer_id: int,
     ) -> None:
-        batch_items = []
-        reqs_to_load = []
-        last_block_items = []
-        for request in requests:
-            load_spec = request.load_spec
-            if load_spec is None or not load_spec.can_load:
-                continue
+        requests_to_load = [
+            request for request in requests
+            if request.load_spec is not None and request.load_spec.can_load
+        ]
+        if not requests_to_load:
+            return
 
+        total_blocks = 0
+        total_last_blocks = 0
+        for request in requests_to_load:
+            load_spec = request.load_spec
             token_len = load_spec.kvpool_cached_tokens
             num_saved_blocks = token_len // self.block_size
-            load_tracker_key = f"{request.req_id}_load"
-            tracker = self._get_or_init_layer_tracker(
-                request.req_id, layer_id, load_tracker_key)
-            batch_items.append((
-                tracker,
-                request.block_ids,
-                request.chunk_gvas,
-                num_saved_blocks,
-                request.block_ids_np,
-                request.chunk_gvas_np,
-            ))
-            reqs_to_load.append(request)
+            total_blocks += num_saved_blocks
             if token_len % self.block_size != 0:
-                last_block_items.append((
-                    tracker,
-                    request.block_ids,
-                    request.last_block_gva,
-                    num_saved_blocks,
-                    request.block_ids_np,
-                ))
+                total_last_blocks += 1
 
-        addr_list, size_list, gvas_list = self._process_chunks_incremental_batch(
-            batch_items, layer_id)
-        last_addr_list, last_size_list, last_gvas_list = (
-            self._process_last_blocks_batch(last_block_items, layer_id))
+        (
+            block_ids_arr,
+            chunk_gvas_arr,
+            last_block_ids_arr,
+            last_gvas_arr,
+        ) = self._get_transfer_scratch_arrays(total_blocks, total_last_blocks)
+        req_ids = [request.req_id for request in requests_to_load]
+        is_last_chunks = [
+            request.is_last_chunk for request in requests_to_load]
+        offset = 0
+        last_offset = 0
+        for request in requests_to_load:
+            load_spec = request.load_spec
+            token_len = load_spec.kvpool_cached_tokens
+            num_saved_blocks = token_len // self.block_size
+            block_ids_np, chunk_gvas_np = self._require_request_arrays(request)
+            if num_saved_blocks > 0:
+                end = offset + num_saved_blocks
+                block_ids_arr[offset:end] = block_ids_np[:num_saved_blocks]
+                chunk_gvas_arr[offset:end] = chunk_gvas_np[:num_saved_blocks]
+                offset = end
+
+            if token_len % self.block_size != 0:
+                last_block_ids_arr[last_offset] = block_ids_np[num_saved_blocks]
+                last_gvas_arr[last_offset] = request.last_block_gva
+                last_offset += 1
+
+        addr_array, size_array, gvas_array = self._build_transfer_arrays(
+            block_ids_arr, chunk_gvas_arr, layer_id)
+        last_addr_array, last_size_array, last_gvas_array = (
+            self._build_transfer_arrays(last_block_ids_arr, last_gvas_arr, layer_id))
 
         req_meta = self._build_layer_batch_meta(
-            reqs_to_load,
+            req_ids,
+            is_last_chunks,
             layer_id,
-            addr_list + last_addr_list,
-            size_list + last_size_list,
-            gvas_list + last_gvas_list,
+            self._concat_transfer_arrays(addr_array, last_addr_array),
+            self._concat_transfer_arrays(size_array, last_size_array),
+            self._concat_transfer_arrays(gvas_array, last_gvas_array),
         )
         if req_meta is not None:
             self.layer_load_tasks[layer_id].append(req_meta)
@@ -848,9 +688,6 @@ class KVPoolWorker:
             else set()
         )
 
-        for req_id in done_sending | done_recving:
-            self._cleanup_request_tracker(req_id)
-
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(  # type: ignore[union-attr]
                 req_id
@@ -863,15 +700,6 @@ class KVPoolWorker:
             self.tp_rank,
         )
         return done_sending, done_recving
-
-    def _cleanup_request_tracker(self, req_id: str):
-        if req_id in self._request_addr_tracker:
-            del self._request_addr_tracker[req_id]
-        load_tracker_key = f"{req_id}_load"
-        if load_tracker_key in self._request_addr_tracker:
-            del self._request_addr_tracker[load_tracker_key]
-
-
 
     def lookup(
         self,
