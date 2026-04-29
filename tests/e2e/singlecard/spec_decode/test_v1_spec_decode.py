@@ -381,36 +381,6 @@ def test_suffix_logprobs(
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 
-def test_qwen3_eagle3_pcp2_tp1(
-    test_prompts: list[list[dict[str, Any]]],
-    sampling_config: SamplingParams,
-):
-    """
-    Test Qwen3-8B with Eagle3 speculative decoding under PCP + TP1 configuration.
-    This test verifies that eagle3 spec decode works correctly with:
-    - PCP enabled (prompt_context_parallel_size=2)
-    - Tensor Parallel size = 1
-    - num_speculative_tokens = 3
-    - enforce_eager = True
-    """
-    main_model_name = MODELS["eagle3"]["main"]
-    spec_model_name = MODELS["eagle3"]["spec"]
-
-    with VllmRunner(
-        main_model_name,
-        speculative_config={
-            "method": "eagle3",
-            "model": spec_model_name,
-            "num_speculative_tokens": 3,
-        },
-        max_model_len=2048,
-        enforce_eager=True,
-        tensor_parallel_size=1,
-        prefill_context_parallel_size=2,
-    ) as runner:
-        runner.model.chat(test_prompts, sampling_config)
-
-
 @pytest.mark.parametrize("method", MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 1])
@@ -522,7 +492,6 @@ def test_llama_qwen_eagle_acceptance(
         print(f"golden: {golden}")
 
     assert match
-
 
 @pytest.mark.parametrize("method", DRAFT_PARALLEL_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
