@@ -46,11 +46,8 @@ test_cases:
       - "/"
       - "--mm-processor-cache-gb"
       - "0"
-<<<<<<< HEAD
       - "--safetensors-load-strategy"
       - "eager"
-=======
->>>>>>> cf0af579... add qwen3.5-397B-w4a8-A2 W8A8-A3
     benchmarks:
       perf:
         case_type: performance
@@ -58,11 +55,7 @@ test_cases:
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 8
-<<<<<<< HEAD
-        max_out_len: 1024
-=======
         max_out_len: 1500
->>>>>>> cf0af579... add qwen3.5-397B-w4a8-A2 W8A8-A3
         batch_size: 2
         request_rate: 0
         baseline: 1
