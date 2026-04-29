@@ -51,6 +51,7 @@ release = ""
 extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
+    "sphinx.ext.mathjax",
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -61,7 +62,7 @@ extensions = [
     "sphinx_substitution_extensions",
 ]
 
-myst_enable_extensions = ["colon_fence", "substitution"]
+myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
 myst_substitutions = {
@@ -80,7 +81,7 @@ myst_substitutions = {
     # CANN image tag
     "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
     # vLLM commit hash for main branch
-    "main_vllm_commit": "6f786f2c506cb07f4566771fdc62e640e2c4a176",
+    "main_vllm_commit": "d886c26d4d4fef7d079696beb4ece1cfb4b008a8",
     # vLLM tag for main branch
     "main_vllm_tag": "v0.19.1",
     # Python version for main branch
