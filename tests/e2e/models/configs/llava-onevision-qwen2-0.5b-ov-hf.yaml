@@ -11,6 +11,7 @@ serve:
 
 tasks:
 - name: "ceval-valid"
+  rtol: 0.10
   metrics:
   - name: "acc,none"
     value: 0.42
