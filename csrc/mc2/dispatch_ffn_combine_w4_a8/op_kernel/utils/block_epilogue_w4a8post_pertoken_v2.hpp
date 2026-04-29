@@ -107,7 +107,7 @@ public:
         ubOffset += max_len * sizeof(float);
 
         tokenPerExpert.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(params.ptrTokenPerExpert));
-        tokenPerExpertLayout = Layout3D(AlignUp(params.EP * params.expertPerRank, 128), params.expertPerRank);
+        tokenPerExpertLayout = Layout3D(AlignUp(params.EP * params.expertPerRank + 1, 128), params.expertPerRank);
         is_ping = true;
         rankIdx = params.rank;
     }
@@ -161,7 +161,6 @@ public:
         weightAux.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(GetTensorAddr<float>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(gmWeightAux))));
         int64_t gmOffsetwA = blockCoord.n() + (listLen == 1 ? groupIdx * params.n2 : 0);
         gmWeighAux = weightAux[gmOffsetwA];
-
 
 #ifdef W4A8_DEBUG
         int32_t gmCOffset = (preSrcExpertSum * params.n2 + blockCoord.m() * params.n2) / 2 + blockCoord.n();

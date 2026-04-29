@@ -37,7 +37,7 @@ enum NnopbaseHcclServerType {
 extern aclnnStatus aclnnInnerDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                          const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                          const aclTensorList* bias1, const aclTensorList * bias2,
-                                                         const aclTensor* probs,
+                                                         const aclTensor* probs,  const aclTensor* xActiveMask,
                                                          const char* group, int64_t maxOutputSize,
                                                          bool transB, bool weightNz,
                                                          const aclTensor* out, const aclTensor* expertTokenNums,
@@ -51,7 +51,8 @@ extern "C" void __attribute__((weak)) NnopbaseSetHcclServerType(void *executor, 
 aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, const aclTensorList* weight1, const aclTensorList* weight2,
                                                     const aclTensor* expertId, const aclTensorList* scale1, const aclTensorList* scale2,
                                                     const aclTensorList* bias1, const aclTensorList * bias2,
-                                                    const aclTensor* probs, const char* group, int64_t maxOutputSize,
+                                                    const aclTensor* probs, const aclTensor* xActiveMask,
+                                                    const char* group, int64_t maxOutputSize,
                                                     const aclTensor* out, const aclTensor* expertTokenNums,
                                                     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
@@ -60,7 +61,8 @@ aclnnStatus aclnnDispatchFFNCombineW4A8GetWorkspaceSize(const aclTensor* x, cons
 
     aclnnStatus ret = aclnnInnerDispatchFFNCombineW4A8GetWorkspaceSize(x, weight1, weight2, expertId, 
                                                                     scale1, scale2, bias1, bias2, 
-                                                                    probs, group, maxOutputSize, 
+                                                                    probs, xActiveMask,
+                                                                    group, maxOutputSize, 
                                                                     transB, weightNz,
                                                                     out, expertTokenNums, workspaceSize, executor);
     return ret;

@@ -271,9 +271,9 @@ class FusedMC2CommImpl(MoECommMethod):
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )
 
-        assert not (fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None), (
-            "w1_scale_bias and w2_scale_bias cannot be None for FusedMC2CommImpl."
-        )
+        assert not (
+            fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
+        ), "w1_scale_bias and w2_scale_bias cannot be None for FusedMC2CommImpl."
 
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
