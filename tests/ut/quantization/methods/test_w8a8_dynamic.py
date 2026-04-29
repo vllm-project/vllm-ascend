@@ -70,8 +70,7 @@ class TestAscendW8A8DynamicLinearMethod(TestBase):
     def test_apply_with_npu(self):
         input_size, output_size = 128, 256
         params_dtype = torch.bfloat16
-        layer = torch.nn.Module()
-        layer.weight = create_linear_layer(self.method, input_size, output_size, params_dtype)
+        layer = create_linear_layer(self.method, input_size, output_size, params_dtype)
         self.method.process_weights_after_loading(layer)
 
         x = torch.randn(32, input_size, dtype=params_dtype).npu()
