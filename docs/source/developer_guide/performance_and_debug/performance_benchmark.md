@@ -4,6 +4,12 @@ This document details the benchmark methodology for vllm-ascend, aimed at evalua
 
 **Benchmark Coverage**: We measure offline E2E latency and throughput, and fixed-QPS online serving benchmarks. For more details, see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
 
+**Legend Description**:
+
+- ✅ = Supported
+- 🟡 = Partial / Work in progress
+- 🚧 = Under development
+  
 ## 1. Run docker container
 
 ```{code-block} bash
@@ -44,7 +50,7 @@ This section introduces how to perform performance testing using the benchmark s
 
 ### 3.1 Dataset
 
-VLLM supports a variety of [datasets](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets.py).
+VLLM supports a variety of [datasets](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets/datasets.py).
 
 <style>
 th {
@@ -91,7 +97,8 @@ For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 First start serving your model:
 
 ```bash
-VLLM_USE_MODELSCOPE=True vllm serve Qwen/Qwen3-8B
+export VLLM_USE_MODELSCOPE=True
+vllm serve Qwen/Qwen3-8B
 ```
 
 Then run the benchmarking script:
@@ -141,7 +148,7 @@ P99 ITL (ms):                            28.85
 #### 3.2.2 Offline Throughput Benchmark
 
 ```bash
-VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=True
 vllm bench throughput \
   --model Qwen/Qwen3-8B \
   --dataset-name random \
@@ -152,7 +159,7 @@ vllm bench throughput \
 If successful, you will see the following output
 
 ```shell
-Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 t
+Processed prompts: 100%|█| 10/10 [00:03<00:00,  2.74it/s, est. speed input: 351.02 toks/s, output: 351.02 toks/s]
 Throughput: 2.73 requests/s, 699.93 total tokens/s, 349.97 output tokens/s
 Total num prompt tokens:  1280
 Total num output tokens:  1280
@@ -216,7 +223,7 @@ vllm serve Qwen/Qwen3-Embedding-8B --trust-remote-code
 ```shell
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve \
   --model Qwen/Qwen3-Embedding-8B \
   --backend openai-embeddings \

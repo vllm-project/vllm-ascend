@@ -10,22 +10,52 @@ import yaml
 from ci_utils import TestFile, TestRecord, run_tests
 
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
+_CONFIG_UPSTREAM = Path(__file__).parent / "upstream_config.yaml"
+
+# Each entry: (config_path, is_upstream)
+# When is_upstream is True, sanity_check is skipped for tests from that config.
+_DEFAULT_CONFIGS: list[tuple[Path, bool]] = [
+    (_CONFIG_PATH, False),
+    (_CONFIG_UPSTREAM, True),
+]
 
 
-def load_suites(config_path: Path = _CONFIG_PATH) -> dict[str, list[TestFile]]:
-    """Load all test suites from config.yaml."""
-    data = yaml.safe_load(config_path.read_text())
-    return {
-        suite_name: [
-            TestFile(
-                name=entry["name"],
-                estimated_time=entry.get("estimated_time", 60),
-                is_skipped=entry.get("is_skipped", False),
-            )
-            for entry in entries
-        ]
-        for suite_name, entries in data.items()
-    }
+def load_suites(
+    config_paths: list[tuple[Path, bool]] | None = None,
+) -> tuple[dict[str, list[TestFile]], set[str]]:
+    """Load all test suites from config yaml files.
+
+    Each entry in config_paths is a (path, is_upstream) tuple.
+    Returns (all_suites, upstream_files) where upstream_files is the set of
+    test file names originating from upstream configs (sanity_check is skipped
+    for these).
+    """
+    if config_paths is None:
+        config_paths = _DEFAULT_CONFIGS
+
+    all_suites: dict[str, list[TestFile]] = {}
+    upstream_files: set[str] = set()
+    for config_path, is_upstream in config_paths:
+        if not config_path.exists():
+            continue
+        print(f"Loading suites from {config_path}" + (" (upstream)" if is_upstream else ""))
+        with open(config_path) as f:
+            data = yaml.safe_load(f) or {}
+        for suite_name, tests in data.items():
+            files = []
+            for entry in tests or []:
+                name = entry["name"]
+                files.append(
+                    TestFile(
+                        name=name,
+                        estimated_time=entry.get("estimated_time", 60),
+                        is_skipped=entry.get("is_skipped", False),
+                    )
+                )
+                if is_upstream:
+                    upstream_files.add(name.split("::")[0])
+            all_suites[suite_name] = files
+    return all_suites, upstream_files
 
 
 def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
@@ -48,8 +78,8 @@ def partition(files: list[TestFile], rank: int, size: int) -> list[TestFile]:
         lightest = sums.index(min(sums))
         buckets[lightest].append(idx)
         sums[lightest] += test.estimated_time
-
-    return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time)
+    # Sort each bucket ascending by estimated_time for better feedback and developer experience
+    return sorted([active[i] for i in buckets[rank]], key=lambda f: f.estimated_time, reverse=True)
 
 
 def _find_project_root() -> Path:
@@ -79,25 +109,34 @@ def _minimal_covered_dirs(file_paths: set[str], root: Path) -> set[Path]:
     return dirs
 
 
-def sanity_check(suites: dict[str, list[TestFile]]) -> None:
+def sanity_check(suites: dict[str, list[TestFile]], upstream_files: set[str]) -> None:
     """
     Verify that:
-    1. Every test file in any suite exists on disk.
+    1. Every local test file in any suite exists on disk.
     2. No test_*.py files exist on disk (in covered dirs) that are absent from all suites.
+
+    Files from upstream configs are skipped — they live in a separate checkout
+    and we only register a subset of them.
     Raises SystemExit with a descriptive message on failure.
     """
+    if upstream_files:
+        return
     suite_files = {f.name.split("::")[0] for tests in suites.values() for f in tests}
-    root = _find_project_root()
-    covered = _minimal_covered_dirs(suite_files, root)
 
+    # Only check files that belong to this repo (not from upstream configs).
+    local_files = suite_files - upstream_files
+    print("local_files>>>", local_files)
+    root = _find_project_root()
+    covered = _minimal_covered_dirs(local_files, root)
+    print("covered>>>", covered)
     disk_files = {str(p.relative_to(root)) for d in covered for p in (root / d).rglob("test_*.py")}
 
-    missing_from_suite = sorted(disk_files - suite_files)
+    missing_from_suite = sorted(disk_files - local_files)
     if missing_from_suite:
         entries = "\n".join(f'  TestFile("{f}"),' for f in missing_from_suite)
         raise SystemExit(f"Test files on disk are not in any suite (add them or mark is_skipped=True):\n{entries}")
 
-    missing_from_disk = sorted(suite_files - disk_files)
+    missing_from_disk = sorted(local_files - disk_files)
     if missing_from_disk:
         entries = "\n".join(f'  TestFile("{f}"),' for f in missing_from_disk)
         raise SystemExit(f"Test files listed in suite do not exist on disk:\n{entries}")
@@ -166,7 +205,7 @@ def _save_timing_json(
 
 
 def main() -> None:
-    suites = load_suites()
+    suites, upstream_files = load_suites()
 
     parser = argparse.ArgumentParser(description="Run a named e2e test suite")
     parser.add_argument(
@@ -209,7 +248,7 @@ timing data to improve estimates.",
     )
     args = parser.parse_args()
 
-    sanity_check(suites)
+    sanity_check(suites, upstream_files)
 
     all_files = suites[args.suite]
     skipped = [f for f in all_files if f.is_skipped]

@@ -20,7 +20,7 @@ On multi‑socket ARM systems, the OS scheduler may place vLLM threads on CPUs f
   | Device type | Default mode | Description |
   | ----------- | ------------ | ------------ |
   | A3 (No Affinity) | `global_slice` | Splits the allowed CPU list evenly based on the **total number of global logical NPUs**, ensuring each NPU is assigned a contiguous segment of CPU cores. This prevents CPU core overlap across multiple process groups. |
-  | A2 / 310P / Others | `topo_affinity` | Allocates CPUs based on NPU topology affinity (`npu‑smi info -t topo`). If multiple NPUs are assigned to a single NUMA node (which may cause bandwidth contention), the CPU allocation extends to adjacent NUMA nodes. |
+  | A2 / Atlas 300 inference products / Others | `topo_affinity` | Allocates CPUs based on NPU topology affinity (`npu‑smi info -t topo`). If multiple NPUs are assigned to a single NUMA node (which may cause bandwidth contention), the CPU allocation extends to adjacent NUMA nodes. |
 
     - **Default**: enabled (enable_cpu_binding = true).
     - **Fallback**: If NPU topo affinity is unavailable, global_slice is used.
@@ -36,7 +36,7 @@ On multi‑socket ARM systems, the OS scheduler may place vLLM threads on CPUs f
    - Read cpuset from /proc/self/status.
    - Read topo affinity from `npu‑smi info -t topo`.
 4. **Build CPU pools**:
-   - Use **global_slice** for A3 devices; **topo_affinity** for A2 and 310P.
+   - Use **global_slice** for A3 devices; **topo_affinity** for A2 and Atlas 300 inference products.
    - If topo affinity is missing, fall back to global_slice.
    - Ensure each NPU has at least 5 CPUs.
 5. **Allocate per‑role CPUs**:
@@ -156,7 +156,7 @@ With the current `global_slice` strategy, some CPU/NPU layouts cannot avoid cros
 |2|10-14|`IRQ`: 10-11, `Main`: 12, `ACL`: 13, `Release`: 14|
 |3|15-19|`IRQ`: 15-16, `Main`: 17, `ACL`: 18, `Release`: 19|
 
-### Example 5: A2/310P topo_affinity with NUMA extension
+### Example 5: A2/Atlas 300 inference products topo_affinity with NUMA extension
 
 **Inputs**:
 

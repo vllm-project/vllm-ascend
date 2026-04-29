@@ -67,11 +67,12 @@ sudo dnf install -y util-linux numactl procps-ng
 
 ### IRQ binding's additional considerations
 
-For best results, if you run inside a docker container, which `systemctl` is likely unavailable, stop `irqbalance` service on the host manually before starting vLLM. Also make sure the container has the necessary permissions to write to `/proc/irq/*/smp_affinity` for IRQ binding:
+For best results, if you run inside a Docker container where `systemctl` is likely unavailable, stop the `irqbalance` service on the host manually before starting vLLM. Also make sure the container has the necessary permissions to write to `/proc/irq/*/smp_affinity` for IRQ binding:
 
 - **Stop `irqbalance` service**:
 
-    For example, on Ubuntu system, you can run the following command to stop irqbalance:
+    For example, on Ubuntu and other systemd-based Linux distributions, you can stop irqbalance with:
+
     ```bash
     sudo systemctl stop irqbalance
     ```
@@ -81,6 +82,8 @@ For best results, if you run inside a docker container, which `systemctl` is lik
     ```bash
     sudo systemctl start irqbalance
     ```
+
+    Note: On systems that do not use systemd, use the corresponding service-management command provided by the distribution.
 
 - **Permissions**:
     - Read access to `/proc/self/status` and `/proc/interrupts`

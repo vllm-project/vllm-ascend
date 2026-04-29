@@ -19,9 +19,10 @@ import einops
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from vllm_ascend.device.device_op import DeviceOperator
 
 MIN_PAD_SIZE: int = 64  # min_size to pad weight
 MAX_PAD_SIZE: int = 128  # max_size to pad weight
@@ -156,18 +157,15 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             k = F.pad(k, (0, pad_len), mode="constant", value=0)
             v = F.pad(v, (0, pad_len), mode="constant", value=0)
 
-        seq_lens_cpu = list(seq_lens_cpu.cumsum(0))
-
-        context_layer = torch_npu.npu_fusion_attention(
+        context_layer = DeviceOperator.npu_flash_attention(
             query=q,
             key=k,
             value=v,
-            actual_seq_qlen=seq_lens_cpu,
-            actual_seq_kvlen=seq_lens_cpu,
+            seq_lens_cpu=seq_lens_cpu,
             head_num=self.num_heads,
-            scale=self.scale_value,
-            input_layout="TND",
-        )[0]
+            scale_value=self.scale_value,
+            num_kv_heads=self.num_kv_heads,
+        )
 
         if self.enable_pad:
             context_layer = context_layer[..., :origin_shape]

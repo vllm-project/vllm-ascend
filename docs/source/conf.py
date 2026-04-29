@@ -26,6 +26,9 @@
 import json
 import os
 
+from docutils.parsers.rst import directives
+from sphinx.directives.code import CodeBlock
+
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
@@ -48,6 +51,7 @@ release = ""
 extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
+    "sphinx.ext.mathjax",
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -58,7 +62,7 @@ extensions = [
     "sphinx_substitution_extensions",
 ]
 
-myst_enable_extensions = ["colon_fence", "substitution"]
+myst_enable_extensions = ["colon_fence", "amsmath", "dollarmath", "substitution"]
 
 # Change this when cut down release
 myst_substitutions = {
@@ -76,13 +80,10 @@ myst_substitutions = {
     "pip_vllm_version": "0.18.0",
     # CANN image tag
     "cann_image_tag": "8.5.1-910b-ubuntu22.04-py3.11",
-    # vllm version in ci
-    "ci_vllm_version": "v0.18.0",
-    # main branch compatibility matrix - updated dynamically
     # vLLM commit hash for main branch
-    "main_vllm_commit": "14acf429ac08b6d538ca6feb3e06b6d13895804d",
+    "main_vllm_commit": "d886c26d4d4fef7d079696beb4ece1cfb4b008a8",
     # vLLM tag for main branch
-    "main_vllm_tag": "",
+    "main_vllm_tag": "v0.19.1",
     # Python version for main branch
     "main_python_version": ">= 3.10, < 3.12",
     # CANN version for main branch
@@ -141,6 +142,26 @@ html_theme_options = {
 # Copy llms.txt to site root so it is available as /llms.txt.
 html_extra_path = ["llms.txt"]
 
+# -- Options for linkcheck builder -------------------------------------------
+
+# Check external links without validating remote anchors. Many third-party
+# sites render anchors dynamically, which makes anchor checks flaky in CI.
+linkcheck_anchors = False
+linkcheck_retries = 2
+linkcheck_timeout = 15
+linkcheck_workers = 10
+
+# Example service endpoints in docs are intentionally not reachable from CI.
+linkcheck_ignore = [
+    r"https?://localhost(:\d+)?($|/.*)",
+    r"https?://127\.0\.0\.1(:\d+)?($|/.*)",
+    r"https?://0\.0\.0\.0(:\d+)?($|/.*)",
+    r"https?://192\.0\.0\.1(:\d+)?($|/.*)",
+    r"https?://<[^>]+>.*",
+    r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
+    r"https://github\.com/[^/?#]+/?$",
+]
+
 READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
 if READTHEDOCS_VERSION_TYPE == "tag":
     # remove the warning banner if the version is a tagged release
@@ -151,8 +172,18 @@ if READTHEDOCS_VERSION_TYPE == "tag":
         os.remove(header_file)
 
 
+class SyncMetadataCodeBlock(CodeBlock):
+    """Code block supporting docs-to-YAML sync metadata."""
+
+    option_spec = CodeBlock.option_spec | {
+        "sync-yaml": directives.unchanged_required,
+        "sync-target": directives.unchanged_required,
+        "sync-class": directives.unchanged_required,
+    }
+
+
 def setup(app):
-    pass
+    app.add_directive("test", SyncMetadataCodeBlock)
 
 
 if __name__ == "__main__":

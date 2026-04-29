@@ -16,10 +16,10 @@ enable_custom_op()
 
 ## How to add a custom aclnn operation?
 
-- Create a new operation folder under `csrc` directory
-- Create `op_host` and `op_kernel` directories for host and kernel source code
-- Add build options in `csrc/build_aclnn.sh` for supported SOC. Note that multiple ops should be separated with `;`, i.e. `CUSTOM_OPS=op1;op2;op3`
-- Bind aclnn operators to torch.ops._C_ascend module in `csrc/torch_binding.cpp`
-- Write a meta implementation in `csrc/torch_binding_meta.cpp` for op being captured into aclgraph
+- Create a new operation folder under `csrc` directory.
+- Create `op_host` and `op_kernel` directories for host and kernel source code.
+- Add build options in `csrc/build_aclnn.sh` for supported SOC. Note that multiple ops should be separated with `;`, i.e. `CUSTOM_OPS="op1;op2;op3"`.
+- Bind aclnn operators to torch.ops._C_ascend module in `csrc/torch_binding.cpp`.
+- Write a meta implementation in `csrc/torch_binding_meta.cpp` for the op to be captured into the aclgraph.
 
 After a successful build of vllm-ascend, the custom aclnn operation can be invoked in python code.

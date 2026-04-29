@@ -38,11 +38,11 @@ Run the vLLM server in the docker.
 
 ```{code-block} bash
    :substitutions:
-vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 35000 &
+vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 35000 &
 ```
 
 :::{note}
-`--max_model_len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
+`--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
 :::
 
 The vLLM server is started successfully, if you see logs as below:
@@ -61,7 +61,7 @@ Refer to [AISBench](https://gitee.com/aisbench/benchmark/tree/master) for detail
 Install AISBench from source.
 
 ```shell
-git clone https://gitee.com/aisbench/benchmark.git
+git clone https://github.com/AISBench/benchmark.git
 cd benchmark/
 pip3 install -e ./ --use-pep517
 ```
@@ -161,7 +161,7 @@ There are several arguments that you should update according to your environment
 - `path`: Update to your model weight path.
 - `model`: Update to your model name in vLLM.
 - `host_ip` and `host_port`: Update to your vLLM server ip and port.
-- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max-model-len`(config in your vllm server), `32768` will be suitable for most datasets.
+- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len`(config in your vllm server), `32768` will be suitable for most datasets.
 - `batch_size`: Update according to your dataset.
 - `temperature`: Update inference argument.
 

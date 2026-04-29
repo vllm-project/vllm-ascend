@@ -1,5 +1,6 @@
 import math
 from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from typing import Any
 
@@ -19,6 +20,7 @@ from vllm_ascend.utils import (
     is_drafter_moe_model,
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
+    vllm_version_is,
 )
 
 
@@ -29,11 +31,33 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
+_MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+
+
+@contextmanager
+def override_mrv2_in_profile_run(enabled: bool):
+    """Override MRv2's extra profile-run marker for one forward path.
+
+    MRv2 builds the base forward context inside upstream vLLM, so Ascend's
+    platform hook cannot tell whether the current forward is the extra MC2
+    profile dummy run. A ContextVar keeps this MRv2-only state scoped to the
+    current forward path without adding default fallback behavior.
+    """
+    token = _MRV2_IN_PROFILE_RUN.set(enabled)
+    try:
+        yield
+    finally:
+        _MRV2_IN_PROFILE_RUN.reset(token)
+
+
+def get_mrv2_in_profile_run() -> bool:
+    return _MRV2_IN_PROFILE_RUN.get()
+
+
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     num_tokens: int = 0,
     num_tokens_across_dp: torch.Tensor | None = None,
     in_profile_run: bool = False,
@@ -124,13 +148,18 @@ def set_ascend_forward_context(
         forward_context.prefetch_mlp_down_proj = False
         forward_context.model_instance = model_instance
         forward_context.is_draft_model = is_draft_model
+        forward_context.is_draft_model_prefill = False
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
 
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
-            max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
+            dp_meta = forward_context.dp_metadata
+            if vllm_version_is("0.19.1"):
+                max_tokens_across_dp = dp_meta.max_tokens_across_dp_cpu.item()
+            else:
+                max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
             if forward_context.flash_comm_v1_enabled or forward_context.flashcomm_v2_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
@@ -187,7 +216,9 @@ def set_mc2_mask(vllm_config, device):
     if _reserved_mc2_mask is not None:
         return
     if is_moe_model(vllm_config):
-        _reserved_mc2_mask = torch.zeros(get_mc2_tokens_capacity(), dtype=torch.bool, device=device)
+        _reserved_mc2_mask = torch.zeros(
+            vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.bool, device=device
+        )
     else:
         _reserved_mc2_mask = None
 
@@ -294,6 +325,7 @@ class _ExtraForwardContextProxy:
         "num_tokens_across_dp",
         "mc2_mask",
         "is_draft_model",
+        "is_draft_model_prefill",
         "prefetch_mlp_gate_up_proj",
         "prefetch_mlp_down_proj",
         "model_instance",

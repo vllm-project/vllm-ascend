@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 import regex as re
 import torch
+from transformers import PretrainedConfig
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -403,7 +404,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         return cls(config)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> str | None:
+    def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config: Any = None) -> str | None:
         if hf_quant_cfg is not None:
             quant_method = hf_quant_cfg.get("quant_method", None)
             if not quant_method and torch.npu.is_available():
@@ -583,7 +584,12 @@ class AscendModelSlimConfig(QuantizationConfig):
             kv_head_dim_list = [k_quant_head_dim, v_quant_head_dim]
         return calc_split_factor(kv_head_dim_list)
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None) -> None:
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ) -> None:
         """Load the ModelSlim quantization config from model directory.
 
         This method is called by vllm after get_quant_config() returns
@@ -599,6 +605,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         Args:
             model_name: Path to the model directory or HuggingFace /
                 ModelScope repo id.
+            hf_config: The Hugging Face config of the model
             revision: Optional revision (branch, tag, or commit hash) for
                 remote repos.
         """
@@ -694,6 +701,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
+        kv_quant_type = self.quant_description.get("kv_cache_type", "")
+        self.enable_c8_quant = kv_quant_type != ""
         if self.enable_fa_quant or self.enable_indexer_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))

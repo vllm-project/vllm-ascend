@@ -34,14 +34,13 @@ bash format.sh
 
 #### Run CI locally
 
-After completing "Run lint" setup, you can run CI locally:
+After completing "Run lint" setup, you can run CI (Continuous integration) locally:
 
 ```{code-block} bash
    :substitutions:
-
 cd ~/vllm-project/
 
-# Run CI need vLLM installed
+# Run CI needs vLLM installed
 git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/build.txt
@@ -52,7 +51,7 @@ cd ..
 cd vllm-ascend
 # For Linux:
 pip install -r requirements-dev.txt
-# For non Linux:
+# For non-Linux:
 cat requirements-dev.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 
@@ -75,7 +74,7 @@ You can refer to [Testing](./testing.md)  to set up a testing environment and ru
 
 ## DCO and Signed-off-by
 
-When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO.
+When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).
 
 Using `-s` with `git commit` will automatically add this header.
 
@@ -112,4 +111,5 @@ testing
 multi_node_test
 nightly_ci_test
 e2e_ci_test
+doc_writing
 :::

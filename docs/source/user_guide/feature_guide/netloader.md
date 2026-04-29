@@ -54,9 +54,9 @@ To enable Netloader, pass `--load-format=netloader` and provide configuration vi
 ### Server
 
 ```shell
-VLLM_SLEEP_WHEN_IDLE=1 vllm serve `<model_file>` \
+VLLM_SLEEP_WHEN_IDLE=1 vllm serve <model_file> \
   --tensor-parallel-size 1 \
-  --served-model-name `<model_name>` \
+  --served-model-name <model_name> \
   --enforce-eager \
   --port `<port>` \
   --load-format netloader
@@ -65,14 +65,14 @@ VLLM_SLEEP_WHEN_IDLE=1 vllm serve `<model_file>` \
 ### Client
 
 ```shell
-export NETLOADER_CONFIG='{"SOURCE":[{"device_id":0, "sources": ["`<server_IP>`:`<server_Port>`"]}]}'
+export NETLOADER_CONFIG='{"SOURCE":[{"device_id":0, "sources": ["<server_IP>:<server_Port>"]}]}'
 
-VLLM_SLEEP_WHEN_IDLE=1 ASCEND_RT_VISIBLE_DEVICES=`<device_id_diff_from_server>` \
-  vllm serve `<model_file>` \
+VLLM_SLEEP_WHEN_IDLE=1 ASCEND_RT_VISIBLE_DEVICES=<device_id_diff_from_server> \
+  vllm serve <model_file> \
   --tensor-parallel-size 1 \
-  --served-model-name `<model_name>` \
+  --served-model-name <model_name> \
   --enforce-eager \
-  --port `<client_port>` \
+  --port <client_port> \
   --load-format netloader \
   --model-loader-extra-config="${NETLOADER_CONFIG}"
 ```
@@ -93,5 +93,5 @@ After startup, you can test consistency by issuing inference requests with tempe
 ## Note & Caveats
 
 - If Netloader is used, **each worker process** must bind a listening port. That port may be user-specified or assigned randomly. If user-specified, ensure it is available.  
-- Netloader requires extra HBM memory to establish HCCL connections (i.e. `HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve sufficient capacity (e.g. via `--gpu-memory-utilization`).  
+- Netloader requires extra on-chip memory memory to establish HCCL connections (i.e. `HCCL_BUFFERSIZE`, default ~200 MB). Users should reserve sufficient capacity (e.g. via `--gpu-memory-utilization`).  
 - It is recommended to set `VLLM_SLEEP_WHEN_IDLE=1` to mitigate unstable or slow connections/transmissions. Related info: [vLLM Issue #16660](https://github.com/vllm-project/vllm/issues/16660), [vLLM PR #16226](https://github.com/vllm-project/vllm/pull/16226).
