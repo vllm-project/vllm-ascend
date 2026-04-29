@@ -6,6 +6,10 @@ This tutorial shows how to run `CohereLabs/c4ai-command-r-v01` with vLLM-Ascend 
 
 CohereLabs/c4ai-command-r-v01 is an open-weights instruction model optimized for reasoning, summarization, and question answering. It supports multilingual generation and long-context processing, and is suitable for enterprise-style assistant and RAG scenarios. This tutorial describes how to deploy and validate the model on vLLM-Ascend with Atlas A2.
 
+## Supported Features
+
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
 ## Prerequisites
 
 - Ascend driver/toolkit is installed and healthy.
