@@ -9,11 +9,9 @@ from dataclasses import dataclass
 
 warnings.filterwarnings(
     "ignore",
-    message=r"builtin type swigvarlink has no __module__ attribute",
+    message="swigvarlink object is not an iterator",
     category=DeprecationWarning,
 )
-
-
 
 RTOL = 0.05
 TEST_DIR = os.path.dirname(__file__)
