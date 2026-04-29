@@ -1,5 +1,12 @@
 import os
+import warnings
 from dataclasses import dataclass
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"builtin type swigvarlink has no __module__ attribute",
+    category=DeprecationWarning,
+)
 
 import lm_eval
 import numpy as np
