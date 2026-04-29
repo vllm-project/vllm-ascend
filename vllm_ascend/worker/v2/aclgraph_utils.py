@@ -132,14 +132,27 @@ class ModelWithContext(nn.Module):
     so we can inherit vllm's CudaGraphManager._capture_full_graph.
     """
 
-    def __init__(self, original_model):
+    def __init__(self, original_model, is_draft_model=False, is_draft_model_prefill=False):
         super().__init__()
         self.original_model = original_model
+        self.is_draft_model = is_draft_model
+        self.is_draft_model_prefill = is_draft_model_prefill
 
     def forward(self, *args, **kwargs):
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
         if torch.npu.is_current_stream_capturing():
             _EXTRA_CTX.capturing = True
+        if self.is_draft_model:
+            _EXTRA_CTX.is_draft_model = True
+        if self.is_draft_model_prefill:
+            _EXTRA_CTX.is_draft_model_prefill = True
 
         return self.original_model(*args, **kwargs)
+
+    def get_original_model(self):
+        return self.original_model
+
+    def compute_logits(self, hidden_states: torch.Tensor):
+        # draft model has `compute_logits`, which is not in ModelWithContext
+        return self.original_model.compute_logits(hidden_states)
