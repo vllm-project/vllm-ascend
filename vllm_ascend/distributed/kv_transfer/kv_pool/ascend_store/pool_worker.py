@@ -334,53 +334,51 @@ class KVPoolWorker:
         if len(metadata.requests) == 0:
             return
         self.current_layer = 0
-        layerwise_requests = []
+        if self.use_layerwise:
+            self.process_layer_data(metadata.requests)
+            if len(self.independent_layers) == 0 and metadata.unfinished_request_ids:
+                for layer_id in self.offload_start_ids:
+                    layer_load_task = self.layer_load_tasks[layer_id]
+                    self.kv_recv_thread.add_request(
+                        (None, layer_load_task, layer_id))
+            return
+
         for request in metadata.requests:
-            if self.use_layerwise:
-                layerwise_requests.append(request)
+            load_spec = request.load_spec
+            if load_spec is None or not load_spec.can_load:  # load =0
+                continue
+            token_len = request.token_len_chunk
+            if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
+                load_spec.kvpool_cached_tokens == token_len - 1
+            ):
+                token_len = request.load_spec.kvpool_cached_tokens + 1
             else:
-                load_spec = request.load_spec
-                if load_spec is None or not load_spec.can_load:  # load =0
-                    continue
-                token_len = request.token_len_chunk
-                if (load_spec.kvpool_cached_tokens % self.block_size != 0) and (
-                    load_spec.kvpool_cached_tokens == token_len - 1
+                token_len = request.load_spec.kvpool_cached_tokens
+            request.load_spec.token_len = token_len
+            if self.load_async:
+                self.kv_recv_thread.add_request(  # type: ignore[union-attr]
+                    request,
+                )
+            else:
+                addr_list = []
+                size_list = []
+                key_list = []
+                mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
+                for start, end, key in self.token_database.process_tokens(
+                    token_len, request.block_hashes, mask_num
                 ):
-                    token_len = request.load_spec.kvpool_cached_tokens + 1
-                else:
-                    token_len = request.load_spec.kvpool_cached_tokens
-                request.load_spec.token_len = token_len
-                if self.load_async:
-                    self.kv_recv_thread.add_request(  # type: ignore[union-attr]
-                        request,
-                    )
-                else:
-                    addr_list = []
-                    size_list = []
-                    key_list = []
-                    mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
-                    for start, end, key in self.token_database.process_tokens(
-                        token_len, request.block_hashes, mask_num
-                    ):
-                        addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
-                        key_list.append(key.to_string())
-                        addr_list.append(addr)
-                        size_list.append(size)
-                    key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
-                    addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
-                    size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
-                    self.m_store.get(key_list_c, addr_list_c, size_list_c)
-        if layerwise_requests:
-            self.process_layer_data(layerwise_requests)
+                    addr, size, _ = self.token_database.prepare_value(start, end, request.block_ids)
+                    key_list.append(key.to_string())
+                    addr_list.append(addr)
+                    size_list.append(size)
+                key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
+                addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
+                size_list_c = _circular_shift(size_list, self.tp_rank % len(size_list))
+                self.m_store.get(key_list_c, addr_list_c, size_list_c)
         # TODO 这里的请求释放可能有问题
         # logger.info(
         #     f">>>>>>>>>>>> metadata.requests {len(metadata.requests)} "
         #     f"metadata.unfinished_request_ids {metadata.unfinished_request_ids}")
-        # TODO 把这个移到 independent layer attention 计算前
-        if len(self.independent_layers)==0 and self.use_layerwise and metadata.unfinished_request_ids:
-            for layer_id in self.offload_start_ids:
-                layer_load_task = self.layer_load_tasks[layer_id]
-                self.kv_recv_thread.add_request((None, layer_load_task, layer_id))
 
     def _ensure_scratch_array(self, attr_name: str, capacity: int) -> np.ndarray:
         array = getattr(self, attr_name, None)
