@@ -150,6 +150,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_npu_format_cast.assert_called_once()
         self.assertFalse(isinstance(layer.deq_scale, MagicMock))
 
+
 @npu_test(num_npus=1, npu_type="a2")
 class TestAscendW8A8LinearMethodWithNpu(TestBase):
     def setUp(self):
