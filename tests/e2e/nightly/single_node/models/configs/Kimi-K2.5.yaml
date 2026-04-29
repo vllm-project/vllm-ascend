@@ -16,7 +16,7 @@ _envs: &envs
 
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"
-  - "--enable-prefix-caching"
+  - "-no-enable-prefix-caching"
   - "--enable-chunked-prefill"
   - "--allowed-local-media-path"
   - "/"
@@ -27,11 +27,11 @@ _server_cmd: &server_cmd
   - "--port"
   - "$SERVER_PORT"
   - "--max-model-len"
-  - "133120"
+  - "32768"
   - "--max-num-batched-tokens"
-  - "8192"
+  - "16384"
   - "--max-num-seqs"
-  - "8"
+  - "500"
   - "--async-scheduling"
   - "--quantization"
   - "ascend"
@@ -40,9 +40,8 @@ _server_cmd: &server_cmd
   - "0.9"
   - "--seed"
   - "42"
-  - "--async-scheduling"
   - "--compilation-config"
-  - '{"cudagraph_capture_sizes":[4,8,12,16,32], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+  - '{"cudagraph_capture_sizes":[48,64,80,96,112,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
   - "--speculative-config"
   - '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
   - "--additional-config"
@@ -58,9 +57,9 @@ _benchmarks: &benchmarks
     dataset_path: vllm-ascend/GSM8K-in3500-bs2800
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 160
+    num_prompts: 392
     max_out_len: 1500
-    batch_size: 40
+    batch_size: 98
     trust_remote_code: true
     request_rate: 0
     baseline: 1
