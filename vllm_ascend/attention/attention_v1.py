@@ -39,6 +39,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
@@ -62,11 +63,23 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
+from vllm_ascend.ops.select_attention import (
+    paged_select_attention,
+    paged_select_attention_get_workspace,
+    paged_select_attention_graph_out,
+    quest_block_select_paged,
+    quest_block_select_paged_out,
+    quest_prefill_metadata,
+)
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+QUEST_PAGE_SIZE = 128
+QUEST_HEAD_SIZE = 128
+QUEST_MAX_METADATA_BLOCKS_PER_REQ = 6
+QUEST_INDEX_ALIGNMENT = 8
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -209,6 +222,15 @@ class AscendMetadata:
 
     kvcomp_metadata: KVCompMetaData | None = None
 
+    # Optional QUEST sparse-decode metadata carried alongside the standard
+    # attention metadata.
+    quest_metadata_block_tables: torch.Tensor | None = None
+    quest_refresh_seq_lens: torch.Tensor | None = None
+    quest_ready: bool = False
+    quest_seq_lens: torch.Tensor | None = None
+    quest_maxblocks: torch.Tensor | None = None
+    quest_minblocks: torch.Tensor | None = None
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
@@ -309,6 +331,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        quest_metadata_block_tables = common_attn_metadata.quest_metadata_block_tables
+        quest_batch_size = 0 if quest_metadata_block_tables is None else quest_metadata_block_tables.shape[0]
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -328,6 +352,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
             kvcomp_metadata=common_attn_metadata.kvcomp_metadata,
+            quest_metadata_block_tables=quest_metadata_block_tables,
+            quest_refresh_seq_lens=(
+                common_attn_metadata.quest_refresh_seq_lens[:quest_batch_size]
+                if common_attn_metadata.quest_refresh_seq_lens is not None and quest_batch_size > 0
+                else None
+            ),
+            quest_ready=common_attn_metadata.quest_ready,
+            quest_seq_lens=common_attn_metadata.seq_lens[:quest_batch_size] if quest_batch_size > 0 else None,
         )
         return attn_metadata
 
@@ -387,6 +419,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self.ascend_config = get_ascend_config()
+        self.quest_enabled = self.ascend_config.quest_decode_config.enable
+        self.quest_topk_pages = self.ascend_config.quest_decode_config.topk_pages
+        self.quest_layer_supported = (
+            self.quest_enabled
+            and not enable_cp()
+            and not self.vllm_config.model_config.use_mla
+            and self.head_size == QUEST_HEAD_SIZE
+            and self.attn_type != AttentionType.ENCODER_DECODER
+            and self.sliding_window is None
+            and sinks is None
+        )
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
@@ -396,6 +440,201 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.sinks = sinks
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
+
+    def _should_refresh_quest_metadata(self, attn_metadata: AscendMetadata) -> bool:
+        return (
+            self.quest_enabled
+            and self.quest_layer_supported
+            and attn_metadata.quest_ready
+            and self.key_cache is not None
+            and attn_metadata.block_tables is not None
+            and attn_metadata.quest_metadata_block_tables is not None
+            and attn_metadata.quest_refresh_seq_lens is not None
+            and attn_metadata.quest_seq_lens is not None
+            and attn_metadata.quest_maxblocks is not None
+            and attn_metadata.quest_minblocks is not None
+        )
+
+    @staticmethod
+    def _round_quest_selected_k(k: int) -> int:
+        return cdiv(k, QUEST_INDEX_ALIGNMENT) * QUEST_INDEX_ALIGNMENT
+
+    def _quest_decode_eligible(self, attn_metadata: AscendMetadata, num_tokens: int) -> bool:
+        return (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and self.quest_enabled
+            and self.quest_layer_supported
+            and attn_metadata.quest_ready
+            and self.sliding_window is None
+            and self.sinks is None
+            and attn_metadata.block_tables is not None
+            and attn_metadata.block_tables.shape[1] > 0
+            and attn_metadata.quest_metadata_block_tables is not None
+            and attn_metadata.quest_seq_lens is not None
+            and attn_metadata.quest_maxblocks is not None
+            and attn_metadata.quest_minblocks is not None
+            and num_tokens > 0
+        )
+
+    def forward_quest_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if (
+            attn_metadata.quest_metadata_block_tables is None
+            or attn_metadata.quest_seq_lens is None
+            or attn_metadata.quest_maxblocks is None
+            or attn_metadata.quest_minblocks is None
+            or attn_metadata.block_tables is None
+        ):
+            raise RuntimeError("QUEST decode was selected without the required metadata tensors.")
+
+        batch_size = attn_metadata.quest_metadata_block_tables.shape[0]
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        block_table = block_table[:batch_size]
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[:batch_size]
+        actual_seq_lengths_kv = actual_seq_lengths_kv[:batch_size]
+        k = min(self.quest_topk_pages, block_table.shape[1])
+        if k <= 0:
+            raise RuntimeError("QUEST decode was selected without any blocks available for selection.")
+
+        query = query[:batch_size]
+        selected_q_indices = quest_block_select_paged(
+            query=query,
+            maxblocks=attn_metadata.quest_maxblocks,
+            minblocks=attn_metadata.quest_minblocks,
+            metadata_block_tables=attn_metadata.quest_metadata_block_tables,
+            seq_lens=attn_metadata.quest_seq_lens,
+            k=k,
+            tokens_since_metadata_update=0,
+        )
+        attn_output = paged_select_attention(
+            query,
+            key,
+            value,
+            actual_seq_lengths_q,
+            actual_seq_lengths_kv,
+            block_table,
+            selected_q_indices,
+            self.num_heads,
+            self.scale,
+            self.num_kv_heads,
+            block_size,
+        )
+        output[:batch_size] = attn_output[:batch_size]
+        return output
+
+    def full_graph_quest(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if (
+            attn_metadata.quest_metadata_block_tables is None
+            or attn_metadata.quest_seq_lens is None
+            or attn_metadata.quest_maxblocks is None
+            or attn_metadata.quest_minblocks is None
+            or attn_metadata.block_tables is None
+        ):
+            raise RuntimeError("QUEST graph decode was selected without the required metadata tensors.")
+
+        graph_params = get_graph_params()
+        num_tokens = query.shape[0]
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        batch_size = attn_metadata.quest_metadata_block_tables.shape[0]
+        block_table = block_table[:batch_size]
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[:batch_size]
+        actual_seq_lengths_kv = actual_seq_lengths_kv[:batch_size]
+        selected_k = min(self.quest_topk_pages, block_table.shape[1])
+        if selected_k <= 0:
+            raise RuntimeError("QUEST graph decode was selected without any blocks available for selection.")
+
+        query = query[:batch_size]
+        quest_output = output[:batch_size]
+        rounded_k = self._round_quest_selected_k(selected_k)
+        selected_q_indices_buffer = torch.empty(
+            (batch_size, self.num_heads, rounded_k),
+            dtype=torch.int32,
+            device=query.device,
+        )
+        selected_q_indices = selected_q_indices_buffer[:, :, :selected_k]
+        workspace = graph_params.workspaces.get(num_tokens)
+        if workspace is None:
+            workspace = paged_select_attention_get_workspace(
+                query=query,
+                key=key,
+                value=value,
+                actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                block_table=block_table,
+                selected_kv_indices=selected_q_indices,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                num_key_value_heads=self.num_kv_heads,
+                block_size=block_size,
+                output=quest_output,
+            )
+            update_graph_params_workspaces(num_tokens, workspace)
+
+        stream = torch_npu.npu.current_stream()
+        event = torch.npu.ExternalEvent()
+        event.wait(stream)
+        event.reset(stream)
+        graph_params.events[num_tokens].append(event)
+        graph_params.attn_params[num_tokens].append(
+            (
+                weak_ref_tensors(query),
+                weak_ref_tensors(key),
+                weak_ref_tensors(value),
+                weak_ref_tensors(block_table),
+                weak_ref_tensors(quest_output),
+                weak_ref_tensors(attn_metadata.quest_metadata_block_tables),
+                weak_ref_tensors(attn_metadata.quest_maxblocks),
+                weak_ref_tensors(attn_metadata.quest_minblocks),
+                selected_q_indices_buffer,
+                selected_k,
+                self.num_heads,
+                self.num_kv_heads,
+                self.scale,
+                block_size,
+            )
+        )
+
+        torch.npu.graph_task_group_begin(stream)
+        quest_block_select_paged_out(
+            query=query,
+            maxblocks=attn_metadata.quest_maxblocks,
+            minblocks=attn_metadata.quest_minblocks,
+            metadata_block_tables=attn_metadata.quest_metadata_block_tables,
+            seq_lens=attn_metadata.quest_seq_lens,
+            out=selected_q_indices_buffer,
+            tokens_since_metadata_update=0,
+        )
+        paged_select_attention_graph_out(
+            query=query,
+            key=key,
+            value=value,
+            actual_seq_lengths=actual_seq_lengths_q,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            block_table=block_table,
+            selected_kv_indices=selected_q_indices,
+            num_heads=self.num_heads,
+            scale_value=self.scale,
+            num_key_value_heads=self.num_kv_heads,
+            block_size=block_size,
+            workspace=workspace,
+            out=quest_output,
+        )
+        handle = torch.npu.graph_task_group_end(stream)
+        graph_params.handles[num_tokens].append(handle)
+        return output
 
     @staticmethod
     def update_graph_params(
@@ -407,6 +646,82 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_dcp_pcp_tokens=None,
         draft_attn_metadatas=None,
     ):
+        quest_metadata = forward_context.attn_metadata
+        quest_graph_ready = (
+            not _EXTRA_CTX.is_draft_model
+            and quest_metadata is not None
+            and len(quest_metadata) > 0
+            and all(
+                metadata.quest_ready and metadata.attn_state == AscendAttentionState.DecodeOnly
+                for metadata in quest_metadata.values()
+            )
+        )
+        if quest_graph_ready:
+            graph_params = get_graph_params()
+            if graph_params is None:
+                return
+            workspace = graph_params.workspaces.get(num_tokens)
+            if workspace is None:
+                return
+            with torch.npu.stream(update_stream):
+                for key, param, handle, event in zip(
+                    forward_context.attn_metadata,
+                    graph_params.attn_params[num_tokens],
+                    graph_params.handles[num_tokens],
+                    graph_params.events[num_tokens],
+                ):
+                    (
+                        query,
+                        key_cache,
+                        value_cache,
+                        block_table,
+                        output,
+                        quest_metadata_block_tables,
+                        quest_maxblocks,
+                        quest_minblocks,
+                        selected_q_indices_buffer,
+                        selected_k,
+                        num_heads,
+                        num_kv_heads,
+                        scale,
+                        block_size,
+                    ) = param
+                    current_attn_metadata = forward_context.attn_metadata[key]
+                    batch_size = quest_metadata_block_tables.shape[0]
+                    actual_seq_lengths_q = current_attn_metadata.actual_seq_lengths_q[:batch_size]
+                    actual_seq_lengths_kv = current_attn_metadata.seq_lens_list[:batch_size]
+                    seq_lens = current_attn_metadata.seq_lens[:batch_size]
+                    selected_q_indices = selected_q_indices_buffer[:, :, :selected_k]
+
+                    torch.npu.graph_task_update_begin(update_stream, handle)
+                    quest_block_select_paged_out(
+                        query=query,
+                        maxblocks=quest_maxblocks,
+                        minblocks=quest_minblocks,
+                        metadata_block_tables=quest_metadata_block_tables,
+                        seq_lens=seq_lens,
+                        out=selected_q_indices_buffer,
+                        tokens_since_metadata_update=0,
+                    )
+                    paged_select_attention_graph_out(
+                        query=query,
+                        key=key_cache,
+                        value=value_cache,
+                        actual_seq_lengths=actual_seq_lengths_q,
+                        actual_seq_lengths_kv=actual_seq_lengths_kv,
+                        block_table=block_table,
+                        selected_kv_indices=selected_q_indices,
+                        num_heads=num_heads,
+                        scale_value=scale,
+                        num_key_value_heads=num_kv_heads,
+                        block_size=block_size,
+                        workspace=workspace,
+                        out=output,
+                    )
+                    torch.npu.graph_task_update_end(update_stream)
+                    event.record(update_stream)
+            return
+
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
@@ -1054,6 +1369,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
                 slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
             )
+            if self._should_refresh_quest_metadata(attn_metadata):
+                batch_size = attn_metadata.quest_metadata_block_tables.shape[0]
+                quest_prefill_metadata(
+                    k_cache=self.key_cache,
+                    block_tables=attn_metadata.block_tables[:batch_size],
+                    seq_lens=attn_metadata.quest_refresh_seq_lens,
+                    metadata_block_tables=attn_metadata.quest_metadata_block_tables,
+                    maxblocks=attn_metadata.quest_maxblocks,
+                    minblocks=attn_metadata.quest_minblocks,
+                )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
         return query, key, value, output
@@ -1068,7 +1393,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-        if (
+        if self._quest_decode_eligible(attn_metadata, num_tokens):
+            if _EXTRA_CTX.capturing:
+                output = self.full_graph_quest(query, key, value, attn_metadata, output)
+            else:
+                output = self.forward_quest_attention(query, key, value, attn_metadata, output)
+        elif (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and using_paged_attention(num_tokens, self.vllm_config)
             and self.sliding_window is None

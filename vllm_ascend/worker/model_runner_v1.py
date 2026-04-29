@@ -95,9 +95,15 @@ from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import (
+    QUEST_HEAD_SIZE,
+    QUEST_MAX_METADATA_BLOCKS_PER_REQ,
+    QUEST_PAGE_SIZE,
+    AscendAttentionBackend,
+    AscendAttentionState,
+)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_cp, using_paged_attention
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -118,6 +124,7 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -402,6 +409,12 @@ class NPUModelRunner(GPUModelRunner):
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
 
         self.use_aclgraph = self._use_aclgraph()
+        self.quest_enabled = self.ascend_config.quest_decode_config.enable
+        self.quest_topk_pages = self.ascend_config.quest_decode_config.topk_pages
+        self.quest_model_supported = self.quest_enabled
+        self.quest_max_num_metadata_blocks_per_req = 0
+        self.quest_layer_tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._configure_quest_decode()
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
@@ -449,6 +462,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config.speculative_config.num_speculative_tokens if self.vllm_config.speculative_config else 0
             ),
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            quest_max_num_metadata_blocks_per_req=self.quest_max_num_metadata_blocks_per_req,
         )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
@@ -489,6 +503,157 @@ class NPUModelRunner(GPUModelRunner):
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
+
+    def _disable_quest_decode(self, reason: str) -> None:
+        if self.quest_enabled:
+            logger.warning_once(f"QUEST decode is disabled: {reason}")
+        self.quest_model_supported = False
+        self.quest_max_num_metadata_blocks_per_req = 0
+        self.quest_layer_tensors.clear()
+
+    def _configure_quest_decode(self) -> None:
+        if not self.quest_enabled:
+            self.quest_model_supported = False
+            return
+
+        if get_ascend_device_type() not in {AscendDeviceType.A2, AscendDeviceType.A3}:
+            self._disable_quest_decode(
+                "current hardware is unsupported, QUEST decode currently supports only "
+                "Ascend A2/A3 (ascend910b/ascend910_93)."
+            )
+            return
+
+        if self.vllm_config.kv_transfer_config is not None:
+            self._disable_quest_decode(
+                "kv_transfer_config is set, but QUEST decode requires a local KV cache."
+            )
+            return
+        if enable_cp():
+            self._disable_quest_decode(
+                "context parallel is enabled, but QUEST decode requires unsharded request metadata."
+            )
+            return
+        if self.ascend_config.xlite_graph_config.enabled:
+            self._disable_quest_decode(
+                "xLite graph execution is enabled, but QUEST decode only supports the standard v1 decode path."
+            )
+            return
+        if self.model_config.use_mla:
+            self._disable_quest_decode(
+                "MLA attention is enabled, but QUEST decode only supports standard v1 attention."
+            )
+            return
+        if self.use_sparse:
+            self._disable_quest_decode(
+                "sparse attention is enabled, but QUEST decode only supports standard v1 attention."
+            )
+            return
+
+        quest_max_model_len = max(self.model_config.max_model_len, self.max_encoder_len or 0)
+        self.quest_max_num_metadata_blocks_per_req = cdiv(cdiv(quest_max_model_len, QUEST_PAGE_SIZE), QUEST_PAGE_SIZE)
+        if self.quest_max_num_metadata_blocks_per_req > QUEST_MAX_METADATA_BLOCKS_PER_REQ:
+            self._disable_quest_decode(
+                "the configured max_model_len requires more metadata blocks per request "
+                f"({self.quest_max_num_metadata_blocks_per_req}) than the kernel limit "
+                f"({QUEST_MAX_METADATA_BLOCKS_PER_REQ})."
+            )
+
+    def _initialize_quest_layer_tensors(self, kv_caches: dict[str, Any]) -> None:
+        self.quest_layer_tensors.clear()
+        if not self.quest_model_supported or self.quest_max_num_metadata_blocks_per_req == 0:
+            return
+
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        num_metadata_blocks = self.max_num_reqs * self.quest_max_num_metadata_blocks_per_req
+        for layer_name, attn_layer in attn_layers.items():
+            if layer_name in self.shared_kv_cache_layers:
+                continue
+            if layer_name not in kv_caches:
+                self._disable_quest_decode(f"attention layer {layer_name} does not have a local KV cache.")
+                return
+
+            impl = getattr(attn_layer, "impl", None)
+            if not getattr(impl, "quest_layer_supported", False):
+                self._disable_quest_decode(f"attention layer {layer_name} is not QUEST-compatible.")
+                return
+
+            kv_cache = kv_caches[layer_name]
+            if not isinstance(kv_cache, tuple) or len(kv_cache) < 2:
+                self._disable_quest_decode(f"attention layer {layer_name} does not expose a standard KV cache tuple.")
+                return
+
+            k_cache = kv_cache[0]
+            if not isinstance(k_cache, torch.Tensor) or k_cache.ndim != 4:
+                self._disable_quest_decode(f"attention layer {layer_name} has an unsupported key-cache layout.")
+                return
+            if k_cache.shape[1] != QUEST_PAGE_SIZE or k_cache.shape[-1] != QUEST_HEAD_SIZE:
+                self._disable_quest_decode(
+                    f"attention layer {layer_name} has block_size={k_cache.shape[1]} and "
+                    f"head_size={k_cache.shape[-1]}, but QUEST requires block_size={QUEST_PAGE_SIZE} "
+                    f"and head_size={QUEST_HEAD_SIZE}."
+                )
+                return
+
+            metadata_shape = (num_metadata_blocks, QUEST_PAGE_SIZE, k_cache.shape[2], QUEST_HEAD_SIZE)
+            maxblocks = torch.zeros(metadata_shape, dtype=k_cache.dtype, device=self.device)
+            minblocks = torch.zeros_like(maxblocks)
+            self.quest_layer_tensors[layer_name] = (maxblocks, minblocks)
+
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
+            if layer_name not in attn_layers:
+                continue
+            if target_layer_name in self.quest_layer_tensors:
+                self.quest_layer_tensors[layer_name] = self.quest_layer_tensors[target_layer_name]
+            else:
+                self._disable_quest_decode(
+                    f"attention layer {layer_name} shares KV cache with {target_layer_name}, "
+                    "but the target layer is not QUEST-compatible."
+                )
+                return
+
+        if not self.quest_layer_tensors:
+            self._disable_quest_decode(
+                "no compatible v1 attention layers were found with block_size 128 and head_size 128."
+            )
+
+    def _prepare_quest_refresh_seq_lens(self, num_reqs: int) -> torch.Tensor | None:
+        if (
+            not self.quest_model_supported
+            or num_reqs <= 0
+            or self.input_batch.quest_metadata_block_tables is None
+        ):
+            return None
+
+        refresh_seq_lens_cpu = self.input_batch.quest_refresh_seq_lens_cpu
+        refresh_seq_lens_cpu[:num_reqs].fill(0)
+        seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs]
+        valid_tokens = self.input_batch.quest_metadata_valid_tokens
+
+        for row_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            seq_len = int(seq_lens_cpu[row_idx])
+            if (
+                self.input_batch.quest_metadata_owner_req_ids[row_idx] != req_id
+                or valid_tokens[row_idx] > seq_len
+                or seq_len // QUEST_PAGE_SIZE > valid_tokens[row_idx] // QUEST_PAGE_SIZE
+            ):
+                refresh_seq_lens_cpu[row_idx] = seq_len
+
+        self.input_batch.quest_refresh_seq_lens[:num_reqs].copy_(
+            self.input_batch.quest_refresh_seq_lens_cpu_tensor[:num_reqs],
+            non_blocking=True,
+        )
+        return self.input_batch.quest_refresh_seq_lens[:num_reqs]
+
+    def _commit_quest_metadata_refreshes(self, num_reqs: int) -> None:
+        if not self.quest_model_supported or num_reqs <= 0:
+            return
+
+        for row_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            refreshed_seq_len = int(self.input_batch.quest_refresh_seq_lens_cpu[row_idx])
+            if refreshed_seq_len <= 0:
+                continue
+            self.input_batch.quest_metadata_owner_req_ids[row_idx] = req_id
+            self.input_batch.quest_metadata_valid_tokens[row_idx] = refreshed_seq_len
 
     def _init_device_properties(self) -> None:
         self.num_sms = None
@@ -1894,6 +2059,9 @@ class NPUModelRunner(GPUModelRunner):
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
 
+            if self.quest_model_supported and self.input_batch.num_reqs > 0:
+                self._commit_quest_metadata_refreshes(self.input_batch.num_reqs)
+
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
@@ -2639,6 +2807,20 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_cpu = None
             num_computed_tokens_cpu = None
 
+        quest_metadata_block_tables = None
+        quest_refresh_seq_lens = None
+        quest_ready = False
+        quest_decode_ready = (
+            self.quest_model_supported
+            and self.attn_state == AscendAttentionState.DecodeOnly
+            and max_query_len == 1
+            and self.input_batch.quest_metadata_block_tables is not None
+        )
+        if quest_decode_ready:
+            quest_metadata_block_tables = self.input_batch.quest_metadata_block_tables[:num_reqs]
+            quest_refresh_seq_lens = self._prepare_quest_refresh_seq_lens(num_reqs)
+            quest_ready = True
+
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -2667,6 +2849,9 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
+            quest_metadata_block_tables=quest_metadata_block_tables,
+            quest_refresh_seq_lens=quest_refresh_seq_lens,
+            quest_ready=quest_ready,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
@@ -2718,7 +2903,14 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata_dict = attn_metadata[ubid]
 
             for layer_name in attn_group.layer_names:
-                attn_metadata_dict[layer_name] = attn_metadata_i
+                quest_layer_tensors = self.quest_layer_tensors.get(layer_name)
+                if quest_layer_tensors is not None:
+                    attn_metadata_layer = copy(attn_metadata_i)
+                    attn_metadata_layer.quest_maxblocks = quest_layer_tensors[0]
+                    attn_metadata_layer.quest_minblocks = quest_layer_tensors[1]
+                    attn_metadata_dict[layer_name] = attn_metadata_layer
+                else:
+                    attn_metadata_dict[layer_name] = attn_metadata_i
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
@@ -3200,14 +3392,18 @@ class NPUModelRunner(GPUModelRunner):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        self._initialize_quest_layer_tensors(kv_caches)
         # TODO: refactor the logic of attention
         # Initialize drafter attention group initialization
         if self.speculative_config and (
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
-            block_size = (self.kernel_block_sizes[0] if isinstance(
-            self.kernel_block_sizes, list) else self.kernel_block_sizes)
+            block_size = (
+                self.kernel_block_sizes[0]
+                if isinstance(self.kernel_block_sizes, list)
+                else self.kernel_block_sizes
+            )
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group():
@@ -3762,6 +3958,7 @@ class NPUModelRunner(GPUModelRunner):
                 ),
                 kernel_block_sizes=self.kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
+                quest_max_num_metadata_blocks_per_req=self.quest_max_num_metadata_blocks_per_req,
             )
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
