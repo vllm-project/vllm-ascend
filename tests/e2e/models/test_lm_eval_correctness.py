@@ -1,3 +1,8 @@
+import lm_eval
+import numpy as np
+import pytest
+import yaml
+from jinja2 import Environment, FileSystemLoader
 import os
 import warnings
 from dataclasses import dataclass
@@ -8,11 +13,7 @@ warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
-import lm_eval
-import numpy as np
-import pytest
-import yaml
-from jinja2 import Environment, FileSystemLoader
+
 
 RTOL = 0.05
 TEST_DIR = os.path.dirname(__file__)
