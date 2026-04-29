@@ -897,6 +897,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
+            worker._pp_send_work = []
 
             # Set as middle rank (not first, not last)
             mock_pp_group = MagicMock()
@@ -904,8 +905,12 @@ class TestNPUWorker(TestBase):
             mock_pp_group.is_last_rank = False
             mock_get_pp_group.return_value = mock_pp_group
 
-            # Setup tensor reception data
-            mock_pp_group.recv_tensor_dict.return_value = {"tensor": "data"}
+            # Setup async tensor reception data (irecv_tensor_dict returns 3 values)
+            mock_pp_group.irecv_tensor_dict.return_value = (
+                {"tensor": "data"},  # tensor_dict
+                None,  # comm_handles
+                None,  # comm_postprocess
+            )
 
             # Mock return IntermediateTensors - use real type
             mock_intermediate_output = MagicMock(spec=IntermediateTensors)
@@ -919,18 +924,17 @@ class TestNPUWorker(TestBase):
             # Test execute_model
             result = worker.execute_model(mock_scheduler_output)
 
-            # Verify tensor reception
-            mock_pp_group.recv_tensor_dict.assert_called_once()
+            # Verify async tensor reception
+            mock_pp_group.irecv_tensor_dict.assert_called_once()
 
             # Verify model execution with intermediate_tensors
-            # Second parameter should be IntermediateTensors instance
+            # Second parameter should be AsyncIntermediateTensors instance
             worker.model_runner.execute_model.assert_called_once()
             args, kwargs = worker.model_runner.execute_model.call_args
             self.assertEqual(args[0], mock_scheduler_output)
-            self.assertIsInstance(args[1], IntermediateTensors)
 
-            # Verify tensor sending
-            mock_pp_group.send_tensor_dict.assert_called_once()
+            # Verify async tensor sending
+            mock_pp_group.isend_tensor_dict.assert_called_once()
 
             # Middle rank without kv_transfer_group should return None
             self.assertIsNone(result)

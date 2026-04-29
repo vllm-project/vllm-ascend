@@ -463,6 +463,13 @@ class NPUModelRunner(GPUModelRunner):
             self.cudagraph_batch_sizes = []
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+        self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
+        self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
+        if self.enable_hamming_sparse is True:
+            from vllm_ascend.worker.kvcomp_utils import initialize_kvcomp_metadata
+            self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
+                block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
+                parallel_config=self.parallel_config, dtype=self.dtype)
 
     @property
     def use_cp(self) -> bool:
@@ -1269,6 +1276,27 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices=logits_indices,
         )
 
+    def _copy_valid_sampled_token_count(
+        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
+    ) -> None:
+        if self.valid_sampled_token_count_event is None:
+            return
+
+        # Initialize a new stream to overlap the copy operation with
+        # prepare_input of draft model.
+        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):  
+            self.valid_sampled_token_count_copy_stream.wait_stream(torch.npu.current_stream())  
+            counts = valid_sampled_tokens_count
+            counts_cpu = self.valid_sampled_token_count_cpu
+            assert counts_cpu is not None
+            counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
+            self.valid_sampled_token_count_event.record()
+
+        if self.use_async_spec_decode:
+            # Stash for GPU-side correction in _prepare_inputs.
+            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
+        self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
@@ -1836,7 +1864,7 @@ class NPUModelRunner(GPUModelRunner):
             assert self.sampling_done_event is not None
             self.sampling_done_event.record()
 
-        self.valid_sampled_token_count_gpu: torch.Tensor | None = None
+        self.valid_sampled_token_count_gpu: torch.Tensor | None = None # type: ignore[no-redef]
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -2494,6 +2522,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
                 )
 
+            # add kvcomp_metadata into common_attn_metadata
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
@@ -2551,7 +2580,9 @@ class NPUModelRunner(GPUModelRunner):
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
-
+            if self.enable_hamming_sparse is True:
+                from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
+                build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
         if self.is_mm_prefix_lm:
@@ -2771,7 +2802,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            if self.is_multimodal_model and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
+            if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
@@ -3024,6 +3055,18 @@ class NPUModelRunner(GPUModelRunner):
 
         num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches, num_attn_module)
+
+        if self.enable_hamming_sparse is True:
+            from vllm_ascend.worker.kvcomp_utils import init_and_bind_hashk_cache
+            init_and_bind_hashk_cache(
+                kv_caches=kv_caches,
+                num_attn_module=num_attn_module,
+                vllm_config=self.vllm_config,
+                device=self.device,
+                compilation_config=self.compilation_config,
+                kvcomp_meta_data=self.kvcomp_meta_data
+            )
+
         return kv_caches
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:

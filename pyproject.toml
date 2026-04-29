@@ -17,7 +17,7 @@ requires = [
     "psutil",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "transformers>=4.57.4",
+    "transformers==5.5.3",
     "torch-npu==2.9.0",
     "torch==2.9.0",
     "torchvision",
@@ -81,12 +81,11 @@ ignore = [
     "B007",
     # f-string format
     "UP032",
-    # TODO: FIE ME
-    "G004",
     "B904",
     "SIM108",
     "SIM102"
 ]
+logger-objects = ["vllm.logger.logger"]
 
 [tool.ruff.format]
 docstring-code-format = true
