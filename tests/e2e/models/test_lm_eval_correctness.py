@@ -14,7 +14,7 @@ warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
-RTOL = 0.05
+DEFAULT_RTOL = 0.05
 TEST_DIR = os.path.dirname(__file__)
 
 
@@ -113,6 +113,20 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         f.write(report_content)
 
 
+def resolve_metric_rtol(eval_config: dict, task: dict, metric: dict) -> float:
+    """Resolve relative tolerance with priority: metric > task > eval config > default."""
+    metric_rtol = metric.get("rtol")
+    if metric_rtol is not None:
+        return float(metric_rtol)
+    task_rtol = task.get("rtol")
+    if task_rtol is not None:
+        return float(task_rtol)
+    eval_rtol = eval_config.get("rtol")
+    if eval_rtol is not None:
+        return float(eval_rtol)
+    return DEFAULT_RTOL
+
+
 def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
@@ -122,6 +136,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
     model_args = build_model_args(eval_config, tp_size)
     success = True
     report_data: dict[str, list[dict]] = {"rows": []}
+    failure_details: list[str] = []
 
     eval_params = {
         "model": eval_config.get("model_type", "vllm"),
@@ -149,8 +164,17 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
             metric_name = metric["name"]
             ground_truth = metric["value"]
             measured_value = round(task_result[metric_name], 4)
-            task_success = bool(np.isclose(ground_truth, measured_value, rtol=RTOL))
+            rtol = resolve_metric_rtol(eval_config, task, metric)
+            task_success = bool(np.isclose(ground_truth, measured_value, rtol=rtol))
             success = success and task_success
+
+            if not task_success:
+                lower_bound = round(ground_truth * (1 - rtol), 4)
+                upper_bound = round(ground_truth * (1 + rtol), 4)
+                failure_details.append(
+                    f"{task_name}/{metric_name}: expected={ground_truth}, measured={measured_value}, "
+                    f"allowed=[{lower_bound}, {upper_bound}], rtol={rtol}"
+                )
 
             print(
                 f"{task_name} | {metric_name}: "
@@ -162,7 +186,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
                 {
                     "task": task_name,
                     "metric": metric_name,
-                    "value": f"✅{measured_value}" if success else f"❌{measured_value}",
+                    "value": f"✅{measured_value}" if task_success else f"❌{measured_value}",
                     "stderr": task_result[
                         metric_name.replace(",", "_stderr,")
                         if metric_name == "acc,none"
@@ -171,4 +195,4 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir, env_con
                 }
             )
     generate_report(tp_size, eval_config, report_data, report_dir, env_config)
-    assert success
+    assert success, "lm_eval correctness check failed:\n" + "\n".join(failure_details)
