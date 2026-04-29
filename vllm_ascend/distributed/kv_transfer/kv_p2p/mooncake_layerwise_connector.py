@@ -1586,14 +1586,14 @@ class MooncakeLayerwiseConnectorWorker:
                     )
 
                     # Load cache data into buffers
-                    torch_npu.atb.npu_paged_cache_load(
+                    torch.ops._C_ascend.npu_gather_pa_kv_cache_vllm(
                         kv_layer[0],
                         kv_layer[1],
                         send_task.group_block_table[layer_group_idx],
                         send_task.group_block_len_tensor[layer_group_idx],
-                        seq_starts=send_task.group_seq_start_tensor[layer_group_idx],
-                        key=keys,
-                        value=values,
+                        keys,
+                        values,
+                        send_task.group_seq_start_tensor[layer_group_idx],
                     )
                     if self.pd_head_ratio != 1:
                         # sort kv caches for each block
