@@ -46,6 +46,8 @@ test_cases:
       - "/"
       - "--mm-processor-cache-gb"
       - "0"
+      - "--safetensors-load-strategy"
+      - "eager"
     benchmarks:
       perf:
         case_type: performance
