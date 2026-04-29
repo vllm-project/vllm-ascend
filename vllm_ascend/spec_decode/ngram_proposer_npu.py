@@ -1,10 +1,29 @@
 import torch
-from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU
 
 
-class AscendNgramProposerNPU(NgramProposerGPU):
-    def __init__(self, vllm_config, device: torch.device, runner):
-        super().__init__(vllm_config, device=device)
+class AscendNgramProposerNPU:
+    """NPU-native N-gram speculative decoding proposer.
+
+    This class does NOT inherit from NgramProposerGPU to avoid the upstream
+    __init__ creating and compiling a GPU-specific NgramGPUKernel
+    (torch.compile) which is incompatible with NPU hardware.  The actual
+    propose logic is handled by the Ascend C kernel
+    ``torch.ops._C_ascend.npu_ngram_spec_decode`` called from
+    ``NPUModelRunner.propose_draft_token_ids``.
+    """
+
+    def __init__(self, vllm_config, device: torch.device, runner=None):
+        assert vllm_config.speculative_config is not None
+        assert vllm_config.speculative_config.prompt_lookup_min is not None
+        assert vllm_config.speculative_config.prompt_lookup_max is not None
+
+        self.vllm_config = vllm_config
+        self.min_n = vllm_config.speculative_config.prompt_lookup_min
+        self.max_n = vllm_config.speculative_config.prompt_lookup_max
+        self.k = vllm_config.speculative_config.num_speculative_tokens
+        self.max_model_len = vllm_config.model_config.max_model_len
+        self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        self.device = device
 
     def load_model(self, *args, **kwargs):
         # No model to load.
