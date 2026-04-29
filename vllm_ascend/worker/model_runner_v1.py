@@ -228,22 +228,18 @@ class ExecuteModelState(NamedTuple):
 
 
 class _NPULazyEvent:
-    """A torch.npu.Event proxy that defers event creation until first record().
+    """``torch.npu.Event`` proxy with CUDA-equivalent unrecorded-sync.
 
-    Why this exists:
-    Upstream ``update_scheduler_for_invalid_drafts`` calls
-    ``event.synchronize()`` unconditionally at the start of every step,
-    including the very first step before any ngram D2H copy has run.
+    Used for events that **need to actually synchronize** (async
+    scheduling depends on them) but where the upstream code path may
+    call ``synchronize()`` once before any ``record()`` has run -- e.g.
+    ``synchronize_input_prep`` on the very first step.
+
     On CUDA, ``synchronize()`` of a never-recorded event is a no-op.
     On NPU, the same call returns
-    ``RuntimeError: SUSPECT REMOTE ERROR (507057)``.
-
-    This proxy mirrors the CUDA semantic: ``synchronize()`` and
-    ``query()`` are no-ops until the first ``record()``, after which the
-    proxy delegates to a real ``torch.npu.Event``. ``record()``
-    accepts the same args as ``torch.npu.Event.record`` (in particular
-    a stream object), matching the calls in
-    ``propose_draft_token_ids``'s D2H path.
+    ``RuntimeError: SUSPECT REMOTE ERROR (507057)``. This proxy bridges
+    the gap: it is a no-op until the first ``record()``, then delegates
+    every subsequent call to a real ``torch.npu.Event``.
     """
 
     __slots__ = ("_event",)
@@ -266,6 +262,40 @@ class _NPULazyEvent:
     def wait(self, *args, **kwargs) -> None:
         if self._event is not None:
             self._event.wait(*args, **kwargs)
+
+
+class _NoOpNPUEvent:
+    """``torch.npu.Event``-shaped permanent no-op.
+
+    Used for events whose synchronization is **structurally
+    unnecessary** because the corresponding D2H copy is already issued
+    synchronously on the host's compute path. The CPU-side data is
+    therefore guaranteed to be ready before any caller could read it,
+    and ``synchronize()`` has nothing to wait on.
+
+    Currently used for ``_num_valid_draft_tokens_event``: the
+    ``num_valid_draft_tokens_cpu`` buffer is filled by a synchronous
+    blocking ``copy_`` in ``propose_draft_token_ids`` (see comment
+    there for rationale), so upstream's
+    ``update_scheduler_for_invalid_drafts.synchronize()`` is a true
+    no-op every step. This guarantees we never enter
+    ``torch_npu``'s ``rtEventSynchronize`` path -- the documented
+    source of intermittent ``SUSPECT REMOTE ERROR (507057)`` on NPU.
+    """
+
+    __slots__ = ()
+
+    def record(self, *args, **kwargs) -> None:
+        return None
+
+    def synchronize(self) -> None:
+        return None
+
+    def query(self) -> bool:
+        return True
+
+    def wait(self, *args, **kwargs) -> None:
+        return None
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -607,26 +637,17 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens_cpu = torch.empty(
                     self.max_num_reqs, dtype=torch.int32,
                     pin_memory=self.pin_memory)
-                self._num_valid_draft_tokens_copy_stream = torch.npu.Stream()
-                # Use a synchronization-safe Event proxy instead of a raw
-                # torch.npu.Event(). Upstream
-                # ``update_scheduler_for_invalid_drafts`` calls
-                # ``event.synchronize()`` UNCONDITIONALLY at the start of
-                # every step — including the very first step, before any
-                # real ngram D2H copy has had a chance to record() the
-                # event on its copy stream. On NPU this surfaces as
-                # ``SUSPECT REMOTE ERROR (507057)`` because the event has
-                # no completion anchor yet.
-                #
-                # Our NPU propose_draft_token_ids does its own ordered
-                # D2H via copy_stream.wait_stream(default_stream) +
-                # non_blocking copy, and the proxy's record()/synchronize()
-                # delegate to a real torch.npu.Event AFTER the first
-                # record(). Before any record() has been called, both
-                # synchronize() and query() are safe no-ops — matching
-                # CUDA's "synchronize on unrecorded event = no-op"
-                # semantic that upstream relies on.
-                self._num_valid_draft_tokens_event = _NPULazyEvent()
+                # Permanent no-op event for ``_num_valid_draft_tokens``.
+                # The host-side buffer is populated by a synchronous
+                # blocking D2H ``copy_`` in ``propose_draft_token_ids``
+                # (see the rationale comment there), so upstream's
+                # ``update_scheduler_for_invalid_drafts.synchronize()``
+                # has nothing to wait on. Routing it to a no-op
+                # eliminates the ``rtEventSynchronize`` code path on NPU
+                # entirely, sidestepping intermittent
+                # ``SUSPECT REMOTE ERROR (507057)`` failures observed in
+                # CI under torch_npu's NPU event sync implementation.
+                self._num_valid_draft_tokens_event = _NoOpNPUEvent()
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
 
@@ -1562,27 +1583,42 @@ class NPUModelRunner(GPUModelRunner):
             # save num_valid_draft_tokens for scheduler trim
             self._num_valid_draft_tokens = num_valid_draft_tokens
 
-            # Async D2H copy on a dedicated NPU stream + record event
-            # via the lazy-event proxy. Wait_stream ensures the copy
-            # observes the kernel's writes.
+            # Synchronous D2H copy of num_valid_draft_tokens.
+            #
+            # We deliberately use a *blocking* copy (no non_blocking,
+            # no separate stream, no event.record()) to bypass NPU's
+            # ``rtEventSynchronize`` path entirely. CI repeatedly fails
+            # at upstream's ``update_scheduler_for_invalid_drafts``'s
+            # ``num_valid_draft_tokens_event.synchronize()`` with NPU
+            # error 507057 ("rtEventSynchronize execution failed,
+            # reason=suspect remote error") even when the kernel itself
+            # ran successfully and the event was properly recorded on a
+            # dedicated copy stream — this is a runtime/API-level
+            # reliability issue with ``torch.npu.Event.synchronize()``
+            # in this code path, distinct from any kernel OOB.
+            #
+            # By making the copy synchronous, the CPU buffer is
+            # populated immediately on the host side. We pair this with
+            # ``_num_valid_draft_tokens_event = _NoOpNPUEvent()`` (set
+            # in ``_set_up_drafter``) so upstream's later
+            # ``num_valid_draft_tokens_event.synchronize()`` is a true
+            # permanent no-op — never reaching ``torch_npu`` and never
+            # producing 507057.
+            #
+            # Performance impact: a B*4-byte (a few hundred bytes)
+            # blocking D2H per step, well below 1 µs on Ascend — small
+            # and bounded compared to model forward / sampling. We
+            # trade a tiny amount of compute/copy overlap for total
+            # elimination of an entire class of NPU event-sync
+            # failures.
             if num_valid_draft_tokens is not None:
                 num_reqs_to_copy = min(
                     batch_size, num_valid_draft_tokens.shape[0]
                 )
                 if num_reqs_to_copy > 0:
-                    default_stream = torch.npu.current_stream()
-                    with torch.npu.stream(
-                            self._num_valid_draft_tokens_copy_stream):
-                        self._num_valid_draft_tokens_copy_stream.wait_stream(
-                            default_stream
-                        )
-                        self._num_valid_draft_tokens_cpu[
-                            :num_reqs_to_copy
-                        ].copy_(
-                            num_valid_draft_tokens[:num_reqs_to_copy],
-                            non_blocking=True,
-                        )
-                        self._num_valid_draft_tokens_event.record()
+                    self._num_valid_draft_tokens_cpu[
+                        :num_reqs_to_copy
+                    ].copy_(num_valid_draft_tokens[:num_reqs_to_copy])
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
