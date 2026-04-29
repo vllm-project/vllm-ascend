@@ -288,19 +288,25 @@ class KVPoolScheduler:
             load_spec = self.load_specs.pop(request.req_id, None)
             num_tokens_to_compute = request.num_computed_tokens + scheduler_output.num_scheduled_tokens[request.req_id]
             request_tuple = self._unfinished_requests.get(request.req_id)
+            if request_tuple is None:
+                raise ValueError(
+                    f"Request {request.req_id} is not in _unfinished_requests, "
+                    "but it is scheduled as a new request"
+                )
             request_real = request_tuple[0]  # type: ignore[index]
             if not isinstance(request.block_ids[0], list):
                 unfolded_block_ids = request.block_ids.copy()
             else:
                 unfolded_block_ids = request.block_ids[0].copy()
+            previous_tracker = self._request_trackers.get(request.req_id)
             request_tracker = RequestTracker(
                 req_id=request.req_id,
                 token_len=num_tokens_to_compute,
                 allocated_block_ids=unfolded_block_ids,
                 num_saved_tokens=0,
                 token_ids=request.prompt_token_ids[:num_tokens_to_compute].copy(),
-                block_keys=self._request_trackers[request.req_id].block_keys,
-                chunk_gvas=self._request_trackers[request.req_id].chunk_gvas,
+                block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
+                chunk_gvas=(previous_tracker.chunk_gvas.copy() if previous_tracker else []),
             )
             num_hit_blocks = len(request_tracker.block_keys)
             self._request_trackers[request.req_id] = request_tracker
@@ -354,6 +360,11 @@ class KVPoolScheduler:
                             can_load=True,
                         )
                     request_tuple = self._unfinished_requests.get(req_id)
+                    if request_tuple is None:
+                        raise ValueError(
+                            f"Request {req_id} is not in _unfinished_requests, "
+                            "but it is scheduled as a preempted cached request"
+                        )
                     request_real = request_tuple[0]  # type: ignore[index]
                     num_tokens_to_compute = (
                         request_real.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
@@ -393,7 +404,12 @@ class KVPoolScheduler:
 
                 # decode/chunked request
                 else:
-                    request_tracker = self._request_trackers[req_id]
+                    request_tracker = self._request_trackers.get(req_id)
+                    if request_tracker is None:
+                        raise ValueError(
+                            f"Request {req_id} is not in _request_trackers, "
+                            "but it is scheduled to be cached"
+                        )
                     num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
                     req_tuple = self._unfinished_requests.get(req_id)
                     if req_tuple:
