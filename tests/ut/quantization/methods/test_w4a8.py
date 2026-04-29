@@ -332,7 +332,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             top_k=top_k,
             renormalize=True,
             use_grouped_topk=False,
-            global_num_experts=num_experts,
+            num_experts=num_experts,
             expert_map=expert_map,
             scoring_func="softmax",
             routed_scaling_factor=1.0,
@@ -351,7 +351,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         select_call_args = mock_select.call_args
         self.assertTrue(torch.equal(select_call_args.kwargs["hidden_states"], x))
         self.assertEqual(select_call_args.kwargs["top_k"], top_k)
-        self.assertEqual(select_call_args.kwargs["global_num_experts"], num_experts)
+        self.assertEqual(select_call_args.kwargs["num_experts"], num_experts)
 
         mock_build_input.assert_called_once()
         build_kwargs = mock_build_input.call_args.kwargs
