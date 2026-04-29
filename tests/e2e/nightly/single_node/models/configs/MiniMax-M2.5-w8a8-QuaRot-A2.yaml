@@ -36,7 +36,7 @@ test_cases:
       - "--model-loader-extra-config"
       - '{"enable_multithread_load":true,"num_threads":16}'
       - "--speculative_config"
-      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagel-model-0318","num_speculative_tokens":3}'
+      - '{"method":"eagle3","model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318","num_speculative_tokens":3}'
       - "--enable-expert-parallel"
       - "--enable-chunked-prefill"
       - "--enable-prefix-caching"
