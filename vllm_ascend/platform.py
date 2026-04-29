@@ -49,7 +49,6 @@ from vllm_ascend.utils import (
     is_310p,
     enable_sp,
     vllm_version_is,
-    vllm_version_is,
 )
 
 if TYPE_CHECKING:

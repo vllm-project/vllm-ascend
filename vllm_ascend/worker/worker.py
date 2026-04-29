@@ -562,11 +562,6 @@ class NPUWorker(WorkerBase):
             encoder=self.compilation_config.encoder_compilation_time,
         )
 
-        return CompilationTimes(
-            language_model=self.vllm_config.compilation_config.compilation_time,
-            encoder=self.compilation_config.encoder_compilation_time,
-        )
-
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()
         weight = torch.rand((2, 4), dtype=torch.float16).npu()

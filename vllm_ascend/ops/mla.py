@@ -34,7 +34,6 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.utils import is_vl_model, parse_layer_idx, vllm_version_is
-from vllm_ascend.utils import is_vl_model, parse_layer_idx, vllm_version_is
 
 
 class IndexerWrapper(nn.Module):

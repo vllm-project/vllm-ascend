@@ -56,7 +56,6 @@ from vllm_ascend.utils import (
     get_weight_prefetch_method,
     maybe_trans_nz,
     vllm_version_is,
-    vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 

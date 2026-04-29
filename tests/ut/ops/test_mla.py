@@ -9,7 +9,6 @@ from vllm.model_executor.layers.mla import MLAModules
 from tests.ut.base import TestBase
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestIndexerWrapper(TestBase):

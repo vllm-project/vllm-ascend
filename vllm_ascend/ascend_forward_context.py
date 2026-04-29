@@ -21,7 +21,6 @@ from vllm_ascend.utils import (
     is_moe_model,
     speculative_enable_dispatch_gmm_combine_decode,
     vllm_version_is,
-    vllm_version_is,
 )
 
 
