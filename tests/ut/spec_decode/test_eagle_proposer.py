@@ -6,12 +6,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-import vllm_ascend.spec_decode.eagle_proposer as eagle_proposer
 from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
+import vllm_ascend.spec_decode.eagle_proposer as eagle_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
