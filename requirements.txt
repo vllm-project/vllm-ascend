@@ -22,12 +22,16 @@ pandas-stubs
 opencv-python-headless<=4.11.0.86 # Required to avoid numpy version conflict with vllm
 compressed_tensors>=0.11.0
 
-# requirements for disaggregated prefill
+# Required for disaggregated prefill
 msgpack
 quart
 
 # Required for N-gram speculative decoding
 numba
+
+# Required for kvpool supports memcache backend
+memfabric_hybrid==1.0.8
+memcache_hybrid==1.0.4
 
 # Install torch_npu
 #--pre
