@@ -14,20 +14,9 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-import logging
-import os
 
 import torch
 import vllm.v1.attention.backends.gdn_attn as gdn_attn
-
-logger = logging.getLogger(__name__)
-_GDN_DEBUG = bool(os.environ.get("GDN_DEBUG", ""))
-
-
-def _dbg(msg: str, *args) -> None:
-    """Print debug message only when GDN_DEBUG env var is set."""
-    if _GDN_DEBUG:
-        print(msg % args if args else msg, flush=True)
 
 from vllm_ascend.ops.triton.gdn_chunk_meta import (
     _build_seq_lens,
@@ -705,38 +694,6 @@ def _compute_all_mode_metadata(builder, attn_metadata, m):
     attn_metadata.scatter_src_indices_tensor = scatter_src_indices
     attn_metadata.scatter_dst_slots_tensor = scatter_dst_slots
 
-    # Clean block-level debug: one line per step showing scheduling behavior
-    if _GDN_DEBUG and num_prefills > 0:
-        for si in range(num_prefills):
-            idx = num_decodes + si
-            new_tok = query_lens[idx].item()
-            ctx = context_lens[idx].item()
-            hit = bool(has_context[idx].item())
-            src = block_state_indices[idx].item()
-            dst = dest_slots[idx].item()
-            blk_first = block_idx_first_scheduled[idx].item()
-            blk_last = block_idx_last_scheduled[idx].item()
-            n_scatter = max(0, blk_last - blk_first)
-            scat_slots = block_table_2d[idx, blk_first:blk_last].tolist() if n_scatter > 0 else []
-            n_total = blk_last + 1
-            all_slots = block_table_2d[idx, :n_total].tolist()
-            valid_set = set(scat_slots + [dst])
-            valid_ann = [
-                f"s{s}+" if s in valid_set else f"s{s}-"
-                for s in all_slots
-            ]
-            print(
-                f"[GDN-ALL] prefill seq{si}: "
-                f"new={new_tok} ctx={ctx} | "
-                f"{'HIT' if hit else 'no-hit'} | "
-                f"src={'slot' + str(src) if src >= 0 else '-'} "
-                f"dest=slot{dst} | "
-                f"scatter={n_scatter}blk{scat_slots}\n"
-                f"  block_table={all_slots} -> "
-                f"state_valid={valid_ann} (scatter+running)",
-                flush=True,
-            )
-
 
 def _patched_build(
     self,
@@ -760,41 +717,6 @@ def _patched_build(
     mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
     if mamba_cache_mode == "all":
         _compute_all_mode_metadata(self, attn_metadata, common_attn_metadata)
-
-    # Align-mode block table debug: show full allocation + running block
-    if (
-        _GDN_DEBUG
-        and mamba_cache_mode != "all"
-        and attn_metadata.num_prefills > 0
-    ):
-        _nd = attn_metadata.num_decodes
-        _np = attn_metadata.num_prefills
-        _ns = _nd + _np
-        _m = common_attn_metadata
-        _bs = self.kv_cache_spec.block_size
-        _full_bt = _m.block_table_tensor
-        _sl = _m.seq_lens[:_ns]
-        _ql = _m.query_start_loc[1:_ns + 1] - _m.query_start_loc[:_ns]
-        _cl = _sl - _ql
-        for _si in range(_np):
-            _idx = _nd + _si
-            _stok = _sl[_idx].item()
-            _ctx = _cl[_idx].item()
-            _ntok = _ql[_idx].item()
-            _nblk = (_stok + _bs - 1) // _bs
-            _slots = _full_bt[_idx, :_nblk].tolist()
-            _run = attn_metadata.non_spec_state_indices_tensor[_idx].item()
-            _ann = [
-                f"s{s}+" if s == _run else f"s{s}-"
-                for s in _slots
-            ]
-            print(
-                f"[GDN-ALIGN] prefill seq{_si}: "
-                f"new={_ntok} ctx={_ctx} -> {_nblk} blocks\n"
-                f"  block_table={_slots} -> "
-                f"state_valid={_ann} (running=slot{_run} only)",
-                flush=True,
-            )
 
     if attn_metadata.num_prefills <= 0:
         return attn_metadata

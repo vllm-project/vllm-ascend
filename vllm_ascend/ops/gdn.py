@@ -15,22 +15,13 @@
 # limitations under the License.
 #
 
-import logging
 import os
 
 import torch
 import torch_npu
 from einops import rearrange
 
-logger = logging.getLogger(__name__)
-_GDN_DEBUG = bool(os.environ.get("GDN_DEBUG", ""))
 _ALIGN_TRITON_CONV1D = bool(os.environ.get("GDN_ALIGN_TRITON_CONV1D", ""))
-
-
-def _dbg(msg: str, *args) -> None:
-    """Print debug message only when GDN_DEBUG env var is set."""
-    if _GDN_DEBUG:
-        print(msg % args if args else msg, flush=True)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
