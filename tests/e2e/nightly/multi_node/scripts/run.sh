@@ -159,16 +159,18 @@ checkout_src() {
 
 install_vllm_ascend() {
     echo "====> Install vllm-ascend"
-    pip install -r "$WORKSPACE/vllm-ascend/requirements-dev.txt"
-    pip install -e "$WORKSPACE/vllm-ascend"
 }
 
 install_aisbench() {
     echo "====> Install AISBench benchmark"
 
-    BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
+    cd "$WORKSPACE/vllm-ascend"
 
-    cp -r /tmp/aisbench-backup "$BENCH_DIR"
+    mv benchmark benchmark_bk
+
+    GIT_CONFIG_GLOBAL=/dev/null git clone -b v3.1-20260429-master https://github.com/AISBench/benchmark.git
+
+    BENCH_DIR="$WORKSPACE/vllm-ascend/benchmark"
 
     cd "$BENCH_DIR"
     pip install -e . \
