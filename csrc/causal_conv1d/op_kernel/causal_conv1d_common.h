@@ -11,7 +11,6 @@
 
 /*!
  * \file causal_conv1d_common.h
- * \brief Common utilities and constants for CausalConv1D prefill kernel.
  */
 
 #ifndef CAUSAL_CONV1D_COMMON_H
@@ -39,6 +38,28 @@ __aicore__ inline int32_t SlotPrefetch(int32_t t)
 {
     return (t + 4) % RING_SLOTS;
 }
+
+struct CalcBufLayout {
+    AscendC::LocalTensor<float> weightF;
+    AscendC::LocalTensor<float> biasF;
+    AscendC::LocalTensor<float> accF;
+    AscendC::LocalTensor<float> tmpF;
+    AscendC::LocalTensor<float> currF;
+
+    __aicore__ inline CalcBufLayout() = default;
+
+    __aicore__ static inline CalcBufLayout FromCalcBuf(AscendC::TBuf<AscendC::QuePosition::VECCALC> &calcBuf)
+    {
+        CalcBufLayout layout;
+        AscendC::LocalTensor<float> calc = calcBuf.template Get<float>();
+        layout.weightF = calc;
+        layout.biasF = calc[MAX_WIDTH * MAX_BLOCK_DIM];
+        layout.accF = layout.biasF[MAX_BLOCK_DIM];
+        layout.tmpF = layout.accF[MAX_BLOCK_DIM];
+        layout.currF = layout.tmpF[MAX_BLOCK_DIM];
+        return layout;
+    }
+};
 
 } // namespace NsCausalConv1dCommon
 
