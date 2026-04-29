@@ -326,11 +326,7 @@ async def _patched_chat_completion_stream_generator(
                             ),
                         )
 
-                    data = json.dumps(
-                        _filter_tool_call_null_fields(
-                            chunk.model_dump(exclude_unset=True)
-                        )
-                    )
+                    data = json.dumps(_filter_tool_call_null_fields(chunk.model_dump(exclude_unset=True)))
                     yield f"data: {data}\n\n"
 
                 if request.echo:
@@ -365,11 +361,7 @@ async def _patched_chat_completion_stream_generator(
                                     ),
                                 )
 
-                            data = json.dumps(
-                                _filter_tool_call_null_fields(
-                                    chunk.model_dump(exclude_unset=True)
-                                )
-                            )
+                            data = json.dumps(_filter_tool_call_null_fields(chunk.model_dump(exclude_unset=True)))
                             yield f"data: {data}\n\n"
                 first_iteration = False
 
@@ -772,11 +764,7 @@ async def _patched_chat_completion_stream_generator(
                         ),
                     )
 
-                data = json.dumps(
-                    _filter_tool_call_null_fields(
-                        chunk.model_dump(exclude_unset=True)
-                    )
-                )
+                data = json.dumps(_filter_tool_call_null_fields(chunk.model_dump(exclude_unset=True)))
                 yield f"data: {data}\n\n"
 
         if include_usage:
