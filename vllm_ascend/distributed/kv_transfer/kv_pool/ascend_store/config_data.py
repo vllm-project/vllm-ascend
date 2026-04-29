@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
@@ -359,6 +360,9 @@ class ReqMeta:
 
     sizes_per_chunk: list[list[int]] | None = None
 
+    block_ids_np: np.ndarray | None = None
+    chunk_gvas_np: np.ndarray | None = None
+
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
@@ -421,6 +425,7 @@ class ReqMeta:
             # Do not load if not in `can_load` state
             load_spec = None
         logger.debug(f"request:{tracker.req_id}, meta save spec:{not skip_save}, meta load spec:{load_spec}")
+        chunk_gvas = tracker.chunk_gvas.copy()
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
@@ -432,8 +437,10 @@ class ReqMeta:
             token_ids=token_ids,
             original_block_size=original_block_size,
             # TODO is this necessary?
-            chunk_gvas=tracker.chunk_gvas.copy(),
+            chunk_gvas=chunk_gvas,
             last_block_gva=tracker.last_block_gva,
+            block_ids_np=np.asarray(tracker.allocated_block_ids, dtype=np.int64),
+            chunk_gvas_np=np.asarray(chunk_gvas, dtype=np.int64),
         )
 
 
@@ -461,6 +468,16 @@ class LasyerMultiBlockReqMeta:
     current_event: torch.npu.Event | None = None
     chunk_gvas: list[int] = field(default_factory=list)
     last_block_gva: int | None = None
+    addr_list: list[int] | None = None
+    size_list: list[int] | None = None
+    gvas_list: list[int] | None = None
+
+
+@dataclass
+class LayerBatchReqMeta:
+    req_ids: list[str]
+    layer_id: int
+    is_last_chunks: list[bool | None] = field(default_factory=list)
     addr_list: list[int] | None = None
     size_list: list[int] | None = None
     gvas_list: list[int] | None = None
