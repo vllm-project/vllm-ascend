@@ -42,6 +42,9 @@
 #include "moe_combine_normal/moe_combine_normal_torch_adpt.h"
 #include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
+#include "paged_select_attention/paged_select_attention_torch_adpt.h"
+#include "quest_block_select_paged/quest_block_select_paged_torch_adpt.h"
+#include "quest_prefill_metadata/quest_prefill_metadata_torch_adpt.h"
 #include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
@@ -1140,6 +1143,71 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def(
+        "npu_paged_select_attention(Tensor query, Tensor key, Tensor value,"
+        "                           int[] actual_seq_lengths, int[] actual_seq_lengths_kv,"
+        "                           Tensor block_table, Tensor selected_kv_indices,"
+        "                           int num_heads, float scale_value,"
+        "                           int num_key_value_heads, int block_size) -> Tensor"
+    );
+    ops.impl("npu_paged_select_attention", torch::kPrivateUse1, &vllm_ascend::npu_paged_select_attention);
+
+    ops.def(
+        "npu_paged_select_attention_out(Tensor query, Tensor key, Tensor value,"
+        "                               int[] actual_seq_lengths, int[] actual_seq_lengths_kv,"
+        "                               Tensor block_table, Tensor selected_kv_indices,"
+        "                               int num_heads, float scale_value,"
+        "                               int num_key_value_heads, int block_size,"
+        "                               Tensor! out) -> Tensor"
+    );
+    ops.impl("npu_paged_select_attention_out", torch::kPrivateUse1, &vllm_ascend::npu_paged_select_attention_out);
+
+    ops.def(
+        "npu_paged_select_attention_get_workspace(Tensor query, Tensor key, Tensor value,"
+        "                                         int[] actual_seq_lengths, int[] actual_seq_lengths_kv,"
+        "                                         Tensor block_table, Tensor selected_kv_indices,"
+        "                                         int num_heads, float scale_value,"
+        "                                         int num_key_value_heads, int block_size,"
+        "                                         Tensor output) -> Tensor"
+    );
+    ops.impl(
+        "npu_paged_select_attention_get_workspace",
+        torch::kPrivateUse1,
+        &vllm_ascend::npu_paged_select_attention_get_workspace);
+
+    ops.def(
+        "npu_paged_select_attention_graph_out(Tensor query, Tensor key, Tensor value,"
+        "                                     int[] actual_seq_lengths, int[] actual_seq_lengths_kv,"
+        "                                     Tensor block_table, Tensor selected_kv_indices,"
+        "                                     int num_heads, float scale_value,"
+        "                                     int num_key_value_heads, int block_size,"
+        "                                     Tensor workspace, Tensor! out) -> Tensor"
+    );
+    ops.impl(
+        "npu_paged_select_attention_graph_out",
+        torch::kPrivateUse1,
+        &vllm_ascend::npu_paged_select_attention_graph_out);
+
+    ops.def(
+        "npu_quest_prefill_metadata(Tensor k_cache, Tensor block_tables, Tensor seq_lens,"
+        "                           Tensor metadata_block_tables, Tensor! maxblocks, Tensor! minblocks) -> ()"
+    );
+    ops.impl("npu_quest_prefill_metadata", torch::kPrivateUse1, &vllm_ascend::npu_quest_prefill_metadata);
+
+    ops.def(
+        "npu_quest_block_select_paged(Tensor query, Tensor maxblocks, Tensor minblocks,"
+        "                             Tensor metadata_block_tables, Tensor seq_lens,"
+        "                             int k, int tokens_since_metadata_update=-1) -> Tensor"
+    );
+    ops.impl("npu_quest_block_select_paged", torch::kPrivateUse1, &vllm_ascend::npu_quest_block_select_paged);
+
+    ops.def(
+        "npu_quest_block_select_paged_out(Tensor query, Tensor maxblocks, Tensor minblocks,"
+        "                                 Tensor metadata_block_tables, Tensor seq_lens,"
+        "                                 Tensor! out, int tokens_since_metadata_update=-1) -> Tensor"
+    );
+    ops.impl("npu_quest_block_select_paged_out", torch::kPrivateUse1, &vllm_ascend::npu_quest_block_select_paged_out);
 
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
