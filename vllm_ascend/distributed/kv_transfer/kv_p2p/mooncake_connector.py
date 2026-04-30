@@ -373,6 +373,7 @@ class KVCacheRecvingThread(threading.Thread):
         tp_num_need_pulls: int,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         all_task_done: bool = False,
+        decode_cp_size: int | None = None,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -391,6 +392,7 @@ class KVCacheRecvingThread(threading.Thread):
                 "tp_num_need_pulls": tp_num_need_pulls,
                 "remote_port_send_num": remote_port_send_num,
                 "all_task_done": all_task_done,
+                "decode_cp_size": decode_cp_size,
             }
         )
 
@@ -423,6 +425,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port = req_meta["remote_handshake_port"]
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
+        decode_cp_size = req_meta["decode_cp_size"]
 
         try:
             logger.debug(f"Starting to transfer KV cache for request {remote_request_id}.")
@@ -431,7 +434,7 @@ class KVCacheRecvingThread(threading.Thread):
         except Exception as e:
             logger.error(f"Failed to transfer KV cache for request {remote_request_id}: {e}", exc_info=True)
         finally:
-            self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
+            self._send_done_signal_to_free_remote_port(remote_request_id, decode_cp_size, remote_port_send_num)
             if all_task_done:
                 if len(req_meta["local_block_ids"]) > 0:
                     self.task_tracker.update_done_task_count(request_id)
@@ -444,9 +447,12 @@ class KVCacheRecvingThread(threading.Thread):
             self._send_done_recv_signal(remote_request_id, remote_host, remote_handshake_port, remote_port_send_num)
 
     def _send_done_signal_to_free_remote_port(
-        self, request_id: str, remote_host: str, remote_port_send_num: dict[int, RemotePortInfo]
+        self, request_id: str, decode_cp_size: int | None, remote_port_send_num: dict[int, RemotePortInfo]
     ):
-        if self.side_channel_port != self.local_handshake_port or not remote_port_send_num:
+        if not remote_port_send_num:
+            return
+        dycp_size_is_1_bool = decode_cp_size is not None and decode_cp_size == 1
+        if (dycp_size_is_1_bool and self.tp_rank != 0) or ( not dycp_size_is_1_bool and self.side_channel_port != self.local_handshake_port):
             return
         if request_id not in self.proc_not_transfer_request:
             self.proc_not_transfer_request[request_id] = True
@@ -839,6 +845,7 @@ class MooncakeConnector(KVConnectorBase_V1):
     def clear_reqs_need_recv(self):
         self.connector_scheduler._reqs_need_recv.clear()
         self.connector_scheduler._reqs_need_send = {}
+        self.connector_scheduler._reqs_need_send_cp_ranks = {}
         self.connector_scheduler._reqs_in_batch = set()
 
     def request_finished(
@@ -950,6 +957,7 @@ class MooncakeConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int], int]] = {}
         self._reqs_need_send: dict[str, float] = {}
+        self._reqs_need_send_cp_ranks: dict[str, list[int]] = {}
         self._reqs_in_batch: set[str] = set()
 
         # master-slave meta information for cross-nodes
@@ -982,7 +990,10 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % self.block_size == 0
             # Note: We use the full token count as transmit data here.
-            count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
+            # [AntGroup] The prefill node appends the first output token to
+            # prompt_token_ids, so subtract 1 to get the original prompt length.
+            num_original_prompt_tokens = len(request.prompt_token_ids) - 1
+            count = max(num_original_prompt_tokens - num_computed_tokens, 0)
             return count, count > 0
 
         # No remote prefill for this request.
@@ -1039,10 +1050,13 @@ class MooncakeConnectorScheduler:
             )
 
         # Clear the list once workers start the transfers
-        # TODO(wangxiaochao): need to check self._reqs_need_send is equal with cp scheduler_output
         if self.dp_per_domain > 1:
+            cp_rank = getattr(scheduler_output, 'cp_rank', None)
             for req_id in self._reqs_need_send:
-                if req_id in scheduler_output.cp_rank_to_req_id:
+                req_cp_ranks = self._reqs_need_send_cp_ranks.get(req_id)
+                if req_cp_ranks is not None and cp_rank is not None and cp_rank in req_cp_ranks:
+                    meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
+                elif req_id in scheduler_output.cp_rank_to_req_id:
                     meta.requests_to_send[req_id] = self._reqs_need_send[req_id]
             for req_id in self._reqs_in_batch:
                 if req_id in scheduler_output.cp_rank_to_req_id:
@@ -1085,6 +1099,7 @@ class MooncakeConnectorScheduler:
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s", len(computed_block_ids), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
+            self._reqs_need_send_cp_ranks[request.request_id] = list(request.cp_ranks)
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
 
@@ -1657,10 +1672,10 @@ class MooncakeConnectorWorker:
             remote_req_id = meta.remote_request_id
 
             if len(meta.remote_dycp_ranks) > 0 or meta.remote_pcp_size * meta.remote_dcp_size > 1 or self.dp_per_domain > 1:
-                rank_id = torch.distributed.get_rank()
                 remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
                     req_id, meta
                 )
+                decode_cp_size = len(meta.local_dycp_ranks) if meta.local_dycp_ranks else None
 
                 for pcp_dcp_rank in range(len(remote_handshake_port_list)):
                     for i in range(tp_num_need_pulls):
@@ -1686,6 +1701,7 @@ class MooncakeConnectorWorker:
                             all_task_done=(
                                 pcp_dcp_rank == len(remote_handshake_port_list) - 1 and i == tp_num_need_pulls - 1
                             ),
+                            decode_cp_size=decode_cp_size,
                         )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)

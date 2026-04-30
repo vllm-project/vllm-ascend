@@ -1175,8 +1175,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 dycp_attn_output.to(attn_output.dtype)
             )
             return self._v_up_proj(attn_output)
-        attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
-        attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
+        elif self.dycp_size == 1:
+            attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
+            attn_output = _npu_attention_update(self.kv_lora_rank, attn_out_lse)
         return self._v_up_proj(attn_output)
 
     def _out_lse_reshape(self, attn_out: torch.Tensor, attn_lse: torch.Tensor) -> torch.Tensor:
