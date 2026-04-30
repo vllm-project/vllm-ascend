@@ -215,10 +215,11 @@ def chunk_gated_delta_rule_fwd_h(
     # state_dtype only controls final_state (for pool compatibility).
     h = k.new_empty(B, NT, H, K, V, dtype=k.dtype)
     h_update = k.new_empty(B, NT, H, K, K)
-    final_state = (k.new_empty(
-        N, H, K, V,
-        dtype=state_dtype if state_dtype is not None else torch.float32)
-        if output_final_state else None)
+    final_state = (
+        k.new_empty(N, H, K, V, dtype=state_dtype if state_dtype is not None else torch.float32)
+        if output_final_state
+        else None
+    )
 
     v_new = torch.empty_like(u) if save_new_value else None
     g = g.transpose(1, 2).contiguous()

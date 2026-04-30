@@ -151,22 +151,20 @@ def causal_conv1d_fn(
         initial_state_idx,
         num_computed_tokens,
     ):
-        if query_start_loc is None:
-            raise RuntimeError("APC causal_conv1d_fn requires query_start_loc for varlen inputs.")
         if cache_indices is None or cache_indices.dim() != 2:
-            raise RuntimeError("APC causal_conv1d_fn requires 2D cache_indices block tables.")
-        if has_initial_state is None:
-            raise RuntimeError("APC causal_conv1d_fn requires has_initial_state.")
-        if conv_states is None:
-            raise RuntimeError("APC causal_conv1d_fn requires conv_states.")
-        if block_idx_first_scheduled_token is None:
-            raise RuntimeError("APC causal_conv1d_fn requires block_idx_first_scheduled_token.")
-        if block_idx_last_scheduled_token is None:
-            raise RuntimeError("APC causal_conv1d_fn requires block_idx_last_scheduled_token.")
-        if initial_state_idx is None:
-            raise RuntimeError("APC causal_conv1d_fn requires initial_state_idx.")
-        if num_computed_tokens is None:
-            raise RuntimeError("APC causal_conv1d_fn requires num_computed_tokens.")
+            raise RuntimeError("APC causal_conv1d_fn requires a 2D block table.")
+        if query_start_loc is None or has_initial_state is None or conv_states is None:
+            raise RuntimeError("APC causal_conv1d_fn requires varlen state metadata.")
+        if any(
+            tensor is None
+            for tensor in (
+                block_idx_first_scheduled_token,
+                block_idx_last_scheduled_token,
+                initial_state_idx,
+                num_computed_tokens,
+            )
+        ):
+            raise RuntimeError("APC causal_conv1d_fn requires block metadata.")
         if null_block_id != pad_slot_id:
             cache_indices = torch.where(
                 cache_indices == null_block_id,
@@ -792,7 +790,7 @@ def _normalize_apc_input_layout(
     weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, bool]:
     if x.dim() != 2:
-        raise RuntimeError(f"APC causal_conv1d_fn expects 2D input, got x.dim()={x.dim()}")
+        raise RuntimeError("APC causal_conv1d_fn expects 2D input.")
 
     input_is_dim_major = False
     if weight.shape[0] == x.shape[1]:
@@ -810,10 +808,7 @@ def _normalize_apc_input_layout(
         x_row_major = x.transpose(0, 1)
         weight_row_major = weight.transpose(0, 1)
     else:
-        raise RuntimeError(
-            "APC causal_conv1d_fn could not infer input layout: "
-            f"x.shape={tuple(x.shape)}, weight.shape={tuple(weight.shape)}"
-        )
+        raise RuntimeError("APC causal_conv1d_fn could not infer input layout.")
 
     if x_row_major.stride(-1) != 1:
         x_row_major = x_row_major.contiguous()
@@ -1127,10 +1122,7 @@ def _causal_conv1d_fwd_npu(
     if conv_states.shape[-2] != dim_val and conv_states.shape[-1] == dim_val:
         conv_states = conv_states.transpose(-1, -2)
     if conv_states.shape[-2] != dim_val:
-        raise RuntimeError(
-            "APC causal_conv1d_fn: conv_states dim mismatch, "
-            f"expected dim={dim_val}, conv_states.shape={tuple(conv_states.shape)}"
-        )
+        raise RuntimeError("APC causal_conv1d_fn conv_states dim mismatch.")
     if block_size_to_align <= 0:
         raise RuntimeError("APC causal_conv1d_fn requires block_size_to_align > 0.")
     if any(
@@ -1142,14 +1134,14 @@ def _causal_conv1d_fwd_npu(
             num_computed_tokens,
         )
     ):
-        raise RuntimeError("APC causal_conv1d_fn requires complete block metadata.")
+        raise RuntimeError("APC causal_conv1d_fn requires block metadata.")
 
     original_dtype = x_row_major.dtype
     x_row_major = x_row_major.to(conv_states.dtype)
     out = torch.empty_like(x_row_major)
 
     _, width = weight_row_major.shape
-    assert width == 4, f"Only KERNEL_WIDTH=4 supported, got {width}"
+    assert width == 4, "Only KERNEL_WIDTH=4 is supported."
     state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
 
@@ -1167,12 +1159,10 @@ def _causal_conv1d_fwd_npu(
     stride_istate_seq = conv_states.stride(0)
     stride_istate_dim = conv_states.stride(1)
     stride_istate_token = conv_states.stride(2)
-    assert stride_istate_dim == 1, f"conv_states must be dim-contiguous, got stride(1)={stride_istate_dim}"
+    assert stride_istate_dim == 1, "conv_states must be dim-contiguous."
 
     stride_cache_indices = cache_indices.stride(0)
-    assert (block_size_to_align % block_m) == 0, (
-        f"block_size ({block_size_to_align}) not divisible by BLOCK_M ({block_m})"
-    )
+    assert (block_size_to_align % block_m) == 0, "block_size must be divisible by BLOCK_M."
 
     batch_ptr, token_chunk_offset_ptr, num_programs = compute_conv1d_grid_npu(
         query_start_loc,

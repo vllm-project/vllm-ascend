@@ -572,17 +572,14 @@ def _compute_all_mode_metadata(builder, attn_metadata, m):
 
     if attn_metadata.spec_state_indices_tensor is not None:
         raise AssertionError(
-            "spec decode batches must be rerouted to align-mode metadata "
-            "before all-mode metadata computation"
+            "spec decode batches must be rerouted to align-mode metadata before all-mode metadata computation"
         )
 
     # In "all" mode, mamba_get_block_table_tensor returns the full table
     block_table_2d = m.block_table_tensor[:num_seqs]  # [num_seqs, max_blocks]
 
     seq_lens = m.seq_lens[:num_seqs]
-    query_lens = (
-        m.query_start_loc[1:num_seqs + 1] - m.query_start_loc[:num_seqs]
-    )
+    query_lens = m.query_start_loc[1 : num_seqs + 1] - m.query_start_loc[:num_seqs]
     context_lens = seq_lens - query_lens
 
     # DEST block index: last block containing scheduled tokens
@@ -599,16 +596,12 @@ def _compute_all_mode_metadata(builder, attn_metadata, m):
     )
     block_state_indices = torch.where(
         has_context,
-        block_table_2d.gather(
-            1, source_block_idx.unsqueeze(1).long()
-        ).squeeze(1),
+        block_table_2d.gather(1, source_block_idx.unsqueeze(1).long()).squeeze(1),
         torch.full((num_seqs,), -1, dtype=block_table_2d.dtype, device=device),
     )
 
     # DEST pool slots: block containing the last scheduled token
-    dest_slots = block_table_2d.gather(
-        1, block_idx_last_scheduled.unsqueeze(1).long()
-    ).squeeze(1)
+    dest_slots = block_table_2d.gather(1, block_idx_last_scheduled.unsqueeze(1).long()).squeeze(1)
 
     # Override non_spec_state_indices_tensor:
     # upstream set it to block_table[:, 0] (block 0), we need DEST block
@@ -626,12 +619,8 @@ def _compute_all_mode_metadata(builder, attn_metadata, m):
         prefill_context_lens = context_lens[num_decodes:]
         prefill_block_first = block_idx_first_scheduled[num_decodes:]
         prefill_block_last = block_idx_last_scheduled[num_decodes:]
-        prefill_chunk_counts = (
-            (prefill_query_lens + chunk_size - 1) // chunk_size
-        )
-        offsets = torch.zeros(
-            num_prefills + 1, dtype=torch.long, device=device
-        )
+        prefill_chunk_counts = (prefill_query_lens + chunk_size - 1) // chunk_size
+        offsets = torch.zeros(num_prefills + 1, dtype=torch.long, device=device)
         torch.cumsum(prefill_chunk_counts, dim=0, out=offsets[1:])
         prefill_chunk_offsets = offsets
 
@@ -658,18 +647,12 @@ def _compute_all_mode_metadata(builder, attn_metadata, m):
         )
         if scatter_seq_ids.numel() > 0:
             scatter_prefix = torch.cumsum(scatter_counts, dim=0) - scatter_counts
-            local_offsets = (
-                torch.arange(scatter_seq_ids.numel(), device=device, dtype=torch.long)
-                - torch.repeat_interleave(scatter_prefix, scatter_counts)
-            )
+            local_offsets = torch.arange(
+                scatter_seq_ids.numel(), device=device, dtype=torch.long
+            ) - torch.repeat_interleave(scatter_prefix, scatter_counts)
             scatter_rows = block_table_2d[num_decodes:].index_select(0, scatter_seq_ids)
-            scatter_block_indices = (
-                prefill_block_first.to(torch.long).index_select(0, scatter_seq_ids)
-                + local_offsets
-            )
-            scatter_dst_slots = scatter_rows.gather(
-                1, scatter_block_indices.unsqueeze(1)
-            ).squeeze(1).to(torch.long)
+            scatter_block_indices = prefill_block_first.to(torch.long).index_select(0, scatter_seq_ids) + local_offsets
+            scatter_dst_slots = scatter_rows.gather(1, scatter_block_indices.unsqueeze(1)).squeeze(1).to(torch.long)
             scatter_src_indices = (
                 prefill_chunk_offsets[:-1].index_select(0, scatter_seq_ids)
                 + prefill_chunk_start

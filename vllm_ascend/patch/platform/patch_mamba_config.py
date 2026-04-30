@@ -41,10 +41,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         and cache_config.mamba_cache_mode == "align"
     ):
         cache_config.mamba_cache_mode = "all"
-        logger.info(
-            "Restoring mamba_cache_mode='all' (NPU all-mode prefix "
-            "caching is supported in vllm-ascend)."
-        )
+        logger.info("Restoring mamba_cache_mode='all' (NPU all-mode prefix caching is supported in vllm-ascend).")
 
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
@@ -147,6 +144,7 @@ def _patched_scheduler_init(self, *args, **kwargs):
 
 
 _Scheduler.__init__ = _patched_scheduler_init
+
 
 # =============================================================================
 # Patch: Remove float32 validation in linear_attention_state_dtype
