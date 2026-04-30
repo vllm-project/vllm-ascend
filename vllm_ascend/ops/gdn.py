@@ -18,7 +18,6 @@
 import torch
 import torch_npu
 from einops import rearrange
-
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
@@ -161,7 +160,6 @@ def _write_final_states(
             ssm_state[p_dest.index_select(0, valid_idx).long()] = state
 
 
-
 def _scatter_intermediate_states(
     ssm_state: torch.Tensor,
     chunk_history: torch.Tensor,
@@ -192,8 +190,7 @@ def _scatter_intermediate_states(
     write_states = chunk_history.index_select(0, src_indices.long()).to(ssm_state.dtype)
     if dst_slots.numel() != write_states.shape[0]:
         raise RuntimeError(
-            "Scatter plan mismatch: scatter_dst_slots_tensor and gathered "
-            "chunk_history rows must have the same length."
+            "Scatter plan mismatch: scatter_dst_slots_tensor and gathered chunk_history rows must have the same length."
         )
     if write_states.numel() == 0:
         return
@@ -535,7 +532,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
         # 1.2: Process the remaining part
-        is_all_mode = getattr(attn_metadata, 'is_all_mode', False)
+        is_all_mode = getattr(attn_metadata, "is_all_mode", False)
         if is_all_mode:
             mixed_qkv_non_spec = _run_all_mode_non_spec_conv1d(
                 mixed_qkv_non_spec,
@@ -790,8 +787,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
             else:
                 core_attn_out_spec, core_attn_out_non_spec = None, None
-            maybe_save_kv_layer_to_connector("", [])
-
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(
