@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import torch
 import vllm.v1.attention.backends.gdn_attn as gdn_attn
+from vllm.logger import init_logger
 
 from vllm_ascend.ops.triton.gdn_chunk_meta import (
     _build_seq_lens,
@@ -32,6 +33,8 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 
 _IS_PATCHED = False
 _ORIGINAL_BUILD = gdn_attn.GDNAttentionMetadataBuilder.build
+_FALLBACK_ALL_MODE_SPEC_WARNED = False
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -569,8 +572,9 @@ def _compute_all_mode_metadata(builder, attn_metadata, m):
     device = m.query_start_loc.device
 
     if attn_metadata.spec_state_indices_tensor is not None:
-        raise NotImplementedError(
-            "all-mode prefix caching with spec decode not yet supported"
+        raise AssertionError(
+            "spec decode batches must be rerouted to align-mode metadata "
+            "before all-mode metadata computation"
         )
 
     # In "all" mode, mamba_get_block_table_tensor returns the full table
@@ -695,6 +699,17 @@ def _compute_all_mode_metadata(builder, attn_metadata, m):
     attn_metadata.scatter_dst_slots_tensor = scatter_dst_slots
 
 
+def _warn_all_mode_spec_fallback_once() -> None:
+    global _FALLBACK_ALL_MODE_SPEC_WARNED
+    if _FALLBACK_ALL_MODE_SPEC_WARNED:
+        return
+    logger.warning(
+        "mamba_cache_mode='all' does not support speculative decode yet; "
+        "falling back to align-mode metadata for this batch."
+    )
+    _FALLBACK_ALL_MODE_SPEC_WARNED = True
+
+
 def _patched_build(
     self,
     common_prefix_len: int,
@@ -703,20 +718,37 @@ def _patched_build(
     num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     fast_build: bool = False,
 ):
-    attn_metadata = _ORIGINAL_BUILD(
-        self,
-        common_prefix_len,
-        common_attn_metadata,
-        num_accepted_tokens=num_accepted_tokens,
-        num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
-        fast_build=fast_build,
-    )
+    cache_config = self.vllm_config.cache_config
+
+    def _build_with_cache_mode(cache_mode: str | None = None):
+        saved_mode = cache_config.mamba_cache_mode
+        if cache_mode is not None:
+            cache_config.mamba_cache_mode = cache_mode
+        try:
+            return _ORIGINAL_BUILD(
+                self,
+                common_prefix_len,
+                common_attn_metadata,
+                num_accepted_tokens=num_accepted_tokens,
+                num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+                fast_build=fast_build,
+            )
+        finally:
+            cache_config.mamba_cache_mode = saved_mode
+
+    attn_metadata = _build_with_cache_mode()
     attn_metadata.non_spec_prefill_fallback_meta = None
     attn_metadata.is_all_mode = False
 
-    mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+    mamba_cache_mode = cache_config.mamba_cache_mode
     if mamba_cache_mode == "all":
-        _compute_all_mode_metadata(self, attn_metadata, common_attn_metadata)
+        if attn_metadata.spec_state_indices_tensor is not None:
+            _warn_all_mode_spec_fallback_once()
+            attn_metadata = _build_with_cache_mode("align")
+            attn_metadata.non_spec_prefill_fallback_meta = None
+            attn_metadata.is_all_mode = False
+        else:
+            _compute_all_mode_metadata(self, attn_metadata, common_attn_metadata)
 
     if attn_metadata.num_prefills <= 0:
         return attn_metadata

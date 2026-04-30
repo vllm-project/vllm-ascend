@@ -255,6 +255,8 @@ def chunk_gated_delta_rule(
             Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+        intermediate_states (torch.Tensor):
+            Returned only when `return_intermediate_states=True`.
 
     Examples::
         >>> import torch
@@ -334,4 +336,6 @@ def chunk_gated_delta_rule(
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
-    return o, final_state, intermediate_states
+    if return_intermediate_states:
+        return o, final_state, intermediate_states
+    return o, final_state
