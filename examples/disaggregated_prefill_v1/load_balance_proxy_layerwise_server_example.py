@@ -536,9 +536,9 @@ async def _handle_completions(api: str, request: Request):
                     e,
                     request_id,
                 )
-
-            # After streaming done, release tokens
-            proxy_state.release_decoder(decoder_idx, decoder_score)
+            finally:
+                # After streaming done, release tokens
+                proxy_state.release_decoder(decoder_idx, decoder_score)
 
         if stream_flag:
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
@@ -602,11 +602,10 @@ async def metaserver(request: Request):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay,
         )
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
     except Exception as e:
         logger.error("Post metaserver failed with: %s", e)
+    finally:
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
         proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
