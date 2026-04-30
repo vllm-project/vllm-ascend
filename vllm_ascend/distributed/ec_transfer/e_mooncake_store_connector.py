@@ -202,9 +202,9 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                             raise ValueError(f"Unexpected ACK response: {ack}")
                 logger.info("rank %s send the feat key %s", get_world_group().local_rank, feat_key)
                 self.send_queue.task_done()
-            except Exception as e:
+            except Exception:
                 # 捕获所有异常，避免线程退出
-                logger.error("send tensor info: {feat_key} to consumer, error code: {str(e)}")
+                logger.error("send tensor info: {feat_key} to consumer")
                 # 确保队列任务完成，避免死锁
                 if "feat_key" in locals():
                     self.send_queue.task_done()
@@ -218,9 +218,9 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 feat_key, tensor_bytes, tensor_shape, tensor_dtype = decoder.decode(payload)
                 self.handle_caches[feat_key] = (tensor_bytes, tensor_shape, getattr(torch, tensor_dtype))
                 self.recv_queue.task_done()
-            except Exception as e:
+            except Exception:
                 # 捕获所有异常，避免线程退出
-                logger.error("recv tensor info: {feat_key} recv error, error code: {str(e)}")
+                logger.error("recv tensor info: {feat_key} recv error")
                 # 确保队列任务完成，避免死锁
                 if "feat_key" in locals():
                     self.recv_queue.task_done()
