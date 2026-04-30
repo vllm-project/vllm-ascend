@@ -24,7 +24,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
 - `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Last month, it was supported; you can use the following quantization scheme to add mtp weights to the quantized weights.
 - `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
-- `Method of Quantify`: [quantization scheme](https://blog.csdn.net/qq_37368095/article/details/156429653?spm=1011.2124.3001.6209). You can use these methods to quantify the model.
+- `Method of Quantify`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantify the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -530,6 +530,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
@@ -598,6 +600,8 @@ Before you start, please
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
+        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
+        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1

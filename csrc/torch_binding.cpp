@@ -1036,8 +1036,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd)"
         );
     ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
-    ops.def("weak_ref_tensor(Tensor input) -> Tensor");
-    ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
 
     ops.def(
         "get_masked_input_and_mask(Tensor input, "
@@ -1147,7 +1145,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
         "                     Tensor[] scale1, Tensor[] scale2, Tensor[]? bias1, Tensor[]? bias2, Tensor probs, str group,"
-        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums) -> (Tensor out, Tensor expert_token_nums)"
+        "                     int max_output_size, Tensor! out, Tensor! expert_token_nums, Tensor? x_active_mask=None) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
