@@ -28,7 +28,6 @@ import torch
 import torch_npu
 from safetensors import safe_open
 from vllm.config import get_current_vllm_config
-from vllm.logger import logger
 
 from vllm_ascend.ops.fast_hadamard import (
     fast_hadamard_dynamic_quant_blockwise_last_dim,
@@ -67,8 +66,6 @@ class _QuaRotSpec:
     LEAN_H_ONLY_SUPPORTED_Q_MODES = frozenset({"randomized_hadamard", "identity"})
     FFN_HADAMARD_LAYOUT = "pow2_last_dim"
     ATTENTION_CONTRACT = "lean_h_only"
-    DEBUG_VALUE_PATH_ENV = "VLLM_ASCEND_QUAROT_DEBUG_VALUE_PATH"
-    DEBUG_ATTN_COMPARE_ENV = "VLLM_ASCEND_QUAROT_DEBUG_ATTN_COMPARE"
 
 
 _QUAROT_SPEC = _QuaRotSpec()
@@ -96,145 +93,6 @@ class HadamardDispatch:
 
 def _layer_prefix(layer: torch.nn.Module) -> str:
     return getattr(layer, "prefix", None) or getattr(layer, "layer_name", "unknown")
-
-
-def _quarot_debug_value_path_enabled() -> bool:
-    return os.getenv(_QUAROT_SPEC.DEBUG_VALUE_PATH_ENV) == "1"
-
-
-def _quarot_debug_attn_compare_enabled() -> bool:
-    return os.getenv(_QUAROT_SPEC.DEBUG_ATTN_COMPARE_ENV) == "1"
-
-
-def _tensor_debug_summary(tensor: torch.Tensor) -> dict[str, object]:
-    if tensor.numel() == 0:
-        return {"shape": tuple(tensor.shape), "dtype": str(tensor.dtype), "empty": True}
-    flat = tensor.detach().reshape(-1).to(torch.float32).cpu()
-    sample = flat[:16].tolist()
-    return {
-        "shape": tuple(tensor.shape),
-        "dtype": str(tensor.dtype),
-        "min": float(flat.min().item()),
-        "max": float(flat.max().item()),
-        "mean": float(flat.mean().item()),
-        "sample": sample,
-    }
-
-
-def _maybe_log_value_path(layer: torch.nn.Module, stage: str, tensor: torch.Tensor) -> None:
-    if not _quarot_debug_value_path_enabled():
-        return
-    prefix = _layer_prefix(layer).lower()
-    allowed_prefixes = (
-        {f"model.layers.{idx}.self_attn.qkv_proj" for idx in range(4)}
-        | {f"model.layers.{idx}.self_attn.o_proj" for idx in range(4)}
-        | {"lm_head"}
-    )
-    if prefix not in allowed_prefixes:
-        return
-    if tensor.ndim == 0 or tensor.shape[0] > 16:
-        return
-    logger.info(
-        "[quarot-value-path] layer=%s stage=%s tensor=%s",
-        _layer_prefix(layer),
-        stage,
-        _tensor_debug_summary(tensor),
-    )
-
-
-def _maybe_log_o_proj_basis_views(
-    layer: torch.nn.Module,
-    *,
-    linear_input: torch.Tensor,
-    linear_output: torch.Tensor,
-) -> None:
-    if not _quarot_debug_value_path_enabled():
-        return
-    prefix = _layer_prefix(layer).lower()
-    if "self_attn.o_proj" not in prefix and "self_attn.out_proj" not in prefix:
-        return
-    if linear_input.ndim == 0 or linear_input.shape[0] > 16:
-        return
-    num_heads, head_dim = _get_quarot_shape(layer)
-    if num_heads > 0 and head_dim > 0:
-        linear_input_unh = _apply_headwise_hadamard(linear_input, num_heads, head_dim)
-        logger.info(
-            "[quarot-value-path] layer=%s stage=%s tensor=%s",
-            _layer_prefix(layer),
-            "linear_input_unh",
-            _tensor_debug_summary(linear_input_unh),
-        )
-    linear_output_unq = _apply_exact_deterministic_walsh_last_dim(linear_output)
-    logger.info(
-        "[quarot-value-path] layer=%s stage=%s tensor=%s",
-        _layer_prefix(layer),
-        "linear_output_unq",
-        _tensor_debug_summary(linear_output_unq),
-    )
-
-
-def _maybe_log_attention_compare(
-    layer: torch.nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    vendor_output: torch.Tensor,
-    *,
-    num_heads: int,
-    head_dim: int,
-    scale: float | torch.Tensor | None,
-) -> None:
-    if not _quarot_debug_attn_compare_enabled():
-        return
-    prefix = _layer_prefix(layer)
-    if "model.layers.0.self_attn" not in prefix:
-        return
-    fallback_output = _softmax_attention_fallback(query, key, value, num_heads, head_dim, scale)
-    logger.info(
-        "[quarot-attn-compare] layer=%s fallback=%s vendor=%s",
-        prefix,
-        _tensor_debug_summary(fallback_output),
-        _tensor_debug_summary(vendor_output),
-    )
-
-
-def _maybe_log_attention_result(
-    layer: torch.nn.Module,
-    stage: str,
-    tensor: torch.Tensor,
-) -> None:
-    if not (_quarot_debug_attn_compare_enabled() or _quarot_debug_value_path_enabled()):
-        return
-    prefix = _layer_prefix(layer)
-    if prefix != "model.layers.0.self_attn.attn":
-        return
-    logger.info(
-        "[quarot-attn-result] layer=%s stage=%s tensor=%s",
-        prefix,
-        stage,
-        _tensor_debug_summary(tensor),
-    )
-
-
-def _maybe_log_attention_inputs(
-    layer: torch.nn.Module,
-    *,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-) -> None:
-    if not _quarot_debug_attn_compare_enabled():
-        return
-    prefix = _layer_prefix(layer)
-    if "model.layers.0.self_attn" not in prefix:
-        return
-    logger.info(
-        "[quarot-attn-inputs] layer=%s query=%s key=%s value=%s",
-        prefix,
-        _tensor_debug_summary(query),
-        _tensor_debug_summary(key),
-        _tensor_debug_summary(value),
-    )
 
 
 def _is_quarot_enabled(layer: torch.nn.Module) -> bool:
@@ -661,7 +519,7 @@ def _run_attention(
     if require_impl:
         prefix = _layer_prefix(layer)
         raise RuntimeError(
-            f"QuaRot fused attention requires layer.impl.forward for {prefix}; python attention fallback is debug-only"
+            f"QuaRot fused attention requires layer.impl.forward for {prefix}; python attention fallback is only for non-runtime contexts"
         )
 
     out = _softmax_attention_fallback(query, key, value, num_heads, head_dim, scale)
@@ -1089,8 +947,6 @@ def _apply_heads_mixing_hadamard(
 
 
 def _use_perchannel_fused_down_proj_dynamic_quant(layer: torch.nn.Module, group_size: int, input_width: int) -> bool:
-    if os.getenv("VLLM_ASCEND_QUAROT_DISABLE_FUSED_HADAMARD_QUANT") == "1":
-        return False
     if group_size > 0 or not _is_quarot_enabled(layer):
         return False
     prefix = _layer_prefix(layer).lower()
@@ -1370,8 +1226,6 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
 
         if not use_fused_down_proj_dynamic_quant:
             x = self.maybe_apply_quarot_transform(layer, x)
-        _maybe_log_value_path(layer, "linear_input", x)
-        input_for_basis_log = x
 
         if use_grouped_native_linear:
             output = _apply_grouped_native_weight_quant_batchmatmul(
@@ -1418,8 +1272,6 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
             )
         if bias is not None:
             output = output + bias.to(original_dtype)
-        _maybe_log_value_path(layer, "linear_output", output)
-        _maybe_log_o_proj_basis_views(layer, linear_input=input_for_basis_log, linear_output=output)
         return output
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -1480,18 +1332,11 @@ class _AscendQuaRotAttentionBase(AscendAttentionScheme):
         require_impl: bool = False,
     ) -> torch.Tensor:
         _validate_fused_quarot_contract(layer)
-        _maybe_log_value_path(layer, "attention_query_input", query)
-        _maybe_log_value_path(layer, "attention_key_input", key)
-        _maybe_log_value_path(layer, "attention_value_input", value)
         if not use_native_quarot_kv_cache():
             query = _apply_headwise_hadamard(query, num_heads, head_dim)
             key = _apply_headwise_hadamard(key, num_heads, head_dim)
         if _lean_attention_requires_runtime_value_rotation(layer):
             value = _apply_headwise_hadamard(value, num_heads, head_dim)
-        _maybe_log_value_path(layer, "attention_query_runtime_h", query)
-        _maybe_log_value_path(layer, "attention_key_runtime_h", key)
-        _maybe_log_value_path(layer, "attention_value_runtime_h", value)
-        _maybe_log_attention_inputs(layer, query=query, key=key, value=value)
         result = _run_attention(
             layer,
             query,
@@ -1504,17 +1349,6 @@ class _AscendQuaRotAttentionBase(AscendAttentionScheme):
             num_heads=num_heads,
             head_dim=head_dim,
             require_impl=require_impl,
-        )
-        _maybe_log_attention_result(layer, "post_run_attention", result)
-        _maybe_log_attention_compare(
-            layer,
-            query,
-            key,
-            value,
-            result,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            scale=scale,
         )
         return result
 
