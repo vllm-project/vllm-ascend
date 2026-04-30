@@ -29,7 +29,6 @@ import argparse
 import collections
 import json
 import os
-import re
 import ssl
 import statistics
 import string
@@ -39,6 +38,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 DEFAULT_DATASET_URL = "https://raw.githubusercontent.com/YaoJiayi/CacheBlend/main/inputs/wikimqa_s.json"
 DEFAULT_SYSTEM_PROMPT = (
