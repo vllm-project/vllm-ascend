@@ -155,7 +155,25 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 8. File: platform/patch_kv_cache_interface.py**
+# ** 8. File: platform/patch_minimax_usage_accounting.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.reasoning.minimax_m2_reasoning_parser`
+#    Why:
+#       MiniMax-M2 reasoning usage accounting needs to report
+#       `completion_tokens_details.reasoning_tokens` for both streaming and
+#       non-streaming chat completions.
+#    How：
+#       Monkey-patch MiniMax reasoning token counters, extend `UsageInfo`, and
+#       update chat usage construction to count reasoning tokens from raw output
+#       token ids.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37955
+#    Future Plan:
+#       Remove this patch once the runtime vLLM version contains the upstream
+#       MiniMax usage-accounting fix.
+#
+# ** 9. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
 #    Why:
@@ -177,7 +195,7 @@
 #    Future Plan:
 #       Remove this patch after the upcoming KV cache spec refactor.
 #
-# ** 9. File: platform/patch_profiling_chunk.py**
+# ** 10. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
 #   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
