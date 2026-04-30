@@ -18,36 +18,99 @@
 #include <torch/library.h>
 #include <torch/version.h>
 #include <torch/torch.h>
+#include <ATen/core/Formatting.h>
+#include "acl/acl.h"
+#include "acl/acl_rt.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
-#include "acl/acl.h"
-#include "acl/acl_rt.h"
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
-#include "add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
-#include "apply_top_k_top_p_custom/apply_top_k_top_p_custom_torch_adpt.h"
+#include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
+#include "moe/apply_top_k_top_p_custom/apply_top_k_top_p_custom_torch_adpt.h"
 #include "batch_matmul_transpose/batch_matmul_transpose_torch_adpt.h"
-#include "dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
-#include "dispatch_gmm_combine_decode/dispatch_gmm_combine_decode_torch_adpt.h"
-#include "dispatch_layout/dispatch_layout_torch_adpt.h"
-#include "grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
-#include "lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
-#include "matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
+#include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
+#include "mc2/dispatch_gmm_combine_decode/dispatch_gmm_combine_decode_torch_adpt.h"
+#include "mc2/dispatch_layout/dispatch_layout_torch_adpt.h"
+#include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
+#include "attention/lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h"
+#include "mc2/matmul_allreduce_add_rmsnorm/matmul_allreduce_add_rmsnorm_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
-#include "moe_combine_normal/moe_combine_normal_torch_adpt.h"
-#include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
-#include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
-#include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
-#include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
+#include "mc2/moe_combine_normal/moe_combine_normal_torch_adpt.h"
+#include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
+#include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
+#include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
+#include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
+#include "moe/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include <c10/core/Device.h>
+#include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <sstream>
 
 namespace vllm_ascend {
+
+namespace {
+
+struct DevicePrintPayload {
+    std::string message;
+    at::Tensor host_tensor_snapshot;
+};
+
+std::mutex& get_device_print_mutex()
+{
+    static std::mutex device_print_mutex;
+    return device_print_mutex;
+}
+
+void device_print_callback(void* args)
+{
+    // device_print is a debug-only helper. We intentionally do not reclaim the
+    // callback payload here because aclgraph replay may re-execute the same host
+    // callback payload multiple times. Freeing it on first execution would make
+    // later replays dereference a dangling pointer.
+    auto* payload = static_cast<DevicePrintPayload*>(args);
+    if (payload == nullptr) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> guard(get_device_print_mutex());
+    if (!payload->message.empty()) {
+        std::cout << payload->message;
+    }
+
+    if (payload->host_tensor_snapshot.defined()) {
+        if (!payload->message.empty()) {
+            std::cout << std::endl;
+        }
+        at::print(std::cout, payload->host_tensor_snapshot.contiguous(), 120);
+    }
+
+    std::cout << std::endl;
+    std::cout.flush();
+}
+
+void enqueue_device_print(std::unique_ptr<DevicePrintPayload> payload,
+                          aclrtStream stream)
+{
+    auto* raw_payload = payload.release();
+    const aclError ret = aclrtLaunchHostFunc(stream, device_print_callback,
+                                             raw_payload);
+    if (ret != ACL_SUCCESS) {
+        delete raw_payload;
+    }
+    TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc failed, error code: ", ret);
+}
+
+}
+
 void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping, aclrtStream stream)
 {
@@ -173,7 +236,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
 
     // Create output tensors
     at::Tensor masked_input = at::empty_like(input);
-	at::Tensor mask = at::empty_like(input).to(at::kBool);
+    at::Tensor mask = at::empty_like(input).to(at::kBool);
 
     // Get data pointers
     void *input_ptr = input.data_ptr();
@@ -598,6 +661,50 @@ void transpose_kv_cache_by_block(
 
 }
 
+void device_print(c10::string_view msg)
+{
+    auto payload = std::make_unique<DevicePrintPayload>();
+    payload->message = std::string(msg);
+    enqueue_device_print(std::move(payload), c10_npu::getCurrentNPUStream().stream());
+}
+
+void device_print(const at::Tensor& tensor)
+{
+    TORCH_CHECK(tensor.defined(), "tensor must be defined");
+    TORCH_CHECK(
+        tensor.device().is_cpu() ||
+            tensor.device().type() == c10::DeviceType::PrivateUse1,
+        "device_print only supports CPU and NPU tensors, but got device ",
+        tensor.device());
+
+    auto payload = std::make_unique<DevicePrintPayload>();
+    if (tensor.device().is_cpu()) {
+        payload->host_tensor_snapshot = tensor.contiguous().clone();
+        enqueue_device_print(std::move(payload),
+                             c10_npu::getCurrentNPUStream().stream());
+        return;
+    }
+
+    const c10_npu::OptionalNPUGuard npu_guard(tensor.device());
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at::Tensor contiguous_tensor = tensor.contiguous();
+    payload->host_tensor_snapshot = at::empty_like(
+        contiguous_tensor,
+        contiguous_tensor.options().device(at::kCPU).pinned_memory(true));
+
+    const size_t num_bytes = contiguous_tensor.numel() *
+                             contiguous_tensor.element_size();
+    const aclError memcpy_ret = aclrtMemcpyAsync(
+        payload->host_tensor_snapshot.data_ptr(), num_bytes,
+        contiguous_tensor.data_ptr(), num_bytes, ACL_MEMCPY_DEVICE_TO_HOST, stream);
+    TORCH_CHECK(memcpy_ret == ACL_SUCCESS,
+                "aclrtMemcpyAsync failed, error code: ", memcpy_ret);
+
+    // The D2H copy and host callback are queued on the same stream so the
+    // callback prints only after the host snapshot is ready.
+    enqueue_device_print(std::move(payload), stream);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 npu_copy_and_expand_eagle_inputs(
     const at::Tensor &target_token_ids,
@@ -615,12 +722,12 @@ npu_copy_and_expand_eagle_inputs(
     int64_t num_reqs = query_start_loc.size(0) - 1;
 
     auto device = target_token_ids.device();
-    at::Tensor out_input_ids = at::empty({total_draft_tokens}, at::dtype(at::kInt).device(device));
-    at::Tensor out_positions = at::empty({total_draft_tokens}, at::dtype(at::kInt).device(device));
-    at::Tensor out_is_rejected_token_mask = at::empty({total_draft_tokens}, at::dtype(at::kChar).device(device));
-    at::Tensor out_is_masked_token_mask = at::empty({total_draft_tokens}, at::dtype(at::kChar).device(device));
-    at::Tensor out_new_token_indices = at::empty({num_reqs * num_padding_slots_per_request}, at::dtype(at::kInt).device(device));
-    at::Tensor out_hidden_state_mapping = at::empty({total_input_tokens}, at::dtype(at::kInt).device(device));
+    at::Tensor out_input_ids = at::zeros({total_draft_tokens}, at::dtype(at::kInt).device(device));
+    at::Tensor out_positions = at::zeros({total_draft_tokens}, at::dtype(at::kInt).device(device));
+    at::Tensor out_is_rejected_token_mask = at::zeros({total_draft_tokens}, at::dtype(at::kChar).device(device));
+    at::Tensor out_is_masked_token_mask = at::zeros({total_draft_tokens}, at::dtype(at::kChar).device(device));
+    at::Tensor out_new_token_indices = at::zeros({num_reqs * num_padding_slots_per_request}, at::dtype(at::kInt).device(device));
+    at::Tensor out_hidden_state_mapping = at::zeros({total_input_tokens}, at::dtype(at::kInt).device(device));
 
     EXEC_NPU_CMD(aclnnCopyAndExpandEagleInputs,
         target_token_ids, target_positions, next_token_ids, query_start_loc, query_end_loc,
@@ -699,6 +806,40 @@ std::vector<at::Tensor> moe_grouped_matmul(
 
 } // namespace vllm_ascend
 
+#ifdef ASCEND_PLATFORM_310P
+// Pybind on Ascend 310P
+TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
+{
+    ops.def(
+        "npu_causal_conv1d_310(Tensor x, "
+        "                         Tensor weight, "
+        "                         Tensor? bias, "
+        "                         Tensor conv_states, "
+        "                         int[] query_start_loc, "
+        "                         int[] cache_indices, "
+        "                         int[] initial_state_mode, "
+        "                         int[] num_accepted_tokens, "
+        "                         int activation_mode, "
+        "                         int pad_slot_id, "
+        "                         int run_mode) -> (Tensor output)");
+    ops.impl("npu_causal_conv1d_310", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_310);
+
+    ops.def(
+        "npu_recurrent_gated_delta_rule_310(Tensor query, "
+        "                                   Tensor key, "
+        "                                   Tensor value, "
+        "                                   Tensor beta, "
+        "                                   Tensor state, "
+        "                                   Tensor actual_seq_lengths, "
+        "                                   Tensor ssm_state_indices, "
+        "                                   Tensor? g, "
+        "                                   Tensor? gk, "
+        "                                   Tensor? num_accepted_tokens, "
+        "                                   float scale_value=1.0) -> (Tensor output)");
+    ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
+}
+#else
+// Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
 
@@ -759,6 +900,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
+
+    ops.def("device_print(str msg) -> ()");
+    ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
+
+    ops.def("device_print_tensor(Tensor tensor) -> ()");
+    ops.impl("device_print_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             static_cast<void (*)(const at::Tensor&)>(&vllm_ascend::device_print));
 
     ops.def(
         "grouped_matmul_swiglu_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor x_scale,"
@@ -928,3 +1077,4 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
 }
+#endif

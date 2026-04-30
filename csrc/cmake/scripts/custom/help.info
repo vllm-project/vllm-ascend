@@ -1,0 +1,2 @@
+  --install-path                    Install operator package to specific dir path
+  --install-for-all                 Allow other users to use the operator package

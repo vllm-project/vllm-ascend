@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<block name="EngineeringFiles" install_own="$username:$usergroup" install_mod="440" install_type="all">
+   <file_info value="conf" copy_type="source" src_path="build/release/config/common" dst_path="conf" install_path="$(TARGET_ENV)/conf">
+       <file value="path.cfg"/>
+   </file_info>
+</block>
