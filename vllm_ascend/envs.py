@@ -117,6 +117,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Maximum number of short requests to accumulate before dispatching early,
     # even if the waiting window has not expired yet.
     "VLLM_ASCEND_LAPS_WAIT_MAX_BATCH": lambda: int(os.getenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")),
+    # Maximum number of tokens a single long prefill request can consume in one
+    # scheduling step. Set to 0 to disable the LAPS-specific long prefill cap.
+    "VLLM_ASCEND_LAPS_LONG_PREFILL_CAP": lambda: int(
+        os.getenv("VLLM_ASCEND_LAPS_LONG_PREFILL_CAP", "0")
+    ),
+    # Fraction of the per-step scheduler token budget reserved for short
+    # prefills when any short request is waiting. Set to 0 to disable short
+    # budget reservation.
+    "VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO": lambda: float(
+        os.getenv("VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO", "0")
+    ),
     # Optional periodic LAPS stats logging interval, in seconds. Set to 0 to
     # disable aggregate stats logging. This is intended for benchmark
     # observability without enabling global DEBUG logging.

@@ -56,10 +56,10 @@ log() {
 
 write_summary_headers() {
   cat >"${RESULT_DIR}/${CASE_SUMMARY_CSV}" <<'EOF'
-case_name,label,variant,laps_enabled,laps_threshold,laps_wait_window_ms,laps_wait_max_batch,request_rate,num_prompts,completed,failed,duration_s,request_throughput,output_throughput,total_token_throughput,mean_ttft_ms,median_ttft_ms,p99_ttft_ms,mean_tpot_ms,median_tpot_ms,p99_tpot_ms,mean_itl_ms,median_itl_ms,p99_itl_ms,mean_e2el_ms,median_e2el_ms,p99_e2el_ms
+case_name,label,variant,laps_enabled,laps_threshold,laps_wait_window_ms,laps_wait_max_batch,laps_long_prefill_cap,laps_short_reserved_ratio,request_rate,num_prompts,completed,failed,duration_s,request_throughput,output_throughput,total_token_throughput,mean_ttft_ms,median_ttft_ms,p99_ttft_ms,mean_tpot_ms,median_tpot_ms,p99_tpot_ms,mean_itl_ms,median_itl_ms,p99_itl_ms,mean_e2el_ms,median_e2el_ms,p99_e2el_ms
 EOF
   cat >"${RESULT_DIR}/${CLASS_SUMMARY_CSV}" <<'EOF'
-case_name,label,variant,laps_enabled,laps_threshold,laps_wait_window_ms,laps_wait_max_batch,request_rate,class_name,class_threshold,num_requests,completed_requests,avg_input_len,avg_output_len,mean_ttft_ms,median_ttft_ms,p99_ttft_ms,mean_tpot_ms,median_tpot_ms,p99_tpot_ms,mean_e2el_ms,median_e2el_ms,p99_e2el_ms
+case_name,label,variant,laps_enabled,laps_threshold,laps_wait_window_ms,laps_wait_max_batch,laps_long_prefill_cap,laps_short_reserved_ratio,request_rate,class_name,class_threshold,num_requests,completed_requests,avg_input_len,avg_output_len,mean_ttft_ms,median_ttft_ms,p99_ttft_ms,mean_tpot_ms,median_tpot_ms,p99_tpot_ms,mean_e2el_ms,median_e2el_ms,p99_e2el_ms
 EOF
 }
 
@@ -240,12 +240,14 @@ start_prefill() {
     cd "${VLLM_ASCEND_DIR}"
     export ASCEND_RT_VISIBLE_DEVICES="${PREFILL_DEVICES}"
     if [ "${laps_threshold}" = "off" ]; then
-      unset VLLM_ASCEND_LAPS_SCHEDULING VLLM_ASCEND_LAPS_THRESHOLD VLLM_ASCEND_LAPS_WAIT_WINDOW_MS VLLM_ASCEND_LAPS_WAIT_MAX_BATCH VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S
+      unset VLLM_ASCEND_LAPS_SCHEDULING VLLM_ASCEND_LAPS_THRESHOLD VLLM_ASCEND_LAPS_WAIT_WINDOW_MS VLLM_ASCEND_LAPS_WAIT_MAX_BATCH VLLM_ASCEND_LAPS_LONG_PREFILL_CAP VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S
     else
       export VLLM_ASCEND_LAPS_SCHEDULING=1
       export VLLM_ASCEND_LAPS_THRESHOLD="${laps_threshold}"
       export VLLM_ASCEND_LAPS_WAIT_WINDOW_MS="${LAPS_WAIT_WINDOW_MS:-5}"
       export VLLM_ASCEND_LAPS_WAIT_MAX_BATCH="${LAPS_WAIT_MAX_BATCH:-4}"
+      export VLLM_ASCEND_LAPS_LONG_PREFILL_CAP="${LAPS_LONG_PREFILL_CAP:-0}"
+      export VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO="${LAPS_SHORT_RESERVED_RATIO:-0}"
       export VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S="${LAPS_STATS_LOG_INTERVAL_S:-0}"
     fi
     exec vllm serve "${MODEL_PATH}" \
@@ -349,24 +351,29 @@ append_case_summaries() {
   local result_file="$5"
   local result_path="${RESULT_DIR}/${result_file}"
 
-  local laps_enabled variant threshold_value wait_window_ms wait_max_batch
+  local laps_enabled variant threshold_value wait_window_ms wait_max_batch long_prefill_cap short_reserved_ratio
   if [ "${laps_threshold}" = "off" ]; then
     laps_enabled=0
     variant="off"
     threshold_value=""
     wait_window_ms=""
     wait_max_batch=""
+    long_prefill_cap=""
+    short_reserved_ratio=""
   else
     laps_enabled=1
     variant="laps"
     threshold_value="${laps_threshold}"
     wait_window_ms="${LAPS_WAIT_WINDOW_MS:-5}"
     wait_max_batch="${LAPS_WAIT_MAX_BATCH:-4}"
+    long_prefill_cap="${LAPS_LONG_PREFILL_CAP:-0}"
+    short_reserved_ratio="${LAPS_SHORT_RESERVED_RATIO:-0}"
   fi
 
   python3 - "${result_path}" "${RESULT_DIR}/${CASE_SUMMARY_CSV}" "${RESULT_DIR}/${CLASS_SUMMARY_CSV}" \
     "${case_name}" "${label}" "${variant}" "${laps_enabled}" "${threshold_value}" \
-    "${wait_window_ms}" "${wait_max_batch}" "${request_rate}" <<'PY'
+    "${wait_window_ms}" "${wait_max_batch}" "${long_prefill_cap}" \
+    "${short_reserved_ratio}" "${request_rate}" <<'PY'
 import csv
 import json
 import math
@@ -409,7 +416,7 @@ def mean_value(values):
     return round(statistics.fmean(values), 3)
 
 
-result_path, case_csv, class_csv, case_name, label, variant, laps_enabled, laps_threshold, wait_window_ms, wait_max_batch, request_rate = sys.argv[1:]
+result_path, case_csv, class_csv, case_name, label, variant, laps_enabled, laps_threshold, wait_window_ms, wait_max_batch, long_prefill_cap, short_reserved_ratio, request_rate = sys.argv[1:]
 
 with open(result_path, "r", encoding="utf-8") as f:
     data = json.load(f)
@@ -460,6 +467,8 @@ case_row = {
     "laps_threshold": laps_threshold,
     "laps_wait_window_ms": wait_window_ms,
     "laps_wait_max_batch": wait_max_batch,
+    "laps_long_prefill_cap": long_prefill_cap,
+    "laps_short_reserved_ratio": short_reserved_ratio,
     "request_rate": request_rate,
     "num_prompts": len(rows),
     "completed": data.get("completed", len(successful_rows)),
@@ -500,6 +509,8 @@ for class_name, predicate in (
         "laps_threshold": laps_threshold,
         "laps_wait_window_ms": wait_window_ms,
         "laps_wait_max_batch": wait_max_batch,
+        "laps_long_prefill_cap": long_prefill_cap,
+        "laps_short_reserved_ratio": short_reserved_ratio,
         "request_rate": request_rate,
         "class_name": class_name,
         "class_threshold": threshold,
