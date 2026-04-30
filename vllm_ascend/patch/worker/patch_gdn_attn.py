@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import torch
 import vllm.v1.attention.backends.gdn_attn as gdn_attn
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.ops.triton.gdn_chunk_meta import (
     _build_seq_lens,
@@ -34,7 +34,6 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 _IS_PATCHED = False
 _ORIGINAL_BUILD = gdn_attn.GDNAttentionMetadataBuilder.build
 _ORIGINAL_INIT_THRESHOLD = gdn_attn.GDNAttentionMetadataBuilder._init_reorder_batch_threshold
-logger = init_logger(__name__)
 
 
 @dataclass
