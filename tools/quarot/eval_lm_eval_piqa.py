@@ -369,9 +369,6 @@ def run_model(
         llm_kwargs["quantization"] = quantization
     if args.enable_chunked_prefill is not None:
         llm_kwargs["enable_chunked_prefill"] = args.enable_chunked_prefill
-    if args.enable_thinking is not None:
-        llm_kwargs["enable_thinking"] = args.enable_thinking
-
     model_args = build_model_args(
         model_path=model_path,
         tensor_parallel_size=tensor_parallel_size,
@@ -509,9 +506,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--apply-chat-template", type=parse_optional_bool, default=None)
+    parser.add_argument(
+        "--apply-chat-template",
+        type=parse_optional_bool,
+        default=True,
+        help="Apply the tokenizer chat template. Defaults to true for Qwen-style instruct models.",
+    )
     parser.add_argument("--enable-chunked-prefill", type=parse_optional_bool, default=None)
-    parser.add_argument("--enable-thinking", type=parse_optional_bool, default=None)
+    parser.add_argument(
+        "--enable-thinking",
+        type=parse_optional_bool,
+        default=False,
+        help="Disable explicit thinking traces by default for single-token A/B evaluation.",
+    )
     parser.add_argument("--max-tokens", type=int, default=4)
     return parser
 
