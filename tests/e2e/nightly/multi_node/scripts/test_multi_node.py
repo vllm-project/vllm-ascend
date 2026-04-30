@@ -263,7 +263,9 @@ async def test_multi_node() -> None:
         for k, v in config.special_dependencies.items():
             command = [
                 sys.executable,
-                "-m", "pip", "install",
+                "-m",
+                "pip",
+                "install",
                 f"{k}=={v}",
             ]
             subprocess.call(command)
