@@ -33,6 +33,8 @@ on:
         type: choice
         options:
           - main
+          - v0.19.1rc1
+          - v0.18.0
           - v0.18.0rc1
           - v0.17.0rc1
           - v0.16.0rc1
