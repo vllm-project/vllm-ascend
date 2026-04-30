@@ -328,12 +328,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _maybe_share_lm_head(self, model: nn.Module) -> None:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.method in ("eagle", "dflash") and hasattr(model, "lm_head"):
+        if self.method in ("eagle", "dflash"):
             logger.info("Loading EAGLE or DFLASH LM head weights from the target model.")
-            if supports_multimodal(model):
+            if hasattr(model, "lm_head"):
+                self.model.lm_head = model.lm_head
+            elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
                 self.model.lm_head = model.get_language_model().lm_head
             else:
-                self.model.lm_head = model.lm_head
+                logger.warning("Target model has no accessible lm_head for sharing.")
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -938,6 +940,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             for _ in range(self.num_speculative_tokens):
                 draft_token_ids_list.append(draft_token_ids)
             return torch.stack(draft_token_ids_list, dim=1)
+
+        # The logits are split and then merged only when lmhead_tp_enable() is enabled.
+        # As a result, the batch size length becomes the actual length 32.
+        # However, when lmhead_tp_enable() is disabled, the batch size uses the length after padding.
+        # To decouple the scenarios, a judgment is required.
+        # That is, the batch size needs to be modified only when lmhead_tp_enable() is enabled.
+        if lmhead_tp_enable() and self.method == "mtp":
+            batch_size = draft_token_ids.shape[0]
 
         # Generate the remaining draft tokens.
         draft_token_ids_tensor = torch.zeros(
