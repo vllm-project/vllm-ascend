@@ -102,7 +102,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
-            
+
             tensor_bytes, tensor_shape, tensor_dtype = self.handle_caches.get(mm_data.mm_hash, None)
             tensor = torch.empty(tensor_shape, dtype=tensor_dtype).npu()
             tensor_addr = (tensor.data_ptr() + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
