@@ -39,23 +39,6 @@ from vllm_ascend.quantization.quarot_kv_cache import use_native_quarot_kv_cache
 from .base import AscendAttentionScheme, AscendLinearScheme
 from .registry import register_scheme
 
-QUAROT_LINEAR_QUANT_TYPE = "W4A4_QUAROT_DYNAMIC"
-QUAROT_ATTN_QUANT_TYPE = "QUAROT_ATTENTION"
-
-HADAMARD_KERNEL_FAMILY_ENV = "VLLM_ASCEND_QUAROT_HADAMARD_KERNEL_FAMILY"
-HADAMARD_LAUNCH_MODE_ENV = "VLLM_ASCEND_QUAROT_HADAMARD_LAUNCH_MODE"
-HADAMARD_KERNEL_FAMILY_PYTHON = "python"
-HADAMARD_KERNEL_FAMILY_PTO = "pto"
-HADAMARD_LAUNCH_MODE_EAGER_JIT = "eager_jit"
-HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP = "compile_custom_op"
-_VALID_HADAMARD_KERNEL_FAMILIES = {
-    HADAMARD_KERNEL_FAMILY_PYTHON,
-    HADAMARD_KERNEL_FAMILY_PTO,
-}
-_VALID_HADAMARD_LAUNCH_MODES = {
-    HADAMARD_LAUNCH_MODE_EAGER_JIT,
-    HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP,
-}
 _PTO_HADAMARD_JIT_FUNC = None
 _PTO_JIT_WARMUP_DONE = False
 _NATIVE_QUAROT_INDEX_CACHE: dict[str, dict[str, str]] = {}
@@ -68,19 +51,43 @@ _PTO_KERNEL_CPP_PATH = os.path.join(
     "ops",
     "fast_hadamard_pto-isa.cpp",
 )
-_MODELSLIM_WEIGHT_INDEX_FILENAME = "quant_model_weights.safetensors.index.json"
-_LEAN_H_ONLY_QUAROT_CONTRACT = {
-    "export_rotation_tensors": False,
-    "h_mode": "deterministic_walsh",
-    "deterministic_h_profile": True,
-    "alpha_source": "rmsnorm",
-    "matrix_free_h_runtime": True,
-}
-_LEAN_H_ONLY_SUPPORTED_Q_MODES = {"randomized_hadamard", "identity"}
-_FFN_HADAMARD_LAYOUT = "pow2_last_dim"
-_LEAN_ATTENTION_CONTRACT = "lean_h_only"
-_QUAROT_DEBUG_VALUE_PATH_ENV = "VLLM_ASCEND_QUAROT_DEBUG_VALUE_PATH"
-_QUAROT_DEBUG_ATTN_COMPARE_ENV = "VLLM_ASCEND_QUAROT_DEBUG_ATTN_COMPARE"
+
+
+class _QuaRotSpec:
+    LINEAR_QUANT_TYPE = "W4A4_QUAROT_DYNAMIC"
+    ATTN_QUANT_TYPE = "QUAROT_ATTENTION"
+    MODELSLIM_WEIGHT_INDEX_FILENAME = "quant_model_weights.safetensors.index.json"
+    LEAN_H_ONLY_REQUIRED_CONTRACT = {
+        "export_rotation_tensors": False,
+        "h_mode": "deterministic_walsh",
+        "deterministic_h_profile": True,
+        "alpha_source": "rmsnorm",
+        "matrix_free_h_runtime": True,
+    }
+    LEAN_H_ONLY_SUPPORTED_Q_MODES = frozenset({"randomized_hadamard", "identity"})
+    FFN_HADAMARD_LAYOUT = "pow2_last_dim"
+    ATTENTION_CONTRACT = "lean_h_only"
+    DEBUG_VALUE_PATH_ENV = "VLLM_ASCEND_QUAROT_DEBUG_VALUE_PATH"
+    DEBUG_ATTN_COMPARE_ENV = "VLLM_ASCEND_QUAROT_DEBUG_ATTN_COMPARE"
+
+
+_QUAROT_SPEC = _QuaRotSpec()
+
+
+class _HadamardRuntime:
+    KERNEL_FAMILY_ENV = "VLLM_ASCEND_QUAROT_HADAMARD_KERNEL_FAMILY"
+    LAUNCH_MODE_ENV = "VLLM_ASCEND_QUAROT_HADAMARD_LAUNCH_MODE"
+    KERNEL_FAMILY_PYTHON = "python"
+    KERNEL_FAMILY_PTO = "pto"
+    LAUNCH_MODE_EAGER_JIT = "eager_jit"
+    LAUNCH_MODE_COMPILE_CUSTOM_OP = "compile_custom_op"
+    VALID_KERNEL_FAMILIES = frozenset({KERNEL_FAMILY_PYTHON, KERNEL_FAMILY_PTO})
+    VALID_LAUNCH_MODES = frozenset({LAUNCH_MODE_EAGER_JIT, LAUNCH_MODE_COMPILE_CUSTOM_OP})
+
+
+_HADAMARD_RUNTIME = _HadamardRuntime()
+
+
 @dataclass(frozen=True)
 class HadamardDispatch:
     kernel_family: str
@@ -92,11 +99,11 @@ def _layer_prefix(layer: torch.nn.Module) -> str:
 
 
 def _quarot_debug_value_path_enabled() -> bool:
-    return os.getenv(_QUAROT_DEBUG_VALUE_PATH_ENV) == "1"
+    return os.getenv(_QUAROT_SPEC.DEBUG_VALUE_PATH_ENV) == "1"
 
 
 def _quarot_debug_attn_compare_enabled() -> bool:
-    return os.getenv(_QUAROT_DEBUG_ATTN_COMPARE_ENV) == "1"
+    return os.getenv(_QUAROT_SPEC.DEBUG_ATTN_COMPARE_ENV) == "1"
 
 
 def _tensor_debug_summary(tensor: torch.Tensor) -> dict[str, object]:
@@ -333,15 +340,19 @@ def _largest_power_of_two_factor(n: int) -> int:
 
 
 def _get_ffn_hadamard_layout(config: dict[str, Any]) -> str:
-    layout = config.get("ffn_hadamard_layout", _FFN_HADAMARD_LAYOUT)
-    if layout != _FFN_HADAMARD_LAYOUT:
-        raise ValueError(f"Unsupported FFN Hadamard layout {layout!r}; expected {_FFN_HADAMARD_LAYOUT!r}")
+    layout = config.get("ffn_hadamard_layout", _QUAROT_SPEC.FFN_HADAMARD_LAYOUT)
+    if layout != _QUAROT_SPEC.FFN_HADAMARD_LAYOUT:
+        raise ValueError(
+            f"Unsupported FFN Hadamard layout {layout!r}; expected {_QUAROT_SPEC.FFN_HADAMARD_LAYOUT!r}"
+        )
     return layout
 
 
 def _get_ffn_hadamard_dims(n: int, layout: str) -> tuple[int, int]:
-    if layout != _FFN_HADAMARD_LAYOUT:
-        raise ValueError(f"Unsupported FFN Hadamard layout {layout!r}; expected {_FFN_HADAMARD_LAYOUT!r}")
+    if layout != _QUAROT_SPEC.FFN_HADAMARD_LAYOUT:
+        raise ValueError(
+            f"Unsupported FFN Hadamard layout {layout!r}; expected {_QUAROT_SPEC.FFN_HADAMARD_LAYOUT!r}"
+        )
     last_dim = _largest_power_of_two_factor(n)
     return n // last_dim, last_dim
 
@@ -370,7 +381,7 @@ def _apply_matrix_free_down_proj_rotation(
     x: torch.Tensor,
     block_size: int | None = None,
     *,
-    layout: str = _FFN_HADAMARD_LAYOUT,
+    layout: str = _QuaRotSpec.FFN_HADAMARD_LAYOUT,
 ) -> torch.Tensor:
     _, n = _get_ffn_hadamard_dims(x.shape[-1], layout)
     init_shape = x.shape
@@ -387,37 +398,41 @@ def _apply_matrix_free_down_proj_rotation(
 
 def _normalize_hadamard_kernel_family(kernel_family: str) -> str:
     name = kernel_family.strip().lower()
-    if name not in _VALID_HADAMARD_KERNEL_FAMILIES:
+    if name not in _HADAMARD_RUNTIME.VALID_KERNEL_FAMILIES:
         raise ValueError(
-            f"Unknown Hadamard kernel family '{kernel_family}'. Valid: {sorted(_VALID_HADAMARD_KERNEL_FAMILIES)}"
+            f"Unknown Hadamard kernel family '{kernel_family}'. Valid: {sorted(_HADAMARD_RUNTIME.VALID_KERNEL_FAMILIES)}"
         )
     return name
 
 
 def _normalize_hadamard_launch_mode(launch_mode: str) -> str:
     name = launch_mode.strip().lower()
-    if name not in _VALID_HADAMARD_LAUNCH_MODES:
-        raise ValueError(f"Unknown Hadamard launch mode '{launch_mode}'. Valid: {sorted(_VALID_HADAMARD_LAUNCH_MODES)}")
+    if name not in _HADAMARD_RUNTIME.VALID_LAUNCH_MODES:
+        raise ValueError(
+            f"Unknown Hadamard launch mode '{launch_mode}'. Valid: {sorted(_HADAMARD_RUNTIME.VALID_LAUNCH_MODES)}"
+        )
     return name
 
 
 def _resolve_hadamard_dispatch(kernel_family: str | None) -> HadamardDispatch:
-    configured_kernel_family = os.getenv(HADAMARD_KERNEL_FAMILY_ENV)
-    launch_mode = os.getenv(HADAMARD_LAUNCH_MODE_ENV)
+    configured_kernel_family = os.getenv(_HADAMARD_RUNTIME.KERNEL_FAMILY_ENV)
+    launch_mode = os.getenv(_HADAMARD_RUNTIME.LAUNCH_MODE_ENV)
     if kernel_family is not None:
         normalized_family = _normalize_hadamard_kernel_family(kernel_family)
     elif configured_kernel_family:
         normalized_family = _normalize_hadamard_kernel_family(configured_kernel_family)
     else:
-        normalized_family = HADAMARD_KERNEL_FAMILY_PTO
+        normalized_family = _HADAMARD_RUNTIME.KERNEL_FAMILY_PTO
 
-    if normalized_family == HADAMARD_KERNEL_FAMILY_PYTHON:
-        return HadamardDispatch(HADAMARD_KERNEL_FAMILY_PYTHON, None)
+    if normalized_family == _HADAMARD_RUNTIME.KERNEL_FAMILY_PYTHON:
+        return HadamardDispatch(_HADAMARD_RUNTIME.KERNEL_FAMILY_PYTHON, None)
     if launch_mode:
         normalized_launch_mode = _normalize_hadamard_launch_mode(launch_mode)
     else:
         normalized_launch_mode = (
-            HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP if _is_torch_compile_mode() else HADAMARD_LAUNCH_MODE_EAGER_JIT
+            _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP
+            if _is_torch_compile_mode()
+            else _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT
         )
     return HadamardDispatch(normalized_family, normalized_launch_mode)
 
@@ -430,28 +445,28 @@ def _get_quarot_config(layer: torch.nn.Module) -> dict[str, Any]:
 
 
 def _is_lean_h_only_quarot_contract(config: dict[str, Any]) -> bool:
-    if config.get("attention_contract") != _LEAN_ATTENTION_CONTRACT:
+    if config.get("attention_contract") != _QUAROT_SPEC.ATTENTION_CONTRACT:
         return False
-    for key, expected in _LEAN_H_ONLY_QUAROT_CONTRACT.items():
+    for key, expected in _QUAROT_SPEC.LEAN_H_ONLY_REQUIRED_CONTRACT.items():
         if config.get(key) != expected:
             return False
-    if config.get("q_mode") not in _LEAN_H_ONLY_SUPPORTED_Q_MODES:
+    if config.get("q_mode") not in _QUAROT_SPEC.LEAN_H_ONLY_SUPPORTED_Q_MODES:
         return False
     if config.get("allow_runtime_shift_permutation") not in (None, False):
         return False
-    if _get_ffn_hadamard_layout(config) != _FFN_HADAMARD_LAYOUT:
+    if _get_ffn_hadamard_layout(config) != _QUAROT_SPEC.FFN_HADAMARD_LAYOUT:
         return False
     runtime_h_partition = config.get("runtime_h_partition")
     return runtime_h_partition == "full"
 
 
 def _is_supported_fused_quarot_contract(config: dict[str, Any]) -> bool:
-    if config.get("attention_contract") != _LEAN_ATTENTION_CONTRACT:
+    if config.get("attention_contract") != _QUAROT_SPEC.ATTENTION_CONTRACT:
         return False
-    for key, expected in _LEAN_H_ONLY_QUAROT_CONTRACT.items():
+    for key, expected in _QUAROT_SPEC.LEAN_H_ONLY_REQUIRED_CONTRACT.items():
         if config.get(key) != expected:
             return False
-    if config.get("q_mode") not in _LEAN_H_ONLY_SUPPORTED_Q_MODES:
+    if config.get("q_mode") not in _QUAROT_SPEC.LEAN_H_ONLY_SUPPORTED_Q_MODES:
         return False
     if config.get("allow_runtime_shift_permutation") not in (None, False):
         return False
@@ -468,13 +483,18 @@ def _validate_fused_quarot_contract(layer: torch.nn.Module) -> None:
     config = _get_quarot_config(layer)
     if _is_supported_fused_quarot_contract(config):
         return
-    bad_items = [f"{key}={config.get(key)!r}" for key in sorted(_LEAN_H_ONLY_QUAROT_CONTRACT)]
+    bad_items = [
+        f"{key}={config.get(key)!r}"
+        for key in sorted(_QUAROT_SPEC.LEAN_H_ONLY_REQUIRED_CONTRACT)
+    ]
     bad_items.append(f"q_mode={config.get('q_mode')!r}")
     bad_items.append(f"attention_contract={config.get('attention_contract')!r}")
     if config.get("allow_runtime_shift_permutation") not in (None, False):
         bad_items.append(f"allow_runtime_shift_permutation={config.get('allow_runtime_shift_permutation')!r}")
     bad_items.append(f"runtime_h_partition={config.get('runtime_h_partition')!r}")
-    bad_items.append(f"ffn_hadamard_layout={config.get('ffn_hadamard_layout', _FFN_HADAMARD_LAYOUT)!r}")
+    bad_items.append(
+        f"ffn_hadamard_layout={config.get('ffn_hadamard_layout', _QUAROT_SPEC.FFN_HADAMARD_LAYOUT)!r}"
+    )
     raise RuntimeError(
         "QuaRot fused mode only supports the deterministic full-runtime contract "
         f"(layer={_layer_prefix(layer)}; observed: {', '.join(bad_items)})"
@@ -676,7 +696,7 @@ def _is_torch_compile_mode() -> bool:
 
 def _is_pto_hadamard_supported(x: torch.Tensor, kernel_family: str) -> bool:
     dispatch = _resolve_hadamard_dispatch(kernel_family)
-    if dispatch.kernel_family != HADAMARD_KERNEL_FAMILY_PTO:
+    if dispatch.kernel_family != _HADAMARD_RUNTIME.KERNEL_FAMILY_PTO:
         return False
     if x.device.type != "npu":
         return False
@@ -702,7 +722,7 @@ def _maybe_warmup_pto_for_process() -> None:
     if _PTO_JIT_WARMUP_DONE:
         return
     dispatch = _resolve_hadamard_dispatch(None)
-    if dispatch.kernel_family != HADAMARD_KERNEL_FAMILY_PTO:
+    if dispatch.kernel_family != _HADAMARD_RUNTIME.KERNEL_FAMILY_PTO:
         return
     try:
         from vllm_ascend.ops.fast_hadamard import (
@@ -711,7 +731,7 @@ def _maybe_warmup_pto_for_process() -> None:
             ensure_fast_hadamard_shared_object,
         )
 
-        if dispatch.launch_mode == HADAMARD_LAUNCH_MODE_EAGER_JIT:
+        if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT:
             _ = ensure_fast_hadamard_shared_object()
             _ = _get_pto_hadamard_jit_func()
         _ = ensure_fast_hadamard_dynamic_quant_shared_object()
@@ -727,13 +747,13 @@ def _apply_hadamard_last_dim_pto(x: torch.Tensor, launch_mode: str) -> torch.Ten
     if n <= 1:
         return x
     log2_n = int(math.log2(n))
-    if launch_mode == HADAMARD_LAUNCH_MODE_EAGER_JIT:
+    if launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT:
         y = x.clone()
         hadamard_func = _get_pto_hadamard_jit_func()
         hadamard_func(y, y.shape[0], n, log2_n)
         return y / math.sqrt(float(n))
 
-    if launch_mode == HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP:
+    if launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP:
         return fast_hadamard_last_dim_custom_op(x)
 
     raise ValueError(f"Unsupported PTO launch mode: {launch_mode}")
@@ -750,12 +770,12 @@ def _apply_exact_deterministic_walsh_last_dim(
     dispatch = _resolve_hadamard_dispatch(kernel_family)
     if _is_power_of_two(n):
         rows = x.reshape(-1, n).contiguous()
-        if dispatch.kernel_family == HADAMARD_KERNEL_FAMILY_PTO and _is_pto_hadamard_supported(
+        if dispatch.kernel_family == _HADAMARD_RUNTIME.KERNEL_FAMILY_PTO and _is_pto_hadamard_supported(
             rows, dispatch.kernel_family
         ):
-            if dispatch.launch_mode == HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP:
+            if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP:
                 return fast_hadamard_last_dim_custom_op(rows).reshape_as(x)
-            if dispatch.launch_mode == HADAMARD_LAUNCH_MODE_EAGER_JIT:
+            if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT:
                 pto_rows = rows
                 needs_cast_back = False
                 if rows.dtype == torch.bfloat16:
@@ -848,7 +868,7 @@ def _apply_hadamard_family_python(x: torch.Tensor, axis: int = -1) -> torch.Tens
 
 def _apply_hadamard_family(x: torch.Tensor, axis: int = -1, kernel_family: str | None = None) -> torch.Tensor:
     dispatch = _resolve_hadamard_dispatch(kernel_family)
-    if dispatch.kernel_family == HADAMARD_KERNEL_FAMILY_PYTHON:
+    if dispatch.kernel_family == _HADAMARD_RUNTIME.KERNEL_FAMILY_PYTHON:
         return _apply_hadamard_family_python(x, axis=axis)
 
     if x.numel() == 0:
@@ -859,7 +879,7 @@ def _apply_hadamard_family(x: torch.Tensor, axis: int = -1, kernel_family: str |
         raise ValueError(f"Invalid axis {axis} for tensor with {x.ndim} dims")
 
     moved = x.movedim(axis, -1)
-    if dispatch.launch_mode == HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP and not moved.is_contiguous():
+    if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP and not moved.is_contiguous():
         # Compile mode may lower reshape after movedim into an invalid view on a
         # non-contiguous tensor. Materialize the last-dim layout boundary before
         # flattening into PTO rows.
@@ -876,7 +896,7 @@ def _apply_hadamard_family(x: torch.Tensor, axis: int = -1, kernel_family: str |
     if not _is_pto_hadamard_supported(rows, dispatch.kernel_family):
         return _apply_hadamard_family_python(x, axis=axis)
 
-    if dispatch.launch_mode == HADAMARD_LAUNCH_MODE_COMPILE_CUSTOM_OP:
+    if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP:
         transformed_rows = fast_hadamard_last_dim_custom_op(rows)
         transformed = transformed_rows.reshape(*moved.shape[:-1], groups, p)
         restored = transformed.reshape(*moved.shape[:-1], d).movedim(-1, axis)
@@ -884,11 +904,11 @@ def _apply_hadamard_family(x: torch.Tensor, axis: int = -1, kernel_family: str |
 
     pto_rows = rows
     needs_cast_back = False
-    if dispatch.launch_mode == HADAMARD_LAUNCH_MODE_EAGER_JIT and rows.dtype == torch.bfloat16:
+    if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT and rows.dtype == torch.bfloat16:
         pto_rows = rows.to(torch.float16)
         needs_cast_back = True
 
-    if dispatch.launch_mode != HADAMARD_LAUNCH_MODE_EAGER_JIT:
+    if dispatch.launch_mode != _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT:
         return _apply_hadamard_family_python(x, axis=axis)
 
     try:
@@ -1159,7 +1179,7 @@ def _load_native_quarot_index(model_dir: str) -> dict[str, str]:
     cached = _NATIVE_QUAROT_INDEX_CACHE.get(model_dir)
     if cached is not None:
         return cached
-    index_path = os.path.join(model_dir, _MODELSLIM_WEIGHT_INDEX_FILENAME)
+    index_path = os.path.join(model_dir, _QUAROT_SPEC.MODELSLIM_WEIGHT_INDEX_FILENAME)
     if not os.path.isfile(index_path):
         _NATIVE_QUAROT_INDEX_CACHE[model_dir] = {}
         return {}
@@ -1229,7 +1249,7 @@ def _attach_native_quarot_rotation_tensors(layer: torch.nn.Module) -> None:
             _register_or_update_buffer(layer, "quarot_kronecker_rotation_n", rotation_n)
 
 
-@register_scheme(QUAROT_LINEAR_QUANT_TYPE, "linear")
+@register_scheme(_QUAROT_SPEC.LINEAR_QUANT_TYPE, "linear")
 class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
     """W4A4 dynamic linear scheme for lean_h_only fused serving."""
 
@@ -1525,7 +1545,7 @@ class _AscendQuaRotAttentionBase(AscendAttentionScheme):
         )
 
 
-@register_scheme(QUAROT_ATTN_QUANT_TYPE, "attention")
+@register_scheme(_QUAROT_SPEC.ATTN_QUANT_TYPE, "attention")
 class AscendQuaRotAttentionMethod(_AscendQuaRotAttentionBase):
     """Production QuaRot attention scheme for fused serving."""
 
