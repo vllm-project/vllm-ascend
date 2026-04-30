@@ -27,6 +27,7 @@ Usage:
     scheme = scheme_cls()
 """
 
+from importlib import import_module
 from typing import Any
 
 # Import base classes
@@ -36,11 +37,11 @@ from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, Qu
 from .kv_c8 import AscendFAQuantAttentionMethod
 
 # Import registry functions
-from .registry import get_scheme_class, register_scheme
+from .registry import get_scheme_class as _get_scheme_class
+from .registry import register_scheme
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
-from .w4a4_quarot_dynamic import AscendQuaRotAttentionMethod, AscendW4A4QuaRotDynamicLinearMethod
 from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
 from .w4a16 import AscendW4A16FusedMoEMethod
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
@@ -48,6 +49,30 @@ from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from .w8a8_pdmix import AscendW8A8PDMixFusedMoeMethod, AscendW8A8PDMixLinearMethod
 from .w8a8_static import AscendW8A8LinearMethod
 from .w8a16 import AscendW8A16LinearMethod
+
+_QUAROT_LINEAR_QUANT_TYPE = "W4A4_QUAROT_DYNAMIC"
+_QUAROT_ATTN_QUANT_TYPE = "QUAROT_ATTENTION"
+_QUAROT_EXPORTS = {
+    "AscendW4A4QuaRotDynamicLinearMethod",
+    "AscendQuaRotAttentionMethod",
+}
+
+
+def _ensure_quarot_methods_imported() -> None:
+    import_module(".w4a4_quarot_dynamic", __name__)
+
+
+def get_scheme_class(quant_type: str, layer_type: str) -> type[Any] | None:
+    if quant_type in {_QUAROT_LINEAR_QUANT_TYPE, _QUAROT_ATTN_QUANT_TYPE}:
+        _ensure_quarot_methods_imported()
+    return _get_scheme_class(quant_type, layer_type)
+
+
+def __getattr__(name: str) -> Any:
+    if name in _QUAROT_EXPORTS:
+        _ensure_quarot_methods_imported()
+        return globals().get(name) or getattr(import_module(".w4a4_quarot_dynamic", __name__), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def is_mx_quant_type(instance: Any) -> bool:
