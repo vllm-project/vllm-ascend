@@ -1,7 +1,9 @@
 # Supported Models
+
 Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/1608>
 
 **Legend Description**:
+
 - ✅ = Supported model/feature
 - 🔵 = Experimental supported model/feature
 - ❌ = Not supported model/feature
