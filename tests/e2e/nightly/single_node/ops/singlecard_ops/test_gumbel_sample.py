@@ -23,44 +23,54 @@ enable_custom_op()
 PERF_WARMUP = 3
 PERF_ITERS = 20
 
-
 # ============================================================
-# CPU golden 实现
-#   与 op_kernel 中 float LCG hash 算法完全对齐：
-#   splitmix64(seed, pos) → gumbelSeedF → 两轮 LCG → u → g = -ln(-ln(u+ε)+ε)
-#   argmax(logits/temp + g)
+# Philox4x32-10 CPU golden
+#   与 op_kernel/gumbel_sample.h 中的 Philox4x32 实现字节级对齐：
+#   - mulhi 使用有符号乘法（triton-ascend NPU 后端将 tt.mulhiui 编译为 smulhi）
+#   - uint_to_uniform_float：abs_signed(raw) * 4.6566127342e-10
 # ============================================================
-LCG_A = np.float32(1664525.0)
-LCG_C = np.float32(1013904223.0)
-NORM  = np.float32(2.3283064e-10)
-EPS   = np.float32(1e-20)
+PHILOX_KEY_A   = np.uint32(0x9E3779B9)
+PHILOX_KEY_B   = np.uint32(0xBB67AE85)
+PHILOX_ROUND_A = np.uint32(0xD2511F53)
+PHILOX_ROUND_B = np.uint32(0xCD9E8D57)
+PHILOX_ROUNDS  = 10
+PHILOX_FLOAT_SCALE = np.float32(4.6566127342e-10)
+GUMBEL_EPS     = np.float32(1e-20)
 
 
-def _splitmix64(seed: int, pos: int) -> np.float32:
-    """splitmix64 混合 seed 和 pos，返回 float32 种子（与 kernel 一致）。"""
-    h = (int(seed) & 0xFFFFFFFFFFFFFFFF) ^ ((int(pos) & 0xFFFFFFFF) << 32)
-    h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9
-    h &= 0xFFFFFFFFFFFFFFFF
-    h = (h ^ (h >> 27)) * 0x94D049BB133111EB
-    h &= 0xFFFFFFFFFFFFFFFF
-    h = h ^ (h >> 31)
-    h &= 0xFFFFFFFFFFFFFFFF
-    # 转为有符号 int64 再转 float32（与 kernel static_cast<float>(int64_t(h)) 一致）
-    h_signed = h if h < (1 << 63) else h - (1 << 64)
-    return np.float32(h_signed)
+def _smulhi(a: np.uint32, b: np.uint32) -> np.uint32:
+    """有符号 32×32→64 乘法，取高 32 位（与 triton-ascend NPU smulhi 对齐）。"""
+    prod = int(np.int32(a)) * int(np.int32(b))
+    return np.uint32((prod >> 32) & 0xFFFFFFFF)
 
 
-def _lcg_gumbel(seed_f: np.float32, vocab_size: int) -> np.ndarray:
-    """生成 vocab_size 个 Gumbel 噪声（float32），与 kernel GenerateGumbelTile 对齐。"""
-    idx = np.arange(vocab_size, dtype=np.float32)
-    state = idx + seed_f
-    # 两轮 LCG（float32 运算）
-    state = state * LCG_A + LCG_C
-    state = state * LCG_A + LCG_C
-    u = np.abs(state) * NORM
-    u = u + EPS
-    g = -np.log(-np.log(u) + EPS)
-    return g
+def _philox4x32(c0: int, k0: int, k1: int) -> np.uint32:
+    """Philox4x32-10 单元素实现，返回 c0 输出（与 kernel Philox4x32 完全对齐）。"""
+    c0 = np.uint32(c0)
+    c1 = np.uint32(0)
+    c2 = np.uint32(0)
+    c3 = np.uint32(0)
+    k0 = np.uint32(k0)
+    k1 = np.uint32(k1)
+    for _ in range(PHILOX_ROUNDS):
+        hi_b = _smulhi(PHILOX_ROUND_B, c2)
+        hi_a = _smulhi(PHILOX_ROUND_A, c0)
+        new_c0 = hi_b ^ c1 ^ k0
+        new_c2 = hi_a ^ c3 ^ k1
+        new_c1 = np.uint32(np.int32(PHILOX_ROUND_B) * np.int32(c2))
+        new_c3 = np.uint32(np.int32(PHILOX_ROUND_A) * np.int32(c0))
+        c0, c1, c2, c3 = new_c0, new_c1, new_c2, new_c3
+        k0 = np.uint32(k0 + PHILOX_KEY_A)
+        k1 = np.uint32(k1 + PHILOX_KEY_B)
+    return c0
+
+
+def _philox_to_uniform(raw: np.uint32) -> np.float32:
+    """uint32 → uniform float，与 kernel 中 abs_signed * PHILOX_FLOAT_SCALE 对齐。"""
+    sx = int(np.int32(raw))
+    if sx < 0:
+        sx = -sx - 1
+    return np.float32(sx) * PHILOX_FLOAT_SCALE
 
 
 def golden_gumbel_sample(
@@ -72,25 +82,38 @@ def golden_gumbel_sample(
 ) -> np.ndarray:
     """
     CPU golden：返回 sampled[num_reqs]（int64）。
-    logits: [num_reqs, vocab_size] float32
-    temperature: [num_reqs] float32
-    seeds: [num_reqs] int64
-    pos: [num_reqs] int64
+    与 op_kernel/gumbel_sample.h ProcessOneRow 完全对齐：
+      1. gumbelSeed = Philox4x32(c0=pos_i32, k0=seedLo, k1=seedHi)
+      2. 对每个 vocabIdx: raw = Philox4x32(c0=vocabIdx, k0=gumbelSeed, k1=0)
+      3. u = abs_signed(raw) * PHILOX_FLOAT_SCALE
+      4. g = -ln(-ln(u + eps) + eps)
+      5. sampled = argmax(logits/temp + g)
     """
     num_reqs, vocab_size = logits.shape
     sampled = np.zeros(num_reqs, dtype=np.int64)
     for r in range(num_reqs):
         temp = float(temperature[r])
-        seed64 = int(seeds[r])
-        pos_i  = int(pos[r])
-        is_greedy = (temp == 0.0)
+        seed64 = int(seeds[r]) & 0xFFFFFFFFFFFFFFFF
+        pos_i32 = int(pos[r]) & 0xFFFFFFFF
 
+        is_greedy = (temp == 0.0)
         logits_r = logits[r].astype(np.float32).copy()
+
         if not is_greedy:
             if apply_temperature:
                 logits_r = logits_r / np.float32(temp)
-            seed_f = _splitmix64(seed64, pos_i)
-            g = _lcg_gumbel(seed_f, vocab_size)
+
+            seed_lo = np.uint32(seed64 & 0xFFFFFFFF)
+            seed_hi = np.uint32((seed64 >> 32) & 0xFFFFFFFF)
+            gumbel_seed = _philox4x32(pos_i32, int(seed_lo), int(seed_hi))
+
+            g = np.empty(vocab_size, dtype=np.float32)
+            for i in range(vocab_size):
+                raw = _philox4x32(i, int(gumbel_seed), 0)
+                u = _philox_to_uniform(raw)
+                u = u + GUMBEL_EPS
+                g[i] = -np.log(-np.log(u) + GUMBEL_EPS)
+
             logits_r = logits_r + g
 
         sampled[r] = int(np.argmax(logits_r))
@@ -103,17 +126,17 @@ def golden_gumbel_sample(
 def _make_inputs(num_reqs: int, vocab_size: int, temp_val: float = 1.0,
                  seed_base: int = 42, pos_base: int = 0):
     """
-    构造 GumbelSample 输入张量（CPU numpy + NPU tensor）。
+    构造 GumbelSample 输入张量（CPU numpy）。
     参数自洽检查：num_reqs >= 1, vocab_size >= 1。
     """
     assert num_reqs >= 1, f"num_reqs must be >= 1, got {num_reqs}"
     assert vocab_size >= 1, f"vocab_size must be >= 1, got {vocab_size}"
 
-    rng = np.random.default_rng(seed_base)
-    logits_np   = rng.standard_normal((num_reqs, vocab_size)).astype(np.float32)
-    temp_np     = np.full(num_reqs, temp_val, dtype=np.float32)
-    seeds_np    = np.arange(seed_base, seed_base + num_reqs, dtype=np.int64)
-    pos_np      = np.arange(pos_base, pos_base + num_reqs, dtype=np.int64)
+    rng = np.random.default_rng(seed_base + 1000)
+    logits_np = rng.standard_normal((num_reqs, vocab_size)).astype(np.float32)
+    temp_np   = np.full(num_reqs, temp_val, dtype=np.float32)
+    seeds_np  = np.arange(seed_base, seed_base + num_reqs, dtype=np.int64)
+    pos_np    = np.arange(pos_base, pos_base + num_reqs, dtype=np.int64)
     return logits_np, temp_np, seeds_np, pos_np
 
 
@@ -125,13 +148,11 @@ def _run_npu(logits_np, temp_np, seeds_np, pos_np, apply_temperature: bool,
     seeds_npu  = torch.from_numpy(seeds_np).npu()
     pos_npu    = torch.from_numpy(pos_np).npu()
 
-    # warmup
     for _ in range(PERF_WARMUP):
         _ = torch.ops._C_ascend.npu_gumbel_sample(
             logits_npu, temp_npu, seeds_npu, pos_npu, apply_temperature)
     torch.npu.synchronize()
 
-    # measure
     t0 = time.perf_counter()
     for _ in range(PERF_ITERS):
         out = torch.ops._C_ascend.npu_gumbel_sample(
@@ -230,23 +251,23 @@ def test_gumbel_sample_large(num_reqs, vocab_size, label):
 # ============================================================
 @pytest.mark.parametrize("case_name,num_reqs,vocab_size,temp_val,seed_base,pos_base", [
     # 最小规模
-    ("min_scale",          1,   1,     1.0,  0,    0),
+    ("min_scale",           1,   1,     1.0,  0,    0),
     # vocab 恰好 = BLOCK_SIZE（4096，整数倍对齐）
-    ("vocab_eq_block",     4,   4096,  1.0,  1,    0),
+    ("vocab_eq_block",      4,   4096,  1.0,  1,    0),
     # vocab 恰好 = 2×BLOCK_SIZE
-    ("vocab_2x_block",     4,   8192,  1.0,  2,    0),
+    ("vocab_2x_block",      4,   8192,  1.0,  2,    0),
     # vocab 非整数倍（4096+1）
-    ("vocab_non_aligned",  4,   4097,  1.0,  3,    0),
+    ("vocab_non_aligned",   4,   4097,  1.0,  3,    0),
     # seed=0（边界值）
-    ("seed_zero",          8,   32000, 1.0,  0,    0),
+    ("seed_zero",           8,   32000, 1.0,  0,    0),
     # pos=0（边界值）
-    ("pos_zero",           8,   32000, 1.0,  42,   0),
+    ("pos_zero",            8,   32000, 1.0,  42,   0),
     # 极大 pos（接近 int32 上限）
-    ("pos_large",          4,   32000, 1.0,  42,   2147483647 - 4),
+    ("pos_large",           4,   32000, 1.0,  42,   2147483647 - 4),
     # 极大 seed（接近 int64 上限）
-    ("seed_large",         4,   32000, 1.0,  9223372036854775800, 0),
+    ("seed_large",          4,   32000, 1.0,  9223372036854775800, 0),
     # 混合 batch：num_reqs 不整除 usedCoreNum（假设 20 核）
-    ("batch_non_divisible", 21, 32000, 1.0,  7,    0),
+    ("batch_non_divisible", 21,  32000, 1.0,  7,    0),
 ])
 @torch.inference_mode()
 def test_gumbel_sample_boundary(case_name, num_reqs, vocab_size, temp_val, seed_base, pos_base):
