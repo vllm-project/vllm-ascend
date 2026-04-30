@@ -65,7 +65,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # it's installed from source, the version of vllm is usually set to "0.9.1".
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
-    "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
+    # DEPRECATED: VLLM_VERSION env var is removed. Use vllm.__version__ directly.
+    #     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),

@@ -406,19 +406,17 @@ def adapt_patch(is_global_patch: bool = False):
 
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
-    if envs_ascend.VLLM_VERSION is not None:
-        vllm_version = envs_ascend.VLLM_VERSION
-    else:
-        import vllm
+    # VLLM_VERSION env var is removed. Use vllm.__version__ directly.
+    import vllm
 
-        vllm_version = vllm.__version__
+    vllm_version = vllm.__version__
+    print(f"[PATCH_VERIFY] vllm_version_is: auto-detected = {vllm_version}")
     try:
         return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
-            "is installed probably. Set the environment variable VLLM_VERSION "
-            "to control it by hand. And please make sure the value follows the "
+            "is installed probably. Please make sure the value follows the "
             "format of x.y.z."
         )
 
