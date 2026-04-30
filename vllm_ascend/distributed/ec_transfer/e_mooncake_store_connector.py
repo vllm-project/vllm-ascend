@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 import torch
 import zmq
-from mooncake.store import MooncakeDistributedStore
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
@@ -46,6 +45,14 @@ class EMoonCakeStoreConnector(ECConnectorBase):
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
         # init mooncake store
+        try:
+            from mooncake.store import MooncakeDistributedStore  # type: ignore
+        except ImportError as e:
+            raise ImportError(
+                "Please install mooncake by following the instructions at "
+                "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
+                "to run vLLM with MooncakeConnector."
+            ) from e
         self.ec_store = MooncakeDistributedStore()
         self.config = MooncakeStoreConfig.load_from_env()
         mooncake_engine_init(self.ec_store, self.config, role)
@@ -66,8 +73,8 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 self.thread_executor.submit(self.producer_run)
                 logger.info("============ Producer init ===============")
             elif transfer_config.ec_role == "ec_consumer":
-                self.handle_caches = {}
-                self.recv_queue = queue.Queue()
+                self.handle_caches = dict[str, tuple()]
+                self.recv_queue = queue.Queue[bytes]()
                 self.thread_executor.submit(self.consumer_run)
                 self.thread_executor.submit(self.recv_feat_async)
                 logger.info("============= Consumer init ==============")
@@ -255,7 +262,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
 
 def ensure_zmq_send(
     socket: zmq.Socket,  # type: ignore
-    data: list,
+    data: bytes,
     max_retries: int = 3,
 ):
     retries_left = max_retries
@@ -277,7 +284,7 @@ def ensure_zmq_send(
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
-    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
+    if socket_type not in (zmq.REQ, zmq.DEALER):  # type: ignore
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
     ctx: zmq.Context | None = None
