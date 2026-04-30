@@ -91,11 +91,8 @@ benchmarks:
 
   perf:
     case_type: performance
-<<<<<<< HEAD
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100
-=======
-    dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
->>>>>>> 5933425a... add Qwen3.5-397B-A17B-W4A8/W8A8;GLM5-1-W8A8-dual-nodes;deepseekv3.2-w8a8
+
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 12
