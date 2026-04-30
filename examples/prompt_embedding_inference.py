@@ -17,7 +17,7 @@ def init_tokenizer_and_llm(model_name: str):
 
 
 def get_prompt_embeds(chat: list[dict[str, str]], tokenizer: PreTrainedTokenizer, embedding_layer: torch.nn.Module):
-    token_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt")
+    token_ids = tokenizer.apply_chat_template(chat, add_generation_prompt=True, return_tensors="pt", return_dict=False)
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
     return prompt_embeds
 

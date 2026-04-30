@@ -44,6 +44,8 @@ Rules:
 7. For difficult parts, keep original English
 8. Remove "#, fuzzy" markers
 9. Do NOT translate proper nouns: person names, contributor names, author names must be kept as-is in msgstr
+10. In list items, no space between marker and Chinese text: "1.中文" not "1. 中文"
+    (space causes Sphinx to ignore the translation)
 
 Return ONLY the complete PO file content, no extra explanations.
 
