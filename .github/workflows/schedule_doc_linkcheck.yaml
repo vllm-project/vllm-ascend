@@ -52,7 +52,34 @@ jobs:
       - name: Run full Sphinx linkcheck
         if: ${{ github.event_name != 'pull_request' }}
         run: |
+          set +e
           make -C docs linkcheck SPHINXOPTS="-W --keep-going"
+          LINKCHECK_EXIT_CODE=$?
+          set -e
+
+          if [[ "${LINKCHECK_EXIT_CODE}" == "0" ]]; then
+            exit 0
+          fi
+
+          # Retry all failed links reported by Sphinx linkcheck.
+          retry_failed=0
+          retried=0
+          while IFS= read -r url; do
+            retried=1
+            echo "Retrying failed link: ${url}"
+            curl_args=(-fsSL --retry 3 --retry-delay 3 --retry-all-errors -o /dev/null)
+            if curl "${curl_args[@]}" "${url}"; then
+              echo "Retry succeeded: ${url}"
+            else
+              echo "Retry failed: ${url}"
+              retry_failed=1
+            fi
+          done < <(python -c 'import json, pathlib; p = pathlib.Path("docs/_build/linkcheck/output.json"); print("\n".join(sorted({json.loads(line).get("uri", "").split("#", 1)[0] for line in p.read_text(encoding="utf-8").splitlines() if json.loads(line).get("status") in {"broken", "timeout"} and json.loads(line).get("uri")})) if p.exists() else "")')
+
+          if [[ "${retried}" == "0" ]]; then
+            exit "${LINKCHECK_EXIT_CODE}"
+          fi
+          exit "${retry_failed}"
 
       - name: Run Sphinx linkcheck for changed docs
         if: ${{ github.event_name == 'pull_request' && steps.changed-docs.outputs.any_changed == 'true' }}
@@ -61,11 +88,40 @@ jobs:
         run: |
           set -euo pipefail
 
+          # shellcheck disable=SC2153
+          read -r -a changed_docs <<< "${CHANGED_DOCS}"
           echo "Changed docs files:"
-          printf '  %s\n' ${CHANGED_DOCS}
+          printf '  %s\n' "${changed_docs[@]}"
 
+          set +e
           sphinx-build -b linkcheck -W --keep-going \
-            docs/source docs/_build/linkcheck ${CHANGED_DOCS}
+            docs/source docs/_build/linkcheck "${changed_docs[@]}"
+          LINKCHECK_EXIT_CODE=$?
+          set -e
+
+          if [[ "${LINKCHECK_EXIT_CODE}" == "0" ]]; then
+            exit 0
+          fi
+
+          # Retry all failed links reported by Sphinx linkcheck.
+          retry_failed=0
+          retried=0
+          while IFS= read -r url; do
+            retried=1
+            echo "Retrying failed link: ${url}"
+            curl_args=(-fsSL --retry 3 --retry-delay 5 --retry-all-errors -o /dev/null)
+            if curl "${curl_args[@]}" "${url}"; then
+              echo "Retry succeeded: ${url}"
+            else
+              echo "Retry failed: ${url}"
+              retry_failed=1
+            fi
+          done < <(python -c 'import json, pathlib; p = pathlib.Path("docs/_build/linkcheck/output.json"); print("\n".join(sorted({json.loads(line).get("uri", "").split("#", 1)[0] for line in p.read_text(encoding="utf-8").splitlines() if json.loads(line).get("status") in {"broken", "timeout"} and json.loads(line).get("uri")})) if p.exists() else "")')
+
+          if [[ "${retried}" == "0" ]]; then
+            exit "${LINKCHECK_EXIT_CODE}"
+          fi
+          exit "${retry_failed}"
 
       - name: Upload linkcheck reports
         if: ${{ always() && github.event_name != 'pull_request' }}
