@@ -621,15 +621,14 @@ def test_eagle3_fia_pad_under_max_concurrency(
 
 @pytest.mark.parametrize("method", DFLASH.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
-@pytest.mark.skipif(True, reason="Fix me, DFlash acceptance test is flaky, needs investigation")
 def test_dflash_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
     from vllm_ascend.utils import vllm_version_is
 
-    if vllm_version_is("0.19.0"):
-        pytest.skip("Dflash tests are not supported on vLLM version 0.19.0")
+    if vllm_version_is("0.19.1"):
+        pytest.skip("Dflash tests are not supported on vLLM version 0.19.1")
 
     main_model_name = DFLASH[method]["main"]
     spec_model_name = DFLASH[method]["spec"]
