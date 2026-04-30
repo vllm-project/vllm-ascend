@@ -153,13 +153,12 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
-from starlette.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 try:
     from vllm.logger import init_logger
@@ -917,6 +916,7 @@ def trans_instances(instances: list[str]) -> list[ServerState]:
         server_list.append(ServerState(h, int(p)))
     return server_list
 
+
 async def check_backend_health(server: ServerState) -> dict:
     try:
         health_url = f"{server.origin_url}/health"
@@ -973,6 +973,7 @@ def build_readiness_response(prefill_results: list[dict], decode_results: list[d
     }
     return payload, status_code
 
+
 @app.post("/v1/completions")
 @with_cancellation
 async def handle_completions(request: Request):
@@ -992,6 +993,7 @@ async def healthcheck():
         "prefill_instances": len(proxy_state.prefillers),
         "decode_instances": len(proxy_state.decoders),
     }
+
 
 @app.get("/readiness")
 async def readiness():
