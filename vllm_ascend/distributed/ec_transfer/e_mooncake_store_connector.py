@@ -5,7 +5,7 @@ import queue
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 import torch
