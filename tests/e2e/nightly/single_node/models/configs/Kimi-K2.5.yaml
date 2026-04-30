@@ -73,24 +73,24 @@ _benchmarks: &benchmarks
     batch_size: 8
     baseline: 95
     threshold: 5
-acc_GPQA:
-  case_type: accuracy
-  dataset_path: vllm-ascend/gpqa
-  request_conf: vllm_api_general_chat
-  dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-  max_out_len: 4096
-  batch_size: 32
-  baseline: 90
-  threshold: 5
-acc_aime2025:
-  case_type: accuracy
-  dataset_path: vllm-ascend/aime2025
-  request_conf: vllm_api_general_chat
-  dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-  max_out_len: 4096
-  batch_size: 32
-  baseline: 90
-  threshold: 5
+  acc_GPQA:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 4096
+    batch_size: 32
+    baseline: 90
+    threshold: 5
+  acc_aime2025:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 4096
+    batch_size: 32
+    baseline: 90
+    threshold: 5
 
 # ==========================================
 # ACTUAL TEST CASES
