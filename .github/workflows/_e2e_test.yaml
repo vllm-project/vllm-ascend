@@ -943,6 +943,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         shell: bash
         run: |
+          python -c "import torch; print('torch version:', torch.__version__)"
           set -o pipefail
           pytest -sv --durations=0 \
           tests/e2e/310p/multicard/test_dense_model_multicard.py::test_qwen3_dense_tp4_w8a8 \
