@@ -471,15 +471,20 @@ def read_readme() -> str:
 
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
+    soc_version = (envs.SOC_VERSION or "").lower()
+    skip_triton_ascend = soc_version.startswith("ascend310p")
 
     def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
-            requirements = f.read().strip().split("\n")
+            requirements = f.read().splitlines()
         resolved_requirements = []
         for line in requirements:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
-            elif line.startswith("--"):
+            elif line.startswith("--") or skip_triton_ascend and line.startswith("triton-ascend"):
                 continue
             else:
                 resolved_requirements.append(line)
