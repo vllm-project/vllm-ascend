@@ -15,7 +15,10 @@ import torch.nn.functional as F
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+from vllm.v1.attention.backends import utils as attn_backend_utils  # type: ignore
+
+PAD_SLOT_ID = attn_backend_utils.PAD_SLOT_ID
+NULL_BLOCK_ID = getattr(attn_backend_utils, "NULL_BLOCK_ID", PAD_SLOT_ID)
 
 
 def causal_conv1d_ref(
@@ -78,21 +81,21 @@ def _uses_apc_prefill_path(
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    activation: str | None = "silu",
-    conv_states: torch.Tensor | None = None,
-    has_initial_state: torch.Tensor | None = None,
+    bias: torch.Tensor | None,
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
     cache_indices: torch.Tensor | None = None,
-    query_start_loc: torch.Tensor | None = None,
-    metadata: Any | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
+    null_block_id: int = NULL_BLOCK_ID,
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     num_computed_tokens: torch.Tensor | None = None,
     block_size_to_align: int = 0,
-    batch_ptr: torch.Tensor | None = None,
-    token_chunk_offset_ptr: torch.Tensor | None = None,
+    metadata: Any | None = None,
+    validate_data: bool = False,
 ):
     """
     x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
@@ -109,6 +112,9 @@ def causal_conv1d_fn(
     has_initial_state: (batch) bool
         indicates whether should the kernel take the current state as initial
         state for the calculations
+    null_block_id: int
+        Upstream-compatible sentinel for empty APC block-table entries. The
+        NPU path normalizes it to pad_slot_id before dispatch.
     block_idx_first_scheduled_token / block_idx_last_scheduled_token /
     initial_state_idx / num_computed_tokens:
         APC all-mode prefill metadata. When provided, causal_conv1d_fn routes
@@ -135,6 +141,8 @@ def causal_conv1d_fn(
 
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
+
+    del metadata, validate_data
 
     if _uses_apc_prefill_path(
         cache_indices,
@@ -171,6 +179,12 @@ def causal_conv1d_fn(
             raise RuntimeError(
                 "APC causal_conv1d_fn requires num_computed_tokens."
             )
+        if null_block_id != pad_slot_id:
+            cache_indices = torch.where(
+                cache_indices == null_block_id,
+                torch.full_like(cache_indices, pad_slot_id),
+                cache_indices,
+            )
         return _causal_conv1d_fwd_npu(
             x=x,
             weight=weight,
@@ -186,8 +200,6 @@ def causal_conv1d_fn(
             initial_state_idx=initial_state_idx,
             num_computed_tokens=num_computed_tokens,
             block_size_to_align=block_size_to_align,
-            batch_ptr=batch_ptr,
-            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
 
     if x.stride(-1) != 1:
@@ -1184,8 +1196,6 @@ def _causal_conv1d_fwd_npu(
     initial_state_idx: torch.Tensor | None = None,
     num_computed_tokens: torch.Tensor | None = None,
     block_size_to_align: int = 0,
-    batch_ptr: torch.Tensor | None = None,
-    token_chunk_offset_ptr: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """NPU causal conv1d forward for all-mode prefix caching.
 
@@ -1208,8 +1218,6 @@ def _causal_conv1d_fwd_npu(
         initial_state_idx: (batch,) SOURCE block pointer into cache_indices
         num_computed_tokens: (batch,) tokens already computed per seq
         block_size_to_align: mamba block size (divisible by BLOCK_M=8)
-        batch_ptr: precomputed grid scheduling tensor
-        token_chunk_offset_ptr: precomputed grid scheduling tensor
 
     Returns:
         (num_tokens, dim) output tensor
@@ -1296,13 +1304,12 @@ def _causal_conv1d_fwd_npu(
         block_size_to_align = BLOCK_M
 
     # Grid scheduling
-    if batch_ptr is None or token_chunk_offset_ptr is None:
-        batch_ptr, token_chunk_offset_ptr, num_programs = (
-            compute_conv1d_grid_npu(
-                query_start_loc, BLOCK_M, pad_slot_id, x_row_major.device))
-    else:
-        num_programs = int(
-            (batch_ptr != pad_slot_id).sum().item())
+    batch_ptr, token_chunk_offset_ptr, num_programs = compute_conv1d_grid_npu(
+        query_start_loc,
+        BLOCK_M,
+        pad_slot_id,
+        x_row_major.device,
+    )
 
     grid = (num_programs, triton.cdiv(dim_val, BLOCK_N))
 
