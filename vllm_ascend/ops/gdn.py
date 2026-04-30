@@ -310,7 +310,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
-        conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
@@ -491,6 +490,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv_non_spec = output_non_spec
             else:
                 output_non_spec = torch.empty_like(mixed_qkv_non_spec)
+                has_initial_state = (non_spec_state_indices_tensor != PAD_SLOT_ID).to(torch.int32)
                 torch.ops._C_ascend.npu_causal_conv1d_custom(
                         output_non_spec,
                         mixed_qkv_non_spec,
@@ -499,7 +499,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         bias_opt=self.conv1d.bias,
                         query_start_loc_opt=to_int64_tuple(non_spec_query_start_loc[:num_actual_tokens + 1]),
                         cache_indices_opt=to_int64_tuple(non_spec_state_indices_tensor[:num_actual_tokens]),
-                        initial_state_mode_opt=to_int64_tuple((non_spec_state_indices_tensor != PAD_SLOT_ID).to(torch.int32)),
+                        initial_state_mode_opt=to_int64_tuple(has_initial_state),
                         num_accepted_tokens_opt=[],
                         activation_mode=activation_num,
                         pad_slot_id=PAD_SLOT_ID,

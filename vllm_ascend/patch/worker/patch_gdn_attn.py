@@ -554,7 +554,8 @@ def _ensure_spec_causal_conv1d_host_meta_state(builder, device: torch.device) ->
 
 def _acquire_spec_causal_conv1d_host_slot(builder) -> _GDNSpecCausalConv1dHostBufferSlot:
     pool = builder._ascend_gdn_spec_causal_conv1d_host_pool
-    builder._ascend_gdn_spec_causal_conv1d_host_pool_idx = (builder._ascend_gdn_spec_causal_conv1d_host_pool_idx + 1) % len(pool)
+    builder._ascend_gdn_spec_causal_conv1d_host_pool_idx = ((builder._ascend_gdn_spec_causal_conv1d_host_pool_idx + 1)
+                                                            % len(pool))
     return pool[builder._ascend_gdn_spec_causal_conv1d_host_pool_idx]
 
 
@@ -662,7 +663,6 @@ def _build_spec_causal_conv1d_host_meta(
         slot = _acquire_spec_causal_conv1d_host_slot(builder)
 
     num_spec_decodes = attn_metadata.num_spec_decodes
-    num_spec_decode_tokens = attn_metadata.num_spec_decode_tokens
     cache_indices_cpu = _copy_to_pinned_cpu(
         attn_metadata.spec_state_indices_tensor[:num_spec_decodes, 0].contiguous(),
         None if slot is None else slot.cache_indices_cpu,
