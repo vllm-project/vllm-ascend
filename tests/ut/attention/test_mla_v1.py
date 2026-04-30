@@ -1492,7 +1492,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
         self.impl.q_lora_rank = 32
 
-        self.impl.process_weights_for_fused_mlapo_a5(torch.float16)
+        self.impl._process_weights_for_fused_mlapo_a5(torch.float16)
         self.assertTrue(hasattr(self.impl, "weight_dq"))
         self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
@@ -1625,11 +1625,11 @@ class TestAscendMLAImpl(TestBase):
 
         mock_get_ascend_device_type.return_value = AscendDeviceType.A5
 
-        self.impl.process_weights_for_fused_mlapo_a5 = MagicMock()
+        self.impl._process_weights_for_fused_mlapo_a5 = MagicMock()
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.impl.process_weights_for_fused_mlapo_a5.assert_called_once_with(torch.bfloat16)
+        self.impl._process_weights_for_fused_mlapo_a5.assert_called_once_with(torch.bfloat16)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
@@ -1667,11 +1667,11 @@ class TestAscendMLAImpl(TestBase):
 
         mock_get_ascend_device_type.return_value = AscendDeviceType.A2
 
-        self.impl.process_weights_for_fused_mlapo = MagicMock()
+        self.impl._process_weights_for_fused_mlapo = MagicMock()
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.impl.process_weights_for_fused_mlapo.assert_called_once_with(torch.bfloat16)
+        self.impl._process_weights_for_fused_mlapo.assert_called_once_with(torch.bfloat16)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
