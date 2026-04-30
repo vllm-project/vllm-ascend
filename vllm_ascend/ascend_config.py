@@ -117,6 +117,9 @@ class AscendConfig:
         # 2: enable dispatch_gmm_combine_decode (Decode)
         self.enable_fused_mc2 = additional_config.get("enable_fused_mc2", 0)
         print(f"[PATCH_VERIFY] AscendConfig.enable_fused_mc2 initialized: {self.enable_fused_mc2}")
+        # FLASHCOMM1 configuration (replaces VLLM_ASCEND_ENABLE_FLASHCOMM1 env var)
+        self.enable_flashcomm1 = additional_config.get("enable_flashcomm1", False)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_flashcomm1 initialized: {self.enable_flashcomm1}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
