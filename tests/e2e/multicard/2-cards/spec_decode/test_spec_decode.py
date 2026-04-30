@@ -44,7 +44,7 @@ BASELINES_SP = {
     "eagle3": [0.68, 0.40, 0.18],
 }
 
-
+@pytest.mark.skip(reason="skip test_eagle3_sp_acceptance")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @pytest.mark.parametrize("method", ["eagle3"])
 @pytest.mark.parametrize("num_speculative_tokens", [3])

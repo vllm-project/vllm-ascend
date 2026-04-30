@@ -1153,7 +1153,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     cad.num_actual_tokens = num_tokens
                     cad.max_query_len = max(self.decode_threshold, max_query_len_p)
                     cad.seq_lens[-num_prefill_reqs:] = seq_lens_p
-                    cad.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
+                    if cad.seq_lens_cpu is not None:
+                        cad.seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
+                    if cad._seq_lens_cpu is not None:
+                        cad._seq_lens_cpu[-num_prefill_reqs:] = seq_lens_p
                     query_start_loc_p = cu_num_tokens_p[1:] + cad.query_start_loc[num_decode_reqs].item()
                     cad.query_start_loc[-num_prefill_reqs:] = query_start_loc_p
                     cad.query_start_loc_cpu[-num_prefill_reqs:] = query_start_loc_p
