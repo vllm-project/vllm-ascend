@@ -160,7 +160,7 @@ def sample_npu_memory_usage() -> dict[str, Any] | None:
     current_device_selected = False
 
     for line in output.splitlines():
-        first_line_match = re.match(r"^\|\s*(\d+)\s+\S+", line)
+        first_line_match = re.match(r"^\|\s*(\d+)\s+[A-Za-z0-9_.-]", line)
         if first_line_match:
             current_device = int(first_line_match.group(1))
             current_device_selected = visible_devices is None or current_device in visible_devices
@@ -169,7 +169,7 @@ def sample_npu_memory_usage() -> dict[str, Any] | None:
         if current_device is None or not current_device_selected:
             continue
 
-        hbm_match = re.search(r"(\d+)\s*/\s*(\d+)\s*$", line)
+        hbm_match = re.search(r"(\d+)\s*/\s*(\d+)\s*\|?\s*$", line)
         if hbm_match:
             used_mb = int(hbm_match.group(1))
             total_mb = int(hbm_match.group(2))
