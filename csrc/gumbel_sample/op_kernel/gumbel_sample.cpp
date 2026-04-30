@@ -23,6 +23,7 @@ __global__ __aicore__ void gumbel_sample(
 {
     GET_TILING_DATA_WITH_STRUCT(GumbelSampleTilingData, tilingData, tiling);
 
+    // [opt-1] TPipe 在核函数入口创建，传指针给 Op 类（减少头尾开销）
     TPipe pipe;
     if constexpr (applyTemp == 1) {
         NsGumbelSample::GumbelSampleOp<true> op;
