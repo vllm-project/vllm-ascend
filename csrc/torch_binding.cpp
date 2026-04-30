@@ -923,6 +923,50 @@ npu_copy_and_expand_eagle_inputs(
             out_new_token_indices, out_hidden_state_mapping};
 }
 
+std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&>
+npu_copy_and_expand_dflash_inputs(
+    const at::Tensor &next_token_ids,
+    const at::Tensor &target_positions,
+    const at::Tensor &query_start_loc,
+    const c10::optional<at::Tensor> &num_rejected_tokens_opt,
+    const at::Tensor &block_table,
+    int64_t parallel_drafting_token_id,
+    int64_t num_query_per_req,
+    int64_t num_speculative_tokens,
+    int64_t block_size,
+    at::Tensor &out_input_ids,
+    at::Tensor &out_context_positions,
+    at::Tensor &out_query_positions,
+    at::Tensor &out_context_slot_mapping,
+    at::Tensor &out_query_slot_mapping,
+    at::Tensor &out_token_indices)
+{
+    int64_t total_input_tokens = target_positions.size(0);
+    int64_t num_reqs = query_start_loc.size(0) - 1;
+    int64_t total_query_tokens = num_reqs * num_query_per_req;
+
+    // Validate output tensor shapes - allow larger tensors for buffer reuse
+    TORCH_CHECK(out_input_ids.size(0) >= total_query_tokens, "out_input_ids size too small");
+    TORCH_CHECK(out_context_positions.size(0) >= total_input_tokens, "out_context_positions size too small");
+    TORCH_CHECK(out_query_positions.size(0) >= total_query_tokens, "out_query_positions size too small");
+    TORCH_CHECK(out_context_slot_mapping.size(0) >= total_input_tokens, "out_context_slot_mapping size too small");
+    TORCH_CHECK(out_query_slot_mapping.size(0) >= total_query_tokens, "out_query_slot_mapping size too small");
+    TORCH_CHECK(out_token_indices.size(0) >= num_reqs * num_speculative_tokens, "out_token_indices size too small");
+
+    bool has_num_rejected = num_rejected_tokens_opt.has_value();
+    at::Tensor num_rejected_tokens = has_num_rejected ? num_rejected_tokens_opt.value() : at::empty({0}, at::dtype(at::kInt).device(next_token_ids.device()));
+
+    EXEC_NPU_CMD(aclnnCopyAndExpandDflashInputs,
+        next_token_ids, target_positions, query_start_loc, num_rejected_tokens, block_table,
+        out_input_ids, out_context_positions, out_query_positions,
+        out_context_slot_mapping, out_query_slot_mapping, out_token_indices,
+        parallel_drafting_token_id, num_query_per_req, num_speculative_tokens, block_size,
+        total_input_tokens, has_num_rejected);
+
+    return {out_input_ids, out_context_positions, out_query_positions,
+            out_context_slot_mapping, out_query_slot_mapping, out_token_indices};
+}
+
 at::Tensor npu_causal_conv1d_custom(
     const at::Tensor& x,
     const at::Tensor& weight,
@@ -1228,7 +1272,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
 
     ops.def(
-        "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
+        "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] "
+        "vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
     );
     ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
 
@@ -1241,6 +1286,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor out_is_masked_token_mask, Tensor out_new_token_indices, Tensor out_hidden_state_mapping)"
     );
     ops.impl("npu_copy_and_expand_eagle_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_eagle_inputs);
+    ops.def(
+        "npu_copy_and_expand_dflash_inputs(Tensor next_token_ids, Tensor target_positions, "
+        "Tensor query_start_loc, Tensor? num_rejected_tokens, Tensor block_table, "
+        "int parallel_drafting_token_id, int num_query_per_req, int num_speculative_tokens, "
+        "int block_size, Tensor! out_input_ids, Tensor! out_context_positions, Tensor! out_query_positions, "
+        "Tensor! out_context_slot_mapping, Tensor! out_query_slot_mapping, Tensor! out_token_indices) -> "
+        "(Tensor out_input_ids, Tensor out_context_positions, Tensor out_query_positions, "
+        "Tensor out_context_slot_mapping, Tensor out_query_slot_mapping, Tensor out_token_indices)"
+    );
+    ops.impl("npu_copy_and_expand_dflash_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_dflash_inputs);
     ops.def(
         "npu_causal_conv1d_custom(Tensor x, "
         "                         Tensor weight, "

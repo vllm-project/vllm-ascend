@@ -88,31 +88,25 @@ class AscendDflashProposer(AscendEagleProposer):
 
         has_num_rejected = num_rejected_tokens_gpu is not None
 
-        copy_and_expand_dflash_inputs_kernel_single_grid[1,](
+        torch.ops._C_ascend.npu_copy_and_expand_dflash_inputs(
             # Inputs
-            next_token_ids_ptr=next_token_ids,
-            target_positions_ptr=target_positions,
-            # Outputs
-            out_input_ids_ptr=self.input_ids,
-            out_context_positions_ptr=self._context_positions_buffer,
-            out_query_positions_ptr=self.positions,
-            out_context_slot_mapping_ptr=self._context_slot_mapping_buffer,
-            out_query_slot_mapping_ptr=self._slot_mapping_buffer,
-            out_token_indices_ptr=token_indices_to_sample,
-            # Block table
-            block_table_ptr=cad.block_table_tensor,
-            block_table_stride=cad.block_table_tensor.stride(0),
-            # Metadata
-            query_start_loc_ptr=cad.query_start_loc,
-            num_rejected_tokens_ptr=(num_rejected_tokens_gpu if has_num_rejected else 0),
+            next_token_ids,
+            target_positions,
+            cad.query_start_loc,
+            num_rejected_tokens_gpu,
+            cad.block_table_tensor,
             # Scalars
-            parallel_drafting_token_id=self.parallel_drafting_token_id,
-            block_size=self.block_size,
-            num_query_per_req=num_query_per_req,
-            num_speculative_tokens=self.num_speculative_tokens,
-            total_input_tokens=num_context,
-            batch_size=batch_size,
-            HAS_NUM_REJECTED=has_num_rejected,
+            self.parallel_drafting_token_id,
+            num_query_per_req,
+            self.num_speculative_tokens,
+            self.block_size,
+            # In-place outputs
+            self.input_ids,
+            self._context_positions_buffer,
+            self.positions,
+            self._context_slot_mapping_buffer,
+            self._slot_mapping_buffer,
+            token_indices_to_sample
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
