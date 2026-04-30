@@ -102,7 +102,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
-            
+                
             tensor_bytes, tensor_shape, tensor_dtype = self.handle_caches.get(mm_data.mm_hash, None)
             tensor = torch.empty(tensor_shape, dtype=tensor_dtype).npu()
             tensor_addr = (tensor.data_ptr() + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
@@ -254,9 +254,9 @@ class EMoonCakeStoreConnector(ECConnectorBase):
 
 
 def ensure_zmq_send(
-        socket: zmq.Socket,  # type: ignore
-        data: list,
-        max_retries: int = 3
+    socket: zmq.Socket,  # type: ignore
+    data: list,
+    max_retries: int = 3
 ):
     retries_left = max_retries
     while True:
@@ -266,8 +266,7 @@ def ensure_zmq_send(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning(
-                    f"Send failed: {e}, retrying... ({retries_left} attempts left)")
+                logger.warning(f"Send failed: {e}, retrying... ({retries_left} attempts left)")
                 time.sleep(0.1)
             else:
                 logger.error(f"Send failed after all retries: {e}")
@@ -288,4 +287,3 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignor
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
-            
