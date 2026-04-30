@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -40,6 +39,8 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 DEFAULT_MODELS = [
     "dense=/data/weights/Qwen3-32B",
