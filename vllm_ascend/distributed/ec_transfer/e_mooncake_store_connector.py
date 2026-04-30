@@ -102,7 +102,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
-                
+            
             tensor_bytes, tensor_shape, tensor_dtype = self.handle_caches.get(mm_data.mm_hash, None)
             tensor = torch.empty(tensor_shape, dtype=tensor_dtype).npu()
             tensor_addr = (tensor.data_ptr() + ALIGNMENT - 1) // ALIGNMENT * ALIGNMENT
@@ -130,7 +130,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
             return
 
         self.send_queue.put((mm_hash, encoder_cache[mm_hash]))
-    
+
     def has_cache_item(
         self,
         identifier: str,
@@ -145,7 +145,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
             Bool indicate that media exists in cache or not
         """
         return self.ec_store.is_exist(identifier)
-        
+
     def update_state_after_alloc(
         self,
         request: "Request",
@@ -256,7 +256,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
 def ensure_zmq_send(
     socket: zmq.Socket,  # type: ignore
     data: list,
-    max_retries: int = 3
+    max_retries: int = 3,
 ):
     retries_left = max_retries
     while True:
