@@ -297,50 +297,52 @@ private:
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
     }
 
-    // Move tokens and scales together, then write them to different positions respectively
     template<typename T>
     CATLASS_DEVICE void CopyGMToGMPerToken(
         AscendC::GlobalTensor<T> dst,
         AscendC::GlobalTensor<float> dstScale,
         AscendC::GlobalTensor<T> src,
         int32_t rows,
-        int32_t hiddenSize
-    )
-    {
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
- 
+        int32_t hiddenSize,
+        int32_t ubMoveNum,
+        int32_t& pingpongId
+    ) {
+
         constexpr int32_t BufferNum = 2;
         AscendC::LocalTensor<T> tmpBuffer1 = resource.ubBuf.template GetBufferByByte<T>(0);
         constexpr int tmpBufferOffset = 96 * 1024; // half of UB
         AscendC::LocalTensor<T> tmpBuffer2 = resource.ubBuf.template GetBufferByByte<T>(tmpBufferOffset);
-        uint32_t copyInNum = hiddenSize + ALIGN_512;
-        // [ReduceScatter] 2. Pre Interface Sync
-        int pingpongId = 0;
-        for (uint32_t processIndex = 0; processIndex < rows; ++processIndex) {
+        uint32_t copyInNum = hiddenSize + UB_ALIGN;
+        auto processCount = CeilDiv(rows, ubMoveNum);
+        for (uint32_t processIndex = 0; processIndex < processCount; ++processIndex) {
+            pingpongId = (pingpongId + 1) % BufferNum;
             AscendC::TEventID EVENT_ID = pingpongId == 0 ? EVENT_ID0 : EVENT_ID1;
             AscendC::LocalTensor<T> buf = pingpongId == 0 ? tmpBuffer1 : tmpBuffer2;
             AscendC::LocalTensor<float> bufScale = buf[hiddenSize].template ReinterpretCast<float>();
-            auto inputOffset = processIndex * copyInNum;
-            auto outputOffset = processIndex * hiddenSize;
-            // [ReduceScatter] 2. Pre Interface Sync
+            auto inputOffset = processIndex * ubMoveNum * copyInNum;
+            
+            int32_t rowNum = ubMoveNum;
+            if (processIndex == processCount - 1) {
+                rowNum = rows - processIndex * ubMoveNum;
+            }
+
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
-            // [ReduceScatter] 3. Start shmem_mte_get_mem_nbi
-            AscendC::DataCopy(buf, src[inputOffset], copyInNum);
+            int64_t dataLen = rowNum * copyInNum;
+            AscendC::DataCopy(buf, src[inputOffset], dataLen);
+
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
-            AscendC::DataCopy(dst[outputOffset], buf, hiddenSize);
-            AscendC::DataCopyPad(dstScale[processIndex], bufScale, {1, 4, 0, 0, 0});
- 
-            // [ReduceScatter] 4. Post Interface Sync
+            auto outputOffset = processIndex * ubMoveNum * hiddenSize;
+            #define U16(x) static_cast<uint16_t>(x)
+            AscendC::DataCopyPad(dst[outputOffset], 
+                buf, {U16(rowNum), U16(hiddenSize), 1, 0, 0});
+            AscendC::DataCopyPad(dstScale[processIndex * ubMoveNum], 
+                bufScale, {U16(rowNum), U16(sizeof(float)), static_cast<uint32_t>(hiddenSize / 32), 0, 0});
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
-            pingpongId = (pingpongId + 1) % BufferNum;
+            
         }
-        // [ReduceScatter] 4. Post Interface Sync
- 
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
     }
+    
 
     CATLASS_DEVICE
     void ApplyXActiveMask(Params const &params) {
@@ -813,6 +815,9 @@ private:
         uint32_t dequantSum = 0;
 
         icache_preload(8);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+        int32_t pingpongIdx = 0;
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             // The ith core reads data from the ith rank's peermem
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
@@ -828,17 +833,11 @@ private:
                     GM_ADDR otherRankPtr = shmem(0, dstEpIdx);
                     AscendC::GlobalTensor<ElementA> gmRemoteA;
                     gmRemoteA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peermemInfo.offsetA));
-                    AscendC::GlobalTensor<ElementPerTokenScale> gmRemotePerTokenScale;
-                    gmRemotePerTokenScale.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale*>(otherRankPtr + peermemInfo.offsetPeerPerTokenScale));
                     MatrixCoord offsetA{rowStart, 0};
-                    MatrixCoord offsetPeer{rowSrc, 0};
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
-                    int64_t gmOffsetPeer = params.layoutA.GetOffset(offsetPeer);
-
-                    // Communication data
-                    CopyGMToGM(gmA[gmOffsetA], gmRemoteA[gmOffsetPeer], rows * params.problemShape.k(), params.ubMoveNum);
-                    // Communication scale
-                    CopyGMToGM(gmPerTokenScale1[rowStart], gmRemotePerTokenScale[rowSrc], rows, rows);
+                    int64_t gmOffsetPeer = rowSrc * (params.problemShape.k() + UB_ALIGN);
+                    int32_t ubMoveNum = 2;
+                    CopyGMToGMPerTokenV2(gmA[gmOffsetA], gmPerTokenScale1[rowStart], gmRemoteA[gmOffsetPeer],  rows, params.problemShape.k(), ubMoveNum, pingpongIdx);
                 }
 
             }
@@ -866,6 +865,8 @@ private:
                 }
             }
         }
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 
         uint32_t n2 = params.problemShape.k();
 
