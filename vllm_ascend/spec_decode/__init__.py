@@ -37,10 +37,10 @@ def get_spec_decode_method(method, vllm_config, device, runner):
     elif method in ("eagle", "eagle3", "mtp"):
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
-        if not vllm_version_is("0.19.0"):
+        if not vllm_version_is("0.19.1"):
             return AscendDflashProposer(vllm_config, device, runner)
         else:
-            raise ValueError(f"VLLM v0.19.0 doesn't support {method} now")
+            raise ValueError(f"VLLM v0.19.1 doesn't support {method} now")
     elif method == "draft_model":
         return AscendDraftModelProposer(vllm_config, device, runner)
     else:

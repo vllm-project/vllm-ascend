@@ -265,6 +265,15 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
             "up_proj",
         ],
     },
+    "bailing_hybrid": {
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "o_proj": ["dense"],
+    },
 }
 
 _QUAROT_LINEAR_QUANT_TYPE = "W4A4_QUAROT_DYNAMIC"
@@ -771,6 +780,10 @@ class AscendModelSlimConfig(QuantizationConfig):
         if model_type in ["qwen3_vl"] and prefix == "lm_head":
             prefix = "language_model.lm_head"
 
+        if model_type in ["bailing_hybrid"]:
+            # Adapt to bailing_hybrid architecture: update layer names to MoE convention
+            prefix = prefix.replace("linear_attn", "attention")
+            prefix = prefix.replace("self_attn", "attention")
         self.packed_modules_mapping = packed_modules_model_mapping.get(model_type, {})
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
@@ -1010,6 +1023,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         indexer_quant_type = self.quant_description.get("indexer_quant_type", "")
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
+        kv_quant_type = self.quant_description.get("kv_cache_type", "")
+        self.enable_c8_quant = kv_quant_type != ""
         if self.enable_fa_quant or self.enable_indexer_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
