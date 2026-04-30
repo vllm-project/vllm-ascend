@@ -132,6 +132,87 @@ python3 tools/docs_codegen/cli.py \
 
 By default, artifacts are written to: `docs/_build/doc_codegen/<doc_stem>/<block_name>.sh`.
 
+#### Concrete YAML-to-shell example
+
+The following `model-code` block reads the first test case from
+`tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml`:
+
+````md
+```{model-code}
+:block_name: kimi_k2_thinking_single_node
+:converter_tag: single_node
+:test_case_path: tests/e2e/nightly/single_node/models/configs/Kimi-K2-Thinking.yaml
+```
+````
+
+The YAML fields read by the converter look like this:
+
+```yaml
+test_cases:
+  - name: "Kimi-K2-Thinking-TP16-Case"
+    model: "moonshotai/Kimi-K2-Thinking"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      TASK_QUEUE_ENABLE: "1"
+      OMP_PROC_BIND: "false"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "16"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "12"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--trust-remote-code"
+      - "--enable-expert-parallel"
+      - "--no-enable-prefix-caching"
+```
+
+Run the block in dry-run mode to see the generated shell without writing files:
+
+```bash
+python3 tools/docs_codegen/cli.py \
+  --block docs/source/tutorials/models/Kimi-K2-Thinking.md::kimi_k2_thinking_single_node \
+  --dry-run --stdout
+```
+
+The first line is the artifact path. The remaining lines are the generated shell
+content:
+
+```bash
+# docs/_build/doc_codegen/Kimi-K2-Thinking/kimi_k2_thinking_single_node.sh
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export OMP_PROC_BIND=false
+export HCCL_OP_EXPANSION_MODE=AIV
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export SERVER_PORT=8000
+
+vllm serve moonshotai/Kimi-K2-Thinking \
+  --tensor-parallel-size 16 \
+  --port $SERVER_PORT \
+  --max-model-len 8192 \
+  --max-num-batched-tokens 8192 \
+  --max-num-seqs 12 \
+  --gpu-memory-utilization 0.9 \
+  --trust-remote-code \
+  --enable-expert-parallel \
+  --no-enable-prefix-caching
+```
+
+In this example, `envs` is rendered as `export` lines, `model` becomes
+`vllm serve <model>`, and `server_cmd` is appended as formatted command-line
+arguments. `SERVER_PORT: "DEFAULT_PORT"` is resolved to the default single-node
+port `8000`.
+
 #### Build the site & preview locally
 
 ```bash
