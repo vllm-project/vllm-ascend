@@ -34,6 +34,7 @@ _GDN_CUMSUM_WORKING_SET = 2**18
 _IS_PATCHED = False
 _ORIGINAL_BUILD = gdn_attn.GDNAttentionMetadataBuilder.build
 _ORIGINAL_INIT_THRESHOLD = gdn_attn.GDNAttentionMetadataBuilder._init_reorder_batch_threshold
+_FALLBACK_ALL_MODE_SPEC_WARNED = False
 
 
 @dataclass

@@ -244,7 +244,7 @@ def _run_all_mode_non_spec_conv1d(
             query_start_loc=non_spec_query_start_loc,
             cache_indices=attn_metadata.block_table_2d,
             has_initial_state=has_initial_state,
-            activation=activation,
+            activation="silu" if activation else None,
             pad_slot_id=PAD_SLOT_ID,
             block_idx_first_scheduled_token=attn_metadata.block_idx_first_scheduled_token,
             block_idx_last_scheduled_token=attn_metadata.block_idx_last_scheduled_token,
