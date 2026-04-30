@@ -1,30 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any, Optional
-import torch, msgspec, time, queue, zmq, contextlib
+import contextlib
+import queue
+import time
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any
+
+import msgspec
+import torch
+import zmq
+from mooncake.store import MooncakeDistributedStore
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
-    ECConnectorRole,
     ECConnectorMetadata,
+    ECConnectorRole,
 )
 from vllm.distributed.ec_transfer.ec_connector.example_connector import (
     ECExampleConnectorMetadata,
     MMMeta,
 )
-from vllm.logger import logger
-from vllm.v1.core.sched.output import SchedulerOutput
-from mooncake.store import MooncakeDistributedStore
 from vllm.distributed.parallel_state import get_world_group
+from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
-from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
+from vllm.v1.core.sched.output import SchedulerOutput
+
 from vllm_ascend.distributed.ec_transfer.e_mooncake_backend import MooncakeStoreConfig, mooncake_engine_init
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 ALIGNMENT = 2 * 1024 * 1024
+
 
 class EMoonCakeStoreConnector(ECConnectorBase):
     # NOTE: This is Simple debug implementation of the EC connector.
@@ -37,7 +45,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
         if transfer_config is None:
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
-        #init mooncake store
+        # init mooncake store
         self.ec_store = MooncakeDistributedStore()
         self.config = MooncakeStoreConfig.load_from_env()
         mooncake_engine_init(self.ec_store, self.config, role)
@@ -50,9 +58,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 raise ValueError("Producer must have 'listen_ports' in config.")
             # 解析为 (host, port) 列表
             self.consumer_sock_addrs = [(transfer_config.ec_ip, addr_port) for addr_port in self.listen_ports]
-            self.thread_executor = ThreadPoolExecutor(
-                max_workers=getattr(transfer_config, "max_workers", 8) or 8
-            )
+            self.thread_executor = ThreadPoolExecutor(max_workers=getattr(transfer_config, "max_workers", 8) or 8)
 
             if transfer_config.ec_role == "ec_producer":
                 self.send_queue = queue.Queue[tuple[str, torch.Tensor]]()
@@ -198,9 +204,9 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 self.send_queue.task_done()
             except Exception as e:
                 # 捕获所有异常，避免线程退出
-                logger.error(f"send tensor info: {feat_key} to comsumer, error code: {str(e)}")
+                logger.error(f"send tensor info: {feat_key} to consumer, error code: {str(e)}")
                 # 确保队列任务完成，避免死锁
-                if 'feat_key' in locals():
+                if "feat_key" in locals():
                     self.send_queue.task_done()
                 continue
 
@@ -212,13 +218,11 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 feat_key, tensor_bytes, tensor_shape, tensor_dtype = decoder.decode(payload)
                 self.handle_caches[feat_key] = (tensor_bytes, tensor_shape, getattr(torch, tensor_dtype))
                 self.recv_queue.task_done()
-                logger.info("rank %s recv the feat key %s tensor bytes %s tensor shape %s tensor dtype %s", get_world_group().local_rank, feat_key, 
-                    tensor_bytes, tensor_shape, tensor_dtype)
             except Exception as e:
                 # 捕获所有异常，避免线程退出
                 logger.error(f"recv tensor info: {feat_key} recv error, error code: {str(e)}")
                 # 确保队列任务完成，避免死锁
-                if 'feat_key' in locals():
+                if "feat_key" in locals():
                     self.recv_queue.task_done()
                 continue
 
@@ -252,7 +256,8 @@ class EMoonCakeStoreConnector(ECConnectorBase):
 def ensure_zmq_send(
         socket: zmq.Socket,  # type: ignore
         data: list,
-        max_retries: int = 3):
+        max_retries: int = 3
+):
     retries_left = max_retries
     while True:
         try:
@@ -262,30 +267,25 @@ def ensure_zmq_send(
             retries_left -= 1
             if retries_left > 0:
                 logger.warning(
-                    f"Send failed: {e}, retrying... ({retries_left} "
-                    "attempts left)")
+                    f"Send failed: {e}, retrying... ({retries_left} attempts left)")
                 time.sleep(0.1)
             else:
                 logger.error(f"Send failed after all retries: {e}")
-                raise RuntimeError(f"Failed to send data after {max_retries} "
-                                   f"retries: {e}")
+                raise RuntimeError(f"Failed to send data after {max_retries} retries: {e}")
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any,
-            addr: str) -> Iterator[zmq.Socket]:  # type: ignore
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
-    ctx: Optional[zmq.Context] = None  # type: ignore
+    ctx: zmq.Context | None = None
     try:
         ctx = zmq.Context()  # type: ignore
-        yield make_zmq_socket(ctx=ctx,
-                              path=addr,
-                              socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)  # type: ignore
+        yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+            
