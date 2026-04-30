@@ -628,7 +628,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             elif isinstance(self.quant_description.get("head_dim"), int) and self.quant_description["head_dim"] > 0:
                 self.quant_description["kv_group_size"] = self.quant_description["head_dim"]
 
-    def _get_quarot_shape_metadata(self) -> dict[str, int]:
+    def _get_quarot_shape_metadata(self) -> dict[str, int | float]:
         hidden_dim = self.quant_description.get("hidden_dim")
         num_heads = self.quant_description.get("num_heads")
         head_dim = self.quant_description.get("head_dim")

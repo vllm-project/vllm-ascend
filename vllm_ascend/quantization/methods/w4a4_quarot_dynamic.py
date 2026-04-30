@@ -71,7 +71,13 @@ _QUAROT_SPEC = _QuaRotSpec()
 
 
 def _layer_prefix(layer: torch.nn.Module) -> str:
-    return getattr(layer, "prefix", None) or getattr(layer, "layer_name", "unknown")
+    prefix = getattr(layer, "prefix", None)
+    if isinstance(prefix, str) and prefix:
+        return prefix
+    layer_name = getattr(layer, "layer_name", None)
+    if isinstance(layer_name, str) and layer_name:
+        return layer_name
+    return "unknown"
 
 
 def _is_quarot_enabled(layer: torch.nn.Module) -> bool:
@@ -98,16 +104,6 @@ def _is_int4_repr_dtype(dtype: torch.dtype) -> bool:
     if quint4x2 is not None:
         allowed.add(quint4x2)
     return dtype in allowed
-
-
-def _largest_power_of_two_factor(n: int) -> int:
-    if n <= 0:
-        return 1
-    factor = 1
-    while n % 2 == 0:
-        factor *= 2
-        n //= 2
-    return factor
 
 
 def _is_power_of_two(n: int) -> bool:
