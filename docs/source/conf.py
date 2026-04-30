@@ -147,9 +147,9 @@ html_extra_path = ["llms.txt"]
 # Check external links without validating remote anchors. Many third-party
 # sites render anchors dynamically, which makes anchor checks flaky in CI.
 linkcheck_anchors = False
-linkcheck_retries = 1
-linkcheck_timeout = 3
-linkcheck_workers = 20
+linkcheck_retries = 3
+linkcheck_timeout = 15
+linkcheck_workers = 10
 
 # Example service endpoints in docs are intentionally not reachable from CI.
 linkcheck_ignore = [
