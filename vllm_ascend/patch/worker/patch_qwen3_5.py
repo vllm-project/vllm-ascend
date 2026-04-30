@@ -17,9 +17,14 @@
 # mypy: ignore-errors
 
 
+from contextlib import contextmanager
+
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5DecoderLayer,
+    Qwen3_5ForConditionalGeneration,
+)
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -137,3 +142,34 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
 
 Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+
+# Bypass upstream's NotImplementedError for mamba_cache_mode="all" in
+# Qwen3_5ForConditionalGeneration.__init__. Upstream hasn't merged
+# all-mode support (PR #26807), but we implement it in vllm-ascend.
+_original_qwen35_init = Qwen3_5ForConditionalGeneration.__init__
+
+
+@contextmanager
+def _temporary_mamba_cache_mode(cache_config, mode: str):
+    saved_mode = cache_config.mamba_cache_mode
+    if saved_mode == mode:
+        yield
+        return
+    cache_config.mamba_cache_mode = mode
+    try:
+        yield
+    finally:
+        cache_config.mamba_cache_mode = saved_mode
+
+
+def _patched_qwen35_init(self, *, vllm_config, prefix=""):
+    cache_config = vllm_config.cache_config
+    if cache_config.mamba_cache_mode != "all":
+        _original_qwen35_init(self, vllm_config=vllm_config, prefix=prefix)
+        return
+
+    with _temporary_mamba_cache_mode(cache_config, "align"):
+        _original_qwen35_init(self, vllm_config=vllm_config, prefix=prefix)
+
+
+Qwen3_5ForConditionalGeneration.__init__ = _patched_qwen35_init

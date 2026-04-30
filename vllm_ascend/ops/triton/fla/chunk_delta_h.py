@@ -188,6 +188,7 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    state_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
@@ -210,9 +211,14 @@ def chunk_gated_delta_rule_fwd_h(
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    h = k.new_empty(B, NT, H, K, V)
+    # h must use k.dtype (bf16) to match q in chunk_fwd_kernel_o's tl.dot.
+    # state_dtype only controls final_state (for pool compatibility).
+    h = k.new_empty(B, NT, H, K, V, dtype=k.dtype)
     h_update = k.new_empty(B, NT, H, K, K)
-    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    final_state = (k.new_empty(
+        N, H, K, V,
+        dtype=state_dtype if state_dtype is not None else torch.float32)
+        if output_final_state else None)
 
     v_new = torch.empty_like(u) if save_new_value else None
     g = g.transpose(1, 2).contiguous()

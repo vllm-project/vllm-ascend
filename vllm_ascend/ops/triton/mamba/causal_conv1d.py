@@ -8,13 +8,15 @@
 # mypy: ignore-errors
 
 from typing import Any
-
 import torch
 import torch.nn.functional as F
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+from vllm.v1.attention.backends import utils as attn_backend_utils  # type: ignore
+
+PAD_SLOT_ID = attn_backend_utils.PAD_SLOT_ID
+NULL_BLOCK_ID = getattr(attn_backend_utils, "NULL_BLOCK_ID", PAD_SLOT_ID)
 
 
 def causal_conv1d_ref(
@@ -58,17 +60,40 @@ def causal_conv1d_ref(
     return (out, None) if not return_final_states else (out, final_states_out)
 
 
+def _uses_apc_prefill_path(
+    cache_indices: torch.Tensor | None,
+    block_idx_first_scheduled_token: torch.Tensor | None,
+    block_idx_last_scheduled_token: torch.Tensor | None,
+    initial_state_idx: torch.Tensor | None,
+    num_computed_tokens: torch.Tensor | None,
+) -> bool:
+    return (
+        (cache_indices is not None and cache_indices.dim() == 2)
+        or block_idx_first_scheduled_token is not None
+        or block_idx_last_scheduled_token is not None
+        or initial_state_idx is not None
+        or num_computed_tokens is not None
+    )
+
+
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    activation: str | None = "silu",
-    conv_states: torch.Tensor | None = None,
-    has_initial_state: torch.Tensor | None = None,
+    bias: torch.Tensor | None,
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
     cache_indices: torch.Tensor | None = None,
-    query_start_loc: torch.Tensor | None = None,
-    metadata: Any | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
+    null_block_id: int = NULL_BLOCK_ID,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
+    block_size_to_align: int = 0,
+    metadata: Any | None = None,
+    validate_data: bool = False,
 ):
     """
     x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
@@ -80,12 +105,19 @@ def causal_conv1d_fn(
         the batch, used to index into sequence. prepended by 0.
         for example: query_start_loc = torch.Tensor([0,10,16,17]),
         x.shape=(dim,17)
-    cache_indices: (batch)  int32
-        indicates the corresponding state index,
-        like so: conv_state = conv_states[cache_indices[batch_id]]
+    cache_indices: (batch) int32 for the standard path, or
+        (batch, max_blocks) int32 block table for APC all-mode prefill
     has_initial_state: (batch) bool
         indicates whether should the kernel take the current state as initial
         state for the calculations
+    null_block_id: int
+        Upstream-compatible sentinel for empty APC block-table entries. The
+        NPU path normalizes it to pad_slot_id before dispatch.
+    block_idx_first_scheduled_token / block_idx_last_scheduled_token /
+    initial_state_idx / num_computed_tokens:
+        APC all-mode prefill metadata. When provided, causal_conv1d_fn routes
+        to the NPU APC prefill implementation while keeping this public API
+        aligned with upstream.
     conv_states: (...,dim,width - 1) itype
         updated inplace if provided
     activation: either None or "silu" or "swish"
@@ -107,6 +139,67 @@ def causal_conv1d_fn(
 
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
+
+    del metadata, validate_data
+
+    if _uses_apc_prefill_path(
+        cache_indices,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+        initial_state_idx,
+        num_computed_tokens,
+    ):
+        if query_start_loc is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires query_start_loc for varlen inputs."
+            )
+        if cache_indices is None or cache_indices.dim() != 2:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires 2D cache_indices block tables."
+            )
+        if has_initial_state is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires has_initial_state."
+            )
+        if conv_states is None:
+            raise RuntimeError("APC causal_conv1d_fn requires conv_states.")
+        if block_idx_first_scheduled_token is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires block_idx_first_scheduled_token."
+            )
+        if block_idx_last_scheduled_token is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires block_idx_last_scheduled_token."
+            )
+        if initial_state_idx is None:
+            raise RuntimeError("APC causal_conv1d_fn requires initial_state_idx.")
+        if num_computed_tokens is None:
+            raise RuntimeError(
+                "APC causal_conv1d_fn requires num_computed_tokens."
+            )
+        if null_block_id != pad_slot_id:
+            cache_indices = torch.where(
+                cache_indices == null_block_id,
+                torch.full_like(cache_indices, pad_slot_id),
+                cache_indices,
+            )
+        return _causal_conv1d_fwd_npu(
+            x=x,
+            weight=weight,
+            bias=bias,
+            conv_states=conv_states,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            activation=activation,
+            pad_slot_id=pad_slot_id,
+            block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            initial_state_idx=initial_state_idx,
+            num_computed_tokens=num_computed_tokens,
+            block_size_to_align=block_size_to_align,
+        )
+
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
@@ -702,3 +795,235 @@ def causal_conv1d_update_npu(
     if unsqueeze:
         out = out.squeeze(1)
     return out.to(original_x_dtype)
+
+
+def _normalize_apc_input_layout(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    if x.dim() != 2:
+        raise RuntimeError(
+            f"APC causal_conv1d_fn expects 2D input, got x.dim()={x.dim()}"
+        )
+
+    input_is_dim_major = False
+    if weight.shape[0] == x.shape[1]:
+        x_row_major = x
+        weight_row_major = weight
+    elif weight.shape[1] == x.shape[1]:
+        x_row_major = x
+        weight_row_major = weight.transpose(0, 1)
+    elif weight.shape[0] == x.shape[0]:
+        input_is_dim_major = True
+        x_row_major = x.transpose(0, 1)
+        weight_row_major = weight
+    elif weight.shape[1] == x.shape[0]:
+        input_is_dim_major = True
+        x_row_major = x.transpose(0, 1)
+        weight_row_major = weight.transpose(0, 1)
+    else:
+        raise RuntimeError(
+            "APC causal_conv1d_fn could not infer input layout: "
+            f"x.shape={tuple(x.shape)}, weight.shape={tuple(weight.shape)}"
+        )
+
+    if x_row_major.stride(-1) != 1:
+        x_row_major = x_row_major.contiguous()
+    return x_row_major, weight_row_major.contiguous(), input_is_dim_major
+
+
+def _extract_apc_state_from_history(
+    history: torch.Tensor,
+    num_processed_tokens: int,
+    state_len: int,
+) -> torch.Tensor:
+    return history.narrow(-1, num_processed_tokens, state_len).contiguous()
+
+
+def _write_apc_conv_state(
+    conv_states: torch.Tensor,
+    slot_id: int,
+    state: torch.Tensor,
+    state_len: int,
+    pad_slot_id: int,
+) -> None:
+    if slot_id == pad_slot_id:
+        return
+    conv_states[slot_id][..., :state_len].copy_(state.to(conv_states.dtype))
+
+
+def _write_apc_intermediate_states(
+    conv_states: torch.Tensor,
+    cache_row: torch.Tensor,
+    first_block_idx: int,
+    last_block_idx: int,
+    num_computed_tokens: int,
+    block_size_to_align: int,
+    history: torch.Tensor,
+    state_len: int,
+    pad_slot_id: int,
+    query_len: int,
+) -> None:
+    for block_idx in range(first_block_idx, last_block_idx):
+        boundary_processed_tokens = (block_idx + 1) * block_size_to_align - num_computed_tokens
+        if boundary_processed_tokens <= 0 or boundary_processed_tokens > query_len:
+            continue
+        slot_id = int(cache_row[block_idx].item())
+        state = _extract_apc_state_from_history(
+            history,
+            boundary_processed_tokens,
+            state_len,
+        )
+        _write_apc_conv_state(conv_states, slot_id, state, state_len, pad_slot_id)
+
+
+def _causal_conv1d_fwd_npu(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    activation: str | None = "silu",
+    pad_slot_id: int = PAD_SLOT_ID,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
+    block_size_to_align: int = 0,
+) -> torch.Tensor:
+    """All-mode causal conv1d forward behind the shared public API.
+
+    This keeps the APC behavior inside causal_conv1d_fn, but implements the
+    state routing with the existing causal_conv1d_ref instead of a dedicated
+    forward Triton kernel. That keeps the public surface close to upstream
+    while preserving the all-mode semantics required by the NPU path.
+
+    Args:
+        x: (num_tokens, dim) row-major input or (dim, num_tokens) input
+        weight: (dim, width) conv weights, or the transposed (width, dim)
+        bias: (dim,) optional bias
+        conv_states: (N, dim, state_len) pool view (transposed from gdn.py)
+        query_start_loc: (batch+1,) cumulative sequence lengths
+        cache_indices: (batch, max_blocks) 2D block table with pool slot IDs
+        has_initial_state: (batch,) bool per seq
+        activation: "silu" or None
+        pad_slot_id: sentinel value for padding
+        block_idx_first_scheduled_token: (batch,) first block to fill
+        block_idx_last_scheduled_token: (batch,) DEST block index
+        initial_state_idx: (batch,) SOURCE block pointer into cache_indices
+        num_computed_tokens: (batch,) tokens already computed per seq
+        block_size_to_align: mamba block size
+
+    Returns:
+        (num_tokens, dim) output tensor
+    """
+    x_row_major, weight_row_major, input_is_dim_major = _normalize_apc_input_layout(
+        x,
+        weight,
+    )
+    bias = bias.contiguous() if bias is not None else None
+
+    dim_val = x_row_major.shape[1]
+    if conv_states.shape[-2] != dim_val and conv_states.shape[-1] == dim_val:
+        conv_states = conv_states.transpose(-1, -2)
+    if conv_states.shape[-2] != dim_val:
+        raise RuntimeError(
+            "APC causal_conv1d_fn: conv_states dim mismatch, "
+            f"expected dim={dim_val}, conv_states.shape={tuple(conv_states.shape)}"
+        )
+
+    original_dtype = x_row_major.dtype
+    x_row_major = x_row_major.to(conv_states.dtype)
+    out = torch.empty_like(x_row_major)
+
+    _, width = weight_row_major.shape
+    state_len = width - 1
+    if block_size_to_align <= 0:
+        raise RuntimeError("APC causal_conv1d_fn requires block_size_to_align > 0.")
+
+    if any(
+        tensor is None
+        for tensor in (
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            num_computed_tokens,
+        )
+    ):
+        raise RuntimeError("APC causal_conv1d_fn requires complete block metadata.")
+
+    history_zeros = torch.zeros(
+        dim_val,
+        state_len,
+        dtype=conv_states.dtype,
+        device=conv_states.device,
+    )
+    batch = int(query_start_loc.numel() - 1)
+
+    for seq_idx in range(batch):
+        start = int(query_start_loc[seq_idx].item())
+        end = int(query_start_loc[seq_idx + 1].item())
+        if end <= start:
+            continue
+
+        cache_row = cache_indices[seq_idx]
+        query_tokens = x_row_major[start:end].transpose(0, 1).unsqueeze(0)
+        query_len = query_tokens.shape[-1]
+
+        init_state = None
+        if bool(has_initial_state[seq_idx].item()):
+            init_ptr = int(initial_state_idx[seq_idx].item())
+            init_slot = int(cache_row[init_ptr].item())
+            if init_slot != pad_slot_id:
+                init_state = conv_states[init_slot][..., :state_len].unsqueeze(0)
+
+        out_seq, final_state = causal_conv1d_ref(
+            query_tokens,
+            weight_row_major,
+            bias,
+            initial_states=init_state,
+            return_final_states=True,
+            activation=activation,
+        )
+        out[start:end] = out_seq.squeeze(0).transpose(0, 1)
+
+        history = torch.cat(
+            [
+                history_zeros if init_state is None else init_state.squeeze(0),
+                query_tokens.squeeze(0),
+            ],
+            dim=-1,
+        )
+
+        first_block_idx = int(block_idx_first_scheduled_token[seq_idx].item())
+        last_block_idx = int(block_idx_last_scheduled_token[seq_idx].item())
+        computed_tokens = int(num_computed_tokens[seq_idx].item())
+
+        _write_apc_intermediate_states(
+            conv_states=conv_states,
+            cache_row=cache_row,
+            first_block_idx=first_block_idx,
+            last_block_idx=last_block_idx,
+            num_computed_tokens=computed_tokens,
+            block_size_to_align=block_size_to_align,
+            history=history,
+            state_len=state_len,
+            pad_slot_id=pad_slot_id,
+            query_len=query_len,
+        )
+
+        final_slot = int(cache_row[last_block_idx].item())
+        _write_apc_conv_state(
+            conv_states,
+            final_slot,
+            final_state.squeeze(0),
+            state_len,
+            pad_slot_id,
+        )
+
+    out = out.to(original_dtype)
+    if input_is_dim_major:
+        return out.transpose(0, 1).contiguous()
+    return out
