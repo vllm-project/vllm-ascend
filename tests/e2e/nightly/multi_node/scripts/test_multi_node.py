@@ -5,7 +5,6 @@ import shlex
 import subprocess
 import sys
 from typing import Any
-
 import pytest
 import vllm
 
