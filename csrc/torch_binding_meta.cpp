@@ -546,6 +546,7 @@ npu_copy_and_expand_eagle_inputs_meta(
 }
 
 at::Tensor npu_causal_conv1d_custom_meta(
+    const at::Tensor& output,
     const at::Tensor& x,
     const at::Tensor& weight,
     const at::Tensor& conv_state,
@@ -558,8 +559,6 @@ at::Tensor npu_causal_conv1d_custom_meta(
     int64_t  pad_slot_id,
     int64_t  run_mode)
 {
-
-    at::Tensor output = at::empty_symint(x.sym_sizes(), x.options());
     return output;
 }
 
