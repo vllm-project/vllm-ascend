@@ -53,6 +53,18 @@ class LAPSRequestQueue(RequestQueue):
         self._long_queue = create_request_queue(policy)
         self._short_wait_started_at: float | None = None
         self._short_ready_to_dispatch = False
+        self._stats_log_interval_s = max(
+            envs.VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S, 0.0
+        )
+        self._last_stats_log_at = time.monotonic()
+        self._enqueue_counters = {"immediate": 0, "short": 0, "long": 0}
+        self._dispatch_counters = {"immediate": 0, "short": 0, "long": 0}
+        self._remove_counters = {"immediate": 0, "short": 0, "long": 0}
+        self._short_ready_reason_counters = {
+            "no_wait_window": 0,
+            "max_batch": 0,
+            "wait_window_elapsed": 0,
+        }
         self._debug_logging_enabled = logger.isEnabledFor(logging.DEBUG)
 
     def _queues(self) -> tuple[RequestQueue, ...]:
@@ -83,6 +95,34 @@ class LAPSRequestQueue(RequestQueue):
         if elapsed_ms is None:
             return "pending"
         return f"waiting({elapsed_ms:.3f}/{self.wait_window_ms:.3f}ms)"
+
+    def _maybe_log_stats(self, force: bool = False) -> None:
+        if self._stats_log_interval_s <= 0:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_stats_log_at) < self._stats_log_interval_s:
+            return
+        self._last_stats_log_at = now
+        logger.info(
+            "LAPS stats: threshold=%d wait_window_ms=%.3f wait_max_batch=%d "
+            "sizes=(immediate=%d short=%d long=%d) short_state=%s "
+            "enqueues=%s dispatches=%s removals=%s short_ready_reasons=%s",
+            self.threshold,
+            self.wait_window_ms,
+            self.wait_max_batch,
+            len(self._immediate_queue),
+            len(self._short_queue),
+            len(self._long_queue),
+            self._short_wait_state(),
+            self._enqueue_counters,
+            self._dispatch_counters,
+            self._remove_counters,
+            self._short_ready_reason_counters,
+        )
+
+    def _record_short_ready_reason(self, reason: str) -> None:
+        if reason in self._short_ready_reason_counters:
+            self._short_ready_reason_counters[reason] += 1
 
     def _debug_state(
         self,
@@ -153,7 +193,9 @@ class LAPSRequestQueue(RequestQueue):
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = True
             reason = "no_wait_window" if self.wait_window_ms <= 0 else "max_batch"
+            self._record_short_ready_reason(reason)
             self._debug_state("short_ready", extra=f"reason={reason}")
+            self._maybe_log_stats()
             return
         if self._short_wait_started_at is None:
             self._short_wait_started_at = time.monotonic()
@@ -169,12 +211,16 @@ class LAPSRequestQueue(RequestQueue):
         if self.wait_window_ms <= 0:
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = True
+            self._record_short_ready_reason("no_wait_window")
             self._debug_state("short_ready", extra="reason=no_wait_window")
+            self._maybe_log_stats()
             return True
         if len(self._short_queue) >= self.wait_max_batch:
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = True
+            self._record_short_ready_reason("max_batch")
             self._debug_state("short_ready", extra="reason=max_batch")
+            self._maybe_log_stats()
             return True
         if self._short_wait_started_at is None:
             self._short_wait_started_at = time.monotonic()
@@ -184,10 +230,12 @@ class LAPSRequestQueue(RequestQueue):
         if elapsed_ms >= self.wait_window_ms:
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = True
+            self._record_short_ready_reason("wait_window_elapsed")
             self._debug_state(
                 "short_ready",
                 extra=f"reason=wait_window_elapsed, elapsed_ms={elapsed_ms:.3f}",
             )
+            self._maybe_log_stats()
             return True
         return False
 
@@ -203,18 +251,22 @@ class LAPSRequestQueue(RequestQueue):
     def add_request(self, request: Request) -> None:
         queue = self._classify_queue(request)
         queue.add_request(request)
+        self._enqueue_counters[self._queue_name(queue)] += 1
         if queue is self._short_queue:
             self._on_short_queue_changed()
         self._debug_state("enqueue", request=request, queue=queue)
+        self._maybe_log_stats()
 
     def pop_request(self) -> Request:
         queue = self._select_schedulable_queue()
         if queue is None:
             raise IndexError("pop from empty LAPS queue")
         request = queue.pop_request()
+        self._dispatch_counters[self._queue_name(queue)] += 1
         if queue is self._short_queue:
             self._on_short_queue_changed()
         self._debug_state("dispatch", request=request, queue=queue)
+        self._maybe_log_stats()
         return request
 
     def peek_request(self) -> Request:
@@ -226,9 +278,11 @@ class LAPSRequestQueue(RequestQueue):
     def prepend_request(self, request: Request) -> None:
         queue = self._classify_queue(request)
         queue.prepend_request(request)
+        self._enqueue_counters[self._queue_name(queue)] += 1
         if queue is self._short_queue:
             self._on_short_queue_changed()
         self._debug_state("prepend", request=request, queue=queue)
+        self._maybe_log_stats()
 
     def prepend_requests(self, requests: RequestQueue) -> None:
         for request in requests:
@@ -238,9 +292,11 @@ class LAPSRequestQueue(RequestQueue):
         for queue in self._queues():
             if request in queue:
                 queue.remove_request(request)
+                self._remove_counters[self._queue_name(queue)] += 1
                 if queue is self._short_queue:
                     self._on_short_queue_changed()
                 self._debug_state("remove", request=request, queue=queue)
+                self._maybe_log_stats()
                 return
         raise ValueError("request not found in LAPS queue")
 
@@ -255,10 +311,13 @@ class LAPSRequestQueue(RequestQueue):
                     break
         for queue_id, matched_requests in queue_to_requests.items():
             removed_count += len(matched_requests)
-            queue_map[queue_id].remove_requests(matched_requests)
+            queue = queue_map[queue_id]
+            self._remove_counters[self._queue_name(queue)] += len(matched_requests)
+            queue.remove_requests(matched_requests)
         self._on_short_queue_changed()
         if removed_count:
             self._debug_state("remove_batch", extra=f"count={removed_count}")
+            self._maybe_log_stats()
 
     def __bool__(self) -> bool:
         return self._select_schedulable_queue() is not None

@@ -117,6 +117,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Maximum number of short requests to accumulate before dispatching early,
     # even if the waiting window has not expired yet.
     "VLLM_ASCEND_LAPS_WAIT_MAX_BATCH": lambda: int(os.getenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")),
+    # Optional periodic LAPS stats logging interval, in seconds. Set to 0 to
+    # disable aggregate stats logging. This is intended for benchmark
+    # observability without enabling global DEBUG logging.
+    "VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S": lambda: float(
+        os.getenv("VLLM_ASCEND_LAPS_STATS_LOG_INTERVAL_S", "0")
+    ),
     # use fused op transpose_kv_cache_by_block, default is True
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
