@@ -42,6 +42,7 @@ class MooncakeStoreConfig:
             raise ValueError("The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
         return MooncakeStoreConfig.from_file(config_file_path)
 
+
 def mooncake_engine_init(ec_store, mk_config, role):
     if role == ECConnectorRole.SCHEDULER:
         ec_store.setup(
@@ -51,7 +52,7 @@ def mooncake_engine_init(ec_store, mk_config, role):
             mk_config.local_buffer_size,
             "tcp",
             mk_config.device_name,
-            mk_config.master_server_address
+            mk_config.master_server_address,
         )
     else:
         try:
@@ -62,7 +63,7 @@ def mooncake_engine_init(ec_store, mk_config, role):
                 mk_config.local_buffer_size,
                 mk_config.protocol,
                 mk_config.device_name,
-                mk_config.master_server_address
+                mk_config.master_server_address,
             )
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
