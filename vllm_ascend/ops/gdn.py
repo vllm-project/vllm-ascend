@@ -103,14 +103,15 @@ def _pad_conv1d_host_args_to_capture(
         q_per_seq: int,
         with_num_accepted: bool,
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...] | tuple]:
-    """把 runtime host 参数补尾部虚拟 req, 对齐到 capture 期 x.shape[0].
+    """Pad runtime host arguments with dummy requests at the end to align to capture-time x.shape[0].
 
-    capture 期 ACL Graph 记录了 ``cuSeqlen = mixed_qkv.shape[0]`` (= ``cap_x_dim0``),
-    tiling 强校验 ``qsl[last] == cuSeqlen``. runtime 实际 req 数可能少于 capture
-    期(典型场景: FIA 给 query_start_loc 补了一个虚拟 req, 但 vllm 把它判定成
-    非 spec/非 decode, 于是 spec/non_spec_decode host 参数只覆盖真实 req).
-    这里按 ``q_per_seq`` 步长补虚拟 req, 让 ``qsl[last] == cap_x_dim0``,
-    虚拟 req 的 cache_index 设为 ``PAD_SLOT_ID``, kernel 走到时会跳过 state 写回.
+    During capture, ACL Graph records ``cuSeqlen = mixed_qkv.shape[0]`` (= ``cap_x_dim0``),
+    and tiling strictly validates ``qsl[last] == cuSeqlen``. Runtime may have fewer requests
+    than capture (e.g., FIA adds a dummy request to query_start_loc, but vLLM marks it as
+    non-spec/non-decode, so spec/non_spec_decode host args only cover real requests).
+    This function pads dummy requests at the end with ``q_per_seq`` stride to ensure
+    ``qsl[last] == cap_x_dim0``. Dummy requests use ``PAD_SLOT_ID`` as cache_index,
+    and the kernel skips state writeback for them.
     """
     if not qsl_host:
         return qsl_host, cidx_host, num_accepted_host
@@ -137,7 +138,7 @@ def update_conv1d_graph_params(
         is_draft_model=False,
         draft_attn_metadatas=None,
 ):
-    """更新conv1d的Host侧参数"""
+    """Update host-side parameters for conv1d."""
     from vllm_ascend.compilation.acl_graph import get_graph_params, get_draft_graph_params
 
     graph_params = get_draft_graph_params() if is_draft_model else get_graph_params()
@@ -155,7 +156,7 @@ def update_conv1d_graph_params(
                 graph_params.conv1d_handles[num_tokens],
                 graph_params.conv1d_events[num_tokens],
         ):
-            # 解包捕获时的参数
+            # Unpack parameters captured during graph capture
             (output, mixed_qkv, conv_weights_T, conv_state, bias, activation_num,
              pad_slot_id, run_mode, branch, layer_prefix, _, _, _, q_per_seq) = param
 
@@ -164,7 +165,7 @@ def update_conv1d_graph_params(
             new_num_accepted = ()
 
             if run_mode == 1 and attn_metadata is not None:
-                # get gdn metadata by captrued layer_prefix 
+                # get gdn metadata by captured layer_prefix 
                 meta = attn_metadata
                 if isinstance(meta, dict):
                     meta = meta.get(layer_prefix, None)
@@ -357,11 +358,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 graph_params.conv1d_events[num_actual_tokens].append(event)
 
                 output_spec = torch.empty_like(mixed_qkv_spec)
-                # capture 时每条 spec req 的 query 长度 (= num_spec + 1)。update 时
-                # 用它把 host 参数对齐到 capture 的 x.shape[0]，避免 runtime 实际
-                # spec 序列数 < capture 期 spec 序列数时 tiling 校验失败。
+                # Query length per spec request during capture (= num_spec + 1).
+                # Used during update to align host args to capture's x.shape[0],
+                # avoiding tiling validation failure when runtime has fewer spec
+                # sequences than capture-time.
                 spec_q_per_seq = int(attn_metadata.spec_state_indices_tensor.size(-1))
-                # 保存参数引用（tensor用weak_ref，Host变量直接保存tuple）
+                # Store parameter references (use weak_ref for tensors, save host variables as tuples directly)
                 graph_params.conv1d_params[num_actual_tokens].append((
                     weak_ref_tensors(output_spec),
                     weak_ref_tensors(mixed_qkv_spec),
@@ -446,7 +448,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             non_spec_qsl_host, non_spec_ci_host = get_non_spec_decode_causal_conv1d_host_args(attn_metadata)
-            # 图捕获分支
+            # graph capture branch
             if _EXTRA_CTX.capturing:
                 stream = torch_npu.npu.current_stream()
                 event = torch.npu.ExternalEvent()
@@ -456,9 +458,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 graph_params.conv1d_events[num_actual_tokens].append(event)
 
                 output_non_spec = torch.empty_like(mixed_qkv_non_spec)
-                # non_spec_decode 每条 req 固定 1 个 token，update 时按 1 个步长补尾部虚拟 req。
+                # non_spec_decode has 1 token per request; pad dummy requests with stride=1 during update.
                 non_spec_q_per_seq = 1
-                # 保存参数引用
+                # Store parameter references
                 graph_params.conv1d_params[num_actual_tokens].append((
                     weak_ref_tensors(output_non_spec),
                     weak_ref_tensors(mixed_qkv_non_spec),
