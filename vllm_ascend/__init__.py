@@ -29,6 +29,7 @@ def register_connector():
     register_connector()
     register_ec_connector()
 
+
 def register_model_loader():
     from .model_loader.netloader import register_netloader
     from .model_loader.rfork import register_rforkloader
