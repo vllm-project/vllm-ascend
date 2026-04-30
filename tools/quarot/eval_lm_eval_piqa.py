@@ -37,8 +37,9 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 DEFAULT_MODELS = [
     "dense=/data/weights/Qwen3-32B",
@@ -91,7 +92,7 @@ def parse_optional_bool(value: str) -> bool:
 
 
 def bytes_to_gib(value: int) -> float:
-    return value / (1024 ** 3)
+    return value / (1024**3)
 
 
 def build_model_args(
@@ -149,7 +150,6 @@ def parse_visible_devices() -> list[int] | None:
 
 
 class NpuMemoryMonitor:
-
     def __init__(self, poll_interval_s: float = 0.5) -> None:
         self.poll_interval_s = poll_interval_s
         self.visible_devices = parse_visible_devices()
@@ -263,12 +263,8 @@ while not stop_path.exists():
             "baseline_total_used_gib": bytes_to_gib(baseline_total_used_bytes),
             "peak_total_used_gib": bytes_to_gib(peak_total_used_bytes),
             "peak_increment_gib": bytes_to_gib(peak_total_used_bytes - baseline_total_used_bytes),
-            "per_device_peak_used_gib": [
-                bytes_to_gib(int(value)) for value in peak["per_device_used_bytes"]
-            ],
-            "per_device_total_capacity_gib": [
-                bytes_to_gib(int(value)) for value in peak["per_device_total_bytes"]
-            ],
+            "per_device_peak_used_gib": [bytes_to_gib(int(value)) for value in peak["per_device_used_bytes"]],
+            "per_device_total_capacity_gib": [bytes_to_gib(int(value)) for value in peak["per_device_total_bytes"]],
         }
 
 

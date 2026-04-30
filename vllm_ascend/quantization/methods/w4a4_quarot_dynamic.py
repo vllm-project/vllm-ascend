@@ -179,17 +179,13 @@ def _largest_power_of_two_factor(n: int) -> int:
 def _get_ffn_hadamard_layout(config: dict[str, Any]) -> str:
     layout = config.get("ffn_hadamard_layout", _QUAROT_SPEC.FFN_HADAMARD_LAYOUT)
     if layout != _QUAROT_SPEC.FFN_HADAMARD_LAYOUT:
-        raise ValueError(
-            f"Unsupported FFN Hadamard layout {layout!r}; expected {_QUAROT_SPEC.FFN_HADAMARD_LAYOUT!r}"
-        )
+        raise ValueError(f"Unsupported FFN Hadamard layout {layout!r}; expected {_QUAROT_SPEC.FFN_HADAMARD_LAYOUT!r}")
     return layout
 
 
 def _get_ffn_hadamard_dims(n: int, layout: str) -> tuple[int, int]:
     if layout != _QUAROT_SPEC.FFN_HADAMARD_LAYOUT:
-        raise ValueError(
-            f"Unsupported FFN Hadamard layout {layout!r}; expected {_QUAROT_SPEC.FFN_HADAMARD_LAYOUT!r}"
-        )
+        raise ValueError(f"Unsupported FFN Hadamard layout {layout!r}; expected {_QUAROT_SPEC.FFN_HADAMARD_LAYOUT!r}")
     last_dim = _largest_power_of_two_factor(n)
     return n // last_dim, last_dim
 
@@ -279,18 +275,13 @@ def _validate_fused_quarot_contract(layer: torch.nn.Module) -> None:
     config = _get_quarot_config(layer)
     if _is_supported_fused_quarot_contract(config):
         return
-    bad_items = [
-        f"{key}={config.get(key)!r}"
-        for key in sorted(_QUAROT_SPEC.LEAN_H_ONLY_REQUIRED_CONTRACT)
-    ]
+    bad_items = [f"{key}={config.get(key)!r}" for key in sorted(_QUAROT_SPEC.LEAN_H_ONLY_REQUIRED_CONTRACT)]
     bad_items.append(f"q_mode={config.get('q_mode')!r}")
     bad_items.append(f"attention_contract={config.get('attention_contract')!r}")
     if config.get("allow_runtime_shift_permutation") not in (None, False):
         bad_items.append(f"allow_runtime_shift_permutation={config.get('allow_runtime_shift_permutation')!r}")
     bad_items.append(f"runtime_h_partition={config.get('runtime_h_partition')!r}")
-    bad_items.append(
-        f"ffn_hadamard_layout={config.get('ffn_hadamard_layout', _QUAROT_SPEC.FFN_HADAMARD_LAYOUT)!r}"
-    )
+    bad_items.append(f"ffn_hadamard_layout={config.get('ffn_hadamard_layout', _QUAROT_SPEC.FFN_HADAMARD_LAYOUT)!r}")
     raise RuntimeError(
         "QuaRot fused mode only supports the deterministic full-runtime contract "
         f"(layer={_layer_prefix(layer)}; observed: {', '.join(bad_items)})"
@@ -457,7 +448,8 @@ def _run_attention(
     if require_impl:
         prefix = _layer_prefix(layer)
         raise RuntimeError(
-            f"QuaRot fused attention requires layer.impl.forward for {prefix}; python attention fallback is only for non-runtime contexts"
+            "QuaRot fused attention requires layer.impl.forward for "
+            f"{prefix}; python attention fallback is only for non-runtime contexts"
         )
 
     out = _softmax_attention_fallback(query, key, value, num_heads, head_dim, scale)
@@ -1166,9 +1158,7 @@ class AscendW4A4QuaRotDynamicLinearMethod(AscendLinearScheme):
                     x.shape[-1],
                     _get_ffn_hadamard_layout(_get_quarot_config(layer)),
                 )
-                quant_x, pertoken_scale = fast_hadamard_dynamic_quant_blockwise_last_dim(
-                    x, hadamard_n
-                )
+                quant_x, pertoken_scale = fast_hadamard_dynamic_quant_blockwise_last_dim(x, hadamard_n)
             else:
                 quant_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=torch.quint4x2)
             pertoken_scale = pertoken_scale.reshape(-1).to(torch.float32)
