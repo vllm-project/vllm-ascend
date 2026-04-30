@@ -341,6 +341,8 @@ class AscendFusedMoE(FusedMoE):
         self.multistream_overlap_shared_expert = (
             ascend_config.multistream_overlap_shared_expert and has_shared_experts
         )
+        # Upstream FusedMoE removed reduce_results; keep False for finalize().
+        self.reduce_results = False
 
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
