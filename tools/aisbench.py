@@ -143,9 +143,7 @@ class AisbenchRunner:
             content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            min_p={self.min_p},", content)
         if self.presence_penalty:
             content = re.sub(
-                r"ignore_eos.*",
-                f"ignore_eos=False,\n            presence_penalty={self.presence_penalty},",
-                content
+                r"ignore_eos.*", f"ignore_eos=False,\n            presence_penalty={self.presence_penalty},", content
             )
         if self.repetition_penalty:
             content = re.sub(
