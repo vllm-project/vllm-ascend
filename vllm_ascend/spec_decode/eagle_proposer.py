@@ -1245,9 +1245,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 arange=self.arange,
                 new_slot_mapping=new_slot_mapping,
             )
-            # FIXME(klyzhenko-vadim): seq_lens_cpu is deprecated in vllm.
-            # Updating using .replace() does not work for seq_lens_cpu!
-            new_cad._seq_lens_cpu = new_cad.seq_lens.to("cpu")
 
             return total_num_output_tokens, token_indices_to_sample, new_cad, None
 
