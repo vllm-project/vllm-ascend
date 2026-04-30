@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -69,26 +68,6 @@ class _QuaRotSpec:
 
 
 _QUAROT_SPEC = _QuaRotSpec()
-
-
-class _HadamardRuntime:
-    KERNEL_FAMILY_ENV = "VLLM_ASCEND_QUAROT_HADAMARD_KERNEL_FAMILY"
-    LAUNCH_MODE_ENV = "VLLM_ASCEND_QUAROT_HADAMARD_LAUNCH_MODE"
-    KERNEL_FAMILY_PYTHON = "python"
-    KERNEL_FAMILY_PTO = "pto"
-    LAUNCH_MODE_EAGER_JIT = "eager_jit"
-    LAUNCH_MODE_COMPILE_CUSTOM_OP = "compile_custom_op"
-    VALID_KERNEL_FAMILIES = frozenset({KERNEL_FAMILY_PYTHON, KERNEL_FAMILY_PTO})
-    VALID_LAUNCH_MODES = frozenset({LAUNCH_MODE_EAGER_JIT, LAUNCH_MODE_COMPILE_CUSTOM_OP})
-
-
-_HADAMARD_RUNTIME = _HadamardRuntime()
-
-
-@dataclass(frozen=True)
-class HadamardDispatch:
-    kernel_family: str
-    launch_mode: str | None
 
 
 def _layer_prefix(layer: torch.nn.Module) -> str:
@@ -252,47 +231,6 @@ def _apply_matrix_free_down_proj_rotation(
     rows = x.reshape(-1, n)
     rotated_rows = _apply_exact_deterministic_walsh_last_dim(rows)
     return rotated_rows.reshape(init_shape)
-
-
-def _normalize_hadamard_kernel_family(kernel_family: str) -> str:
-    name = kernel_family.strip().lower()
-    if name not in _HADAMARD_RUNTIME.VALID_KERNEL_FAMILIES:
-        raise ValueError(
-            f"Unknown Hadamard kernel family '{kernel_family}'. Valid: {sorted(_HADAMARD_RUNTIME.VALID_KERNEL_FAMILIES)}"
-        )
-    return name
-
-
-def _normalize_hadamard_launch_mode(launch_mode: str) -> str:
-    name = launch_mode.strip().lower()
-    if name not in _HADAMARD_RUNTIME.VALID_LAUNCH_MODES:
-        raise ValueError(
-            f"Unknown Hadamard launch mode '{launch_mode}'. Valid: {sorted(_HADAMARD_RUNTIME.VALID_LAUNCH_MODES)}"
-        )
-    return name
-
-
-def _resolve_hadamard_dispatch(kernel_family: str | None) -> HadamardDispatch:
-    configured_kernel_family = os.getenv(_HADAMARD_RUNTIME.KERNEL_FAMILY_ENV)
-    launch_mode = os.getenv(_HADAMARD_RUNTIME.LAUNCH_MODE_ENV)
-    if kernel_family is not None:
-        normalized_family = _normalize_hadamard_kernel_family(kernel_family)
-    elif configured_kernel_family:
-        normalized_family = _normalize_hadamard_kernel_family(configured_kernel_family)
-    else:
-        normalized_family = _HADAMARD_RUNTIME.KERNEL_FAMILY_PTO
-
-    if normalized_family == _HADAMARD_RUNTIME.KERNEL_FAMILY_PYTHON:
-        return HadamardDispatch(_HADAMARD_RUNTIME.KERNEL_FAMILY_PYTHON, None)
-    if launch_mode:
-        normalized_launch_mode = _normalize_hadamard_launch_mode(launch_mode)
-    else:
-        normalized_launch_mode = (
-            _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP
-            if _is_torch_compile_mode()
-            else _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT
-        )
-    return HadamardDispatch(normalized_family, normalized_launch_mode)
 
 
 def _get_quarot_config(layer: torch.nn.Module) -> dict[str, Any]:
@@ -552,10 +490,7 @@ def _is_torch_compile_mode() -> bool:
     return False
 
 
-def _is_pto_hadamard_supported(x: torch.Tensor, kernel_family: str) -> bool:
-    dispatch = _resolve_hadamard_dispatch(kernel_family)
-    if dispatch.kernel_family != _HADAMARD_RUNTIME.KERNEL_FAMILY_PTO:
-        return False
+def _is_pto_hadamard_supported(x: torch.Tensor) -> bool:
     if x.device.type != "npu":
         return False
     if x.dtype not in (torch.float16, torch.bfloat16):
@@ -579,9 +514,6 @@ def _maybe_warmup_pto_for_process() -> None:
     global _PTO_JIT_WARMUP_DONE
     if _PTO_JIT_WARMUP_DONE:
         return
-    dispatch = _resolve_hadamard_dispatch(None)
-    if dispatch.kernel_family != _HADAMARD_RUNTIME.KERNEL_FAMILY_PTO:
-        return
     try:
         from vllm_ascend.ops.fast_hadamard import (
             _get_fast_hadamard_dynamic_quant_jit_func,
@@ -589,7 +521,7 @@ def _maybe_warmup_pto_for_process() -> None:
             ensure_fast_hadamard_shared_object,
         )
 
-        if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT:
+        if not _is_torch_compile_mode():
             _ = ensure_fast_hadamard_shared_object()
             _ = _get_pto_hadamard_jit_func()
         _ = ensure_fast_hadamard_dynamic_quant_shared_object()
@@ -600,52 +532,42 @@ def _maybe_warmup_pto_for_process() -> None:
         return
 
 
-def _apply_hadamard_last_dim_pto(x: torch.Tensor, launch_mode: str) -> torch.Tensor:
+def _apply_hadamard_last_dim_pto(x: torch.Tensor) -> torch.Tensor:
     n = x.shape[-1]
     if n <= 1:
         return x
-    log2_n = int(math.log2(n))
-    if launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT:
-        y = x.clone()
-        hadamard_func = _get_pto_hadamard_jit_func()
-        hadamard_func(y, y.shape[0], n, log2_n)
-        return y / math.sqrt(float(n))
-
-    if launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP:
+    if _is_torch_compile_mode():
         return fast_hadamard_last_dim_custom_op(x)
 
-    raise ValueError(f"Unsupported PTO launch mode: {launch_mode}")
+    log2_n = int(math.log2(n))
+    y = x.clone()
+    hadamard_func = _get_pto_hadamard_jit_func()
+    hadamard_func(y, y.shape[0], n, log2_n)
+    return y / math.sqrt(float(n))
 
 
-def _apply_exact_deterministic_walsh_last_dim(
-    x: torch.Tensor,
-    kernel_family: str | None = None,
-) -> torch.Tensor:
+def _apply_exact_deterministic_walsh_last_dim(x: torch.Tensor) -> torch.Tensor:
     n = x.shape[-1]
     if n <= 1:
         return x
 
-    dispatch = _resolve_hadamard_dispatch(kernel_family)
     if _is_power_of_two(n):
         rows = x.reshape(-1, n).contiguous()
-        if dispatch.kernel_family == _HADAMARD_RUNTIME.KERNEL_FAMILY_PTO and _is_pto_hadamard_supported(
-            rows, dispatch.kernel_family
-        ):
-            if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP:
+        if _is_pto_hadamard_supported(rows):
+            if _is_torch_compile_mode():
                 return fast_hadamard_last_dim_custom_op(rows).reshape_as(x)
-            if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT:
-                pto_rows = rows
-                needs_cast_back = False
-                if rows.dtype == torch.bfloat16:
-                    pto_rows = rows.to(torch.float16)
-                    needs_cast_back = True
-                try:
-                    transformed_rows = _apply_hadamard_last_dim_pto(pto_rows, dispatch.launch_mode)
-                    if needs_cast_back:
-                        transformed_rows = transformed_rows.to(rows.dtype)
-                    return transformed_rows.reshape_as(x)
-                except Exception:
-                    pass
+            pto_rows = rows
+            needs_cast_back = False
+            if rows.dtype == torch.bfloat16:
+                pto_rows = rows.to(torch.float16)
+                needs_cast_back = True
+            try:
+                transformed_rows = _apply_hadamard_last_dim_pto(pto_rows)
+                if needs_cast_back:
+                    transformed_rows = transformed_rows.to(rows.dtype)
+                return transformed_rows.reshape_as(x)
+            except Exception:
+                pass
         return _apply_normalized_hadamard_last_dim(x)
 
     return _matmul_had_u(x)
@@ -684,11 +606,7 @@ def _apply_exact_deterministic_walsh_packed_rows(x: torch.Tensor) -> torch.Tenso
     return input_tensor.reshape(original_shape) / math.sqrt(float(n))
 
 
-def _apply_exact_deterministic_walsh(
-    x: torch.Tensor,
-    axis: int = -1,
-    kernel_family: str | None = None,
-) -> torch.Tensor:
+def _apply_exact_deterministic_walsh(x: torch.Tensor, axis: int = -1) -> torch.Tensor:
     if x.numel() == 0:
         return x
     if axis < 0:
@@ -699,7 +617,7 @@ def _apply_exact_deterministic_walsh(
     moved = x if axis == x.ndim - 1 else x.movedim(axis, -1)
     if not moved.is_contiguous():
         moved = moved.contiguous()
-    transformed = _apply_exact_deterministic_walsh_last_dim(moved, kernel_family=kernel_family)
+    transformed = _apply_exact_deterministic_walsh_last_dim(moved)
     return transformed if axis == x.ndim - 1 else transformed.movedim(-1, axis)
 
 
@@ -724,11 +642,7 @@ def _apply_hadamard_family_python(x: torch.Tensor, axis: int = -1) -> torch.Tens
     return restored
 
 
-def _apply_hadamard_family(x: torch.Tensor, axis: int = -1, kernel_family: str | None = None) -> torch.Tensor:
-    dispatch = _resolve_hadamard_dispatch(kernel_family)
-    if dispatch.kernel_family == _HADAMARD_RUNTIME.KERNEL_FAMILY_PYTHON:
-        return _apply_hadamard_family_python(x, axis=axis)
-
+def _apply_hadamard_family(x: torch.Tensor, axis: int = -1) -> torch.Tensor:
     if x.numel() == 0:
         return x
     if axis < 0:
@@ -737,7 +651,7 @@ def _apply_hadamard_family(x: torch.Tensor, axis: int = -1, kernel_family: str |
         raise ValueError(f"Invalid axis {axis} for tensor with {x.ndim} dims")
 
     moved = x.movedim(axis, -1)
-    if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP and not moved.is_contiguous():
+    if _is_torch_compile_mode() and not moved.is_contiguous():
         # Compile mode may lower reshape after movedim into an invalid view on a
         # non-contiguous tensor. Materialize the last-dim layout boundary before
         # flattening into PTO rows.
@@ -751,10 +665,10 @@ def _apply_hadamard_family(x: torch.Tensor, axis: int = -1, kernel_family: str |
     grouped = moved.reshape(*moved.shape[:-1], groups, p)
     rows = grouped.reshape(-1, p).contiguous()
 
-    if not _is_pto_hadamard_supported(rows, dispatch.kernel_family):
+    if not _is_pto_hadamard_supported(rows):
         return _apply_hadamard_family_python(x, axis=axis)
 
-    if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_COMPILE_CUSTOM_OP:
+    if _is_torch_compile_mode():
         transformed_rows = fast_hadamard_last_dim_custom_op(rows)
         transformed = transformed_rows.reshape(*moved.shape[:-1], groups, p)
         restored = transformed.reshape(*moved.shape[:-1], d).movedim(-1, axis)
@@ -762,15 +676,12 @@ def _apply_hadamard_family(x: torch.Tensor, axis: int = -1, kernel_family: str |
 
     pto_rows = rows
     needs_cast_back = False
-    if dispatch.launch_mode == _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT and rows.dtype == torch.bfloat16:
+    if rows.dtype == torch.bfloat16:
         pto_rows = rows.to(torch.float16)
         needs_cast_back = True
 
-    if dispatch.launch_mode != _HADAMARD_RUNTIME.LAUNCH_MODE_EAGER_JIT:
-        return _apply_hadamard_family_python(x, axis=axis)
-
     try:
-        transformed_rows = _apply_hadamard_last_dim_pto(pto_rows, dispatch.launch_mode)
+        transformed_rows = _apply_hadamard_last_dim_pto(pto_rows)
     except Exception:
         return _apply_hadamard_family_python(x, axis=axis)
 
