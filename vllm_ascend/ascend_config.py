@@ -108,6 +108,9 @@ class AscendConfig:
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
+        # HCCL library path configuration (replaces HCCL_SO_PATH env var)
+        self.hccl_so_path = additional_config.get("hccl_so_path", None)
+        logger.info(f"[PATCH_VERIFY] AscendConfig.hccl_so_path initialized: {self.hccl_so_path}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1

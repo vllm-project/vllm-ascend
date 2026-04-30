@@ -312,22 +312,24 @@ def enable_custom_op():
 
 def find_hccl_library() -> str:
     """
-    We either use the library file specified by the `HCCL_SO_PATH`
-    environment variable, or we find the library file brought by PyTorch.
+    We either use the library file specified by the `hccl_so_path`
+    configuration, or we find the library file brought by PyTorch.
     After importing `torch`, `libhccl.so` can be
     found by `ctypes` automatically.
     """
-    so_file = envs_ascend.HCCL_SO_PATH
+    logger.info("[PATCH_VERIFY] find_hccl_library called, reading from Config")
+    config = get_ascend_config()
+    so_file = config.hccl_so_path
 
     # manually load the hccl library
     if so_file:
-        logger.info("Found hccl from environment variable HCCL_SO_PATH=%s", so_file)
+        logger.info("[PATCH_VERIFY] Found hccl from Config hccl_so_path=%s", so_file)
     else:
         if torch.version.cann is not None:
             so_file = "libhccl.so"
         else:
             raise ValueError("HCCL only supports Ascend NPU backends.")
-        logger.info("Found hccl from library %s", so_file)
+        logger.info("[PATCH_VERIFY] Found hccl from library %s (no custom path)", so_file)
     return so_file
 
 
