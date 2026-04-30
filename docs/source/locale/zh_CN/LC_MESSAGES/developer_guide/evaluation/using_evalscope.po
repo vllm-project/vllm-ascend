@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -17,7 +17,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:1
 msgid "Using EvalScope"
@@ -25,14 +25,16 @@ msgstr "使用 EvalScope"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:3
 msgid ""
-"This document will guide you have model inference stress testing and "
+"This document will guide you through model inference stress testing and "
 "accuracy testing using "
 "[EvalScope](https://github.com/modelscope/evalscope)."
-msgstr "本文档将指导您如何使用 [EvalScope](https://github.com/modelscope/evalscope) 进行模型推理压力测试和准确率测试。"
+msgstr ""
+"本文档将指导您如何使用 [EvalScope](https://github.com/modelscope/evalscope) "
+"进行模型推理压力测试和准确率测试。"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:5
 msgid "1. Online server"
-msgstr "1.在线服务器模式"
+msgstr "1. 在线服务器模式"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:7
 msgid "You can run docker container to start the vLLM server on a single NPU:"
@@ -48,11 +50,11 @@ msgstr "如果 vLLM 服务器启动成功，您将看到如下信息："
 msgid ""
 "Once your server is started, you can query the model with input prompts "
 "in a new terminal:"
-msgstr "服务器启动后，您可以在新的终端中使用输入提示词（prompt）查询模型："
+msgstr "服务器启动后，您可以在新的终端中使用输入提示词查询模型："
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:56
 msgid "2. Install EvalScope using pip"
-msgstr "2.使用 pip 安装 EvalScope"
+msgstr "2. 使用 pip 安装 EvalScope"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:58
 msgid "You can install EvalScope as follows:"
@@ -60,11 +62,14 @@ msgstr "您可以按以下方式安装 EvalScope："
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:66
 msgid "3. Run GSM8K using EvalScope for accuracy testing"
-msgstr "3.使用 EvalScope 运行 GSM8K 准确率测试"
+msgstr "3. 使用 EvalScope 运行 GSM8K 准确率测试"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:68
-msgid "You can use `evalscope eval` to run GSM8K for accuracy testing:"
-msgstr "您可以使用 `evalscope eval` 命令运行 GSM8K 准确率测试："
+msgid ""
+"You can use `evalscope eval` to run GSM8K (a grade-school math benchmark "
+"dataset) for accuracy testing:"
+msgstr ""
+"您可以使用 `evalscope eval` 命令运行 GSM8K（一个小学数学基准数据集）进行准确率测试："
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:80
 #: ../../source/developer_guide/evaluation/using_evalscope.md:117
@@ -73,14 +78,17 @@ msgstr "大约 1 到 2 分钟后，输出结果如下所示："
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:90
 msgid ""
-"See more detail in [EvalScope doc - Model API Service "
+"See more details in [EvalScope doc - Model API Service "
 "Evaluation](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html"
 "#model-api-service-evaluation)."
-msgstr "更多详情请参阅 [EvalScope 文档 - 模型 API 服务评测](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html#model-api-service-evaluation)。"
+msgstr ""
+"更多详情请参阅 [EvalScope 文档 - 模型 API "
+"服务评测](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html"
+"#model-api-service-evaluation)。"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:92
 msgid "4. Run model inference stress testing using EvalScope"
-msgstr "4.使用 EvalScope 运行模型推理压力测试"
+msgstr "4. 使用 EvalScope 运行模型推理压力测试"
 
 #: ../../source/developer_guide/evaluation/using_evalscope.md:94
 msgid "Install EvalScope[perf] using pip"
@@ -103,4 +111,7 @@ msgid ""
 "See more detail in [EvalScope doc - Model Inference Stress "
 "Testing](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html"
 "#basic-usage)."
-msgstr "更多详情请参阅 [EvalScope 文档 - 模型推理压力测试](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-usage)。"
+msgstr ""
+"更多详情请参阅 [EvalScope 文档 - "
+"模型推理压力测试](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html"
+"#basic-usage)。"

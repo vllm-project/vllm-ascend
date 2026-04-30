@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-21 10:23+0800\n"
+"POT-Creation-Date: 2026-04-21 02:03+0000\n"
 "PO-Revision-Date: 2026-01-22 10:00+0800\n"
 "Last-Translator: Your Name <email@example.com>\n"
 "Language: zh_CN\n"
@@ -17,7 +17,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.17.0\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: ../../source/developer_guide/contribution/index.md:107
 msgid "Index"
@@ -31,38 +31,40 @@ msgstr "贡献指南"
 msgid "Building and Testing"
 msgstr "构建与测试"
 
-#: ../../source/developer_guide/contribution/index.md:4
+#: ../../source/developer_guide/contribution/index.md:5
 msgid ""
 "It's recommended to set up a local development environment to build vllm-"
 "ascend and run tests before you submit a PR."
 msgstr "建议在提交拉取请求（PR）之前，先搭建本地开发环境来构建 vllm-ascend 并运行测试。"
 
-#: ../../source/developer_guide/contribution/index.md:7
+#: ../../source/developer_guide/contribution/index.md:8
 msgid "Set up a development environment"
 msgstr "搭建开发环境"
 
-#: ../../source/developer_guide/contribution/index.md:9
+#: ../../source/developer_guide/contribution/index.md:10
 msgid ""
 "Theoretically, the vllm-ascend build is only supported on Linux because "
 "`vllm-ascend` dependency `torch_npu` only supports Linux."
 msgstr "理论上，vllm-ascend 的构建仅支持 Linux 系统，因为其依赖项 `torch_npu` 仅支持 Linux。"
 
-#: ../../source/developer_guide/contribution/index.md:12
+#: ../../source/developer_guide/contribution/index.md:13
 msgid ""
 "But you can still set up a development environment on Linux/Windows/macOS"
 " for linting and running basic tests."
 msgstr "但您仍可在 Linux/Windows/macOS 上搭建开发环境，用于代码规范检查（linting）和运行基础测试。"
 
-#: ../../source/developer_guide/contribution/index.md:15
+#: ../../source/developer_guide/contribution/index.md:16
 msgid "Run lint locally"
 msgstr "本地代码规范检查"
 
-#: ../../source/developer_guide/contribution/index.md:34
+#: ../../source/developer_guide/contribution/index.md:35
 msgid "Run CI locally"
 msgstr "本地运行 CI 测试"
 
-#: ../../source/developer_guide/contribution/index.md:36
-msgid "After completing \"Run lint\" setup, you can run CI locally:"
+#: ../../source/developer_guide/contribution/index.md:37
+msgid ""
+"After completing \"Run lint\" setup, you can run CI (Continuous "
+"integration) locally:"
 msgstr "完成“本地代码规范检查”的环境搭建后，您可在本地运行 CI 测试："
 
 #: ../../source/developer_guide/contribution/index.md:62
@@ -91,7 +93,7 @@ msgstr "开发者来源认证（DCO）与签名确认"
 msgid ""
 "When contributing changes to this project, you must agree to the DCO. "
 "Commits must include a `Signed-off-by:` header which certifies agreement "
-"with the terms of the DCO."
+"with the terms of the DCO (Developer Certificate of Origin)."
 msgstr "向本项目提交贡献时，您必须同意开发者来源认证（DCO）。提交（commit）必须包含 `Signed-off-by:` 头部，以证明您同意 DCO 的条款。"
 
 #: ../../source/developer_guide/contribution/index.md:79
@@ -175,7 +177,7 @@ msgstr "其他信息"
 msgid ""
 "You may find more information about contributing to vLLM Ascend backend "
 "plugin on "
-"[<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html)."
-" If you find any problem when contributing, you can feel free to submit a"
-" PR to improve the doc to help other developers."
-msgstr "您可以在 [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html) 上找到有关为 vLLM Ascend 后端插件贡献的更多信息。如果在贡献过程中遇到任何问题，欢迎随时提交 PR 来改进文档，以帮助其他开发者。"
+"[<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing). If "
+"you encounter any problems while contributing, feel free to submit a PR "
+"to improve the documentation to help other developers."
+msgstr "您可以在 [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing) 上找到有关为 vLLM Ascend 后端插件贡献的更多信息。如果在贡献过程中遇到任何问题，欢迎随时提交 PR 来改进文档，以帮助其他开发者。"

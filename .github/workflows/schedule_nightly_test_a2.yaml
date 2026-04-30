@@ -68,8 +68,6 @@ env:
   # so these values are exported as job outputs via the `setup-vars` job below.
   CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
-  # Do not name the env the same as `VLLM_VERSION`, VLLM_VERSION is used in the src.
-  VLLM_REF: 'v0.18.0'
 
 jobs:
   parse-trigger:
@@ -89,14 +87,29 @@ jobs:
     outputs:
       cann_image: ${{ steps.export.outputs.cann_image }}
       ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
-      vllm_version: ${{ steps.export.outputs.vllm_version }}
+      vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
     steps:
       - id: export
         run: |
           {
             echo "cann_image=${{ env.CANN_IMAGE }}"
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            echo "vllm_version=${{ env.VLLM_REF }}"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              base_ref="${{ github.base_ref }}"
+              if [[ "$base_ref" == releases/* ]]; then
+                normalized=$(echo "$base_ref" | tr '/' '-')
+                echo "vllm_ascend_branches=[\"${normalized}\"]"
+              else
+                echo 'vllm_ascend_branches=["main"]'
+              fi
+            elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              input_branch="${{ inputs.vllm_ascend_branch }}"
+              # Normalize branch name for image tag (replace '/' with '-')
+              normalized=$(echo "$input_branch" | tr '/' '-')
+              echo "vllm_ascend_branches=[\"${normalized}\"]"
+            else
+              echo 'vllm_ascend_branches=["releases-v0.18.0"]'
+            fi
           } >> $GITHUB_OUTPUT
 
   build-image:
@@ -127,7 +140,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_ascend_branch: [releases-v0.18.0]
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
           # pytest-driven tests
           - name: test_custom_op
@@ -156,6 +169,7 @@ jobs:
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -163,10 +177,13 @@ jobs:
             contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
           )
         }}
+    secrets:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image, single-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, single-node-tests, single-node-accuracy-tests]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -175,7 +192,7 @@ jobs:
       fail-fast: false
       max-parallel: 5
       matrix:
-        vllm_ascend_branch: [releases-v0.18.0]
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config:
           - name: multi-node-deepseek-dp
             config_file_path: DeepSeek-R1-W8A8-A2.yaml
@@ -188,6 +205,8 @@ jobs:
       soc_version: a2
       runner: linux-amd64-cpu-8-hk
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -202,6 +221,8 @@ jobs:
         }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_HK_001_INTERNAL_B64 }}
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_KEY }}
 
   generate-accuracy-matrix:
     name: Generate accuracy test matrix
@@ -230,22 +251,23 @@ jobs:
           echo "pr_only_matrix=${PR_ONLY}" >> "$GITHUB_OUTPUT"
 
   single-node-accuracy-tests:
-    needs: [setup-vars, parse-trigger, generate-accuracy-matrix]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
-      needs.generate-accuracy-matrix.result != 'skipped'
+      needs.generate-accuracy-matrix.result != 'skipped' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.generate-accuracy-matrix.outputs.nightly_matrix) }}
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: ${{ needs.setup-vars.outputs.vllm_version }}
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: ${{ needs.setup-vars.outputs.cann_image }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       is_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -256,23 +278,24 @@ jobs:
       upload: false
 
   single-node-accuracy-tests-pr-only:
-    needs: [setup-vars, parse-trigger, generate-accuracy-matrix]
+    needs: [setup-vars, parse-trigger, build-image, generate-accuracy-matrix]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
       needs.parse-trigger.outputs.filter != 'all' &&
-      needs.generate-accuracy-matrix.result != 'skipped'
+      needs.generate-accuracy-matrix.result != 'skipped' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
+        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.generate-accuracy-matrix.outputs.pr_only_matrix) }}
     uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
     with:
-      vllm: ${{ needs.setup-vars.outputs.vllm_version }}
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: ${{ needs.setup-vars.outputs.cann_image }}
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       is_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' &&
@@ -283,50 +306,8 @@ jobs:
 
   doc-test:
     name: doc-test
-    needs: [parse-trigger]
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    strategy:
-      # Each version should be tested
-      fail-fast: false
-      matrix:
-        vllm_version: [releases-v0.13.0, releases-v0.13.0-openeuler, main, main-openeuler]
-    runs-on: linux-aarch64-a2b3-1
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_version }}
-    steps:
-      - name: Check NPU/CANN and git info
-        run: |
-          echo "====> Print NPU/CANN info"
-          npu-smi info
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-          echo "====> Print vllm-ascend git info"
-          cd /vllm-workspace/vllm-ascend
-          git --no-pager log -1 || true
-          echo "====> Print vllm git info"
-          cd /vllm-workspace/vllm
-          git --no-pager log -1 || true
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6
-
-      - name: Run vllm-ascend/tests/e2e/run_doctests.sh
-        run: |
-          # PWD: /__w/vllm-ascend/vllm-ascend
-          # Make sure e2e tests are latest
-          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
-          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
-          mkdir -p /vllm-workspace/vllm-ascend/tests
-          # Overwrite e2e and examples
-          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
-          cp -r examples /vllm-workspace/vllm-ascend/
-
-          # Simulate container to enter directory
-          cd /workspace
-
-          # Run real test
-          echo "Test:"
-          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
+    uses: ./.github/workflows/labeled_doctest.yaml
 
   clear-pre-logs:
     needs: [parse-trigger, multi-node-tests]
@@ -343,13 +324,13 @@ jobs:
     needs: [parse-trigger, single-node-tests, multi-node-tests]
     if: >-
       always() &&
-      needs.parse-trigger.result == 'success' &&
-      (needs.single-node-tests.result != 'skipped' ||
-       needs.multi-node-tests.result != 'skipped')
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      needs.parse-trigger.result == 'success'
     runs-on: linux-aarch64-a2b3-0
     steps:
       - name: Merge all benchmark result artifacts
-        uses: actions/upload-artifact/merge@v4
+        continue-on-error: true
+        uses: actions/upload-artifact/merge@v7
         with:
           name: nightly-a2
           pattern: nightly-test-benchmark-results-*

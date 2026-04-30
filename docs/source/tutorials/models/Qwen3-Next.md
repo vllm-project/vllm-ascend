@@ -163,7 +163,7 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
+export VLLM_USE_MODELSCOPE=True
 vllm bench serve --model Qwen/Qwen3-Next-80B-A3B-Instruct  --dataset-name random --random-input 200 --num-prompts 200 --request-rate 1 --save-result --result-dir ./
 ```
 
@@ -183,4 +183,4 @@ The performance result is:
 
 ## FAQ
 
-1. Qwen3Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model).
+1. Qwen3-Next does not support TP>=16 now. Since this model has 16 query heads but only 2 key and value heads, GQA degenerates into MHA when TP >= 16. However, the FIA operator currently fails to function in MHA scenarios with a head dimension of 256 (which is the case for this model).

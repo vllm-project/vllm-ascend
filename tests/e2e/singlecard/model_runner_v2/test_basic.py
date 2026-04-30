@@ -22,13 +22,15 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
-MODELS = ["Qwen/Qwen3-0.6B"]
+MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
 
 
+@pytest.mark.skipif(vllm_version_is("0.19.1"), reason="no need to support model_runner for v0.19.1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -63,16 +65,21 @@ def test_qwen3_dense_eager_mode(
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.skipif(vllm_version_is("0.19.1"), reason="no need to support model_runner for v0.19.1")
 @pytest.mark.parametrize("model", MAIN_MODELS)
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config", [{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]}, {}]
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_egale_spec_decoding(
     model: str,
     eagle_model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -92,16 +99,16 @@ def test_egale_spec_decoding(
             "method": "eagle",
             "num_speculative_tokens": 3,
         },
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
 
 
+@pytest.mark.skipif(vllm_version_is("0.19.1"), reason="no need to support model_runner for v0.19.1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config", [{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8]}, {}]
-)
+@pytest.mark.parametrize("compilation_config", [{"cudagraph_mode": "FULL_DECODE_ONLY"}, {}])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_qwen3_dense_graph_mode(
     model: str,
@@ -123,4 +130,26 @@ def test_qwen3_dense_graph_mode(
         enforce_eager=enforce_eager,
         compilation_config=compilation_config,
     ) as runner:
-        runner.model.generate(prompts, sampling_params)
+        outputs = runner.model.generate(prompts, sampling_params)
+
+    if model != "Qwen/Qwen3-0.6B":
+        return
+
+    expected_outputs = [
+        " Lina. I'm a 22-year-old student from China.",
+        " the same as the president of the United Nations. This is because the president",
+        " Paris. The capital of France is also the capital of the Republic of France",
+        " not just about the technology itself but also about the human aspect-how we",
+    ]
+
+    matches = 0
+    misses = 0
+    for output, expected_output in zip(outputs, expected_outputs):
+        if output.outputs[0].text[:10] == expected_output[:10]:
+            matches += 1
+        else:
+            misses += 1
+            print(f"output: {output.outputs[0].text}")
+            print(f"expected_output: {expected_output}")
+
+    assert misses == 0

@@ -43,33 +43,41 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### 2. Run GSM8K using lm-eval for accuracy testing
+### 2. Run GSM8K using the vLLM server (curl) and then run lm-eval for accuracy testing
 
 You can query the result with input prompts:
 
 ```shell
+PROMPT='<|im_start|>system
+You are a professional accountant. Answer questions using accounting knowledge, output only the option letter (A/B/C/D).<|im_end|>
+<|im_start|>user
+Question: A company'"'"'s balance sheet as of December 31, 2023 shows:
+  Current assets: Cash and equivalents 5 million yuan, Accounts receivable 8 million yuan, Inventory 6 million yuan
+  Non-current assets: Net fixed assets 12 million yuan
+  Current liabilities: Short-term loans 4 million yuan, Accounts payable 3 million yuan
+  Non-current liabilities: Long-term loans 9 million yuan
+  Owner'"'"'s equity: Paid-in capital 10 million yuan, Retained earnings ?
+Requirement: Calculate the company'"'"'s Asset-Liability Ratio and Current Ratio (round to two decimal places).
+Options:
+A. Asset-Liability Ratio=58.33%, Current Ratio=1.90
+B. Asset-Liability Ratio=62.50%, Current Ratio=2.17
+C. Asset-Liability Ratio=65.22%, Current Ratio=1.75
+D. Asset-Liability Ratio=68.00%, Current Ratio=2.50<|im_end|>
+<|im_start|>assistant
+'
+
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
-    -d '{
-        "model": "Qwen/Qwen2.5-0.5B-Instruct",
-        "prompt": "'"<|im_start|>system\nYou are a professional accountant. Answer questions using accounting knowledge, output only the option letter (A/B/C/D).<|im_end|>\n"\
-"<|im_start|>user\nQuestion: A company's balance sheet as of December 31, 2023 shows:\n"\
-"  Current assets: Cash and equivalents 5 million yuan, Accounts receivable 8 million yuan, Inventory 6 million yuan\n"\
-"  Non-current assets: Net fixed assets 12 million yuan\n"\
-"  Current liabilities: Short-term loans 4 million yuan, Accounts payable 3 million yuan\n"\
-"  Non-current liabilities: Long-term loans 9 million yuan\n"\
-"  Owner's equity: Paid-in capital 10 million yuan, Retained earnings ?\n"\
-"Requirement: Calculate the company's Asset-Liability Ratio and Current Ratio (round to two decimal places).\n"\
-"Options:\n"\
-"A. Asset-Liability Ratio=58.33%, Current Ratio=1.90\n"\
-"B. Asset-Liability Ratio=62.50%, Current Ratio=2.17\n"\
-"C. Asset-Liability Ratio=65.22%, Current Ratio=1.75\n"\
-"D. Asset-Liability Ratio=68.00%, Current Ratio=2.50<|im_end|>\n"\
-"<|im_start|>assistant\n"'",
-        "max_completion_tokens": 1,
-        "temperature": 0,
-        "stop": ["<|im_end|>"]
-    }' | python3 -m json.tool
+    -d "$(jq -n \
+        --arg model "Qwen/Qwen2.5-0.5B-Instruct" \
+        --arg prompt "$PROMPT" \
+        '{
+            model: $model,
+            prompt: $prompt,
+            max_completion_tokens: 1,
+            temperature: 0,
+            stop: ["<|im_end|>"]
+        }')" | python3 -m json.tool
 ```
 
 The output format matches the following:
