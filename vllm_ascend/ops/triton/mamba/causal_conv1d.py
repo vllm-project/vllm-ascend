@@ -152,33 +152,21 @@ def causal_conv1d_fn(
         num_computed_tokens,
     ):
         if query_start_loc is None:
-            raise RuntimeError(
-                "APC causal_conv1d_fn requires query_start_loc for varlen inputs."
-            )
+            raise RuntimeError("APC causal_conv1d_fn requires query_start_loc for varlen inputs.")
         if cache_indices is None or cache_indices.dim() != 2:
-            raise RuntimeError(
-                "APC causal_conv1d_fn requires 2D cache_indices block tables."
-            )
+            raise RuntimeError("APC causal_conv1d_fn requires 2D cache_indices block tables.")
         if has_initial_state is None:
-            raise RuntimeError(
-                "APC causal_conv1d_fn requires has_initial_state."
-            )
+            raise RuntimeError("APC causal_conv1d_fn requires has_initial_state.")
         if conv_states is None:
             raise RuntimeError("APC causal_conv1d_fn requires conv_states.")
         if block_idx_first_scheduled_token is None:
-            raise RuntimeError(
-                "APC causal_conv1d_fn requires block_idx_first_scheduled_token."
-            )
+            raise RuntimeError("APC causal_conv1d_fn requires block_idx_first_scheduled_token.")
         if block_idx_last_scheduled_token is None:
-            raise RuntimeError(
-                "APC causal_conv1d_fn requires block_idx_last_scheduled_token."
-            )
+            raise RuntimeError("APC causal_conv1d_fn requires block_idx_last_scheduled_token.")
         if initial_state_idx is None:
             raise RuntimeError("APC causal_conv1d_fn requires initial_state_idx.")
         if num_computed_tokens is None:
-            raise RuntimeError(
-                "APC causal_conv1d_fn requires num_computed_tokens."
-            )
+            raise RuntimeError("APC causal_conv1d_fn requires num_computed_tokens.")
         if null_block_id != pad_slot_id:
             cache_indices = torch.where(
                 cache_indices == null_block_id,
@@ -804,9 +792,7 @@ def _normalize_apc_input_layout(
     weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, bool]:
     if x.dim() != 2:
-        raise RuntimeError(
-            f"APC causal_conv1d_fn expects 2D input, got x.dim()={x.dim()}"
-        )
+        raise RuntimeError(f"APC causal_conv1d_fn expects 2D input, got x.dim()={x.dim()}")
 
     input_is_dim_major = False
     if weight.shape[0] == x.shape[1]:
@@ -937,9 +923,7 @@ def _causal_conv1d_fwd_kernel_npu(
             return
 
     conv_states_base = (
-        conv_states_ptr
-        + conv_states_input_coord * stride_conv_state_seq
-        + idx_feats * stride_conv_state_dim
+        conv_states_ptr + conv_states_input_coord * stride_conv_state_seq + idx_feats * stride_conv_state_dim
     )
     w_base = w_ptr + idx_feats * stride_w_dim
 
@@ -964,11 +948,7 @@ def _causal_conv1d_fwd_kernel_npu(
             mask_f_wr = idx_feats < dim
             for row in range(state_len):
                 src_tok = (seqlen - state_len) + row
-                x_row_ptr = (
-                    x_ptr
-                    + (sequence_start_index + src_tok) * stride_x_token
-                    + idx_feats * stride_x_dim
-                )
+                x_row_ptr = x_ptr + (sequence_start_index + src_tok) * stride_x_token + idx_feats * stride_x_dim
                 row_data = tl.load(x_row_ptr, mask_f_wr, 0.0)
                 cs_row_ptr = (
                     conv_states_ptr
@@ -1042,16 +1022,9 @@ def _causal_conv1d_fwd_kernel_npu(
         col0 = tl.load(prior_tokens - 2 * stride_x_token, mask_w, 0.0)
 
         if (chunk_offset - 1) < n_block_to_fill:
-            base_token = (
-                last_full_block_token_index
-                - (n_block_to_fill - chunk_offset) * b_size
-                - state_len
-            )
+            base_token = last_full_block_token_index - (n_block_to_fill - chunk_offset) * b_size - state_len
             conv_states_output_coord = tl.load(
-                conv_state_indices_ptr
-                + idx_seq * stride_cache_indices
-                + current_first_index
-                + (chunk_offset - 1)
+                conv_state_indices_ptr + idx_seq * stride_cache_indices + current_first_index + (chunk_offset - 1)
             ).to(tl.int64)
             mask_f_inter = idx_feats < dim
             for row in range(state_len):
@@ -1104,11 +1077,7 @@ def _causal_conv1d_fwd_kernel_npu(
             acc = acc / (1 + tl.exp(-acc))
 
         mask_1d = (idx_token < segment_len) & (idx_feats < dim)
-        o_ptrs = (
-            o_ptr
-            + (sequence_start_index + token_offset + idx_token) * stride_o_token
-            + idx_feats * stride_o_dim
-        )
+        o_ptrs = o_ptr + (sequence_start_index + token_offset + idx_token) * stride_o_token + idx_feats * stride_o_dim
         tl.store(o_ptrs, acc, mask=mask_1d)
 
 
@@ -1198,9 +1167,7 @@ def _causal_conv1d_fwd_npu(
     stride_istate_seq = conv_states.stride(0)
     stride_istate_dim = conv_states.stride(1)
     stride_istate_token = conv_states.stride(2)
-    assert stride_istate_dim == 1, (
-        f"conv_states must be dim-contiguous, got stride(1)={stride_istate_dim}"
-    )
+    assert stride_istate_dim == 1, f"conv_states must be dim-contiguous, got stride(1)={stride_istate_dim}"
 
     stride_cache_indices = cache_indices.stride(0)
     assert (block_size_to_align % block_m) == 0, (
