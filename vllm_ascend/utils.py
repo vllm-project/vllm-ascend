@@ -629,6 +629,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
+        AscendGateLinear,
         AscendMergedColumnParallelLinear,
         AscendQKVParallelLinear,
         AscendReplicatedLinear,
@@ -641,6 +642,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.rotary_embedding import (
         AscendApplyRotaryEmb,
         AscendDeepseekScalingRotaryEmbedding,
+        AscendGemma4RotaryEmbedding,
         AscendMRotaryEmbedding,
         AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding,
@@ -657,12 +659,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
+        "Gemma4RotaryEmbedding": AscendGemma4RotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
         "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
         "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
         "QKVParallelLinear": AscendQKVParallelLinear,
         "ReplicatedLinear": AscendReplicatedLinear,
+        "GateLinear": AscendGateLinear,
         "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
         "VocabParallelEmbedding": AscendVocabParallelEmbedding,
         "ParallelLMHead": AscendParallelLMHead,
