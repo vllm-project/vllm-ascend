@@ -118,6 +118,9 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           git config --global --add safe.directory /vllm-workspace/vllm-ascend
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install -v -e .
 
       - name: Install aisbench
         if: ${{ github.event_name == 'pull_request' }}
@@ -126,6 +129,8 @@ jobs:
           cd /vllm-workspace/vllm-ascend
           
           GIT_CONFIG_GLOBAL=/dev/null git clone -b v3.1-20260429-master https://github.com/AISBench/benchmark.git
+          
+          cd benchmark
           
           pip install pytest asyncio pytest-asyncio
           pip install -e . -r requirements/api.txt -r requirements/extra.txt
