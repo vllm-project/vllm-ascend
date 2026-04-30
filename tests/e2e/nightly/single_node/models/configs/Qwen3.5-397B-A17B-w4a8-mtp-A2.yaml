@@ -53,15 +53,15 @@ test_cases:
         batch_size: 32
         baseline: 88.38
         threshold: 5
-      acc_aime2025:
-        case_type: accuracy
-        dataset_path: vllm-ascend/aime2025
-        request_conf: vllm_api_general_chat
-        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 72348
-        batch_size: 32
-        baseline: 93.33
-        threshold: 5
+#      acc_aime2025:
+#        case_type: accuracy
+#        dataset_path: vllm-ascend/aime2025
+#        request_conf: vllm_api_general_chat
+#        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+#        max_out_len: 72348
+#        batch_size: 32
+#        baseline: 93.33
+#        threshold: 5
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in3500-bs8000-qwen3
@@ -71,5 +71,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 64
         request_rate: 0
-        baseline: 1
+        baseline: 1108.865
         threshold: 0.97

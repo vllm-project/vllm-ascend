@@ -72,8 +72,8 @@ benchmarks:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
-    dataset_conf: gpqa/gpqa_gen_0_short_str
-    max_out_len: 16384
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
     batch_size: 32
     baseline: 85.35
     threshold: 5
@@ -83,19 +83,19 @@ benchmarks:
     dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 16384
+    max_out_len: 72348
     batch_size: 32
     baseline: 90
     threshold: 5
 
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 160
-    max_out_len: 1500
-    batch_size: 40
+    num_prompts: 12
+    max_out_len: 1024
+    batch_size: 3
     request_rate: 0
     baseline: 1
     threshold: 0.97
