@@ -17,7 +17,7 @@
 #
 
 from __future__ import annotations
-
+from collections.abc import Iterable
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, fields
@@ -994,6 +994,7 @@ class RecomputeScheduler(Scheduler):
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
                 prefill_kwargs = {}
+                self._get_kv_load_failure_output_stats(request)
                 if vllm_version_is("0.19.1"):
                     prefill_kwargs["num_cached_tokens"] = request.num_cached_tokens
                 outputs[request.client_index].append(
@@ -1053,6 +1054,25 @@ class RecomputeScheduler(Scheduler):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+    
+    @staticmethod
+    def _get_kv_load_failure_output_stats(request: Request) -> tuple[int, int]:
+        """Return non-negative prefill stats for a failed KV load output."""
+        num_cached_tokens = min(
+            max(request.num_computed_tokens, 0),
+            request.num_prompt_tokens,
+        )
+        recomputed_tokens = (
+            1 if num_cached_tokens + 1 == request.num_prompt_tokens else 0
+        )
+        max_external_tokens = num_cached_tokens + recomputed_tokens
+        num_external_computed_tokens = min(
+            max(request.num_external_computed_tokens, 0),
+            max_external_tokens,
+        )
+        request.num_external_computed_tokens = num_external_computed_tokens
+        request.num_cached_tokens = num_cached_tokens
+        return num_cached_tokens, num_external_computed_tokens
 
 
 class AsyncRecomputeScheduler(AsyncScheduler, RecomputeScheduler):
