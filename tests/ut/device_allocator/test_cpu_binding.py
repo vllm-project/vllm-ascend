@@ -29,6 +29,7 @@ def make_cpu_alloc(rank_id=0):
     cpu_alloc.rank_id = rank_id
     cpu_alloc.device_info = SimpleNamespace(
         running_npu_list=[0],
+        all_logic_npus=[0],
         allowed_cpus=[],
         npu_affinity={},
         total_logic_npus=0,
@@ -292,6 +293,38 @@ class TestCpuAlloc(unittest.TestCase):
         self.cpu_alloc.build_global_slice_cpu_pool()
         self.assertEqual(self.cpu_alloc.npu_cpu_pool[1], list(range(10, 20)))
 
+    def test_build_global_slice_cpu_pool_splits_same_cpuset_across_processes(self):
+        def build_single_card_process(visible_npu):
+            cpu_alloc = make_cpu_alloc()
+            cpu_alloc.device_info.running_npu_list = [visible_npu]
+            cpu_alloc.device_info.allowed_cpus = list(range(20))
+            cpu_alloc.device_info.total_logic_npus = 4
+            cpu_alloc.device_info.npu_affinity = {}
+
+            cpu_alloc.build_global_slice_cpu_pool()
+            cpu_alloc.allocate()
+            return cpu_alloc
+
+        npu0_process = build_single_card_process(0)
+        npu3_process = build_single_card_process(3)
+
+        self.assertEqual(npu0_process.npu_cpu_pool, {0: [0, 1, 2, 3, 4]})
+        self.assertEqual(npu3_process.npu_cpu_pool, {3: [15, 16, 17, 18, 19]})
+        self.assertFalse(set(npu0_process.npu_cpu_pool[0]) & set(npu3_process.npu_cpu_pool[3]))
+        self.assertFalse(set(npu0_process.assign_main[0]) & set(npu3_process.assign_main[3]))
+
+    def test_build_global_slice_cpu_pool_distributes_remainder_by_npu_id(self):
+        self.cpu_alloc.device_info.running_npu_list = [0, 1, 2]
+        self.cpu_alloc.device_info.allowed_cpus = list(range(17))
+        self.cpu_alloc.device_info.total_logic_npus = 3
+        self.cpu_alloc.device_info.npu_affinity = {}
+
+        self.cpu_alloc.build_global_slice_cpu_pool()
+
+        self.assertEqual(self.cpu_alloc.npu_cpu_pool[0], [0, 1, 2, 3, 4, 5])
+        self.assertEqual(self.cpu_alloc.npu_cpu_pool[1], [6, 7, 8, 9, 10, 11])
+        self.assertEqual(self.cpu_alloc.npu_cpu_pool[2], [12, 13, 14, 15, 16])
+
     def test_build_global_slice_cpu_pool_fallback_to_affinity_len(self):
         self.cpu_alloc.device_info.running_npu_list = [0, 1]
         self.cpu_alloc.device_info.allowed_cpus = list(range(12))
@@ -459,6 +492,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
     def test_build_cpu_pools_topo_mode_builds_and_splits_duplicate_groups(self, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1, 2]
         cpu_alloc.device_info.running_npu_list = [0, 1, 2]
         cpu_alloc.device_info.allowed_cpus = [0, 1, 2, 3]
         cpu_alloc.device_info.npu_affinity = {0: [0, 1], 1: [2, 3], 2: [2, 3]}
@@ -470,6 +504,79 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             cpu_alloc.build_cpu_pools()
 
         self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [0, 1], 1: [2], 2: [3]})
+
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_build_cpu_pools_topo_mode_skips_non_running_npu_without_cpuset_overlap(self, _mock_get_device_type):
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1]
+        cpu_alloc.device_info.running_npu_list = [0]
+        cpu_alloc.device_info.allowed_cpus = [192, 193]
+        cpu_alloc.device_info.npu_affinity = {0: [192, 193], 1: [128, 129]}
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
+        ):
+            cpu_alloc.build_cpu_pools()
+
+        self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [192, 193]})
+
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_build_cpu_pools_topo_mode_excludes_non_running_npu_from_final_pool(self, _mock_get_device_type):
+        cpu_alloc = make_cpu_alloc()
+        cpu_alloc.device_info.all_logic_npus = [0, 1]
+        cpu_alloc.device_info.running_npu_list = [0]
+        cpu_alloc.device_info.allowed_cpus = list(range(192, 202))
+        cpu_alloc.device_info.npu_affinity = {
+            0: list(range(192, 202)),
+            1: list(range(192, 202)),
+        }
+
+        with (
+            patch.object(cpu_alloc, "build_cpu_node_map"),
+            patch.object(cpu_alloc, "extend_numa", side_effect=lambda cpus: cpus),
+        ):
+            cpu_alloc.build_cpu_pools()
+            cpu_alloc.allocate()
+
+        self.assertEqual(cpu_alloc.npu_cpu_pool, {0: [192, 193, 194, 195, 196]})
+        self.assertEqual(cpu_alloc.assign_main, {0: [194]})
+
+    @patch("vllm_ascend.cpu_binding.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    def test_build_cpu_pools_topo_mode_splits_hidden_same_affinity_npus_across_processes(self, _mock_get_device_type):
+        def build_single_card_process(visible_npu):
+            cpu_alloc = make_cpu_alloc()
+            cpu_alloc.device_info.all_logic_npus = list(range(8))
+            cpu_alloc.device_info.running_npu_list = [visible_npu]
+            cpu_alloc.device_info.allowed_cpus = list(range(144, 192))
+            cpu_alloc.device_info.npu_affinity = {
+                0: list(range(144, 168)),
+                1: list(range(0, 24)),
+                2: list(range(144, 168)),
+                3: list(range(0, 24)),
+                4: list(range(96, 120)),
+                5: list(range(48, 72)),
+                6: list(range(96, 120)),
+                7: list(range(48, 72)),
+            }
+
+            with (
+                patch.object(cpu_alloc, "build_cpu_node_map"),
+                patch.object(cpu_alloc, "extend_numa", return_value=list(range(144, 192))),
+            ):
+                cpu_alloc.build_cpu_pools()
+                cpu_alloc.allocate()
+            return cpu_alloc
+
+        npu0_process = build_single_card_process(0)
+        npu2_process = build_single_card_process(2)
+
+        self.assertEqual(npu0_process.npu_cpu_pool, {0: list(range(144, 168))})
+        self.assertEqual(npu2_process.npu_cpu_pool, {2: list(range(168, 192))})
+        self.assertFalse(set(npu0_process.npu_cpu_pool[0]) & set(npu2_process.npu_cpu_pool[2]))
+        self.assertFalse(set(npu0_process.assign_main[0]) & set(npu2_process.assign_main[2]))
+        self.assertFalse(set(npu0_process.assign_acl[0]) & set(npu2_process.assign_acl[2]))
+        self.assertFalse(set(npu0_process.assign_rel[0]) & set(npu2_process.assign_rel[2]))
 
     @patch("vllm_ascend.cpu_binding.logger.info")
     def test_print_plan_handles_empty_release_assignment(self, mock_logger_info):
