@@ -25,6 +25,7 @@ from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.spec_decode.universal_draft_proposer import AscendUniversalDraftProposer
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -43,5 +44,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
             raise ValueError(f"VLLM v0.19.1 doesn't support {method} now")
     elif method == "draft_model":
         return AscendDraftModelProposer(vllm_config, device, runner)
+    elif method == "universal_draft":
+        return AscendUniversalDraftProposer(vllm_config, device, runner)
     else:
         raise ValueError(f"Unknown speculative decoding method: {method}")
