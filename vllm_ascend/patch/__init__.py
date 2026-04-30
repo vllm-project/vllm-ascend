@@ -155,7 +155,25 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 8. File: platform/patch_kv_cache_interface.py**
+# ** 8. File: platform/patch_minimax_usage_accounting.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.chat_completion.serving.OpenAIServingChat`
+#      `vllm.reasoning.minimax_m2_reasoning_parser`
+#    Why:
+#       MiniMax-M2 reasoning usage accounting needs to report
+#       `completion_tokens_details.reasoning_tokens` for both streaming and
+#       non-streaming chat completions.
+#    How：
+#       Monkey-patch MiniMax reasoning token counters, extend `UsageInfo`, and
+#       update chat usage construction to count reasoning tokens from raw output
+#       token ids.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/37955
+#    Future Plan:
+#       Remove this patch once the runtime vLLM version contains the upstream
+#       MiniMax usage-accounting fix.
+#
+# ** 9. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
 #    Why:
@@ -177,7 +195,7 @@
 #    Future Plan:
 #       Remove this patch after the upcoming KV cache spec refactor.
 #
-# ** 9. File: platform/patch_profiling_chunk.py**
+# ** 10. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
 #   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
@@ -204,6 +222,26 @@
 #       Remove or narrow this patch if upstream exposes stable hooks for backend
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
+#
+# ** 10. File: platform/patch_tool_choice_none_content.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.engine.serving.OpenAIServing._parse_tool_calls_from_content`
+#      `vllm.parser.abstract_parser.DelegatingParser._parse_tool_calls`
+#    Why:
+#       Forced tool choice can receive `content=None` when reasoning extraction
+#       consumes the whole generated text, for example when generation stops at
+#       `max_tokens`. Upstream vLLM 0.19.1 asserts in that case.
+#    How：
+#       Return an empty tool-call list for forced tool choice with `content=None`
+#       and mark the current named chat tool-choice result so the downstream
+#       chat response path does not assert. Preserve normal forced tool-call
+#       behavior when content is present.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40148
+#       https://github.com/vllm-project/vllm-ascend/pull/8400
+#    Future Plan:
+#       Remove this patch once the vLLM fix is included in the supported vLLM
+#       version.
 #
 # * Worker Patch:
 # ===============
