@@ -12,6 +12,8 @@
 #define GUMBEL_SAMPLE_TILING_H
 
 #include "register/tilingdata_base.h"
+#include "register/op_impl_registry.h"
+#include "tiling/platform/platform_ascendc.h"
 
 namespace optiling {
 

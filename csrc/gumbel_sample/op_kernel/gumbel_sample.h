@@ -25,12 +25,14 @@ constexpr int32_t GUMBEL_BLOCK_SIZE  = 4096;
 constexpr float   GUMBEL_EPS         = 1e-20f;
 constexpr float   GUMBEL_NEG_INF     = -3.4e38f;
 
-// Float LCG hash 常量（Numerical Recipes，与 CPU golden 字节级对齐）
-// state_f = state_f * LCG_A + LCG_C  (float 乘法，IEEE 754 确定性)
-// 归一化：u = Abs(state_f) * NORM_SCALE → [0, 1)
-constexpr float GUMBEL_LCG_A    = 1664525.0f;
-constexpr float GUMBEL_LCG_C    = 1013904223.0f;
-constexpr float GUMBEL_NORM     = 2.3283064e-10f;  // 1 / 2^32
+// Philox4x32-10 常量（与 triton tl.rand/tl.randint 完全一致）
+constexpr uint32_t PHILOX_KEY_A   = 0x9E3779B9u;
+constexpr uint32_t PHILOX_KEY_B   = 0xBB67AE85u;
+constexpr uint32_t PHILOX_ROUND_A = 0xD2511F53u;
+constexpr uint32_t PHILOX_ROUND_B = 0xCD9E8D57u;
+constexpr int32_t  PHILOX_ROUNDS  = 10;
+// uint_to_uniform_float scale（triton: 4.6566127342e-10 = (2^23-1)/2^23 * 2^(32-1) 的倒数）
+constexpr float PHILOX_FLOAT_SCALE = 4.6566127342e-10f;
 
 template <bool APPLY_TEMPERATURE>
 class GumbelSampleOp {
@@ -41,17 +43,20 @@ public:
                                  GM_ADDR seeds, GM_ADDR pos,
                                  GM_ADDR sampled, GM_ADDR workspace,
                                  const GumbelSampleTilingData& t,
-                                 TPipe* pipePtr);
+                                 TPipe* pipePtr);  // [opt-1] TPipe 移到核函数入口，传指针
     __aicore__ inline void Process();
 
 private:
     __aicore__ inline void ProcessOneRow(uint32_t reqIdx);
-    __aicore__ inline void GenerateGumbelTile(uint32_t tileOffset, uint32_t alignedLen,
-                                              float gumbelSeedF);
+    __aicore__ inline void GenerateGumbelTile(uint32_t tileOffset, uint32_t curLen,
+                                              uint32_t alignedLen,
+                                              uint32_t gumbelSeedLo, uint32_t gumbelSeedHi);
     __aicore__ inline int32_t FindFirstMatchIdx(LocalTensor<float>& logitsLocal,
                                                  float maxVal, uint32_t alignedLen);
+    // Philox4x32-10 单元素实现（与 triton tl.rand/tl.randint 字节级对齐）
+    __aicore__ inline uint32_t Philox4x32(uint32_t c0, uint32_t k0, uint32_t k1) const;
 
-    // TPipe 移到核函数入口，此处改为指针（减少头尾开销）
+    // [opt-1] TPipe 移到核函数入口，此处改为指针（减少头尾开销）
     TPipe* pipe_ = nullptr;
 
     GlobalTensor<float>   logitsGm_;
@@ -60,13 +65,13 @@ private:
     GlobalTensor<int64_t> posGm_;
     GlobalTensor<int64_t> sampledGm_;
 
-    // per-req 标量 buffer（Init 一次性搬入 UB，避免 GlobalTensor::GetValue）
+    // per-req 标量 buffer（Init 一次性搬入 UB，避免 GlobalTensor::GetValue，约束 #7）
     TBuf<TPosition::VECCALC> tempUbBuf_;
     TBuf<TPosition::VECCALC> seedsUbBuf_;
     TBuf<TPosition::VECCALC> posUbBuf_;
 
     // tile 临时 buffer
-    TQue<QuePosition::VECIN, 2>  inQueueLogits_;   // DoubleBuffer
+    TQue<QuePosition::VECIN, 2>  inQueueLogits_;   // [opt-2] DoubleBuffer（单→双缓冲）
     TQue<QuePosition::VECOUT, 1> outQueueSampled_;
     TBuf<TPosition::VECCALC> hashBuf_;       // float hash state / g_i
     TBuf<TPosition::VECCALC> idxBuf_;        // float index [0..BLOCK_SIZE-1]
@@ -91,9 +96,9 @@ template <bool APPLY_TEMPERATURE>
 __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     GM_ADDR logits, GM_ADDR temperature, GM_ADDR seeds, GM_ADDR pos,
     GM_ADDR sampled, GM_ADDR /*workspace*/, const GumbelSampleTilingData& t,
-    TPipe* pipePtr)
+    TPipe* pipePtr)  // [opt-1] 接受外部 TPipe 指针
 {
-    pipe_ = pipePtr;
+    pipe_ = pipePtr;  // [opt-1] 绑定外部 TPipe
     numReqs_     = t.numReqs;
     vocabSize_   = t.vocabSize;
     blockSize_   = t.blockSize;
@@ -124,7 +129,7 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     pipe_->InitBuffer(seedsUbBuf_, Align32(numReqs_ * static_cast<uint32_t>(sizeof(int64_t))));
     pipe_->InitBuffer(posUbBuf_,   Align32(numReqs_ * static_cast<uint32_t>(sizeof(int64_t))));
 
-    pipe_->InitBuffer(inQueueLogits_,   2, GUMBEL_BLOCK_SIZE * sizeof(float));  // DoubleBuffer
+    pipe_->InitBuffer(inQueueLogits_,   2, GUMBEL_BLOCK_SIZE * sizeof(float));  // [opt-2] DoubleBuffer
     pipe_->InitBuffer(outQueueSampled_, 1, 32);
     pipe_->InitBuffer(hashBuf_,       GUMBEL_BLOCK_SIZE * sizeof(float));
     pipe_->InitBuffer(idxBuf_,        GUMBEL_BLOCK_SIZE * sizeof(float));
@@ -145,7 +150,7 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Init(
     }
     PipeBarrier<PIPE_V>();
 
-    // 一次性把 temperature/seeds/pos 搬入 UB（禁 GlobalTensor::GetValue）
+    // 一次性把 temperature/seeds/pos 搬入 UB（约束 #7：禁 GlobalTensor::GetValue）
     {
         LocalTensor<float>   tempLocal  = tempUbBuf_.Get<float>();
         LocalTensor<int64_t> seedsLocal = seedsUbBuf_.Get<int64_t>();
@@ -191,65 +196,109 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::Process()
 }
 
 // =================================================================
-// GenerateGumbelTile: 全 vectorized float LCG hash → fp32 g_i 写到 hashBuf_
-//   算法：state[i] = gumbelSeedF + (tileOffset+i) → 两轮 LCG → u=Abs*NORM → g=-ln(-ln(u+ε)+ε)
-//   与 CPU golden 完全一致（float IEEE 754 确定性）
+// Philox4x32-10 单元素实现
+//   对应 triton-ascend: philox(seed, c0=offset, c1=0, c2=0, c3=0)[0]
+//   NPU 后端将 tt.mulhiui 编译为有符号 smulhi，需与此对齐。
+//   k0 = seed & 0xFFFFFFFF, k1 = (seed >> 32) & 0xFFFFFFFF
+// =================================================================
+template <bool APPLY_TEMPERATURE>
+__aicore__ inline uint32_t GumbelSampleOp<APPLY_TEMPERATURE>::Philox4x32(
+    uint32_t c0, uint32_t k0, uint32_t k1) const
+{
+    uint32_t c1 = 0u, c2 = 0u, c3 = 0u;
+    for (int32_t r = 0; r < PHILOX_ROUNDS; ++r) {
+        // smulhi: upper 32 bits of signed 64-bit product
+        // (triton-ascend compiles tt.mulhiui as signed mulhi on NPU)
+        int64_t prod_b = static_cast<int64_t>(static_cast<int32_t>(PHILOX_ROUND_B))
+                       * static_cast<int64_t>(static_cast<int32_t>(c2));
+        int64_t prod_a = static_cast<int64_t>(static_cast<int32_t>(PHILOX_ROUND_A))
+                       * static_cast<int64_t>(static_cast<int32_t>(c0));
+        uint32_t hi_b = static_cast<uint32_t>(static_cast<uint64_t>(prod_b) >> 32);
+        uint32_t hi_a = static_cast<uint32_t>(static_cast<uint64_t>(prod_a) >> 32);
+        uint32_t new_c0 = hi_b ^ c1 ^ k0;
+        uint32_t new_c2 = hi_a ^ c3 ^ k1;
+        uint32_t new_c1 = PHILOX_ROUND_B * c2;
+        uint32_t new_c3 = PHILOX_ROUND_A * c0;
+        c0 = new_c0; c1 = new_c1; c2 = new_c2; c3 = new_c3;
+        k0 += PHILOX_KEY_A;
+        k1 += PHILOX_KEY_B;
+    }
+    return c0;
+}
+
+// =================================================================
+// GenerateGumbelTile: Philox4x32 → uniform → Gumbel 噪声（向量化 Ln）
+//   1. 标量循环：Philox4x32 → uint_to_uniform_float → 写入 hashBuf_
+//   2. 向量化：Adds/Ln/Muls/Adds/Ln/Muls 完成 Gumbel 变换
+//   使用 AscendC 硬件 Ln 保证与 triton 精度对齐
 // =================================================================
 template <bool APPLY_TEMPERATURE>
 __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::GenerateGumbelTile(
-    uint32_t tileOffset, uint32_t alignedLen, float gumbelSeedF)
+    uint32_t tileOffset, uint32_t curLen, uint32_t alignedLen,
+    uint32_t gumbelSeedLo, uint32_t gumbelSeedHi)
 {
     LocalTensor<float> hashLocal = hashBuf_.Get<float>();
-    LocalTensor<float> idxLocal  = idxBuf_.Get<float>();
 
-    float tileOffsetF = static_cast<float>(static_cast<int32_t>(tileOffset));
-    Adds(hashLocal, idxLocal, tileOffsetF + gumbelSeedF, alignedLen);
-    PipeBarrier<PIPE_V>();
-
-    Muls(hashLocal, hashLocal, GUMBEL_LCG_A, alignedLen);
-    PipeBarrier<PIPE_V>();
-    Adds(hashLocal, hashLocal, GUMBEL_LCG_C, alignedLen);
-    PipeBarrier<PIPE_V>();
-    Muls(hashLocal, hashLocal, GUMBEL_LCG_A, alignedLen);
-    PipeBarrier<PIPE_V>();
-    Adds(hashLocal, hashLocal, GUMBEL_LCG_C, alignedLen);
-    PipeBarrier<PIPE_V>();
-
-    Abs(hashLocal, hashLocal, alignedLen);
-    PipeBarrier<PIPE_V>();
-    Muls(hashLocal, hashLocal, GUMBEL_NORM, alignedLen);
+    // (a) 标量 Philox → uniform float，padding 填 0.5（Gumbel(0.5)=0，不影响 argmax）
+    for (uint32_t i = 0; i < alignedLen; ++i) {
+        float u;
+        if (i < curLen) {
+            uint32_t vocabIdx = tileOffset + i;
+            uint32_t raw = Philox4x32(vocabIdx, gumbelSeedLo, gumbelSeedHi);
+            int32_t sx = static_cast<int32_t>(raw);
+            if (sx < 0) sx = -sx - 1;
+            u = static_cast<float>(sx) * PHILOX_FLOAT_SCALE;
+        } else {
+            u = 0.5f;  // padding: Gumbel(0.5) = 0, 不影响有效元素的 argmax
+        }
+        hashLocal.SetValue(i, u);
+    }
     PipeBarrier<PIPE_V>();
 
-    Adds(hashLocal, hashLocal, GUMBEL_EPS, alignedLen);
+    // (b) 向量化 Gumbel 变换：g = -ln(-ln(u + eps) + eps)
+    //     使用 AscendC 硬件 Ln，精度与 triton 对齐
+    Adds(hashLocal, hashLocal, GUMBEL_EPS, alignedLen);   // u + eps
     PipeBarrier<PIPE_V>();
-    Ln(hashLocal, hashLocal, alignedLen);
+    Ln(hashLocal, hashLocal, alignedLen);                  // ln(u + eps)
     PipeBarrier<PIPE_V>();
-    Muls(hashLocal, hashLocal, -1.0f, alignedLen);
+    Muls(hashLocal, hashLocal, -1.0f, alignedLen);         // -ln(u + eps)
     PipeBarrier<PIPE_V>();
-    Adds(hashLocal, hashLocal, GUMBEL_EPS, alignedLen);
+    Adds(hashLocal, hashLocal, GUMBEL_EPS, alignedLen);    // -ln(u+eps) + eps
     PipeBarrier<PIPE_V>();
-    Ln(hashLocal, hashLocal, alignedLen);
+    Ln(hashLocal, hashLocal, alignedLen);                  // ln(-ln(u+eps)+eps)
     PipeBarrier<PIPE_V>();
-    Muls(hashLocal, hashLocal, -1.0f, alignedLen);
+    Muls(hashLocal, hashLocal, -1.0f, alignedLen);         // -ln(-ln(u+eps)+eps)
+    PipeBarrier<PIPE_V>();
+
+    // padding 元素的 Gumbel 值为 -ln(-ln(0.5+eps)+eps) ≈ 0，不影响有效元素
+    // 但为安全起见，将 padding 位置覆盖为 GUMBEL_NEG_INF
+    for (uint32_t i = curLen; i < alignedLen; ++i) {
+        hashLocal.SetValue(i, GUMBEL_NEG_INF);
+    }
     PipeBarrier<PIPE_V>();
 }
 
 // =================================================================
 // FindFirstMatchIdx: 在 logitsLocal 中找第一个 == maxVal 的索引（vectorized）
 //   过程：Compare(== maxVal) → mask → Select(idx, sentinel) → ReduceMin
+//   sentinel = +INF（float），idx = [0..BLOCK_SIZE-1]（float）
+//   返回 int32_t 索引
 // =================================================================
 template <bool APPLY_TEMPERATURE>
 __aicore__ inline int32_t GumbelSampleOp<APPLY_TEMPERATURE>::FindFirstMatchIdx(
     LocalTensor<float>& logitsLocal, float maxVal, uint32_t alignedLen)
 {
+    // (1) 广播 maxVal
     LocalTensor<float> bcastMax = scratchBuf_.Get<float>();
     Duplicate(bcastMax, maxVal, alignedLen);
     PipeBarrier<PIPE_V>();
 
+    // (2) Compare(logitsLocal == bcastMax) → bitmap
     LocalTensor<uint8_t> mask = maskBuf_.Get<uint8_t>();
     Compare(mask, logitsLocal, bcastMax, CMPMODE::EQ, alignedLen);
     PipeBarrier<PIPE_V>();
 
+    // (3) Select: maskedIdx = mask ? idx : sentinel(+INF)
     LocalTensor<float> idxLocal      = idxBuf_.Get<float>();
     LocalTensor<float> sentinelLocal  = sentinelBuf_.Get<float>();
     LocalTensor<float> maskedIdx      = scratchBuf_.Get<float>();
@@ -257,6 +306,7 @@ __aicore__ inline int32_t GumbelSampleOp<APPLY_TEMPERATURE>::FindFirstMatchIdx(
            SELMODE::VSEL_TENSOR_TENSOR_MODE, alignedLen);
     PipeBarrier<PIPE_V>();
 
+    // (4) ReduceMin(maskedIdx) → first matching idx（float）
     LocalTensor<float> reduceWork = reduceWorkBuf_.Get<float>();
     ReduceMin<float>(reduceWork, maskedIdx, reduceWork[8], alignedLen, false);
 
@@ -273,6 +323,7 @@ __aicore__ inline int32_t GumbelSampleOp<APPLY_TEMPERATURE>::FindFirstMatchIdx(
 template <bool APPLY_TEMPERATURE>
 __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t reqIdx)
 {
+    // ----- (1) 读 per-req 标量（来自 Init 阶段已 DataCopyPad 到 UB 的 buffer）-----
     LocalTensor<float>   tempLocal  = tempUbBuf_.Get<float>();
     LocalTensor<int64_t> seedsLocal = seedsUbBuf_.Get<int64_t>();
     LocalTensor<int64_t> posLocal   = posUbBuf_.Get<int64_t>();
@@ -281,17 +332,17 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
     int64_t posI64 = posLocal.GetValue(reqIdx);
     int32_t pI32   = static_cast<int32_t>(posI64 & 0xFFFFFFFF);
 
-    // splitmix64(seed64, pI32) → gumbelSeedF（与 CPU golden 一致）
-    uint64_t h = static_cast<uint64_t>(seed64) ^
-                 (static_cast<uint64_t>(static_cast<uint32_t>(pI32)) << 32);
-    h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    h = (h ^ (h >> 27)) * 0x94d049bb133111ebULL;
-    h = h ^ (h >> 31);
-    float gumbelSeedF = static_cast<float>(static_cast<int64_t>(h));
+    // gumbel_seed = tl.randint(seed, pos) = Philox4x32(c0=pos_i32, k0=seed_lo32, k1=seed_hi32)
+    uint32_t seedLo = static_cast<uint32_t>(static_cast<uint64_t>(seed64) & 0xFFFFFFFFu);
+    uint32_t seedHi = static_cast<uint32_t>((static_cast<uint64_t>(seed64) >> 32) & 0xFFFFFFFFu);
+    uint32_t gumbelSeed = Philox4x32(static_cast<uint32_t>(pI32), seedLo, seedHi);
+    uint32_t gumbelSeedLo = gumbelSeed;  // tl.rand uses gumbel_seed as uint32 key
+    uint32_t gumbelSeedHi = 0u;          // seed_hi = (gumbel_seed >> 32) = 0 (uint32 fits in lo)
 
     bool  isGreedy  = (temp == 0.0f);
     float recipTemp = isGreedy ? 0.0f : (1.0f / temp);
 
+    // ----- (2) 跨 tile 累积 argmax -----
     float   runningMax = GUMBEL_NEG_INF;
     int32_t runningIdx = 0;
 
@@ -300,6 +351,7 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
         uint32_t curLen     = (tileIdx == numTiles_ - 1) ? lastTileLen_ : blockSize_;
         uint32_t alignedLen = blockSize_;
 
+        // ---- CopyIn ----
         LocalTensor<float> logitsLocal = inQueueLogits_.AllocTensor<float>();
         Duplicate(logitsLocal, GUMBEL_NEG_INF, alignedLen);
         PipeBarrier<PIPE_V>();
@@ -322,12 +374,13 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
                 Muls(logitsLocal, logitsLocal, recipTemp, alignedLen);
                 PipeBarrier<PIPE_V>();
             }
-            GenerateGumbelTile(tileOffset, alignedLen, gumbelSeedF);
+            GenerateGumbelTile(tileOffset, curLen, alignedLen, gumbelSeedLo, gumbelSeedHi);
             LocalTensor<float> gLocal = hashBuf_.Get<float>();
             Add(logitsLocal, logitsLocal, gLocal, alignedLen);
             PipeBarrier<PIPE_V>();
         }
 
+        // ---- ReduceMax ----
         LocalTensor<float> reduceWork = reduceWorkBuf_.Get<float>();
         ReduceMax<float>(reduceWork, logitsLocal, reduceWork[8], alignedLen, false);
 
@@ -348,7 +401,7 @@ __aicore__ inline void GumbelSampleOp<APPLY_TEMPERATURE>::ProcessOneRow(uint32_t
         inQueueLogits_.FreeTensor(logitsLocal);
     }
 
-    // 写回 sampled[reqIdx]
+    // ----- (3) 写回 sampled[reqIdx] -----
     LocalTensor<int64_t> outLocal = outQueueSampled_.AllocTensor<int64_t>();
     outLocal.SetValue(0, static_cast<int64_t>(runningIdx));
 
