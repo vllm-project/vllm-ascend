@@ -2,11 +2,11 @@ import json
 import logging
 import os
 import shlex
+import subprocess
+import sys
 from typing import Any
 import pytest
 import vllm
-import sys
-import subprocess
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.multi_node.scripts.multi_node_config import MultiNodeConfig, MultiNodeConfigLoader, ProxyLauncher
 from tools.aisbench import run_aisbench_cases
