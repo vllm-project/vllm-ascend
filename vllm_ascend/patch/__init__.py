@@ -223,6 +223,26 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
+# ** 10. File: platform/patch_tool_choice_none_content.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.entrypoints.openai.engine.serving.OpenAIServing._parse_tool_calls_from_content`
+#      `vllm.parser.abstract_parser.DelegatingParser._parse_tool_calls`
+#    Why:
+#       Forced tool choice can receive `content=None` when reasoning extraction
+#       consumes the whole generated text, for example when generation stops at
+#       `max_tokens`. Upstream vLLM 0.19.1 asserts in that case.
+#    How：
+#       Return an empty tool-call list for forced tool choice with `content=None`
+#       and mark the current named chat tool-choice result so the downstream
+#       chat response path does not assert. Preserve normal forced tool-call
+#       behavior when content is present.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/40148
+#       https://github.com/vllm-project/vllm-ascend/pull/8400
+#    Future Plan:
+#       Remove this patch once the vLLM fix is included in the supported vLLM
+#       version.
+#
 # * Worker Patch:
 # ===============
 #
