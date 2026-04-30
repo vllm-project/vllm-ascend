@@ -12,6 +12,7 @@ from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enabling_mlapo, split_decodes_and_prefills
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+from vllm_ascend.utils import vllm_version_is
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -57,6 +58,33 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             device=device,
         )
         self.block_arange_buffer = torch.arange(self.pcp_size * self.dcp_size, dtype=torch.int32, device=device)
+
+    def _compact_varlen_decode_slot_mapping(
+        self,
+        decode_slot_mapping: torch.Tensor,
+        decode_query_lens: torch.Tensor,
+    ) -> None:
+        device = decode_slot_mapping.device
+        decode_query_lens_cpu = decode_query_lens.to(device="cpu", dtype=torch.int64, non_blocking=True)
+        total_valid_tokens = int(decode_query_lens_cpu.sum().item())
+        if total_valid_tokens == 0:
+            return
+        decode_query_lens = decode_query_lens_cpu.to(device=device, dtype=torch.int64, non_blocking=True)
+
+        req_spans = decode_query_lens * self.pcp_size
+        req_starts = torch.cumsum(req_spans, dim=0) - req_spans
+
+        token_offsets = torch.arange(total_valid_tokens, device=device, dtype=torch.int64)
+        token_base = torch.cumsum(decode_query_lens, dim=0) - decode_query_lens
+        token_offsets = token_offsets - torch.repeat_interleave(token_base, decode_query_lens)
+
+        expanded_req_starts = torch.repeat_interleave(req_starts, decode_query_lens)
+        valid_in_idx = expanded_req_starts + token_offsets * self.pcp_size
+        valid_out_idx = expanded_req_starts + token_offsets
+
+        valid_slots = decode_slot_mapping[valid_in_idx]
+        decode_slot_mapping.fill_(-1)
+        decode_slot_mapping.index_copy_(0, valid_out_idx, valid_slots)
 
     def build(
         self,
@@ -113,15 +141,16 @@ class AscendSFACPMetadataBuilder(AscendSFAMetadataBuilder):
             elif self.speculative_config is not None and num_decodes > 0:
                 # when mtp, pcp_allgather_restore_idx=[696,-1,697,-1,560,-1,561,-1,100,101,102],
                 # slot_mapping should be [696,697,-1,-1,560,561,-1,-1,100,101,102]
-                num_tokens_per_request = num_decode_tokens // num_decodes
-                decode_slot_mapping = self.slot_mapping_buf[: num_decode_tokens * self.pcp_size].reshape(
-                    num_decodes, -1
+                # corner case: decode requests in the same MTP batch can have
+                # different query lengths when some drafts are clipped near
+                # max_model_len, so compact slot_mapping by per-request length
+                # instead of assuming each request has decode_threshold tokens.
+                decode_query_lens = long_seq_metadata.query_lens_pcp_full_cpu[:num_decodes]
+                decode_slot_mapping = self.slot_mapping_buf[: num_decode_tokens * self.pcp_size]
+                self._compact_varlen_decode_slot_mapping(
+                    decode_slot_mapping,
+                    decode_query_lens,
                 )
-                decode_slot_mapping[:, :num_tokens_per_request] = decode_slot_mapping[
-                    :, : num_tokens_per_request * self.pcp_size : self.pcp_size
-                ]
-                decode_slot_mapping[:, num_tokens_per_request : num_tokens_per_request * self.pcp_size].fill_(-1)
-                self.slot_mapping_buf[: num_decode_tokens * self.pcp_size] = decode_slot_mapping.flatten()
             metadata_cls.slot_mapping = self.slot_mapping_buf[:num_actual_tokens_pcp_padded]
         metadata_cls.sfa_cp_metadata = sfa_cp_metadata
         return metadata_cls
@@ -385,7 +414,11 @@ class AscendSFACPImpl(AscendSFAImpl):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
     ):
-        weights, _ = self.weights_proj(x)
+        if vllm_version_is("0.19.1"):
+            weights, _ = self.weights_proj(x)
+        else:
+            kw, _ = self.wk_weights_proj(x)
+            weights = kw[:, self.head_dim :]
 
         q_li, _ = self.wq_b(q_c)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q_li = q_li.view(-1, self.n_head, self.head_dim)  # [n_toks,64,128]

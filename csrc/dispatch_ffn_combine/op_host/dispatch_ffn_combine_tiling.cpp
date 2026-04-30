@@ -42,6 +42,7 @@ namespace {
     constexpr uint32_t WEIGHT_INDEX = 1;
     constexpr uint32_t WEIGHT2_INDEX = 2;
     constexpr uint32_t EXPERTID_INDEX = 3;
+    constexpr uint32_t X_ACTIVE_MASK_INDEX = 7;
     constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
     constexpr uint64_t MB_SIZE = 1024 * 1024UL;
@@ -174,6 +175,21 @@ static ge::graphStatus DispatchFFNCombineGetPlatformInfoAndSetTiling(gert::Tilin
     return ge::GRAPH_SUCCESS;
 }
 
+static ge::graphStatus CheckXActiveMaskShape(gert::TilingContext *context, const char *nodeName, DispatchFFNCombineInfo &info)
+{
+    const gert::StorageShape* xActiveMaskStorageShape = context->GetOptionalInputShape(X_ACTIVE_MASK_INDEX);
+    if (xActiveMaskStorageShape != nullptr) {
+        OP_TILING_CHECK(xActiveMaskStorageShape->GetStorageShape().GetDimNum() != 1,
+            OP_LOGE(nodeName, "xActiveMask shape dims must be 1, but current dim num is %lu.",
+                xActiveMaskStorageShape->GetStorageShape().GetDimNum()), return ge::GRAPH_FAILED);
+        const int64_t xActiveMaskDim0 = xActiveMaskStorageShape->GetStorageShape().GetDim(0);
+        OP_TILING_CHECK(xActiveMaskDim0 != static_cast<int64_t>(info.M),
+            OP_LOGE(nodeName, "xActiveMask Dim0 must be M(%u), but current dim is %lu.", info.M, xActiveMaskDim0),
+            return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineInfo &info)
 {
     cocTilingData.m0 = 128;
@@ -214,6 +230,9 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     OP_TILING_CHECK(DispatchFFNCombineGetPlatformInfoAndSetTiling(context, info) != ge::GRAPH_SUCCESS,
         OP_LOGE(context->GetNodeName(), "DispatchFFNCombine GetPlatformInfoAndSetTiling Failed"),
         return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckXActiveMaskShape(context, nodeName, info) != ge::GRAPH_SUCCESS,
+        OP_LOGE(context->GetNodeName(), "DispatchFFNCombine CheckXActiveMaskShape Failed"),
+        return ge::GRAPH_FAILED);
 
     SetTilingData(tilingData->cocTiling, info);
 
@@ -238,7 +257,7 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
     int64_t scaleDim0 = 0;
     int64_t ubSize = 196352;
     int64_t expertCapacity = 0;
-    int64_t expertNum = info.expertPerRank * info.worldSize;
+    int64_t expertNum = info.expertPerRank * info.worldSize + 1;    // enable expertId == expertNum
     int64_t activeNum = 0;
     int64_t dropPadMode = 0;
      int64_t expertTokensCountOrCumsumFlag = 2;

@@ -153,7 +153,7 @@ The content of the multi_producer.sh script:
 
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
@@ -232,7 +232,7 @@ The content of multi_consumer.sh:
 ```shell
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
@@ -349,7 +349,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export PYTHONHASHSEED=0 
+export PYTHONHASHSEED=0
 export ACL_OP_INIT_MODE=1
 #A3
 export ASCEND_ENABLE_USE_FABRIC_MEM=1
@@ -730,7 +730,7 @@ etcdctl --endpoints "${ETCD_IP}:2379" get key
 ```
 
 For production environments, refer to the official etcd clustering
-documentation: <https://etcd.io/docs/current/op-guide/clustering/>
+documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>
 
 ### Start Datasystem Worker
 

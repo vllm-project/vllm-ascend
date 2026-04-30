@@ -70,7 +70,7 @@ class EplbUpdator:
 
         self.process = process
 
-        logger.info(f"[ModelRunner] Launched EPLB process (pid={self.process.pid})")
+        logger.info("[ModelRunner] Launched EPLB process (pid=%s)", self.process.pid)
 
     def update_iteration(self):
         self.cur_iterations += 1
@@ -138,7 +138,7 @@ class EplbUpdator:
             moe_load = moe_load.permute(2, 0, 1, 3)
 
         self.shared_dict["moe_load"] = moe_load
-        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
+        logger.debug("[ModelRunner] Updated shared_dict['moe_load'] shape=%s", moe_load.shape)
 
         return moe_load
 

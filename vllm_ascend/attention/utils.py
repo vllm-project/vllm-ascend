@@ -11,6 +11,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend import envs
 from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -173,6 +174,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Prefill Context Parallelism (PCP) operations.
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None
+    kvcomp_metadata: KVCompMetaData | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":

@@ -68,8 +68,8 @@ def elastic_load(
             if model_loaded is None:
                 logger.error("Failed to load model")
                 return None
-            logger.info("Finish elastic load (duration: {}s)".format(time.perf_counter() - t0))
+            logger.info("Finish elastic load (duration: %ss)", time.perf_counter() - t0)
             return model_loaded
     except Exception as e:
-        logger.info(f"elastic_load error: {e}")
+        logger.info("elastic_load error: %s", e)
         return None

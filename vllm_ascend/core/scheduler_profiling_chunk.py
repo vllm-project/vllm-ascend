@@ -483,7 +483,7 @@ class ProfilingChunkScheduler(Scheduler):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
-                        if vllm_version_is("0.19.0"):
+                        if vllm_version_is("0.19.1"):
                             request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
@@ -492,7 +492,7 @@ class ProfilingChunkScheduler(Scheduler):
 
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
 
-                    if not vllm_version_is("0.19.0") and request.prefill_stats is not None:
+                    if not vllm_version_is("0.19.1") and request.prefill_stats is not None:
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
@@ -637,7 +637,7 @@ class ProfilingChunkScheduler(Scheduler):
                 time_budget -= self.profiling_chunk_manager.predict_time(num_new_tokens, request.num_computed_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if vllm_version_is("0.19.0"):
+                if vllm_version_is("0.19.1"):
                     if request.num_cached_tokens < 0:
                         request.num_cached_tokens = num_computed_tokens
                 if encoder_inputs_to_schedule:
