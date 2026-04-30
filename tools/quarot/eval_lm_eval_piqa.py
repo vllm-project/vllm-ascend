@@ -15,16 +15,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Convenience wrapper around lm-eval for PIQA-style dense vs quantized runs."""
+"""Convenience wrapper for generation-based PIQA evaluation on vllm-ascend.
+
+This intentionally avoids lm-eval's multiple-choice loglikelihood path because
+prompt logprobs are not reliable on the current Ascend V1 backend. Instead it:
+
+1. Formats each PIQA validation example as a short A/B instruction prompt.
+2. Runs standard generation with vLLM.
+3. Parses the model response into label A or B.
+4. Reports exact answer accuracy.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
+import subprocess
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 DEFAULT_MODELS = [
     "dense=/data/weights/Qwen3-32B",
@@ -33,6 +45,10 @@ DEFAULT_MODELS = [
 DEFAULT_MODEL_QUANT = [
     "quarot=ascend",
 ]
+DEFAULT_SYSTEM_PROMPT = (
+    "You are solving a two-choice commonsense reasoning task. "
+    "Answer with exactly one character: A or B. Do not output any explanation or other text."
+)
 
 
 def parse_model_specs(specs: list[str]) -> list[tuple[str, str]]:
@@ -72,6 +88,10 @@ def parse_optional_bool(value: str) -> bool:
     raise argparse.ArgumentTypeError(f"Expected a boolean value, got: {value!r}")
 
 
+def bytes_to_gib(value: int) -> float:
+    return value / (1024 ** 3)
+
+
 def build_model_args(
     *,
     model_path: str,
@@ -103,20 +123,6 @@ def build_model_args(
     return ",".join(f"{key}={value}" for key, value in model_args.items())
 
 
-def pick_primary_metric(results: dict[str, Any], task_name: str) -> tuple[str, float]:
-    task_result = results["results"][task_name]
-    for metric_name in ("acc_norm,none", "acc,none", "exact_match,strict-match", "exact_match,flexible-extract"):
-        value = task_result.get(metric_name)
-        if isinstance(value, (int, float)):
-            return metric_name, float(value)
-    for metric_name, value in task_result.items():
-        if metric_name.endswith("_stderr"):
-            continue
-        if isinstance(value, (int, float)):
-            return metric_name, float(value)
-    raise ValueError(f"Could not find a numeric primary metric for task {task_name}")
-
-
 def cleanup_vllm_state() -> None:
     try:
         import gc
@@ -130,20 +136,241 @@ def cleanup_vllm_state() -> None:
         pass
 
 
+def sample_npu_memory_usage() -> dict[str, Any] | None:
+    visible_devices_str = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
+    visible_devices: set[int] | None = None
+    if visible_devices_str:
+        try:
+            visible_devices = {
+                int(device.strip()) for device in visible_devices_str.split(",") if device.strip()
+            }
+        except ValueError:
+            visible_devices = None
+
+    try:
+        output = subprocess.check_output(
+            ["npu-smi", "info"], text=True, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        return None
+
+    per_device_used_bytes: list[int] = []
+    per_device_total_bytes: list[int] = []
+    current_device: int | None = None
+    current_device_selected = False
+
+    for line in output.splitlines():
+        first_line_match = re.match(r"^\|\s*(\d+)\s+\S+", line)
+        if first_line_match:
+            current_device = int(first_line_match.group(1))
+            current_device_selected = visible_devices is None or current_device in visible_devices
+            continue
+
+        if current_device is None or not current_device_selected:
+            continue
+
+        hbm_match = re.search(r"(\d+)\s*/\s*(\d+)\s*$", line)
+        if hbm_match:
+            used_mb = int(hbm_match.group(1))
+            total_mb = int(hbm_match.group(2))
+            per_device_used_bytes.append(used_mb * 1024 * 1024)
+            per_device_total_bytes.append(total_mb * 1024 * 1024)
+            current_device = None
+            current_device_selected = False
+
+    if not per_device_total_bytes:
+        return None
+
+    return {
+        "device_count": len(per_device_total_bytes),
+        "per_device_used_bytes": per_device_used_bytes,
+        "per_device_total_bytes": per_device_total_bytes,
+        "total_used_bytes": sum(per_device_used_bytes),
+        "total_capacity_bytes": sum(per_device_total_bytes),
+    }
+
+
+class NpuMemoryMonitor:
+
+    def __init__(self, poll_interval_s: float = 0.5) -> None:
+        self.poll_interval_s = poll_interval_s
+        self.baseline = sample_npu_memory_usage()
+        self.peak = self.baseline
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _poll_loop(self) -> None:
+        while not self._stop.wait(self.poll_interval_s):
+            snapshot = sample_npu_memory_usage()
+            if snapshot is None:
+                continue
+            if self.peak is None or snapshot["total_used_bytes"] > self.peak["total_used_bytes"]:
+                self.peak = snapshot
+
+    def start(self) -> None:
+        if self.baseline is None:
+            return
+        self._thread = threading.Thread(target=self._poll_loop, name="npu-memory-monitor", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict[str, Any] | None:
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=max(self.poll_interval_s * 2, 1.0))
+        if self.baseline is None or self.peak is None:
+            return None
+        baseline_total_used_bytes = int(self.baseline["total_used_bytes"])
+        peak_total_used_bytes = int(self.peak["total_used_bytes"])
+        return {
+            "device_count": int(self.peak["device_count"]),
+            "baseline_total_used_gib": bytes_to_gib(baseline_total_used_bytes),
+            "peak_total_used_gib": bytes_to_gib(peak_total_used_bytes),
+            "peak_increment_gib": bytes_to_gib(peak_total_used_bytes - baseline_total_used_bytes),
+            "per_device_peak_used_gib": [
+                bytes_to_gib(int(value)) for value in self.peak["per_device_used_bytes"]
+            ],
+            "per_device_total_capacity_gib": [
+                bytes_to_gib(int(value)) for value in self.peak["per_device_total_bytes"]
+            ],
+        }
+
+
+def load_piqa_examples(*, limit: int | None = None) -> list[dict[str, Any]]:
+    from datasets import load_dataset
+
+    dataset = load_dataset("baber/piqa", split="validation")
+    if limit is not None:
+        dataset = dataset.select(range(min(limit, len(dataset))))
+    return [dict(example) for example in dataset]
+
+
+def build_piqa_prompt(example: dict[str, Any]) -> str:
+    return (
+        f"{DEFAULT_SYSTEM_PROMPT}\n\n"
+        f"Question: {example['goal']}\n"
+        f"A. {example['sol1']}\n"
+        f"B. {example['sol2']}\n\n"
+        "Respond with exactly one character: A or B.\nAnswer:"
+    )
+
+
+def apply_chat_template_if_needed(
+    prompts: list[str],
+    *,
+    model_path: str,
+    trust_remote_code: bool,
+    apply_chat_template: bool | None,
+    enable_thinking: bool | None,
+) -> list[str]:
+    if not apply_chat_template:
+        return prompts
+
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+    rendered = []
+    for prompt in prompts:
+        messages = [{"role": "user", "content": prompt}]
+        rendered.append(
+            tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking if enable_thinking is not None else False,
+            )
+        )
+    return rendered
+
+
+def parse_ab_prediction(text: str) -> str | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+
+    leading_match = re.match(r"^[\s:()\[\]\"'`<>{}\-–—,.!?;]*([ABab])(?:\b|[^A-Za-z])", cleaned)
+    if leading_match:
+        return leading_match.group(1).upper()
+
+    token_match = re.search(r"\b([ABab])\b", cleaned)
+    if token_match:
+        return token_match.group(1).upper()
+    return None
+
+
+def batch_iter(items: list[Any], batch_size: int) -> Iterable[list[Any]]:
+    for begin in range(0, len(items), batch_size):
+        yield items[begin : begin + batch_size]
+
+
+def score_predictions(
+    *,
+    examples: list[dict[str, Any]],
+    predictions: list[str],
+) -> tuple[float, list[dict[str, Any]]]:
+    if len(examples) != len(predictions):
+        raise ValueError(f"Mismatched lengths: {len(examples)} examples vs {len(predictions)} predictions")
+
+    scored_examples: list[dict[str, Any]] = []
+    num_correct = 0
+    for index, (example, prediction) in enumerate(zip(examples, predictions)):
+        gold_choice = "A" if int(example["label"]) == 0 else "B"
+        parsed_prediction = parse_ab_prediction(prediction)
+        correct = parsed_prediction == gold_choice
+        num_correct += int(correct)
+        scored_examples.append(
+            {
+                "index": index,
+                "goal": example["goal"],
+                "gold_choice": gold_choice,
+                "prediction": prediction,
+                "parsed_prediction": parsed_prediction,
+                "correct": correct,
+            }
+        )
+    accuracy = num_correct / len(examples) if examples else 0.0
+    return accuracy, scored_examples
+
+
 def run_model(
     *,
     name: str,
     model_path: str,
-    tasks: list[str],
     args: argparse.Namespace,
     output_root: Path,
     tensor_parallel_size: int,
     quantization: str | None,
+    examples: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    import lm_eval
+    from vllm import LLM, SamplingParams
 
     model_output_dir = output_root / name
     model_output_dir.mkdir(parents=True, exist_ok=True)
+
+    prompts = [build_piqa_prompt(example) for example in examples]
+    prompts = apply_chat_template_if_needed(
+        prompts,
+        model_path=model_path,
+        trust_remote_code=args.trust_remote_code,
+        apply_chat_template=args.apply_chat_template,
+        enable_thinking=args.enable_thinking,
+    )
+
+    llm_kwargs: dict[str, Any] = {
+        "model": model_path,
+        "tensor_parallel_size": tensor_parallel_size,
+        "dtype": args.dtype,
+        "max_model_len": args.max_model_len,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "trust_remote_code": args.trust_remote_code,
+        "enforce_eager": args.enforce_eager,
+        "disable_log_stats": True,
+    }
+    if quantization is not None:
+        llm_kwargs["quantization"] = quantization
+    if args.enable_chunked_prefill is not None:
+        llm_kwargs["enable_chunked_prefill"] = args.enable_chunked_prefill
+    if args.enable_thinking is not None:
+        llm_kwargs["enable_thinking"] = args.enable_thinking
 
     model_args = build_model_args(
         model_path=model_path,
@@ -158,75 +385,101 @@ def run_model(
         enable_thinking=args.enable_thinking,
     )
 
-    eval_params: dict[str, Any] = {
-        "model": "vllm",
-        "model_args": model_args,
-        "tasks": tasks,
-        "batch_size": args.batch_size,
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=args.max_tokens,
+        stop=["\n"],
+        skip_special_tokens=True,
+    )
+
+    memory_monitor = NpuMemoryMonitor()
+    memory_monitor.start()
+    load_s = 0.0
+    eval_s = 0.0
+    predictions: list[str] = []
+    llm = None
+    try:
+        load_begin = time.perf_counter()
+        llm = LLM(**llm_kwargs)
+        load_s = time.perf_counter() - load_begin
+        eval_begin = time.perf_counter()
+        if args.batch_size == "auto":
+            outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+            predictions = [output.outputs[0].text for output in outputs]
+        else:
+            batch_size = int(args.batch_size)
+            for prompt_batch in batch_iter(prompts, batch_size):
+                outputs = llm.generate(prompt_batch, sampling_params, use_tqdm=False)
+                predictions.extend(output.outputs[0].text for output in outputs)
+        eval_s = time.perf_counter() - eval_begin
+    finally:
+        memory_summary = memory_monitor.stop()
+        if llm is not None:
+            del llm
+        cleanup_vllm_state()
+
+    accuracy, scored_examples = score_predictions(examples=examples, predictions=predictions)
+    task_summary = {
+        "primary_metric": "accuracy",
+        "primary_value": accuracy,
+        "results": {
+            "accuracy": accuracy,
+            "num_examples": len(examples),
+            "num_correct": sum(int(example["correct"]) for example in scored_examples),
+        },
     }
-    if args.limit is not None:
-        eval_params["limit"] = args.limit
-    if args.num_fewshot is not None:
-        eval_params["num_fewshot"] = args.num_fewshot
-    if args.apply_chat_template is not None:
-        eval_params["apply_chat_template"] = args.apply_chat_template
-    if args.fewshot_as_multiturn is not None:
-        eval_params["fewshot_as_multiturn"] = args.fewshot_as_multiturn
-
-    begin = time.perf_counter()
-    raw_results = lm_eval.simple_evaluate(**eval_params)
-    eval_s = time.perf_counter() - begin
-
-    task_summaries: dict[str, Any] = {}
-    for task_name in tasks:
-        primary_metric, primary_value = pick_primary_metric(raw_results, task_name)
-        task_summaries[task_name] = {
-            "primary_metric": primary_metric,
-            "primary_value": primary_value,
-            "results": raw_results["results"][task_name],
-        }
 
     result = {
         "name": name,
         "model_path": model_path,
         "tensor_parallel_size": tensor_parallel_size,
         "quantization": quantization,
+        "load_s": load_s,
         "eval_s": eval_s,
-        "tasks": task_summaries,
-        "raw_results": raw_results,
+        "npu_memory": memory_summary,
+        "tasks": {"piqa": task_summary},
+        "examples": scored_examples,
         "model_args": model_args,
     }
     (model_output_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-    cleanup_vllm_state()
     return result
 
 
-def build_comparisons(models: list[dict[str, Any]], tasks: list[str]) -> list[dict[str, Any]]:
+def compact_model_result(model_result: dict[str, Any], output_root: Path) -> dict[str, Any]:
+    detailed_result_path = output_root / model_result["name"] / "result.json"
+    return {
+        "name": model_result["name"],
+        "model_path": model_result["model_path"],
+        "tensor_parallel_size": model_result["tensor_parallel_size"],
+        "quantization": model_result["quantization"],
+        "load_s": model_result["load_s"],
+        "eval_s": model_result["eval_s"],
+        "npu_memory": model_result["npu_memory"],
+        "tasks": model_result["tasks"],
+        "model_args": model_result["model_args"],
+        "detailed_result_path": str(detailed_result_path),
+    }
+
+
+def build_comparisons(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(models) < 2:
         return []
     baseline = models[0]
     comparisons = []
     for candidate in models[1:]:
-        task_deltas = {}
-        for task_name in tasks:
-            base_task = baseline["tasks"][task_name]
-            cand_task = candidate["tasks"][task_name]
-            if base_task["primary_metric"] != cand_task["primary_metric"]:
-                metric_name = f"{base_task['primary_metric']} vs {cand_task['primary_metric']}"
-            else:
-                metric_name = base_task["primary_metric"]
-            task_deltas[task_name] = {
-                "metric": metric_name,
-                "baseline": base_task["primary_value"],
-                "candidate": cand_task["primary_value"],
-                "delta": cand_task["primary_value"] - base_task["primary_value"],
-            }
+        base_task = baseline["tasks"]["piqa"]
+        cand_task = candidate["tasks"]["piqa"]
         comparisons.append(
             {
                 "baseline": baseline["name"],
                 "candidate": candidate["name"],
                 "eval_speedup": baseline["eval_s"] / candidate["eval_s"] if candidate["eval_s"] > 0 else 0.0,
-                "tasks": task_deltas,
+                "task": {
+                    "metric": "accuracy",
+                    "baseline": base_task["primary_value"],
+                    "candidate": cand_task["primary_value"],
+                    "delta": cand_task["primary_value"] - base_task["primary_value"],
+                },
             }
         )
     return comparisons
@@ -247,20 +500,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Optional quantization override name=value, e.g. quarot=ascend.",
     )
-    parser.add_argument("--tasks", default="piqa", help="Comma-separated lm-eval tasks. Default: piqa")
+    parser.add_argument("--tasks", default="piqa", help="Comma-separated tasks. Only piqa is supported.")
     parser.add_argument("--output-root", type=Path, default=Path("/tmp/lm_eval_piqa"))
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     parser.add_argument("--batch-size", default="auto")
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--num-fewshot", type=int, default=None)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--apply-chat-template", type=parse_optional_bool, default=None)
-    parser.add_argument("--fewshot-as-multiturn", type=parse_optional_bool, default=None)
     parser.add_argument("--enable-chunked-prefill", type=parse_optional_bool, default=None)
     parser.add_argument("--enable-thinking", type=parse_optional_bool, default=None)
+    parser.add_argument("--max-tokens", type=int, default=4)
     return parser
 
 
@@ -269,12 +521,14 @@ def main() -> int:
     os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     os.environ.setdefault("USE_MODELSCOPE_HUB", "0")
 
+    tasks = [task.strip() for task in args.tasks.split(",") if task.strip()]
+    if tasks != ["piqa"]:
+        raise ValueError(f"Only piqa is supported by this helper, got: {tasks}")
+
     model_specs = parse_model_specs(args.model or DEFAULT_MODELS)
     model_tps = {name: int(value) for name, value in parse_model_overrides(args.model_tp, kind="tp").items()}
     model_quants = parse_model_overrides(args.model_quant or DEFAULT_MODEL_QUANT, kind="quantization")
-    tasks = [task.strip() for task in args.tasks.split(",") if task.strip()]
-    if not tasks:
-        raise ValueError("At least one task must be provided.")
+    examples = load_piqa_examples(limit=args.limit)
 
     args.output_root.mkdir(parents=True, exist_ok=True)
     results = {
@@ -285,13 +539,12 @@ def main() -> int:
             "gpu_memory_utilization": args.gpu_memory_utilization,
             "batch_size": args.batch_size,
             "limit": args.limit,
-            "num_fewshot": args.num_fewshot,
             "enforce_eager": args.enforce_eager,
             "trust_remote_code": args.trust_remote_code,
             "apply_chat_template": args.apply_chat_template,
-            "fewshot_as_multiturn": args.fewshot_as_multiturn,
             "enable_chunked_prefill": args.enable_chunked_prefill,
             "enable_thinking": args.enable_thinking,
+            "max_tokens": args.max_tokens,
             "model_tps": model_tps,
             "model_quants": model_quants,
         },
@@ -307,21 +560,21 @@ def main() -> int:
         model_result = run_model(
             name=name,
             model_path=model_path,
-            tasks=tasks,
             args=args,
             output_root=args.output_root,
             tensor_parallel_size=tensor_parallel_size,
             quantization=quantization,
+            examples=examples,
         )
-        results["models"].append(model_result)
-        task_parts = [
-            f"{task_name}:{model_result['tasks'][task_name]['primary_metric']}="
-            f"{model_result['tasks'][task_name]['primary_value']:.4f}"
-            for task_name in tasks
-        ]
-        print(f"[{name}] {'; '.join(task_parts)}, eval_s={model_result['eval_s']:.3f}")
+        results["models"].append(compact_model_result(model_result, args.output_root))
+        task = model_result["tasks"]["piqa"]
+        print(
+            f"[{name}] piqa:{task['primary_metric']}={task['primary_value']:.4f}, "
+            f"load_s={model_result['load_s']:.3f}, "
+            f"eval_s={model_result['eval_s']:.3f}"
+        )
 
-    results["comparisons"] = build_comparisons(results["models"], tasks)
+    results["comparisons"] = build_comparisons(results["models"])
     summary_path = args.output_root / "summary.json"
     summary_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(f"summary_path={summary_path}")
