@@ -40,7 +40,8 @@
 #     --prefiller-hosts 127.0.0.1 127.0.0.1 \
 #     --prefiller-ports 8100 8101 \
 #     --decoder-hosts 127.0.0.1 127.0.0.1 \
-#     --decoder-ports 8200 8201
+#     --decoder-ports 8200 8201 \
+#     --readiness-timeout 5.0
 #
 # This will start the proxy on port 9000, load balancing between two prefiller
 # and two decoder servers.
@@ -105,6 +106,33 @@
 # the proxy will wait and try until the instances to be started
 # or exceeding the number of attempts
 #
+# Step 6: Readiness Check
+# -----------------------
+# To check if the proxy and all backend servers are ready to serve requests:
+# The readiness probe checks each backend's /health endpoint with a timeout
+# before the proxy dispatches new requests.
+#
+#   curl http://localhost:9000/readiness
+#
+# This will return a detailed JSON object with the health status of each
+# backend server. HTTP 200 indicates all backends are healthy; HTTP 503
+# indicates some backends are unhealthy or no backends are configured.
+#
+# Example response:
+#   {
+#     "status": "ok",
+#     "checked_at": "2024-01-15T10:30:00+00:00",
+#     "timeout_seconds": 5.0,
+#     "prefill_instances": 2,
+#     "prefill_healthy": 2,
+#     "prefill_unhealthy": 0,
+#     "prefill_health": [{"host": "127.0.0.1", "port": 8100, "status": "healthy", "error": null}, ...],
+#     "decode_instances": 2,
+#     "decode_healthy": 2,
+#     "decode_unhealthy": 0,
+#     "decode_health": [{"host": "127.0.0.1", "port": 8200, "status": "healthy", "error": null}, ...]
+#   }
+#
 # Notes:
 # - You can scale the number of prefiller and decoder servers as needed.
 # - The proxy will round-robin requests to balance load.
@@ -126,10 +154,12 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
+from starlette.responses import JSONResponse
 
 try:
     from vllm.logger import init_logger
@@ -156,19 +186,21 @@ class InstanceType:
 
 
 TAINT_PRIORITY = 1e15
+DEFAULT_READINESS_TIMEOUT_SECONDS = 5.0
 
 
 class ServerState:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.url = f"http://{host}:{port}/v1"
+        self.origin_url = f"http://{host}:{port}"
         try:
             ip = ipaddress.ip_address(self.host)
             if isinstance(ip, ipaddress.IPv6Address):
-                self.url = f"http://[{host}]:{port}/v1"
+                self.origin_url = f"http://[{host}]:{port}"
         except Exception:
             pass
+        self.url = f"{self.origin_url}/v1"
         self.client = httpx.AsyncClient(
             timeout=None,
             base_url=self.url,
@@ -523,6 +555,12 @@ def parse_args():
         type=float,
         default=10,
         help="Check interval (seconds) for waiting nodes to be started",
+    )
+    parser.add_argument(
+        "--readiness-timeout",
+        type=float,
+        default=DEFAULT_READINESS_TIMEOUT_SECONDS,
+        help="Timeout (seconds) for each backend /health request in readiness probe",
     )
     args = parser.parse_args()
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
@@ -879,6 +917,61 @@ def trans_instances(instances: list[str]) -> list[ServerState]:
         server_list.append(ServerState(h, int(p)))
     return server_list
 
+async def check_backend_health(server: ServerState) -> dict:
+    try:
+        health_url = f"{server.origin_url}/health"
+        logger.info("Health check URL: %s", health_url)
+        response = await server.client.get(health_url, timeout=global_args.readiness_timeout)
+        logger.info("Health check response: %s", response)
+        status = "healthy" if response.status_code == 200 else "unhealthy"
+        error = None if status == "healthy" else f"unexpected status code {response.status_code}"
+    except Exception as exc:
+        status = "unhealthy"
+        error = str(exc)
+        logger.error("Backend %s:%s health check failed: %s", server.host, server.port, exc)
+
+    return {
+        "host": server.host,
+        "port": server.port,
+        "status": status,
+        "error": error,
+    }
+
+
+def build_readiness_response(prefill_results: list[dict], decode_results: list[dict]) -> tuple[dict, int]:
+    prefill_healthy = sum(result["status"] == "healthy" for result in prefill_results)
+    decode_healthy = sum(result["status"] == "healthy" for result in decode_results)
+    prefill_instances = len(prefill_results)
+    decode_instances = len(decode_results)
+
+    all_healthy = (
+        prefill_instances > 0
+        and decode_instances > 0
+        and prefill_healthy == prefill_instances
+        and decode_healthy == decode_instances
+    )
+
+    if all_healthy:
+        status = "ok"
+        status_code = 200
+    else:
+        status = "unavailable"
+        status_code = 503
+
+    payload = {
+        "status": status,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "timeout_seconds": global_args.readiness_timeout,
+        "prefill_instances": prefill_instances,
+        "prefill_healthy": prefill_healthy,
+        "prefill_unhealthy": prefill_instances - prefill_healthy,
+        "prefill_health": prefill_results,
+        "decode_instances": decode_instances,
+        "decode_healthy": decode_healthy,
+        "decode_unhealthy": decode_instances - decode_healthy,
+        "decode_health": decode_results,
+    }
+    return payload, status_code
 
 @app.post("/v1/completions")
 @with_cancellation
@@ -899,6 +992,13 @@ async def healthcheck():
         "prefill_instances": len(proxy_state.prefillers),
         "decode_instances": len(proxy_state.decoders),
     }
+
+@app.get("/readiness")
+async def readiness():
+    prefill_results = await asyncio.gather(*[check_backend_health(server) for server in proxy_state.prefillers])
+    decode_results = await asyncio.gather(*[check_backend_health(server) for server in proxy_state.decoders])
+    payload, status_code = build_readiness_response(prefill_results, decode_results)
+    return JSONResponse(payload, status_code=status_code)
 
 
 @app.post("/instances/add")
