@@ -33,6 +33,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -136,101 +138,136 @@ def cleanup_vllm_state() -> None:
         pass
 
 
-def sample_npu_memory_usage() -> dict[str, Any] | None:
+def parse_visible_devices() -> list[int] | None:
     visible_devices_str = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
-    visible_devices: set[int] | None = None
-    if visible_devices_str:
-        try:
-            visible_devices = {
-                int(device.strip()) for device in visible_devices_str.split(",") if device.strip()
-            }
-        except ValueError:
-            visible_devices = None
-
+    if not visible_devices_str:
+        return None
     try:
-        output = subprocess.check_output(
-            ["npu-smi", "info"], text=True, stderr=subprocess.DEVNULL
-        )
-    except Exception:
+        return [int(device.strip()) for device in visible_devices_str.split(",") if device.strip()]
+    except ValueError:
         return None
-
-    per_device_used_bytes: list[int] = []
-    per_device_total_bytes: list[int] = []
-    current_device: int | None = None
-    current_device_selected = False
-
-    for line in output.splitlines():
-        first_line_match = re.match(r"^\|\s*(\d+)\s+[A-Za-z0-9_.-]", line)
-        if first_line_match:
-            current_device = int(first_line_match.group(1))
-            current_device_selected = visible_devices is None or current_device in visible_devices
-            continue
-
-        if current_device is None or not current_device_selected:
-            continue
-
-        hbm_match = re.search(r"(\d+)\s*/\s*(\d+)\s*\|?\s*$", line)
-        if hbm_match:
-            used_mb = int(hbm_match.group(1))
-            total_mb = int(hbm_match.group(2))
-            per_device_used_bytes.append(used_mb * 1024 * 1024)
-            per_device_total_bytes.append(total_mb * 1024 * 1024)
-            current_device = None
-            current_device_selected = False
-
-    if not per_device_total_bytes:
-        return None
-
-    return {
-        "device_count": len(per_device_total_bytes),
-        "per_device_used_bytes": per_device_used_bytes,
-        "per_device_total_bytes": per_device_total_bytes,
-        "total_used_bytes": sum(per_device_used_bytes),
-        "total_capacity_bytes": sum(per_device_total_bytes),
-    }
 
 
 class NpuMemoryMonitor:
 
     def __init__(self, poll_interval_s: float = 0.5) -> None:
         self.poll_interval_s = poll_interval_s
-        self.baseline = sample_npu_memory_usage()
-        self.peak = self.baseline
+        self.visible_devices = parse_visible_devices()
+        self.snapshot_path = Path(tempfile.mkstemp(prefix="piqa_npu_mem_", suffix=".json")[1])
+        self.stop_path = Path(tempfile.mkstemp(prefix="piqa_npu_mem_stop_", suffix=".flag")[1])
+        self.stop_path.unlink(missing_ok=True)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen[str] | None = None
 
-    def _poll_loop(self) -> None:
-        while not self._stop.wait(self.poll_interval_s):
-            snapshot = sample_npu_memory_usage()
-            if snapshot is None:
-                continue
-            if self.peak is None or snapshot["total_used_bytes"] > self.peak["total_used_bytes"]:
-                self.peak = snapshot
+    def _build_sampler_code(self) -> str:
+        poll_interval_s = self.poll_interval_s
+        snapshot_path = str(self.snapshot_path)
+        stop_path = str(self.stop_path)
+        visible_devices = self.visible_devices
+        return f"""
+import json, os, time
+from pathlib import Path
+
+snapshot_path = Path({snapshot_path!r})
+stop_path = Path({stop_path!r})
+poll_interval_s = {poll_interval_s!r}
+visible_devices = {visible_devices!r}
+
+def sample():
+    try:
+        import torch
+    except Exception:
+        return None
+    if not hasattr(torch, "npu"):
+        return None
+    if visible_devices is None:
+        try:
+            device_count = torch.npu.device_count()
+            devices = list(range(device_count))
+        except Exception:
+            devices = [0]
+    else:
+        devices = visible_devices
+
+    per_device_used_bytes = []
+    per_device_total_bytes = []
+    for device in devices:
+        try:
+            free_bytes, total_bytes = torch.npu.mem_get_info(device)
+        except TypeError:
+            free_bytes, total_bytes = torch.npu.mem_get_info()
+        except Exception:
+            return None
+        used_bytes = int(total_bytes) - int(free_bytes)
+        per_device_used_bytes.append(int(used_bytes))
+        per_device_total_bytes.append(int(total_bytes))
+
+    return {{
+        "device_count": len(per_device_total_bytes),
+        "per_device_used_bytes": per_device_used_bytes,
+        "per_device_total_bytes": per_device_total_bytes,
+        "total_used_bytes": sum(per_device_used_bytes),
+        "total_capacity_bytes": sum(per_device_total_bytes),
+    }}
+
+baseline = sample()
+peak = baseline
+while not stop_path.exists():
+    cur = sample()
+    if cur is not None:
+        if peak is None or cur["total_used_bytes"] > peak["total_used_bytes"]:
+            peak = cur
+        payload = {{"baseline": baseline, "peak": peak, "latest": cur}}
+        tmp = snapshot_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(snapshot_path)
+    time.sleep(poll_interval_s)
+"""
 
     def start(self) -> None:
-        if self.baseline is None:
-            return
-        self._thread = threading.Thread(target=self._poll_loop, name="npu-memory-monitor", daemon=True)
-        self._thread.start()
+        self._proc = subprocess.Popen(
+            [sys.executable, "-c", self._build_sampler_code()],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
 
     def stop(self) -> dict[str, Any] | None:
-        if self._thread is not None:
-            self._stop.set()
-            self._thread.join(timeout=max(self.poll_interval_s * 2, 1.0))
-        if self.baseline is None or self.peak is None:
+        self.stop_path.write_text("", encoding="utf-8")
+        if self._proc is not None:
+            try:
+                self._proc.wait(timeout=max(self.poll_interval_s * 3, 2.0))
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait(timeout=2.0)
+        payload = None
+        try:
+            if self.snapshot_path.exists():
+                payload = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = None
+        finally:
+            self.snapshot_path.unlink(missing_ok=True)
+            self.stop_path.unlink(missing_ok=True)
+        if payload is None:
             return None
-        baseline_total_used_bytes = int(self.baseline["total_used_bytes"])
-        peak_total_used_bytes = int(self.peak["total_used_bytes"])
+        baseline = payload.get("baseline")
+        peak = payload.get("peak")
+        if baseline is None or peak is None:
+            return None
+        baseline_total_used_bytes = int(baseline["total_used_bytes"])
+        peak_total_used_bytes = int(peak["total_used_bytes"])
         return {
-            "device_count": int(self.peak["device_count"]),
+            "device_count": int(peak["device_count"]),
             "baseline_total_used_gib": bytes_to_gib(baseline_total_used_bytes),
             "peak_total_used_gib": bytes_to_gib(peak_total_used_bytes),
             "peak_increment_gib": bytes_to_gib(peak_total_used_bytes - baseline_total_used_bytes),
             "per_device_peak_used_gib": [
-                bytes_to_gib(int(value)) for value in self.peak["per_device_used_bytes"]
+                bytes_to_gib(int(value)) for value in peak["per_device_used_bytes"]
             ],
             "per_device_total_capacity_gib": [
-                bytes_to_gib(int(value)) for value in self.peak["per_device_total_bytes"]
+                bytes_to_gib(int(value)) for value in peak["per_device_total_bytes"]
             ],
         }
 
