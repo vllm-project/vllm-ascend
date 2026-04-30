@@ -204,7 +204,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 self.send_queue.task_done()
             except Exception as e:
                 # 捕获所有异常，避免线程退出
-                logger.error(f"send tensor info: {feat_key} to consumer, error code: {str(e)}")
+                logger.error("send tensor info: {feat_key} to consumer, error code: {str(e)}")
                 # 确保队列任务完成，避免死锁
                 if "feat_key" in locals():
                     self.send_queue.task_done()
@@ -220,7 +220,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 self.recv_queue.task_done()
             except Exception as e:
                 # 捕获所有异常，避免线程退出
-                logger.error(f"recv tensor info: {feat_key} recv error, error code: {str(e)}")
+                logger.error("recv tensor info: {feat_key} recv error, error code: {str(e)}")
                 # 确保队列任务完成，避免死锁
                 if "feat_key" in locals():
                     self.recv_queue.task_done()
@@ -266,10 +266,10 @@ def ensure_zmq_send(
         except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning(f"Send failed: {e}, retrying... ({retries_left} attempts left)")
+                logger.warning("Send failed: {e}, retrying... ({retries_left} attempts left)")
                 time.sleep(0.1)
             else:
-                logger.error(f"Send failed after all retries: {e}")
+                logger.error("Send failed after all retries: {e}")
                 raise RuntimeError(f"Failed to send data after {max_retries} retries: {e}")
 
 
