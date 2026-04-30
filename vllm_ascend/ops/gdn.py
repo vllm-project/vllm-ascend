@@ -163,55 +163,8 @@ def update_conv1d_graph_params(
             new_cache_indices = ()
             new_num_accepted = ()
 
-            # if run_mode == 1 and attn_metadata is not None:
-            #     # 按捕获时记录的 layer_prefix 精确匹配当前 GDN 层的元数据，
-            #     # 避免多 GDN 层共存时取错其他层的元数据导致精度问题。
-            #     meta = attn_metadata
-            #     if isinstance(meta, dict):
-            #         meta = meta.get(layer_prefix, None)
-            #         assert isinstance(meta, GDNAttentionMetadata)
-            #
-            #     if meta is not None:
-            #         if "spec" == branch:
-            #             (new_query_start_loc, new_cache_indices, new_initial_state, new_num_accepted) = get_spec_causal_conv1d_host_args(meta)
-            #         elif "non_spec_decode" == branch:
-            #             (new_query_start_loc, new_cache_indices, new_initial_state) = get_non_spec_decode_causal_conv1d_host_args(meta)
-            #     else:
-            #         continue
-            # if run_mode == 1 and attn_metadata is not None:
-            #     # 按捕获时记录的 layer_prefix 精确匹配当前 GDN 层的元数据，
-            #     # 避免多 GDN 层共存时取错其他层的元数据导致精度问题。
-            #     meta = attn_metadata
-            #     if isinstance(meta, dict):
-            #         meta = meta.get(layer_prefix, None)
-            #         assert isinstance(meta, GDNAttentionMetadata)
-            #
-            #     if meta is not None:
-            #         if "spec" == branch:
-            #             spec_query_start_loc = meta.spec_query_start_loc
-            #             spec_state_indices_tensor = meta.spec_state_indices_tensor
-            #             new_query_start_loc = to_int64_tuple(spec_query_start_loc[:meta.num_spec_decodes + 1])
-            #             new_cache_indices = to_int64_tuple(spec_state_indices_tensor[:meta.num_spec_decodes, 0])
-            #             new_initial_state = to_int64_tuple((spec_state_indices_tensor[:meta.num_spec_decodes, 0] != PAD_SLOT_ID).to(torch.int32))
-            #             new_num_accepted = to_int64_tuple(meta.num_accepted_tokens[:meta.num_spec_decodes])
-            #             qsl_host, cidx_host, init_state_host, num_accepted_host = get_spec_causal_conv1d_host_args(meta)
-            #         elif "non_spec_decode" == branch:
-            #             non_spec_query_start_loc = meta.non_spec_query_start_loc
-            #             non_spec_state_indices_tensor = meta.non_spec_state_indices_tensor
-            #             new_query_start_loc = to_int64_tuple(non_spec_query_start_loc)
-            #             new_cache_indices = to_int64_tuple(non_spec_state_indices_tensor[:, 0])
-            #             new_initial_state = to_int64_tuple((non_spec_state_indices_tensor[:, 0] != PAD_SLOT_ID).to(torch.int32))
-            #             new_num_accepted = ()
-            #     else:
-            #         continue
-            # print(f"[Graph update]num_accepted: {new_num_accepted}, {num_accepted_host}")
-            # print(f"[Graph update]spec_query_start_loc: {new_query_start_loc}, {meta.spec_query_start_loc}, {qsl_host}")
-            # print(f"[Graph update]cache indices: {new_cache_indices}, {meta.spec_state_indices_tensor}, {cidx_host}")
-            # # print(f"[Graph update]initial state: {new_initial_state}, {meta.spec_state_indices_tensor}, {init_state_host}")
-            # print(f"[Graph update]num_tokens:{num_tokens} meta.num_spec_decodes:{meta.num_spec_decodes}, mixed_qkv shape: {mixed_qkv.shape}")
             if run_mode == 1 and attn_metadata is not None:
-                # 按捕获时记录的 layer_prefix 精确匹配当前 GDN 层的元数据,
-                # 避免多 GDN 层共存时取错其他层的元数据导致精度问题。
+                # get gdn metadata by captrued layer_prefix 
                 meta = attn_metadata
                 if isinstance(meta, dict):
                     meta = meta.get(layer_prefix, None)
@@ -387,18 +340,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            # mixed_qkv_spec = causal_conv1d_update_npu(
-            #         mixed_qkv_spec,
-            #         conv_state,
-            #         conv_weights,
-            #         self.conv1d.bias,
-            #         self.activation,
-            #         conv_state_indices=spec_state_indices_tensor[:, 0][: attn_metadata.num_spec_decodes],
-            #         num_accepted_tokens=num_accepted_tokens,
-            #         query_start_loc=spec_query_start_loc,
-            #         max_query_len=spec_state_indices_tensor.size(-1),
-            #         validate_data=False,
-            # )
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             (
@@ -406,7 +347,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 spec_cache_indices_opt,
                 num_accepted_tokens_cpu
             ) = get_spec_causal_conv1d_host_args(attn_metadata)
-            # 图捕获分支
+            # capturing branch for conv1d update
             if _EXTRA_CTX.capturing:
                 stream = torch_npu.npu.current_stream()
                 event = torch.npu.ExternalEvent()
@@ -431,7 +372,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     PAD_SLOT_ID,
                     1,  # run_mode
                     "spec",
-                    self.prefix,  # layer_prefix: 用于 update 阶段按层精确匹配 metadata
+                    self.prefix,
                     spec_query_start_loc_opt,
                     spec_cache_indices_opt,
                     num_accepted_tokens_cpu,
@@ -457,7 +398,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 graph_params.conv1d_handles[num_actual_tokens].append(handle)
                 mixed_qkv_spec = output_spec
             else:
-                # 正常执行（非图捕获）
+                # for enforce eager
                 output_spec = torch.empty_like(mixed_qkv_spec)
                 torch.ops._C_ascend.npu_causal_conv1d_custom(
                         output_spec,
@@ -502,15 +443,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
-            # mixed_qkv_non_spec = causal_conv1d_update_npu(
-            #         mixed_qkv_non_spec,
-            #         conv_state,
-            #         conv_weights,
-            #         self.conv1d.bias,
-            #         self.activation,
-            #         conv_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
-            #         validate_data=True,
-            # )
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             non_spec_qsl_host, non_spec_ci_host = get_non_spec_decode_causal_conv1d_host_args(attn_metadata)
@@ -537,7 +469,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     PAD_SLOT_ID,
                     1,  # run_mode
                     "non_spec_decode",
-                    self.prefix,  # layer_prefix: 用于 update 阶段按层精确匹配 metadata
+                    self.prefix,
                     non_spec_qsl_host,
                     non_spec_ci_host,
                     [],
