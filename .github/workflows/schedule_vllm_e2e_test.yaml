@@ -50,7 +50,7 @@ jobs:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.5.1-910b-ubuntu22.04-py3.11
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 0
+            HF_HUB_OFFLINE: 1
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v6
