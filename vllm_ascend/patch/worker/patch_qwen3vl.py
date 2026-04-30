@@ -6,6 +6,7 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLForConditionalGeneration,
 )
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
@@ -34,7 +35,8 @@ def tensor_parallel_wrap(func):
 
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
     qkv, _ = self.qkv_proj(hidden_states)
-    if isinstance(self.rotary_emb, AscendMRotaryEmbedding):
+    has_fused_mrope_op = HAS_TRITON and hasattr(torch.ops.vllm, "triton_split_qkv_rmsnorm_mrope")
+    if isinstance(self.rotary_emb, AscendMRotaryEmbedding) and has_fused_mrope_op:
         cos_sin = self.rotary_emb.cos_sin_cache[positions]
         if cos_sin.device != qkv.device:
             cos_sin = cos_sin.to(qkv.device)
