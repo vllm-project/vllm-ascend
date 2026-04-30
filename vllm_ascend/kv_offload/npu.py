@@ -1,16 +1,14 @@
 from collections.abc import Iterator
 
-import torch
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.spec import OffloadingSpec
+from vllm.v1.kv_offload.spec import CanonicalKVCaches, OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
-from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
+from vllm_ascend import envs
 
 
 class NPUOffloadingSpec(OffloadingSpec):
@@ -27,6 +25,15 @@ class NPUOffloadingSpec(OffloadingSpec):
 
         # worker-side
         self._handler: OffloadingHandler | None = None
+        self._host_side_backend = self._use_host_side_backend()
+
+    def _use_host_side_backend(self) -> bool:
+        backend = str(self.extra_config.get("backend", "")).lower()
+        return (
+            bool(self.extra_config.get("host_side", False))
+            or backend in ("host_side", "host-side", "acl_host", "acl-host")
+            or envs.VLLM_ASCEND_KV_HOST_SIDE
+        )
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -43,20 +50,33 @@ class NPUOffloadingSpec(OffloadingSpec):
         return self._manager
 
     def get_handlers(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
+        self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handler:
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-            self._handler = CpuNpuOffloadingHandler(
-                attn_backends=attn_backends,
-                gpu_block_size=gpu_block_size,
-                cpu_block_size=gpu_block_size * self.block_size_factor,
-                num_cpu_blocks=self.num_cpu_blocks,
-                gpu_caches=kv_caches,
-            )
+            if self._host_side_backend:
+                from vllm_ascend.kv_offload.shmem_host import HostSideOffloadingHandler
+
+                max_host_memory_bytes = self.extra_config.get(
+                    "host_side_max_memory_bytes",
+                    envs.VLLM_ASCEND_KV_HOST_SIDE_MAX_MEMORY_BYTES,
+                )
+                if max_host_memory_bytes is not None:
+                    max_host_memory_bytes = int(max_host_memory_bytes)
+                alloc_chunk_blocks = int(self.extra_config.get("host_side_alloc_chunk_blocks", 256))
+                self._handler = HostSideOffloadingHandler(
+                    block_size_factor=self.block_size_factor,
+                    num_cpu_blocks=self.num_cpu_blocks,
+                    gpu_caches=kv_caches,
+                    max_host_memory_bytes=max_host_memory_bytes,
+                    alloc_chunk_blocks=alloc_chunk_blocks,
+                )
+            else:
+                raise NotImplementedError(
+                    "NPUOffloadingSpec requires host-side backend with the "
+                    "current vLLM CanonicalKVCaches offload API. Set "
+                    "kv_connector_extra_config.host_side=true or "
+                    "VLLM_ASCEND_KV_HOST_SIDE=1."
+                )
 
         assert self._handler is not None
         yield GPULoadStoreSpec, CPULoadStoreSpec, self._handler
