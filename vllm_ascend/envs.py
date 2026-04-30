@@ -100,7 +100,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
-    "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # DEPRECATED: VLLM_ASCEND_ENABLE_FUSED_MC2 env var is removed. Use --additional-config '{"enable_fused_mc2": 1}'.
+    #     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
     # Whether to enable balance scheduling in the v1 scheduler.
     # Platform validation: only PD-mixed mode (`kv_role='kv_both'` or no kv_transfer_config).
     # Not supported in PD-disaggregated mode (`kv_producer` / `kv_consumer` only).

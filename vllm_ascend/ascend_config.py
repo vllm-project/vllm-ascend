@@ -111,6 +111,12 @@ class AscendConfig:
         # HCCL library path configuration (replaces HCCL_SO_PATH env var)
         self.hccl_so_path = additional_config.get("hccl_so_path", None)
         logger.info(f"[PATCH_VERIFY] AscendConfig.hccl_so_path initialized: {self.hccl_so_path}")
+        # Fused MC2 configuration (replaces VLLM_ASCEND_ENABLE_FUSED_MC2 env var)
+        # 0: disabled (default)
+        # 1: enable dispatch_ffn_combine (Prefill)
+        # 2: enable dispatch_gmm_combine_decode (Decode)
+        self.enable_fused_mc2 = additional_config.get("enable_fused_mc2", 0)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_fused_mc2 initialized: {self.enable_fused_mc2}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
