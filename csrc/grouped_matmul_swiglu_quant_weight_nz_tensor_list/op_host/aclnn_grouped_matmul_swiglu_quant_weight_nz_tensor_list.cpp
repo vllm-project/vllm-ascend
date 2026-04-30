@@ -236,7 +236,7 @@ static aclnnStatus CheckParams(const aclTensor* x, const aclTensorList* weight, 
 static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(const aclTensor *x, const aclTensorList *weight,
                                                                        const aclTensor *bias, const aclTensor *offset,
                                                                        const aclTensorList *weightScale, const aclTensor *xScale, 
-                                                                       const aclTensor *groupList,  
+                                                                       const aclTensor *groupList,  float swigluLimit,
                                                                        aclTensor *output, aclTensor *outputScale,
                                                                        aclTensor *outputOffset, uint64_t *workspaceSize,
                                                                        aclOpExecutor **executor){
@@ -264,7 +264,7 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSi
   groupList = l0op::Contiguous(groupList, uniqueExecutor.get());
   CHECK_RET(groupList != nullptr, ACLNN_ERR_INNER_NULLPTR);
   // Call L0 operator capability
-  auto ret_0 = l0op::GroupedMatmulSwigluQuantWeightNzTensorList(x, weight, weightScale, xScale, groupList, uniqueExecutor.get());
+  auto ret_0 = l0op::GroupedMatmulSwigluQuantWeightNzTensorList(x, weight, weightScale, xScale, groupList, swigluLimit, uniqueExecutor.get());
   CHECK_RET(ret_0 != std::tuple(nullptr, nullptr), ACLNN_ERR_INNER_NULLPTR);
   auto out0 = std::get<OUTPUT_IDX_0>(ret_0);
   auto ret_1 = l0op::ViewCopy(out0, output, uniqueExecutor.get());
@@ -280,13 +280,14 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSi
 aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(const aclTensor *x, const aclTensorList *weight,
                                                                   const aclTensor *bias, const aclTensor *offset,
                                                                   const aclTensorList *weightScale, const aclTensor *xScale, 
-                                                                  const aclTensor *groupList,  
+                                                                  const aclTensor *groupList, float swigluLimit,
                                                                   aclTensor *output, aclTensor *outputScale,
                                                                   aclTensor *outputOffset, uint64_t *workspaceSize,
                                                                   aclOpExecutor **executor) {
+
   OP_CHECK_COMM_INPUT(workspaceSize, executor);
   L2_DFX_PHASE_1(aclnnGroupedMatmulSwigluQuantWeightNzTensorList,
-                 DFX_IN(x, weight, bias, offset, weightScale, xScale, groupList),
+                 DFX_IN(x, weight, bias, offset, weightScale, xScale, groupList,swigluLimit),
                  DFX_OUT(output, outputScale, outputOffset));
   // weight is forcibly bound to StorageFormat and ViewFormat as NZ in this scenario
   CHECK_RET(weight != nullptr, ACLNN_ERR_PARAM_NULLPTR);
@@ -309,8 +310,9 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSize(cons
       weightNZ->SetViewFormat(op::Format::FORMAT_ND);
     }
   }
+
   // Call the common interface
-  return aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(x, weight, bias, offset, weightScale, xScale, groupList, 
+  return aclnnGroupedMatmulSwigluQuantWeightNzTensorListGetWorkspaceSizeCommon(x, weight, bias, offset, weightScale, xScale, groupList, swigluLimit,
     output, outputScale, outputOffset, workspaceSize, executor);
 }
 

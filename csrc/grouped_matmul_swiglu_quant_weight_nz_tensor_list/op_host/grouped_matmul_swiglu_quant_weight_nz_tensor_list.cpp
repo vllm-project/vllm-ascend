@@ -23,6 +23,7 @@ const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuantWeightNzTensorL
                                                                   const aclTensorList *perChannelScale,
                                                                   const aclTensor *perTokenScale,
                                                                   const aclTensor *groupList,
+                                                                  float swigluLimit,
                                                                   aclOpExecutor *executor) {
     L0_DFX(GroupedMatmulSwigluQuantWeightNzTensorList, x, weight, perChannelScale, perTokenScale, groupList);
     if (x == nullptr) {
@@ -38,14 +39,16 @@ const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuantWeightNzTensorL
     auto scaleOut = executor->AllocTensor(scaleOutShape, DataType::DT_FLOAT, ge::FORMAT_ND);
     auto ret = INFER_SHAPE(GroupedMatmulSwigluQuantWeightNzTensorList,
                         OP_INPUT(x, weight, perChannelScale, perTokenScale, groupList),
-                        OP_OUTPUT(out, scaleOut));
+                        OP_OUTPUT(out, scaleOut),
+                        OP_ATTR(swigluLimit));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "InferShape failed.");
         return std::tuple(nullptr, nullptr);
     }
     ret = ADD_TO_LAUNCHER_LIST_AICORE(GroupedMatmulSwigluQuantWeightNzTensorList,
                                     OP_INPUT(x, weight, perChannelScale, perTokenScale, groupList),
-                                    OP_OUTPUT(out, scaleOut));
+                                    OP_OUTPUT(out, scaleOut),
+                                 OP_ATTR(swigluLimit));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return std::tuple(nullptr, nullptr);

@@ -109,6 +109,10 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
   const int64_t groupNum = groupListTensor->GetStorageShape().GetDim(0);
   GMMSwigluQuantTilingData tilingData;
   const int64_t row = CalRows(compileInfoPtr->ubSize_, n);
+
+  auto attrs = context->GetAttrs();
+  float swiglu_limit = *attrs->GetFloat(0);
+
   tilingData.gmmSwigluBaseParams.set_groupNum(groupNum);
   tilingData.gmmSwigluBaseParams.set_coreNum(compileInfoPtr->aicNum_);
   tilingData.gmmSwigluBaseParams.set_K(k);
@@ -117,7 +121,8 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
   tilingData.gmmSwiglu.set_maxProcessRowNum(row);
   tilingData.gmmSwiglu.set_groupListLen(groupNum);
   tilingData.gmmSwiglu.set_tokenLen(n);
-  
+  tilingData.gmmSwiglu.set_swigluLimit(swiglu_limit);
+
   OPS_LOG_D(context->GetNodeName(),"grouped_matmul_swiglu_quant_weight_nz_tensor_list_tiling.");
   OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.groupNum:  %ld", groupNum);
   OPS_LOG_D(context->GetNodeName(),"gmmSwigluBaseParams.coreNum:   %u ", compileInfoPtr->aicNum_);
@@ -127,7 +132,8 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context) 
   OPS_LOG_D(context->GetNodeName(),"gmmSwiglu.maxProcessRowNum:    %ld", row);
   OPS_LOG_D(context->GetNodeName(),"gmmSwiglu.groupListLen:        %ld", groupNum);
   OPS_LOG_D(context->GetNodeName(),"gmmSwiglu.tokenLen:            %ld", n);
-  
+  OPS_LOG_D(context->GetNodeName(),"gmmSwiglu.swigluLimit:         %f", swiglu_limit);
+
   auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
   using namespace matmul_tiling;
   MatmulApiTiling tiling(ascendcPlatform);
