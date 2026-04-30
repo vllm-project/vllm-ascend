@@ -1,5 +1,11 @@
 # Release Notes
 
+## v0.18.0
+
+### Known Issue
+
+- NPU soft partitioning + `CUDAGraphMode.PIECEWISE`: not supported. With soft-partitioned virtual NPU instances, the 2048 device streams are shared and split across containers (see the [virtual instance with vCANN RT description](https://gitcode.com/Ascend/mind-cluster/blob/branch_v26.0.0/docs/zh/scheduling/usage/virtual_instance/virtual_instance_with_vcann_rt/00_description.md)), but vLLM Ascend still derives ACL graph capture limits from a fixed full-device stream budget in `update_aclgraph_sizes` (`vllm_ascend/utils.py`) and does not use the per-container stream quota, so this combination is incompatible. [#8585](https://github.com/vllm-project/vllm-ascend/pull/8585)
+
 ## v0.17.0rc1 - 2026.03.15
 
 This is the first release candidate of v0.17.0 for vLLM Ascend. Please follow the [official doc](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
