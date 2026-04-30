@@ -81,7 +81,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
             "Setting attention block size to %d tokens to ensure that attention page size is >= mamba page size.",
             attn_block_size,
         )
-    if cache_config.mamba_cache_mode in ("align", "all"):
+    if cache_config.mamba_cache_mode == "align":
         cache_config.mamba_block_size = cache_config.block_size
     attn_page_size = cache_config.block_size * attn_page_size_1_token
     assert attn_page_size >= mamba_page_size

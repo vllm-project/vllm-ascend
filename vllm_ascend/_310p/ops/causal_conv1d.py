@@ -1,11 +1,6 @@
-from typing import Any
-
 import torch
 import torch.nn.functional as F
-from vllm.v1.attention.backends import utils as attn_backend_utils
-
-PAD_SLOT_ID = attn_backend_utils.PAD_SLOT_ID
-NULL_BLOCK_ID = getattr(attn_backend_utils, "NULL_BLOCK_ID", PAD_SLOT_ID)
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 def causal_conv1d_ref(
@@ -60,21 +55,13 @@ def causal_conv1d_ref(
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    conv_states: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    cache_indices: torch.Tensor | None = None,
-    has_initial_state: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
     activation: str | None = "silu",
+    conv_states: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    cache_indices: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
     pad_slot_id: int = PAD_SLOT_ID,
-    null_block_id: int = NULL_BLOCK_ID,
-    block_idx_first_scheduled_token: torch.Tensor | None = None,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
-    initial_state_idx: torch.Tensor | None = None,
-    num_computed_tokens: torch.Tensor | None = None,
-    block_size_to_align: int = 0,
-    metadata: Any | None = None,
-    validate_data: bool = False,
 ):
     """
     PyTorch implementation of causal_conv1d_fn for 310P.
@@ -93,18 +80,6 @@ def causal_conv1d_fn(
     Returns:
         out: (batch, dim, seqlen)
     """
-    del metadata, block_size_to_align, null_block_id, validate_data
-
-    if (
-        (cache_indices is not None and cache_indices.dim() == 2)
-        or block_idx_first_scheduled_token is not None
-        or block_idx_last_scheduled_token is not None
-        or initial_state_idx is not None
-        or num_computed_tokens is not None
-    ):
-        raise RuntimeError(
-            "310P causal_conv1d_fn does not support APC-style block-table inputs."
-        )
 
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
