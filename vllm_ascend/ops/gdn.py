@@ -50,7 +50,7 @@ def _require_non_spec_prefill_fallback_meta(attn_metadata, field_name: str, sub_
     fallback_meta = getattr(attn_metadata, field_name, None)
     if fallback_meta is None:
         raise RuntimeError(
-                f"Expected attn_metadata.non_spec_prefill_fallback_meta.{sub_field_name} for patched GDN non-spec prefill path."
+                f"Expected attn_metadata.{field_name}.{sub_field_name} for patched GDN non-spec prefill path."
         )
     return fallback_meta
 
