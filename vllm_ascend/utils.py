@@ -803,16 +803,13 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        _ENABLE_SP = (
-            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
-        )
+        _ENABLE_SP = get_ascend_config().enable_flashcomm1
+        print(f"[PATCH_VERIFY] enable_sp: from Config = {_ENABLE_SP}")
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
+            print(f"[PATCH_VERIFY] enable_sp: auto-enabled for shared_expert_dp")
 
     return _ENABLE_SP
 
@@ -1135,7 +1132,8 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
                 "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
                 f"Found invalid layer_sharding: {layer_sharding}"
             )
-    if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
+    if not get_ascend_config().enable_flashcomm1:
+        print(f"[PATCH_VERIFY] get_flashcomm2_config: enable_flashcomm1 = {get_ascend_config().enable_flashcomm1}")
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
