@@ -421,40 +421,18 @@ pip install memcache-hybrid
 ```shell
 ock.mmc.meta_service_url = tcp://xx.xx.xx.xx:5000
 ock.mmc.meta_service.config_store_url = tcp://xx.xx.xx.xx:6000
-ock.mmc.meta.ha.enable = false
 ock.mmc.log_level = error
-ock.mmc.log_path = .
-ock.mmc.log_rotation_file_size = 20
-ock.mmc.log_rotation_file_count = 50
-ock.mmc.evict_threshold_high = 90
-ock.mmc.evict_threshold_low = 80
 ```
-
-**Key Focuses：**
-
-| Parameter | Description |
-| :--- | :--- |
-| `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
-| `ock.mmc.meta_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
-| `ock.mmc.meta.ha.enable` | Set to `false` to disable TLS authentication modification. |
 
 **mmc-local.conf：**
 
 ```shell
 ock.mmc.meta_service_url = tcp://xx.xx.xx.xx:5000
+ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
 ock.mmc.log_level = error
 ock.mmc.local_service.world_size = 256
-ock.mmc.local_service.config_store_url = tcp://xx.xx.xx.xx:6000
 ock.mmc.local_service.protocol = device_sdma
-ock.mmc.local_service.dram.size = 2GB
-ock.mmc.local_service.hbm.size = 0
-ock.mmc.local_service.hcom_url = tcp://127.0.0.1:7000
-ock.mmc.client.retry_milliseconds = 0
-ock.mmc.client.timeout.seconds = 60
-
-# read/write thread pool size, value range [1, 64]
-ock.mmc.client.read_thread_pool.size = 16
-ock.mmc.client.write_thread_pool.size = 2
+ock.mmc.local_service.dram.size = 1GB
 ```
 
 **Key Focuses：**
@@ -464,7 +442,7 @@ ock.mmc.client.write_thread_pool.size = 2
 | `ock.mmc.meta_service_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
 | `ock.mmc.local_service.config_store_url` | Configure the IP address and port number of the master node. The IP address and port number of the P node and D node can be the same. |
 | `ock.mmc.local_service.world_size` | Total count of local service, including services that will be added in the future. |
-| `ock.mmc.local_service.protocol` | `host_rdma` (default), `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
+| `ock.mmc.local_service.protocol` | `device_rdma` (supported for A2 and A3 when device ROCE available, recommended for A2), `device_sdma` (supported for A3 when HCCS available, recommended for A3). Currently does not support heterogeneous protocol setting.|
 | `ock.mmc.local_service.dram.size` | Sets the size of the memory occupied by the master. The configured value is the size of the memory occupied by each card. |
 
 
