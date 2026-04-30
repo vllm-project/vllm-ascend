@@ -75,6 +75,7 @@ class LAPSRequestQueue(RequestQueue):
         self._last_short_actual_used_tokens = 0
         self._last_long_actual_used_tokens = 0
         self._debug_logging_enabled = logger.isEnabledFor(logging.DEBUG)
+        self._force_immediate_request_ids: set[str] = set()
 
     def _queues(self) -> tuple[RequestQueue, ...]:
         return (self._immediate_queue, self._short_queue, self._long_queue)
@@ -200,10 +201,12 @@ class LAPSRequestQueue(RequestQueue):
     def has_immediate_requests(self) -> bool:
         return len(self._immediate_queue) > 0
 
-    def _classify_queue(self, request: Request) -> RequestQueue:
-        if self.immediate_predicate is not None and self.immediate_predicate(
-            request
-        ):
+    def _classify_queue(
+        self, request: Request, *, force_immediate: bool = False
+    ) -> RequestQueue:
+        if force_immediate or request.request_id in self._force_immediate_request_ids:
+            return self._immediate_queue
+        if self.immediate_predicate is not None and self.immediate_predicate(request):
             return self._immediate_queue
         if request.num_prompt_tokens <= self.threshold:
             return self._short_queue
@@ -276,10 +279,30 @@ class LAPSRequestQueue(RequestQueue):
             return self._long_queue
         return None
 
+    def select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
+        return self._select_schedulable_queue()
+
+    @staticmethod
+    def _request_id(request: Request | object) -> str | None:
+        return getattr(request, "request_id", None)
+
+    def _find_matching_request(
+        self, queue: RequestQueue, request: Request | object
+    ) -> Request | None:
+        request_id = self._request_id(request)
+        if request_id is None:
+            return None
+        for candidate in queue:
+            if candidate.request_id == request_id:
+                return cast(Request, candidate)
+        return None
+
     def add_request(self, request: Request) -> None:
         queue = self._classify_queue(request)
         queue.add_request(request)
         self._enqueue_counters[self._queue_name(queue)] += 1
+        if queue is not self._immediate_queue:
+            self._force_immediate_request_ids.discard(request.request_id)
         if queue is self._short_queue:
             self._on_short_queue_changed()
         self._debug_state("enqueue", request=request, queue=queue)
@@ -291,6 +314,7 @@ class LAPSRequestQueue(RequestQueue):
             raise IndexError("pop from empty LAPS queue")
         request = queue.pop_request()
         self._dispatch_counters[self._queue_name(queue)] += 1
+        self._force_immediate_request_ids.discard(request.request_id)
         if queue is self._short_queue:
             self._on_short_queue_changed()
         self._debug_state("dispatch", request=request, queue=queue)
@@ -303,8 +327,10 @@ class LAPSRequestQueue(RequestQueue):
             raise IndexError("peek from an empty LAPS queue")
         return queue.peek_request()
 
-    def prepend_request(self, request: Request) -> None:
-        queue = self._classify_queue(request)
+    def prepend_request(self, request: Request, force_immediate: bool = False) -> None:
+        if force_immediate:
+            self._force_immediate_request_ids.add(request.request_id)
+        queue = self._classify_queue(request, force_immediate=force_immediate)
         queue.prepend_request(request)
         self._enqueue_counters[self._queue_name(queue)] += 1
         if queue is self._short_queue:
@@ -318,12 +344,14 @@ class LAPSRequestQueue(RequestQueue):
 
     def remove_request(self, request: Request) -> None:
         for queue in self._queues():
-            if request in queue:
-                queue.remove_request(request)
+            matched_request = self._find_matching_request(queue, request)
+            if matched_request is not None:
+                queue.remove_request(matched_request)
+                self._force_immediate_request_ids.discard(request.request_id)
                 self._remove_counters[self._queue_name(queue)] += 1
                 if queue is self._short_queue:
                     self._on_short_queue_changed()
-                self._debug_state("remove", request=request, queue=queue)
+                self._debug_state("remove", request=matched_request, queue=queue)
                 self._maybe_log_stats()
                 return
         raise ValueError("request not found in LAPS queue")
@@ -334,21 +362,24 @@ class LAPSRequestQueue(RequestQueue):
         removed_count = 0
         for request in requests:
             for queue in self._queues():
-                if request in queue:
-                    queue_to_requests.setdefault(id(queue), []).append(request)
+                matched_request = self._find_matching_request(queue, request)
+                if matched_request is not None:
+                    queue_to_requests.setdefault(id(queue), []).append(matched_request)
                     break
         for queue_id, matched_requests in queue_to_requests.items():
             removed_count += len(matched_requests)
             queue = queue_map[queue_id]
             self._remove_counters[self._queue_name(queue)] += len(matched_requests)
             queue.remove_requests(matched_requests)
+            for request in matched_requests:
+                self._force_immediate_request_ids.discard(request.request_id)
         self._on_short_queue_changed()
         if removed_count:
             self._debug_state("remove_batch", extra=f"count={removed_count}")
             self._maybe_log_stats()
 
     def __bool__(self) -> bool:
-        return self._select_schedulable_queue() is not None
+        return any(bool(queue) for queue in self._queues())
 
     def __len__(self) -> int:
         return (
@@ -363,7 +394,10 @@ class LAPSRequestQueue(RequestQueue):
         yield from self._long_queue
 
     def __contains__(self, request: object) -> bool:
-        return any(candidate is request for candidate in self)
+        return any(
+            self._find_matching_request(queue, request) is not None
+            for queue in self._queues()
+        )
 
 
 class LAPSSchedulerMixin:
@@ -400,6 +434,19 @@ class LAPSSchedulerMixin:
             envs.VLLM_ASCEND_LAPS_LONG_PREFILL_CAP,
             envs.VLLM_ASCEND_LAPS_SHORT_RESERVED_RATIO,
         )
+
+    def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
+        waiting = getattr(self, "waiting", None)
+        if isinstance(waiting, LAPSRequestQueue):
+            return waiting.select_waiting_queue_for_scheduling()
+        return super()._select_waiting_queue_for_scheduling()
+
+    def _preempt_request(self, request: Request, timestamp: float) -> None:
+        super()._preempt_request(request, timestamp)
+        waiting = getattr(self, "waiting", None)
+        if isinstance(waiting, LAPSRequestQueue):
+            waiting.remove_request(request)
+            waiting.prepend_request(request, force_immediate=True)
 
 
 from vllm.v1.core.sched.scheduler import Scheduler as BaseScheduler
@@ -716,7 +763,8 @@ class LAPSScheduler(LAPSSchedulerMixin, BaseScheduler):
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
-                assert request_queue is not None
+                if request_queue is None:
+                    break
 
                 request = request_queue.peek_request()
                 request_id = request.request_id

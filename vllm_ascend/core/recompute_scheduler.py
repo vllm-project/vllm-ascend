@@ -474,7 +474,8 @@ class RecomputeScheduler(LAPSSchedulerMixin, Scheduler):
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
-                assert request_queue is not None
+                if request_queue is None:
+                    break
 
                 request = request_queue.peek_request()
                 request_id = request.request_id

@@ -324,3 +324,54 @@ def test_recompute_scheduler_uses_pd_aware_laps_queue(monkeypatch):
     request.status = RequestStatus.PREEMPTED
 
     assert scheduler._should_bypass_laps_wait_window(request)
+
+
+def test_recompute_scheduler_selects_schedulable_laps_subqueue(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SCHEDULING", "1")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "16")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_WINDOW_MS", "10")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")
+
+    vllm_config = create_vllm_config()
+    base_scheduler = create_scheduler(vllm_config)
+    scheduler = RecomputeScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        log_stats=True,
+        block_size=vllm_config.cache_config.block_size,
+        structured_output_manager=base_scheduler.structured_output_manager,
+    )
+
+    short_request = create_request(request_id=10, num_tokens=8)
+    long_request = create_request(request_id=11, num_tokens=64)
+
+    scheduler.waiting.add_request(short_request)
+    scheduler.waiting.add_request(long_request)
+
+    selected_queue = scheduler._select_waiting_queue_for_scheduling()
+    assert selected_queue is not None
+    assert selected_queue.peek_request() is long_request
+
+
+def test_recompute_scheduler_preempted_request_is_forced_immediate(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_SCHEDULING", "1")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_THRESHOLD", "16")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_WINDOW_MS", "10")
+    monkeypatch.setenv("VLLM_ASCEND_LAPS_WAIT_MAX_BATCH", "4")
+
+    vllm_config = create_vllm_config()
+    base_scheduler = create_scheduler(vllm_config)
+    scheduler = RecomputeScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=base_scheduler.kv_cache_config,
+        log_stats=True,
+        block_size=vllm_config.cache_config.block_size,
+        structured_output_manager=base_scheduler.structured_output_manager,
+    )
+
+    request = create_request(request_id=12, num_tokens=8)
+    scheduler.waiting.prepend_request(request, force_immediate=True)
+
+    selected_queue = scheduler._select_waiting_queue_for_scheduling()
+    assert selected_queue is not None
+    assert selected_queue.peek_request() is request
