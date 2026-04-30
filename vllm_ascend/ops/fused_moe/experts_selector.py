@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import inspect
 from collections.abc import Callable
 
 import torch
@@ -307,13 +308,23 @@ def _native_select_experts(
         )
 
     if custom_routing_function is not None:
-        topk_weights, topk_ids = custom_routing_function(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=top_k,
-            renormalize=renormalize,
-            num_experts=num_experts,
-        )
+        # Check if the function accepts num_experts parameter for API compatibility
+        sig = inspect.signature(custom_routing_function)
+        if 'num_experts' in sig.parameters:
+            topk_weights, topk_ids = custom_routing_function(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
+                num_experts=num_experts,
+            )
+        else:
+            topk_weights, topk_ids = custom_routing_function(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
+            )
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
         return topk_weights, topk_ids

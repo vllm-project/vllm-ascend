@@ -826,6 +826,132 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _forward_fia_fullattention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        batch_size = 1
+        seq_q, num_q_heads, head_dim = query.shape
+        seq_kv, num_kv_heads, _ = key.shape
+
+        query_bsh = query.view(batch_size, seq_q, num_q_heads * head_dim)
+        key_bsh = key.view(batch_size, seq_kv, num_kv_heads * head_dim)
+        value_bsh = value.view(batch_size, seq_kv, num_kv_heads * head_dim)
+
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query_bsh,
+            key_bsh,
+            value_bsh,
+            num_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            input_layout="BSH",
+            atten_mask=attn_metadata.attn_mask,
+            scale=self.scale,
+            sparse_mode=3,
+        )
+
+        attn_output = attn_output.view(seq_q, self.num_heads, self.head_size)
+        output[:seq_q] = attn_output[:seq_q]
+        return output
+
+    @staticmethod
+    def _cum_lens_to_lens(cum_lens: list[int] | torch.Tensor) -> list[int]:
+        lens_src = cum_lens.tolist() if isinstance(cum_lens, torch.Tensor) else cum_lens
+        prev = 0
+        lens: list[int] = []
+        for end in lens_src:
+            cur = int(end)
+            lens.append(cur - prev)
+            prev = cur
+        return lens
+
+    @staticmethod
+    def _pack_tnd_to_bnsd(tensor_tnd: torch.Tensor, seq_lens: list[int]) -> torch.Tensor:
+        batch_size = len(seq_lens)
+        num_heads = tensor_tnd.shape[1]
+        head_dim = tensor_tnd.shape[2]
+        max_seq_len = max(seq_lens) if batch_size > 0 else 0
+
+        tensor_bnsd = tensor_tnd.new_zeros((batch_size, num_heads, max_seq_len, head_dim))
+        start = 0
+        for idx, seq_len in enumerate(seq_lens):
+            end = start + seq_len
+            if seq_len > 0:
+                tensor_bnsd[idx, :, :seq_len, :] = tensor_tnd[start:end].transpose(0, 1)
+            start = end
+        return tensor_bnsd
+
+    @staticmethod
+    def _unpack_bnsd_to_tnd(tensor_bnsd: torch.Tensor, seq_lens: list[int]) -> torch.Tensor:
+        total_tokens = sum(seq_lens)
+        num_heads = tensor_bnsd.shape[1]
+        head_dim = tensor_bnsd.shape[3]
+        tensor_tnd = tensor_bnsd.new_empty((total_tokens, num_heads, head_dim))
+
+        start = 0
+        for idx, seq_len in enumerate(seq_lens):
+            end = start + seq_len
+            if seq_len > 0:
+                tensor_tnd[start:end] = tensor_bnsd[idx, :, :seq_len, :].transpose(0, 1)
+            start = end
+        return tensor_tnd
+
+    def _forward_fia_bnsd(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        block_table: torch.Tensor | None,
+        actual_seq_lengths_kv: list[int] | torch.Tensor,
+        block_size: int,
+        output: torch.Tensor,
+    ):
+        q_lens = self._cum_lens_to_lens(attn_metadata.actual_seq_lengths_q)
+        query_bnsd = self._pack_tnd_to_bnsd(query, q_lens)
+
+        if block_table is None:
+            kv_lens = self._cum_lens_to_lens(actual_seq_lengths_kv)
+            key_input = self._pack_tnd_to_bnsd(key, kv_lens)
+            value_input = self._pack_tnd_to_bnsd(value, kv_lens)
+            seq_lens_kv = kv_lens
+        else:
+            key_input = key
+            value_input = value
+            seq_lens_kv = (
+                actual_seq_lengths_kv.tolist()
+                if isinstance(actual_seq_lengths_kv, torch.Tensor)
+                else actual_seq_lengths_kv
+            )
+
+        sparse_mode = 0 if attn_metadata.attn_state == AscendAttentionState.DecodeOnly else 3
+        attn_mask = None if sparse_mode == 0 else attn_metadata.attn_mask
+
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query_bnsd,
+            key=key_input,
+            value=value_input,
+            atten_mask=attn_mask,
+            block_table=block_table,
+            input_layout="BNSD",
+            block_size=block_size,
+            actual_seq_lengths=q_lens,
+            actual_seq_lengths_kv=seq_lens_kv,
+            num_key_value_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            sparse_mode=sparse_mode,
+        )
+
+        attn_output_tnd = self._unpack_bnsd_to_tnd(attn_output, q_lens)
+        num_tokens = query.shape[0]
+        output[:num_tokens] = attn_output_tnd[:num_tokens]
+        return output
+
     def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
         batch_size = attn_metadata.seq_lens.shape[0]
         block_size = 128
@@ -879,6 +1005,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sinks is None
         ):
             return self._forward_fia_slidingwindow(query, attn_metadata, output)
+        if (
+            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and self.attn_type != AttentionType.ENCODER_DECODER
+            and self.sliding_window is None
+            and self.sinks is None
+        ):
+            return self._forward_fia_fullattention(query, key, value, attn_metadata, output)
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
@@ -897,6 +1030,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+        if (
+            self.head_size == 512
+            and self.sinks is None
+        ):
+            return self._forward_fia_bnsd(
+                query=query,
+                key=key,
+                value=value,
+                attn_metadata=attn_metadata,
+                block_table=block_table,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                block_size=block_size,
+                output=output,
+            )
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
