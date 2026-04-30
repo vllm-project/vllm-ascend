@@ -27,9 +27,7 @@ It is recommended to download the model weights to a local directory (e.g., `./Q
 
 ### Installation
 
-You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly. For optimal performance, it is recommended to use:
-
-- torch_npu version: 2.10.0rc2
+You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly. 
 
 These versions support multi-NPU deployment, allowing the model to utilize all available NPU devices (e.g., 4 NPUs) for improved performance.
 
@@ -138,7 +136,7 @@ curl http://localhost:8000/v1/reward/batch \
 }'
 ```
 
-## Accuracy Evaluation
+## Peformance
 
 ### Using vLLM Benchmark
 
