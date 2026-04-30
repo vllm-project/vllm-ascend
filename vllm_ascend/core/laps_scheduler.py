@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterable, Iterator
 from typing import Callable, cast
@@ -52,9 +53,63 @@ class LAPSRequestQueue(RequestQueue):
         self._long_queue = create_request_queue(policy)
         self._short_wait_started_at: float | None = None
         self._short_ready_to_dispatch = False
+        self._debug_logging_enabled = logger.isEnabledFor(logging.DEBUG)
 
     def _queues(self) -> tuple[RequestQueue, ...]:
         return (self._immediate_queue, self._short_queue, self._long_queue)
+
+    def _queue_name(self, queue: RequestQueue) -> str:
+        if queue is self._immediate_queue:
+            return "immediate"
+        if queue is self._short_queue:
+            return "short"
+        if queue is self._long_queue:
+            return "long"
+        return "unknown"
+
+    def _short_wait_elapsed_ms(self) -> float | None:
+        if self._short_wait_started_at is None:
+            return None
+        return (time.monotonic() - self._short_wait_started_at) * 1000.0
+
+    def _short_wait_state(self) -> str:
+        if not self._short_queue:
+            return "empty"
+        if self._short_ready_to_dispatch:
+            return "ready"
+        if self.wait_window_ms <= 0:
+            return "no_wait"
+        elapsed_ms = self._short_wait_elapsed_ms()
+        if elapsed_ms is None:
+            return "pending"
+        return f"waiting({elapsed_ms:.3f}/{self.wait_window_ms:.3f}ms)"
+
+    def _debug_state(
+        self,
+        event: str,
+        request: Request | None = None,
+        queue: RequestQueue | None = None,
+        extra: str = "",
+    ) -> None:
+        if not self._debug_logging_enabled:
+            return
+        request_id = "-" if request is None else request.request_id
+        prompt_tokens = -1 if request is None else request.num_prompt_tokens
+        queue_name = "-" if queue is None else self._queue_name(queue)
+        extra_suffix = f", {extra}" if extra else ""
+        logger.debug(
+            "LAPS queue %s: request_id=%s, prompt_tokens=%d, target_queue=%s, "
+            "sizes=(immediate=%d, short=%d, long=%d), short_state=%s%s",
+            event,
+            request_id,
+            prompt_tokens,
+            queue_name,
+            len(self._immediate_queue),
+            len(self._short_queue),
+            len(self._long_queue),
+            self._short_wait_state(),
+            extra_suffix,
+        )
 
     @property
     def num_immediate_requests(self) -> int:
@@ -90,15 +145,19 @@ class LAPSRequestQueue(RequestQueue):
         if not self._short_queue:
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = False
+            self._debug_state("short_reset")
             return
         if self._short_ready_to_dispatch:
             return
         if self.wait_window_ms <= 0 or len(self._short_queue) >= self.wait_max_batch:
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = True
+            reason = "no_wait_window" if self.wait_window_ms <= 0 else "max_batch"
+            self._debug_state("short_ready", extra=f"reason={reason}")
             return
         if self._short_wait_started_at is None:
             self._short_wait_started_at = time.monotonic()
+            self._debug_state("short_wait_started")
 
     def _short_batch_ready(self) -> bool:
         if not self._short_queue:
@@ -110,18 +169,25 @@ class LAPSRequestQueue(RequestQueue):
         if self.wait_window_ms <= 0:
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = True
+            self._debug_state("short_ready", extra="reason=no_wait_window")
             return True
         if len(self._short_queue) >= self.wait_max_batch:
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = True
+            self._debug_state("short_ready", extra="reason=max_batch")
             return True
         if self._short_wait_started_at is None:
             self._short_wait_started_at = time.monotonic()
+            self._debug_state("short_wait_started")
             return False
         elapsed_ms = (time.monotonic() - self._short_wait_started_at) * 1000.0
         if elapsed_ms >= self.wait_window_ms:
             self._short_wait_started_at = None
             self._short_ready_to_dispatch = True
+            self._debug_state(
+                "short_ready",
+                extra=f"reason=wait_window_elapsed, elapsed_ms={elapsed_ms:.3f}",
+            )
             return True
         return False
 
@@ -139,6 +205,7 @@ class LAPSRequestQueue(RequestQueue):
         queue.add_request(request)
         if queue is self._short_queue:
             self._on_short_queue_changed()
+        self._debug_state("enqueue", request=request, queue=queue)
 
     def pop_request(self) -> Request:
         queue = self._select_schedulable_queue()
@@ -147,6 +214,7 @@ class LAPSRequestQueue(RequestQueue):
         request = queue.pop_request()
         if queue is self._short_queue:
             self._on_short_queue_changed()
+        self._debug_state("dispatch", request=request, queue=queue)
         return request
 
     def peek_request(self) -> Request:
@@ -160,6 +228,7 @@ class LAPSRequestQueue(RequestQueue):
         queue.prepend_request(request)
         if queue is self._short_queue:
             self._on_short_queue_changed()
+        self._debug_state("prepend", request=request, queue=queue)
 
     def prepend_requests(self, requests: RequestQueue) -> None:
         for request in requests:
@@ -171,20 +240,25 @@ class LAPSRequestQueue(RequestQueue):
                 queue.remove_request(request)
                 if queue is self._short_queue:
                     self._on_short_queue_changed()
+                self._debug_state("remove", request=request, queue=queue)
                 return
         raise ValueError("request not found in LAPS queue")
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
         queue_to_requests: dict[int, list[Request]] = {}
         queue_map = {id(queue): queue for queue in self._queues()}
+        removed_count = 0
         for request in requests:
             for queue in self._queues():
                 if request in queue:
                     queue_to_requests.setdefault(id(queue), []).append(request)
                     break
         for queue_id, matched_requests in queue_to_requests.items():
+            removed_count += len(matched_requests)
             queue_map[queue_id].remove_requests(matched_requests)
         self._on_short_queue_changed()
+        if removed_count:
+            self._debug_state("remove_batch", extra=f"count={removed_count}")
 
     def __bool__(self) -> bool:
         return self._select_schedulable_queue() is not None
