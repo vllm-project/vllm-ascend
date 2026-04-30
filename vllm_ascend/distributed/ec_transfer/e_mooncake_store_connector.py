@@ -73,7 +73,7 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 self.thread_executor.submit(self.producer_run)
                 logger.info("============ Producer init ===============")
             elif transfer_config.ec_role == "ec_consumer":
-                self.handle_caches = dict[str, tuple()]
+                self.handle_caches = dict[str, tuple[int, list[int], str]]
                 self.recv_queue = queue.Queue[bytes]()
                 self.thread_executor.submit(self.consumer_run)
                 self.thread_executor.submit(self.recv_feat_async)
@@ -281,16 +281,20 @@ def ensure_zmq_send(
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
+def zmq_ctx(socket_type: Any,
+            addr: str) -> Iterator[zmq.Socket]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
-    if socket_type not in (zmq.REQ, zmq.DEALER):  # type: ignore
+    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
-    ctx: zmq.Context | None = None
+    ctx: Optional[zmq.Context] = None  # type: ignore
     try:
         ctx = zmq.Context()  # type: ignore
-        yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)
+        yield make_zmq_socket(ctx=ctx,
+                              path=addr,
+                              socket_type=socket_type,
+                              bind=socket_type == zmq.ROUTER)  # type: ignore
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
