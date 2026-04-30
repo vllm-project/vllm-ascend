@@ -244,7 +244,6 @@ def update_full_graph_params(
     )
 
     from vllm_ascend.ops.gdn import update_conv1d_graph_params
-    # print(f"[acl graph update] num_tokens: {num_tokens}")
     update_conv1d_graph_params(
         update_stream,
         forward_context,
