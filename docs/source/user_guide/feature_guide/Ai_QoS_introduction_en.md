@@ -76,5 +76,5 @@ cmake --install tools/ai_qos/build
 
 | Software     |             Matched Version              |
 | :----------: | :--------------------------------------: |
-| Ascend HDK   | 26.0.0 or later                          |
+| Ascend HDK   | 25.5.2 or later                          |
 | UB Switch    | LingQu Computing Network 1.5.1 or later  |

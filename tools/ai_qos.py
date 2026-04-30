@@ -37,7 +37,7 @@ UNSET_STATE_PARSE_FAILED_MSG = (
 )
 
 
-def _remove_state_file_quiet(path: Path) -> None:
+def _remove_state_file(path: Path) -> None:
     try:
         path.unlink()
     except OSError as e:
@@ -49,7 +49,7 @@ def _remove_state_file_quiet(path: Path) -> None:
 
 def _unset_state_parse_failed(state_path: Path) -> None:
     print(UNSET_STATE_PARSE_FAILED_MSG, file=sys.stderr)
-    _remove_state_file_quiet(state_path)
+    _remove_state_file(state_path)
     sys.exit(1)
 
 
@@ -313,7 +313,10 @@ def run_unset(state_path: Path) -> None:
     try:
         state_path.unlink()
     except OSError as e:
-        print(f"Warning: could not remove state file {state_path}: {e}", file=sys.stderr)
+        print(
+            f"Warning: could not remove state file {state_path}: {e}. Please remove this file manually.",
+            file=sys.stderr,
+        )
 
 
 class AiqosConfig:
@@ -407,7 +410,7 @@ class AiqosConfig:
                         f"get_qos failed (dev={device_id} master={master_id} ret={ret}).",
                         file=sys.stderr,
                     )
-                    sys.exit(1)
+                    continue
                 if accu.startswith("AIV"):
                     ai_qos.set_qos(device_id, master_id, mpamid, aiv_qos, pmg, mode)
                 elif accu.startswith("SDMA"):
