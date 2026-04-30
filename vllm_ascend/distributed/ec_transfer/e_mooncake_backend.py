@@ -71,4 +71,3 @@ def mooncake_engine_init(ec_store, mk_config, role):
         except Exception as exc:
             logger.error("An error occurred while loading the configuration: %s", exc)
             raise
-            
