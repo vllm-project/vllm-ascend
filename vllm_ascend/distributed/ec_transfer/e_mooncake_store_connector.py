@@ -281,8 +281,7 @@ def ensure_zmq_send(
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any,
-            addr: str) -> Iterator[zmq.Socket]:  # type: ignore
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
@@ -291,10 +290,7 @@ def zmq_ctx(socket_type: Any,
     ctx: Optional[zmq.Context] = None  # type: ignore
     try:
         ctx = zmq.Context()  # type: ignore
-        yield make_zmq_socket(ctx=ctx,
-                              path=addr,
-                              socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)  # type: ignore
+        yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)  # type: ignore
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
