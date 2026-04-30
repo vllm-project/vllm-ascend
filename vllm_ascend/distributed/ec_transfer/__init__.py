@@ -24,4 +24,3 @@ def register_ec_connector():
         "vllm_ascend.distributed.ec_transfer.e_mooncake_store_connector",
         "EMoonCakeStoreConnector",
     )
-    
