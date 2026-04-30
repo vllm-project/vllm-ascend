@@ -120,6 +120,9 @@ class AscendConfig:
         # FLASHCOMM1 configuration (replaces VLLM_ASCEND_ENABLE_FLASHCOMM1 env var)
         self.enable_flashcomm1 = additional_config.get("enable_flashcomm1", False)
         print(f"[PATCH_VERIFY] AscendConfig.enable_flashcomm1 initialized: {self.enable_flashcomm1}")
+        # MLAPO configuration (replaces VLLM_ASCEND_ENABLE_MLAPO env var)
+        self.enable_mlapo = additional_config.get("enable_mlapo", True)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_mlapo initialized: {self.enable_mlapo}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
