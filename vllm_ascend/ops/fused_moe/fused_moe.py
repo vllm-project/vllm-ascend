@@ -120,7 +120,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
-        global_num_experts: int = -1,
+        num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -144,7 +144,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
+            num_experts=num_experts,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
@@ -158,7 +158,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=global_num_experts,
+                num_experts=num_experts,
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
@@ -168,7 +168,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), global_num_experts, device=topk_ids.device)
+            random_matrix = torch.rand(topk_ids.size(0), num_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
@@ -228,7 +228,7 @@ class AscendMoERunner(DefaultMoERunner):
         chunked path. Always return False to stay on forward_impl."""
         return False
 
-    # TODO: Remove this after drop v0.19.0 support
+    # TODO: Remove this after drop v0.19.1 support
     def forward_impl(
         self,
         layer: torch.nn.Module,
@@ -357,7 +357,7 @@ class AscendFusedMoE(FusedMoE):
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 
-        is_legacy = vllm_version_is("0.19.0")
+        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
             self if is_legacy else self.layer_name,
             self.moe_config,
@@ -419,7 +419,7 @@ class AscendFusedMoE(FusedMoE):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice (compilation + capture),
         # causing moe_layer_index to overflow. Wrap the index to prevent out-of-bounds errors.
-        if self.enable_npugraph_ex_static_kernel:
+        if self.enable_npugraph_ex_static_kernel and forward_context.all_moe_layers:
             moe_layer_index = forward_context.moe_layer_index % (len(forward_context.all_moe_layers))
             forward_context.moe_layer_index = moe_layer_index
 
@@ -459,7 +459,7 @@ class AscendFusedMoE(FusedMoE):
                     scoring_func=self.scoring_func,
                     routed_scaling_factor=self.routed_scaling_factor,
                     e_score_correction_bias=self.e_score_correction_bias,
-                    global_num_experts=self.global_num_experts,
+                    num_experts=self.moe_config.num_experts,
                 )
 
                 if isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl):
@@ -494,7 +494,7 @@ class AscendFusedMoE(FusedMoE):
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
+            num_experts=self.moe_config.num_experts,
             expert_map=self._expert_map,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,
@@ -583,7 +583,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # NOTE: must use self._shared_experts here, not self.shared_experts —
         # FusedMoE.shared_experts is a property that reads self.runner.shared_experts,
         # which at this point is still the stale runner built with shared_experts=None.
-        is_legacy = vllm_version_is("0.19.0")
+        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
             self if is_legacy else self.layer_name,
             self.moe_config,
@@ -639,7 +639,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         if not torch.allclose(integrated_out, split_out):
             diff = (integrated_out - split_out).abs()
             logger.error("SharedFusedMoE shared experts split computation does not match the integrated computation.")
-            logger.error(f"Max absolute difference: {diff.max().item()}")
+            logger.error("Max absolute difference: %s", diff.max().item())
             logger.error(
                 "Integrated output - sum: %s, norm: %s", integrated_out.sum().item(), integrated_out.norm().item()
             )
