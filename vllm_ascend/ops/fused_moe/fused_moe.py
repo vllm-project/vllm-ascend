@@ -309,7 +309,7 @@ class AscendFusedMoE(FusedMoE):
         ascend_config = get_ascend_config()
         self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert and has_shared_experts
         self.shared_multistream_overlap_gate = ascend_config.multistream_overlap_gate and has_shared_experts
-        if enable_sp and has_shared_experts:
+        if enable_sp() and has_shared_experts:
             logger.info_once("Sequence parallelism is enabled, shared experts are replicated for best performance.")
 
         # flashcommon3 gate stream
@@ -410,6 +410,7 @@ class AscendFusedMoE(FusedMoE):
             torch.rand(10, self.hidden_size, device="npu", dtype=self.moe_config.in_dtype) * 2 - 1
         )  # Random input for testing, scoped to [-1, 1]
 
+        assert self._shared_experts is not None
         integrated_out = self._shared_experts(test_input)
         part1_out = self._shared_experts_part1(test_input)
         split_out = self._shared_experts_part2(test_input, part1_out)
@@ -436,6 +437,7 @@ class AscendFusedMoE(FusedMoE):
         shared_out, _ = self._shared_experts.down_proj(shared_act)  # type: ignore
 
         # Qwen3-Next specific gating mechanism
+        assert self._shared_experts is not None
         if hasattr(self._shared_experts, "expert_gate") and self._shared_experts.expert_gate is not None:
             gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
             shared_out = F.sigmoid(gate_out) * shared_out
