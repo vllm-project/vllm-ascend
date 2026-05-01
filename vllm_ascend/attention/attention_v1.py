@@ -607,6 +607,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_mask = attn_metadata.attn_mask
         sparse_mode = 3 if attn_metadata.causal else 0
         extra_args = {}
+
+        # head_size=512 requires BNSD layout on Ascend NPU
+        # TND layout is not supported for D=512 without q_rope/k_rope
+        use_bnsd_for_d512 = self.head_size == 512 and self.sinks is None
+        if use_bnsd_for_d512:
+            input_layout = "BNSD"
+            query = query.unsqueeze(2)  # [batch, heads, 512] -> [batch, heads, 1, 512]
+            output = output.unsqueeze(2)
+            # Decode mode doesn't need attn_mask, sparse_mode=0
+            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                attn_mask = None
+                sparse_mode = 0
         if self.enable_c8_quant:
             extra_args = {
                 "key_antiquant_scale": layer._c8_k_aq_scale,
@@ -696,6 +708,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             out=[output, softmax_lse],
             **extra_args,
         )
+
+        # Restore output shape for BNSD layout
+        if use_bnsd_for_d512:
+            output = output.squeeze(2)
 
         output = output.view(num_tokens, self.num_heads, self.head_size)
 
