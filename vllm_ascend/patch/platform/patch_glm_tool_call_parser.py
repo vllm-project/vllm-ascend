@@ -712,13 +712,50 @@ async def _patched_chat_completion_stream_generator(
                         finish_reason_ = "tool_calls"
                     else:
                         finish_reason_ = output.finish_reason if output.finish_reason else "stop"
+
+                    # Per OpenAI streaming spec: a chunk that carries delta data
+                    # must have finish_reason=None.  When the last token arrives
+                    # together with the finish signal, split into two chunks:
+                    #   1. data chunk  – delta with tool_calls/content, finish_reason=null
+                    #   2. finish chunk – empty delta, finish_reason="tool_calls"
+                    # This prevents downstream consumers from losing the final
+                    # arguments fragment because they stop reading at finish_reason.
+                    _split_done = False
+                    if finish_reason_ == "tool_calls" and delta_message is not None and (
+                        bool(delta_message.tool_calls) or bool(delta_message.content)
+                    ):
+                        _data_choice = ChatCompletionResponseStreamChoice(
+                            index=i,
+                            delta=delta_message,
+                            logprobs=logprobs,
+                            finish_reason=None,
+                            token_ids=(as_list(output.token_ids) if request.return_token_ids else None),
+                        )
+                        _data_choice = maybe_filter_parallel_tool_calls(_data_choice, request)
+                        self._record_streamed_tool_args(_data_choice.delta, streamed_tool_args[i])
+                        _data_chunk = ChatCompletionStreamResponse(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[_data_choice],
+                            model=model_name,
+                        )
+                        yield f"data: {_data_chunk.model_dump_json(exclude_unset=True)}\n\n"
+                        delta_message = DeltaMessage()
+                        logprobs = None
+                        _split_done = True
+
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=i,
                         delta=delta_message,
                         logprobs=logprobs,
                         finish_reason=finish_reason_,
                         stop_reason=output.stop_reason,
-                        token_ids=(as_list(output.token_ids) if request.return_token_ids else None),
+                        token_ids=(
+                            None
+                            if _split_done
+                            else (as_list(output.token_ids) if request.return_token_ids else None)
+                        ),
                     )
 
                     finish_reason_sent[i] = True
