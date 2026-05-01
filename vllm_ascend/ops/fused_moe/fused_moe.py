@@ -21,7 +21,6 @@ from functools import wraps
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
@@ -247,7 +246,6 @@ class AscendMoERunner(MoERunner):
         else:
             result = layer.shared_forward_impl(hidden_states, router_logits)
         return result
-    
 
     def _forward_impl(
         self,
@@ -265,6 +263,7 @@ class AscendMoERunner(MoERunner):
                 shared_experts_input,
             )
 
+
 class AscendFusedMoE(FusedMoE):
     moe_counter = -1
     gate_stream: torch.npu.Stream | None = None
@@ -272,8 +271,8 @@ class AscendFusedMoE(FusedMoE):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.use_overlapped = True
-        self._routed_input_transform = kwargs.get("routed_input_transform", None)
-        self._shared_experts = kwargs.get("shared_experts", None)
+        self._routed_input_transform = kwargs.get("routed_input_transform")
+        self._shared_experts = kwargs.get("shared_experts")
         self.shared_expert_stream = None
         has_shared_experts = self._shared_experts is not None
         num_experts = kwargs["num_experts"]
@@ -303,7 +302,7 @@ class AscendFusedMoE(FusedMoE):
         self.shared_multistream_overlap_gate = ascend_config.multistream_overlap_gate and has_shared_experts
         if enable_sp and has_shared_experts:
             logger.info_once("Sequence parallelism is enabled, shared experts are replicated for best performance.")
-        
+
         # flashcommon3 gate stream
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
@@ -313,7 +312,7 @@ class AscendFusedMoE(FusedMoE):
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype
             )
-        self._gate = kwargs.get("gate", None)
+        self._gate = kwargs.get("gate")
 
         # init moe
         eplb_config = ascend_config.eplb_config
@@ -380,7 +379,7 @@ class AscendFusedMoE(FusedMoE):
             self.quant_method,
             self.vllm_config.parallel_config.enable_dbo,
         )
-        
+
         if self.multistream_overlap_shared_expert:
             # Wrap the quant_method's process_weights_after_loading to validate that
             # splitting shared expert computation (gate_up projection + activation,
@@ -395,7 +394,7 @@ class AscendFusedMoE(FusedMoE):
                 return result
 
             self.quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
-            
+
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated
         computation."""
@@ -427,13 +426,12 @@ class AscendFusedMoE(FusedMoE):
     def _shared_experts_part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
         shared_act = self._shared_experts.act_fn(shared_gate_up)  # type: ignore
         shared_out, _ = self._shared_experts.down_proj(shared_act)  # type: ignore
-        
+
         # Qwen3-Next specific gating mechanism
         if hasattr(self._shared_experts, "expert_gate") and self._shared_experts.expert_gate is not None:
             gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
-
 
     def _get_quant_type(self) -> QuantType:
         quant_type = QuantType.NONE
@@ -464,8 +462,7 @@ class AscendFusedMoE(FusedMoE):
         outputs since each rank only has partial outputs.
         """
         return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
-    
-    
+
     @property
     def gate(self) -> torch.nn.Module | None:
         return self._gate if self.use_overlapped else None
@@ -491,7 +488,6 @@ class AscendFusedMoE(FusedMoE):
             hidden_states,
             router_logits,
         )
-
 
     def forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, return_with_event: bool = False
@@ -695,5 +691,3 @@ class AscendFusedMoE(FusedMoE):
                 ),
             )
         return shared_out, routed_out
-
-
