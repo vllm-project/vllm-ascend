@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+from unittest.mock import MagicMock
+
+import pytest
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -13,6 +18,9 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
+from vllm_ascend.patch.platform.patch_glm_tool_call_parser import (
+    _patched_chat_completion_stream_generator,
+)
 
 
 class FakeTokenizer:
@@ -316,3 +324,248 @@ def test_glm47_streaming_delta_serializes_tool_call_fields():
     assert serialized_deltas[-1] != {}
     assert serialized_deltas[-1]["tool_calls"][0]["index"] == 0
     assert serialized_deltas[-1]["tool_calls"][0]["function"]["arguments"] == '{"filepath":"pong.py"}'
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by streaming-split tests
+# ---------------------------------------------------------------------------
+
+def _make_serving_mock(*, use_harmony: bool = False) -> MagicMock:
+    """Return a minimal mock of OpenAIServingChat for streaming tests."""
+    serving = MagicMock()
+    serving.use_harmony = use_harmony
+    serving.tool_parser = None
+    serving.tool_call_id_type = "standard"
+    serving.enable_log_outputs = False
+    serving.enable_log_deltas = False
+    serving.enable_force_include_usage = False
+    serving._should_stream_with_auto_tool_parsing.return_value = False
+    serving.get_chat_request_role.return_value = "assistant"
+    serving._raise_if_error.return_value = None
+    serving._should_check_for_unstreamed_tool_arg_tokens.return_value = False
+    serving._make_usage_info.return_value = MagicMock()
+    serving._count_reasoning_tokens_for_usage.return_value = None
+    return serving
+
+
+def _make_request_mock(*, tool_choice: str = "required") -> MagicMock:
+    request = MagicMock()
+    request.n = 1
+    request.logprobs = False
+    request.top_logprobs = None
+    request.return_token_ids = False
+    request.return_tokens_as_token_ids = False
+    request.include_reasoning = False
+    request.echo = False
+    request._grammar_from_tool_parser = False
+    request.tool_choice = tool_choice
+    request.stream_options = None
+    request.parallel_tool_calls = True
+    request.tools = []
+    return request
+
+
+class _MockOutput:
+    def __init__(self, *, token_ids=(1,), text="", finish_reason=None, stop_reason=None):
+        self.index = 0
+        self.token_ids = token_ids
+        self.text = text
+        self.finish_reason = finish_reason
+        self.stop_reason = stop_reason
+        self.logprobs = None
+
+
+class _MockResult:
+    def __init__(self, outputs, prompt_token_ids=(1, 2, 3)):
+        self.outputs = outputs
+        self.prompt_token_ids = prompt_token_ids
+        self.encoder_prompt_token_ids = None
+        self.num_cached_tokens = None
+
+
+async def _run_stream(serving, request, outputs):
+    """Drive the patched generator and return parsed non-DONE data chunks."""
+    async def _gen():
+        for out in outputs:
+            yield out
+
+    chunks = []
+    async for item in _patched_chat_completion_stream_generator(
+        serving,
+        request=request,
+        result_generator=_gen(),
+        request_id="test-req-id",
+        model_name="glm-5",
+        conversation=[],
+        tokenizer=MagicMock(),
+        request_metadata=MagicMock(),
+        reasoning_parser=None,
+    ):
+        if item.startswith("data: ") and item.strip() != "data: [DONE]":
+            data = json.loads(item[6:].strip())
+            if data.get("choices"):
+                chunks.append(data)
+    return chunks
+
+
+def _assert_split_invariant(chunks):
+    """Assert that no chunk has both tool_calls delta data AND a non-null finish_reason."""
+    for chunk in chunks:
+        for choice in chunk["choices"]:
+            delta = choice.get("delta", {})
+            finish_reason = choice.get("finish_reason")
+            tool_calls = delta.get("tool_calls", [])
+            assert not (tool_calls and finish_reason is not None), (
+                f"Chunk carries both tool_calls data and finish_reason={finish_reason!r}: {chunk}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Streaming-split tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_streaming_final_tool_calls_chunk_is_split_from_finish_reason():
+    """
+    The last tool_calls arguments delta and finish_reason='tool_calls' must
+    be delivered in separate chunks (OpenAI streaming spec invariant).
+    """
+    serving = _make_serving_mock()
+    request = _make_request_mock(tool_choice="required")
+
+    final_delta = DeltaMessage(
+        tool_calls=[
+            DeltaToolCall(
+                index=0,
+                id="call-123",
+                type="function",
+                function=DeltaFunctionCall(name="detect_text", arguments="}"),
+            )
+        ]
+    )
+    serving.extract_tool_call_required_streaming.return_value = (final_delta, True)
+
+    outputs = [_MockResult([_MockOutput(finish_reason="stop")])]
+    chunks = await _run_stream(serving, request, outputs)
+
+    _assert_split_invariant(chunks)
+
+    tool_call_chunks = [c for c in chunks if any(ch["delta"].get("tool_calls") for ch in c["choices"])]
+    finish_chunks = [c for c in chunks if any(ch.get("finish_reason") == "tool_calls" for ch in c["choices"])]
+
+    assert len(tool_call_chunks) >= 1, "Must have at least one chunk with tool_calls data"
+    assert len(finish_chunks) == 1, "Must have exactly one chunk with finish_reason='tool_calls'"
+
+    data_idx = chunks.index(tool_call_chunks[-1])
+    finish_idx = chunks.index(finish_chunks[0])
+    assert finish_idx > data_idx, "finish_reason chunk must come after the last data chunk"
+
+    # The finish chunk delta must be empty ({})
+    finish_delta = finish_chunks[0]["choices"][0].get("delta", {})
+    assert not finish_delta.get("tool_calls"), "finish chunk delta must have no tool_calls"
+    assert not finish_delta.get("content"), "finish chunk delta must have no content"
+
+
+@pytest.mark.asyncio
+async def test_streaming_multi_chunk_tool_args_split_only_at_finish():
+    """
+    When arguments arrive across several intermediate chunks, only the
+    final chunk (carrying the closing '}') triggers the split.  Intermediate
+    chunks must NOT be split.
+    """
+    serving = _make_serving_mock()
+    request = _make_request_mock(tool_choice="required")
+
+    # Intermediate chunk: first part of arguments, no finish_reason
+    intermediate_delta = DeltaMessage(
+        tool_calls=[
+            DeltaToolCall(
+                index=0,
+                id="call-456",
+                type="function",
+                function=DeltaFunctionCall(name="search", arguments='{"q":"foo"'),
+            )
+        ]
+    )
+    # Final chunk: closing brace + finish_reason
+    final_delta = DeltaMessage(
+        tool_calls=[
+            DeltaToolCall(
+                index=0,
+                function=DeltaFunctionCall(arguments="}"),
+            )
+        ]
+    )
+    serving.extract_tool_call_required_streaming.side_effect = [
+        (intermediate_delta, True),   # first call → no finish_reason
+        (final_delta, True),          # second call → finish_reason="stop"
+    ]
+
+    outputs = [
+        _MockResult([_MockOutput(finish_reason=None)]),   # intermediate
+        _MockResult([_MockOutput(finish_reason="stop")]), # final
+    ]
+    chunks = await _run_stream(serving, request, outputs)
+
+    _assert_split_invariant(chunks)
+
+    finish_chunks = [c for c in chunks if any(ch.get("finish_reason") == "tool_calls" for ch in c["choices"])]
+    assert len(finish_chunks) == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_multiple_tool_calls_split_invariant():
+    """
+    Multi-tool-call scenario: the invariant holds regardless of how many
+    tool calls are present in the final delta.
+    """
+    serving = _make_serving_mock()
+    request = _make_request_mock(tool_choice="required")
+
+    final_delta = DeltaMessage(
+        tool_calls=[
+            DeltaToolCall(
+                index=0,
+                id="call-a",
+                type="function",
+                function=DeltaFunctionCall(name="tool_a", arguments='{"x":1}'),
+            ),
+            DeltaToolCall(
+                index=1,
+                id="call-b",
+                type="function",
+                function=DeltaFunctionCall(name="tool_b", arguments='{"y":2}'),
+            ),
+        ]
+    )
+    serving.extract_tool_call_required_streaming.return_value = (final_delta, True)
+
+    outputs = [_MockResult([_MockOutput(finish_reason="stop")])]
+    chunks = await _run_stream(serving, request, outputs)
+
+    _assert_split_invariant(chunks)
+
+    finish_chunks = [c for c in chunks if any(ch.get("finish_reason") == "tool_calls" for ch in c["choices"])]
+    assert len(finish_chunks) == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_plain_text_not_split():
+    """
+    Plain text streaming (no tool calls) is NOT affected by the split.
+    The finish chunk may still carry content with finish_reason='stop'.
+    """
+    serving = _make_serving_mock()
+    # No tool_choice → pure text path
+    request = _make_request_mock(tool_choice="none")
+    request.tool_choice = "none"  # ensure it doesn't hit required/auto paths
+
+    outputs = [_MockResult([_MockOutput(text="Hello!", finish_reason="stop")])]
+    chunks = await _run_stream(serving, request, outputs)
+
+    finish_chunks = [c for c in chunks if any(ch.get("finish_reason") == "stop" for ch in c["choices"])]
+    assert len(finish_chunks) >= 1, "Should have a chunk with finish_reason='stop'"
+
+    # No spurious extra empty-delta chunk should appear for plain text
+    tool_call_chunks = [c for c in chunks if any(ch["delta"].get("tool_calls") for ch in c["choices"])]
+    assert len(tool_call_chunks) == 0, "Plain text must not produce tool_calls chunks"
