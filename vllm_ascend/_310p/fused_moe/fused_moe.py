@@ -20,8 +20,6 @@ import torch
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
-
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, _MoECommMethods
@@ -263,7 +261,7 @@ class AscendFusedMoE310(FusedMoE):
         return routed_out
 
 
-class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
+class AscendSharedFusedMoE310(AscendFusedMoE310):
     def __init__(
         self,
         shared_experts: torch.nn.Module,
@@ -324,7 +322,7 @@ class AscendSharedFusedMoE310(SharedFusedMoE, AscendFusedMoE310):
             return None
         return self._shared_experts(hidden_states)
 
-    def forward_impl(  # type: ignore[override]
+    def shared_forward_impl(  # type: ignore[override]
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
     ):
         routed_out = AscendFusedMoE310.forward_impl(
