@@ -49,7 +49,8 @@
       "model_list": [
         "gemma-3-4b-it",
         "internlm3-8b-instruct",
-        "Qwen3-ASR-1.7B"
+        "Qwen3-ASR-1.7B",
+        "GLM-4.1V-9B-Thinking"
       ]
     },
     {

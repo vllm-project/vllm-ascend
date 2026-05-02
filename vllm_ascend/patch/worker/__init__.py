@@ -57,3 +57,4 @@ import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 import vllm_ascend.patch.worker.patch_bailing_moe_linear  # noqa
+import vllm_ascend.patch.worker.patch_glm4v  # noqa
