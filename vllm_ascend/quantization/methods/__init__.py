@@ -42,6 +42,7 @@ from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
 from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
 from .w4a16 import AscendW4A16FusedMoEMethod
+from .w4a16_awq import AscendW4A16AWQFusedMoEMethod, AscendW4A16AWQLinearMethod
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from .w8a8_pdmix import AscendW8A8PDMixFusedMoeMethod, AscendW8A8PDMixLinearMethod
@@ -81,6 +82,8 @@ __all__ = [
     "AscendW4A8DynamicLinearMethod",
     "AscendW4A8DynamicFusedMoEMethod",
     "AscendW4A16FusedMoEMethod",
+    "AscendW4A16AWQLinearMethod",
+    "AscendW4A16AWQFusedMoEMethod",
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "AscendW4A4LaosDynamicLinearMethod",
     "AscendFAQuantAttentionMethod",
