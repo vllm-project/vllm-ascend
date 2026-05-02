@@ -144,7 +144,7 @@ def test_recover_request_lengths_empty():
 @patch("vllm_ascend.worker.kvcomp_utils.extract_layer_index")
 def test_bind_hashk_cache_basic(mock_extract):
     """Test bind_hashk_cache populates runner and forward_context."""
-    mock_extract.side_effect = lambda name, _: (0 if "layers.0" in name else (1 if "layers.1" in name else 2))
+    mock_extract.side_effect = lambda name, _: 0 if "layers.0" in name else (1 if "layers.1" in name else 2)
 
     cache0 = torch.zeros(2, 8, 128, 16, dtype=torch.uint8)
     cache1 = torch.ones(2, 8, 128, 16, dtype=torch.uint8)
