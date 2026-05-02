@@ -39,6 +39,7 @@ from vllm_ascend.flash_common3_context import get_flash_common3_context, set_fla
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
@@ -130,6 +131,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     ) -> torch.Tensor:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
+        num_shared_experts = getattr(layer, "n_shared_experts", 0)
+        if num_shared_experts is None:
+            num_shared_experts = 0
+        num_logical_experts = get_moe_num_logical_experts(
+            layer,
+            num_experts,
+            global_redundant_expert_num=global_redundant_expert_num,
+            num_shared_experts=num_shared_experts,
+        )
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -142,7 +152,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            num_experts=num_experts,
+            num_experts=num_logical_experts,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
@@ -156,7 +166,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,
-                num_experts=num_experts,
+                num_experts=num_logical_experts,
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
@@ -166,7 +176,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_experts, device=topk_ids.device)
+            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
