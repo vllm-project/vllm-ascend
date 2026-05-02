@@ -793,7 +793,11 @@ class RecomputeScheduler(Scheduler):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta: KVConnectorMetadata = self.connector.build_connector_meta(scheduler_output)
+            meta: KVConnectorMetadata = None
+            if vllm_version_is("0.17.0"):
+                meta = self.connector.build_connector_meta(scheduler_output)
+            else:
+                meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
         # Build the connector meta for ECConnector
