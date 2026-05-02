@@ -625,11 +625,6 @@ def test_dflash_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    from vllm_ascend.utils import vllm_version_is
-
-    if vllm_version_is("0.19.1"):
-        pytest.skip("Dflash tests are not supported on vLLM version 0.19.1")
-
     main_model_name = DFLASH[method]["main"]
     spec_model_name = DFLASH[method]["spec"]
 

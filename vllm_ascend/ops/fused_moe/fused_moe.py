@@ -49,7 +49,6 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
-    vllm_version_is,
 )
 
 
@@ -357,14 +356,13 @@ class AscendFusedMoE(FusedMoE):
         setup_moe_comm_method(self.moe_config)
         self.quant_type = self._get_quant_type()
 
-        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
+            self.layer_name,
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self.gate if is_legacy else kwargs.pop("gate", None),
-            self.shared_experts if is_legacy else kwargs.pop("shared_experts", None),
+            kwargs.pop("gate", None),
+            kwargs.pop("shared_experts", None),
             self.quant_method,
             self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
@@ -583,9 +581,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # NOTE: must use self._shared_experts here, not self.shared_experts —
         # FusedMoE.shared_experts is a property that reads self.runner.shared_experts,
         # which at this point is still the stale runner built with shared_experts=None.
-        is_legacy = vllm_version_is("0.19.1")
         self.runner = AscendMoERunner(
-            self if is_legacy else self.layer_name,
+            self.layer_name,
             self.moe_config,
             self.router,
             self._routed_input_transform,
