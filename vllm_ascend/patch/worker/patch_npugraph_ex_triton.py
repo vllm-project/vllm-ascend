@@ -19,10 +19,10 @@ import importlib
 import sys
 
 import torch
-import torchair
+import npugraph_ex as nge
 from torch._subclasses.fake_tensor import FakeTensor
-from torchair.core._concrete_graph import _is_symlist
-from torchair.npu_fx_compiler import _unpack_meta_list
+from npugraph_ex.core._concrete_graph import _is_symlist
+from npugraph_ex.npu_fx_compiler import _unpack_meta_list
 
 
 class ValuePack:
@@ -108,9 +108,8 @@ def _unpack_npu(self, args, kwargs):
     return unpacked, unpacked_kwargs
 
 
-torchair.core._concrete_graph.ValuePack = ValuePack
-# The ValuePack class is referenced in these two modules, and after the patch, these two modules need to be reloaded.
-importlib.reload(sys.modules["torchair.fx_summary"])
-importlib.reload(sys.modules["torchair.npu_fx_compiler"])
-torchair.npu_fx_compiler._unpack_meta = _unpack_meta
-torchair.npu_fx_compiler._NpuGraphConverter._unpack_npu = _unpack_npu
+nge.core._concrete_graph.ValuePack = ValuePack
+# The ValuePack class is referenced in the npu_fx_compiler module, and after the patch, it needs to be reloaded.
+importlib.reload(sys.modules["npugraph_ex.npu_fx_compiler"])
+nge.npu_fx_compiler._unpack_meta = _unpack_meta
+nge.npu_fx_compiler._NpuGraphConverter._unpack_npu = _unpack_npu

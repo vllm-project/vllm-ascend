@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch_npu
-import torchair
+import npugraph_ex as nge
 
 from vllm_ascend.utils import enable_custom_op
 
@@ -478,9 +478,8 @@ def run_once(local_rank_id,
     fused_ops = FusionOp(*weight_datas, ep_hcomm_info_fused, *parameter,
                          dynamic_eplb, w8a8_dynamic, is_nz).npu()  # type: ignore
     if test_graph:
-        config = torchair.CompilerConfig()
-        config.mode = "reduce-overhead"
-        npu_backend = torchair.get_npu_backend(compiler_config=config)
+        config = nge.CompilerConfig()
+        npu_backend = nge.get_npu_backend(compiler_config=config)
         fused_ops = torch.compile(fused_ops, backend=npu_backend)
     
     # test performance
