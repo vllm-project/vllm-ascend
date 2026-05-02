@@ -56,22 +56,23 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
-    # The path for HCCL library, it's used by pyhccl communicator backend. If
-    # not set, the default value is libhccl.so.
-    "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
+    # DEPRECATED: HCCL_SO_PATH env var is removed. Use --additional-config '{"hccl_so_path": "/path/to/libhccl.so"}'.
+    #     "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when
     # it's installed from source, the version of vllm is usually set to "0.9.1".
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
-    "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
+    # DEPRECATED: VLLM_VERSION env var is removed. Use vllm.__version__ directly.
+    #     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", "0"))),
     # Whether to enable FlashComm optimization when tensor parallel is enabled.
     # This feature will get better performance when concurrency is large.
-    "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))),
+    # DEPRECATED: VLLM_ASCEND_ENABLE_FLASHCOMM1 env var is removed. Use --additional-config '{"enable_flashcomm1": true}'.
+    #     "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))),
     # Whether to enable FLASHCOMM2. Setting it to 0 disables the feature, while setting it to 1 or above enables it.
     # The specific value set will be used as the O-matrix TP group size for flashcomm2.
     # For a detailed introduction to the parameters and the differences and applicable scenarios
@@ -83,7 +84,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # This option is enabled by default. MLAPO can improve performance, but
     # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
     # for your DeepSeek W8A8 scene, then disable it.
-    "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
+    # DEPRECATED: VLLM_ASCEND_ENABLE_MLAPO env var is removed. Use --additional-config '{"enable_mlapo": true}'.
+    #     "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;
@@ -100,7 +102,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
-    "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # DEPRECATED: VLLM_ASCEND_ENABLE_FUSED_MC2 env var is removed. Use --additional-config '{"enable_fused_mc2": 1}'.
+    #     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
     # Whether to enable balance scheduling in the v1 scheduler.
     # Platform validation: only PD-mixed mode (`kv_role='kv_both'` or no kv_transfer_config).
     # Not supported in PD-disaggregated mode (`kv_producer` / `kv_consumer` only).

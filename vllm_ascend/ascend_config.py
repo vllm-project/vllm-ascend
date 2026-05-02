@@ -108,6 +108,21 @@ class AscendConfig:
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
+        # HCCL library path configuration (replaces HCCL_SO_PATH env var)
+        self.hccl_so_path = additional_config.get("hccl_so_path", None)
+        logger.info(f"[PATCH_VERIFY] AscendConfig.hccl_so_path initialized: {self.hccl_so_path}")
+        # Fused MC2 configuration (replaces VLLM_ASCEND_ENABLE_FUSED_MC2 env var)
+        # 0: disabled (default)
+        # 1: enable dispatch_ffn_combine (Prefill)
+        # 2: enable dispatch_gmm_combine_decode (Decode)
+        self.enable_fused_mc2 = additional_config.get("enable_fused_mc2", 0)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_fused_mc2 initialized: {self.enable_fused_mc2}")
+        # FLASHCOMM1 configuration (replaces VLLM_ASCEND_ENABLE_FLASHCOMM1 env var)
+        self.enable_flashcomm1 = additional_config.get("enable_flashcomm1", False)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_flashcomm1 initialized: {self.enable_flashcomm1}")
+        # MLAPO configuration (replaces VLLM_ASCEND_ENABLE_MLAPO env var)
+        self.enable_mlapo = additional_config.get("enable_mlapo", True)
+        print(f"[PATCH_VERIFY] AscendConfig.enable_mlapo initialized: {self.enable_mlapo}")
 
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1

@@ -312,22 +312,24 @@ def enable_custom_op():
 
 def find_hccl_library() -> str:
     """
-    We either use the library file specified by the `HCCL_SO_PATH`
-    environment variable, or we find the library file brought by PyTorch.
+    We either use the library file specified by the `hccl_so_path`
+    configuration, or we find the library file brought by PyTorch.
     After importing `torch`, `libhccl.so` can be
     found by `ctypes` automatically.
     """
-    so_file = envs_ascend.HCCL_SO_PATH
+    logger.info("[PATCH_VERIFY] find_hccl_library called, reading from Config")
+    config = get_ascend_config()
+    so_file = config.hccl_so_path
 
     # manually load the hccl library
     if so_file:
-        logger.info("Found hccl from environment variable HCCL_SO_PATH=%s", so_file)
+        logger.info("[PATCH_VERIFY] Found hccl from Config hccl_so_path=%s", so_file)
     else:
         if torch.version.cann is not None:
             so_file = "libhccl.so"
         else:
             raise ValueError("HCCL only supports Ascend NPU backends.")
-        logger.info("Found hccl from library %s", so_file)
+        logger.info("[PATCH_VERIFY] Found hccl from library %s (no custom path)", so_file)
     return so_file
 
 
@@ -404,19 +406,17 @@ def adapt_patch(is_global_patch: bool = False):
 
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
-    if envs_ascend.VLLM_VERSION is not None:
-        vllm_version = envs_ascend.VLLM_VERSION
-    else:
-        import vllm
+    # VLLM_VERSION env var is removed. Use vllm.__version__ directly.
+    import vllm
 
-        vllm_version = vllm.__version__
+    vllm_version = vllm.__version__
+    print(f"[PATCH_VERIFY] vllm_version_is: auto-detected = {vllm_version}")
     try:
         return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
-            "is installed probably. Set the environment variable VLLM_VERSION "
-            "to control it by hand. And please make sure the value follows the "
+            "is installed probably. Please make sure the value follows the "
             "format of x.y.z."
         )
 
@@ -803,16 +803,13 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        _ENABLE_SP = (
-            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
-        )
+        _ENABLE_SP = get_ascend_config().enable_flashcomm1
+        print(f"[PATCH_VERIFY] enable_sp: from Config = {_ENABLE_SP}")
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
             logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
+            print(f"[PATCH_VERIFY] enable_sp: auto-enabled for shared_expert_dp")
 
     return _ENABLE_SP
 
@@ -1135,7 +1132,8 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
                 "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
                 f"Found invalid layer_sharding: {layer_sharding}"
             )
-    if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
+    if not get_ascend_config().enable_flashcomm1:
+        print(f"[PATCH_VERIFY] get_flashcomm2_config: enable_flashcomm1 = {get_ascend_config().enable_flashcomm1}")
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
