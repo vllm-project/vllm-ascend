@@ -245,6 +245,46 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
         if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
             positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
+            
+        if positions.dim() > 1:
+            orig_dtype = query.dtype
+            query_f = query.float()
+            key_f = key.float()
+            
+            cos_sin = self.cos_sin_cache[positions].float()
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            
+            q = query_f.view(query_f.shape[0], -1, self.head_size)
+            k = key_f.view(key_f.shape[0], -1, self.head_size)
+            
+            q_rot = q[..., :self.rotary_dim]
+            q_pass = q[..., self.rotary_dim:]
+            k_rot = k[..., :self.rotary_dim]
+            k_pass = k[..., self.rotary_dim:]
+
+            if is_neox_style:
+                def rotate_half(x):
+                    x1 = x[..., : x.shape[-1] // 2]
+                    x2 = x[..., x.shape[-1] // 2 :]
+                    return torch.cat((-x2, x1), dim=-1)
+            else:
+                def rotate_half(x):
+                    x_reshaped = x.view(*x.shape[:-1], x.shape[-1] // 2, 2)
+                    x1 = x_reshaped[..., 0]
+                    x2 = x_reshaped[..., 1]
+                    return torch.stack((-x2, x1), dim=-1).flatten(start_dim=-2)
+
+            cos = cos.unsqueeze(1)
+            sin = sin.unsqueeze(1)
+
+            q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+            k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+            
+            q_embed = torch.cat((q_embed, q_pass), dim=-1).view_as(query)
+            k_embed = torch.cat((k_embed, k_pass), dim=-1).view_as(key)
+            
+            return q_embed.to(orig_dtype), k_embed.to(orig_dtype)
+
         return torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )
