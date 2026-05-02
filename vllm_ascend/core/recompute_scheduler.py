@@ -42,7 +42,6 @@ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutp
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
 
@@ -151,7 +150,10 @@ class RecomputeScheduler(Scheduler):
                 request._all_token_ids.pop()
                 request.num_prompt_tokens -= 1
             if self.is_mtp_kv_consumer:
-                request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
+                padding_token_id = (
+                    request.sampling_params.eos_token_id if request.sampling_params.eos_token_id is not None else 0
+                )
+                request.spec_token_ids = [padding_token_id] * self.num_spec_tokens
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.log_stats:
