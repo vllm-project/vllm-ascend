@@ -14,8 +14,20 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.19.1"):
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
+        EagleCudaGraphManager,
+    )
+else:
+    # vLLM #40410 split EagleCudaGraphManager. The Ascend manager mirrors the
+    # decode-style capture signature, so we extend DecodeEagleCudaGraphManager.
+    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
+        DecodeEagleCudaGraphManager as EagleCudaGraphManager,
+    )
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
