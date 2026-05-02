@@ -85,6 +85,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return False
 
     def process_weights_after_loading(self, layer):
+        if not isinstance(layer, FusedMoE):
+            return
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
