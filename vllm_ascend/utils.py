@@ -1208,12 +1208,6 @@ def refresh_block_size(vllm_config):
         # logic rather than the generic platform default.
         return
 
-    if cache_config.block_size != 128:
-        if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
-            logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
-            cache_config.block_size = 128
-            return
-
     ascend_config = get_ascend_config()
     if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
         logger.warning("Setting block size to 128 for xlite compatibility.")
