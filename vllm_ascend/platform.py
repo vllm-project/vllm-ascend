@@ -138,6 +138,17 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        # Apply Ascend optimizations to vllm's ZeroExpertFusedMoE
+        try:
+            from vllm_ascend.ops.fused_moe.zero_expert_fused_moe_ascend import (  # noqa: F401
+                patch_zero_expert_fused_moe,
+            )
+
+            patch_zero_expert_fused_moe()
+        except ImportError:
+            # vllm.ZeroExpertFusedMoE may not be available in all vllm versions
+            pass
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
