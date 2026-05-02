@@ -99,6 +99,69 @@ export PYTHONHASHSEED=0
 | 800 I/T A3 series | 25.5.0<=HDK<26.0.0 | `export ASCEND_BUFFER_POOL=4:8` | Configures the number and size of buffers on the NPU Device for aggregation and KV transfer (e.g., `4:8` means 4 buffers of 8MB). |
 | 800 I/T A2 series | N/A | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
+### Dummy Client Mode
+
+* Software:
+    * CANN >= 9.0.0
+
+In the default setup, each vLLM worker creates its own Mooncake `MooncakeDistributedStore` client and independently registers KV cache memory with Mooncake via HCCL. **Dummy client mode** consolidates this into a single "real client" process that handles all Mooncake interactions, while the vLLM workers connect to it via IPC (`setup_dummy`) instead of each talking to Mooncake directly.
+
+#### Architecture
+
+```text
+vLLM Worker 0                    ┌───────────────────────┐
+┌──────────────────┐             │   Real Client Process  │
+│ setup_dummy() ───┼── IPC ────> │   MooncakeDistributed  │
+└──────────────────┘             │   Store (full mode)    │
+                                 │                        │
+vLLM Worker 1                    │   Single point of      │
+┌──────────────────┐             │   interaction with     │
+│ setup_dummy() ───┼── IPC ────> │   Mooncake             │
+└──────────────────┘             └───────────────────────┘
+
+Workers do NOT create their own Mooncake clients.
+The real client is the only process that registers memory with Mooncake.
+```
+
+#### Configuration
+
+Add the following fields to your `mooncake.json`:
+
+```json
+{
+    "metadata_server": "P2PHANDSHAKE",
+    "protocol": "ascend",
+    "device_name": "",
+    "master_server_address": "xx.xx.xx.xx:50088",
+    "global_segment_size": "1GB",
+    "use_dummy_client": true,
+    "dummy_server_address": "xx.xx.xx.xx:50051"
+}
+```
+
+| Field | Description |
+| :--- | :--- |
+| `use_dummy_client` | Set to `true` to enable dummy client mode. Can also be set via the `MOONCAKE_USE_DUMMY_CLIENT` environment variable. |
+| `dummy_server_address` | The `host:port` of the real client process. Can also be set via the `MOONCAKE_DUMMY_SERVER_ADDRESS` environment variable. |
+
+#### Running the Real Client
+
+The real client process must be started **before** the vLLM workers. It runs `MooncakeDistributedStore` in full (non-dummy) mode:
+
+```bash
+python run_real_client.py --port 50051
+```
+
+#### Connectors Supporting Dummy Client
+
+* **AscendStoreConnector** (KV Pool backend via `MooncakeBackend`): Reads `use_dummy_client` and `dummy_server_address` from `mooncake.json`. When enabled, calls `setup_dummy()` instead of the full `setup()`, and forwards `register_buffer()` calls to the real client (which handles HCCL registration).
+
+#### Notes
+
+* This feature requires CANN >= 9.0.0. On CANN 8.5, HCCL's `GlobalMemReg` has a hard limit of ~256 registered memory segments per process. When many vLLM workers each register their own KV cache buffers, this limit is easily exceeded, causing registration failures. Dummy client mode avoids this by funneling all registrations through a single real client process, and CANN 9.0 removes the 256-segment limit entirely.
+* The `MOONCAKE_MASTER` environment variable can be used to override `master_server_address` from the config file.
+* When `ASCEND_ENABLE_USE_FABRIC_MEM=1` is set (A3 series with HDK >= 26.0.0), buffer registration with the transfer engine is skipped entirely, so dummy client mode is typically not needed.
+
 ### FAQ for HIXL (ascend_direct) backend
 
 For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
