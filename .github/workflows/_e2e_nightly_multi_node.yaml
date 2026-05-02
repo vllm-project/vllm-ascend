@@ -65,6 +65,10 @@ on:
         required: false
       OBS_SECRET_KEY:
         required: false
+      VLLM_ASCEND_CI_LLM_API_KEY:
+        required: false
+      VLLM_ASCEND_CI_LLM_BASE_URL:
+        required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -377,7 +381,52 @@ jobs:
             fi
           done
 
+          # One flat file for ci_log_summary / LLM: only contents already under collected-logs (no second read from /tmp)
+          out=/tmp/nightly-multi-node-e2e.log
+          {
+            if [ -d "$DEST" ]; then
+              find "$DEST" -type f | LC_ALL=C sort | while IFS= read -r f; do
+                echo "=== $f ==="
+                cat "$f" 2>/dev/null || true
+                echo ""
+              done
+            fi
+          } > "$out"
+
           tar -czf /tmp/ascend-logs.tar.gz -C /tmp collected-logs
+
+      - name: CI failure summary (human-readable)
+        if: failure()
+        continue-on-error: true
+        run: |
+          if [ ! -s /tmp/nightly-multi-node-e2e.log ]; then exit 0; fi
+          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/ci_log_summary.py" \
+            --mode e2e \
+            --no-remote-meta \
+            --step-name "Nightly multi-node (${{ inputs.config_file_path }})" \
+            --log-file /tmp/nightly-multi-node-e2e.log \
+            --output "$GITHUB_STEP_SUMMARY"
+
+      - name: LLM failure diagnostics (optional)
+        if: failure()
+        continue-on-error: true
+        env:
+          VLLM_ASCEND_CI_LLM_BASE_URL: ${{ secrets.VLLM_ASCEND_CI_LLM_BASE_URL }}
+          VLLM_ASCEND_CI_LLM_API_KEY: ${{ secrets.VLLM_ASCEND_CI_LLM_API_KEY }}
+          VLLM_ASCEND_CI_LLM_MODEL: ${{ vars.VLLM_ASCEND_CI_LLM_MODEL }}
+        run: |
+          if [ ! -s /tmp/nightly-multi-node-e2e.log ]; then exit 0; fi
+          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/ci_log_summary.py" \
+            --mode e2e \
+            --no-remote-meta \
+            --step-name "Nightly multi-node (${{ inputs.config_file_path }})" \
+            --log-file /tmp/nightly-multi-node-e2e.log \
+            --format llm-json \
+            --output /tmp/ci-llm-summary-nightly-mn.json
+          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/ci_log_llm_analyze.py" \
+            --step-name "Nightly multi-node (${{ inputs.config_file_path }})" \
+            --log-file /tmp/nightly-multi-node-e2e.log \
+            --structured-summary /tmp/ci-llm-summary-nightly-mn.json
 
       - name: Upload Ascend logs
         if: always()

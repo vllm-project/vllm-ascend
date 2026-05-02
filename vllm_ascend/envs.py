@@ -112,6 +112,25 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # --- CI LLM diagnostics (optional; used by `.github/workflows/scripts/ci_log_llm_analyze.py`)
+    # Master switch: 0 = never call the model (keep workflow steps and env vars for later). 1 = allow
+    # calls when API key and base URL are set.
+    "VLLM_ASCEND_CI_LLM_ENABLED": lambda: bool(int(os.getenv("VLLM_ASCEND_CI_LLM_ENABLED", "0"))),
+    # API key for an OpenAI-compatible chat endpoint. Sensitive: store in GitHub Actions secrets,
+    # never commit. If empty, LLM diagnostics are skipped.
+    "VLLM_ASCEND_CI_LLM_API_KEY": lambda: os.getenv("VLLM_ASCEND_CI_LLM_API_KEY", ""),
+    # Base URL including API version prefix, e.g. https://api.openai.com/v1
+    "VLLM_ASCEND_CI_LLM_BASE_URL": lambda: os.getenv("VLLM_ASCEND_CI_LLM_BASE_URL", ""),
+    # Model name for chat/completions. If empty, the script defaults to gpt-4o-mini.
+    "VLLM_ASCEND_CI_LLM_MODEL": lambda: os.getenv("VLLM_ASCEND_CI_LLM_MODEL", ""),
+    # Backend implementation in ci_log_llm_analyze.py. Default: openai_compatible (POST /chat/completions).
+    "VLLM_ASCEND_CI_LLM_BACKEND": lambda: os.getenv("VLLM_ASCEND_CI_LLM_BACKEND", "openai_compatible"),
+    # Max characters sent as user content after local filtering (approximate guard on token cost).
+    "VLLM_ASCEND_CI_LLM_MAX_INPUT_CHARS": lambda: int(os.getenv("VLLM_ASCEND_CI_LLM_MAX_INPUT_CHARS", "120000")),
+    # Phase-B window sizes around error anchors (see ci_log_filter_llm.py).
+    "VLLM_ASCEND_CI_LLM_CONTEXT_LINES_BEFORE": lambda: int(os.getenv("VLLM_ASCEND_CI_LLM_CONTEXT_LINES_BEFORE", "40")),
+    "VLLM_ASCEND_CI_LLM_CONTEXT_LINES_AFTER": lambda: int(os.getenv("VLLM_ASCEND_CI_LLM_CONTEXT_LINES_AFTER", "80")),
+    "VLLM_ASCEND_CI_LLM_TIMEOUT_S": lambda: int(os.getenv("VLLM_ASCEND_CI_LLM_TIMEOUT_S", "120")),
 }
 
 # end-env-vars-definition
