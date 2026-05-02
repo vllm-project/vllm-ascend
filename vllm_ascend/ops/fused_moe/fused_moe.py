@@ -289,8 +289,9 @@ class AscendFusedMoE(FusedMoE):
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
-        self.moe_config.ep_group = get_ep_group()
-        self.moe_config.mc2_group = get_mc2_group()
+        if self.moe_config.ep_size > 1:
+            self.moe_config.ep_group = get_ep_group()
+            self.moe_config.mc2_group = get_mc2_group()
         self.moe_config.supports_eplb = self.quant_method.supports_eplb
         ascend_config = get_ascend_config()
         # flashcommon3 gate stream
