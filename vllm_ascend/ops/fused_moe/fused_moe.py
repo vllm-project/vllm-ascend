@@ -303,6 +303,12 @@ class AscendFusedMoE(FusedMoE):
             self.quant_method = self.quant_config.get_quant_method(self, self.layer_name)
 
         assert self.quant_method is not None
+        # Keep base_quant_method in sync with the swapped-in Ascend method,
+        # otherwise FusedMoE.maybe_init_modular_kernel (called via the V2
+        # model runner's prepare_communication_buffer_for_model) would dispatch
+        # to the upstream UnquantizedFusedMoEMethod.maybe_make_prepare_finalize,
+        # which raises by design.
+        self.base_quant_method = self.quant_method
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -420,16 +426,14 @@ class AscendFusedMoE(FusedMoE):
 
         if not torch.allclose(integrated_out, split_out):
             diff = (integrated_out - split_out).abs()
-            logger.error("SharedFusedMoE shared experts split computation does not match the integrated computation.")
+            logger.error("FusedMoE shared experts split computation does not match the integrated computation.")
             logger.error("Max absolute difference: %s", diff.max().item())
             logger.error(
                 "Integrated output - sum: %s, norm: %s", integrated_out.sum().item(), integrated_out.norm().item()
             )
             logger.error("Split output - sum: %s, norm: %s", split_out.sum().item(), split_out.norm().item())
-            raise ValueError(
-                "SharedFusedMoE shared experts split computation does not match the integrated computation."
-            )
-        logger.info_once("SharedFusedMoE shared experts split computation matches the integrated computation.")
+            raise ValueError("FusedMoE shared experts split computation does not match the integrated computation.")
+        logger.info_once("FusedMoE shared experts split computation matches the integrated computation.")
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
         shared_gate_up, _ = self._shared_experts.gate_up_proj(hidden_states)  # type: ignore
