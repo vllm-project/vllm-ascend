@@ -88,7 +88,32 @@ class AttentionMaskBuilder310:
         splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)
         return splitfuse_mask_nz
 
-    def get_attention_mask(self, model_config) -> torch.Tensor:
+    def get_swa_mask(self, dtype: torch.dtype, sliding_window):
+        """
+        Generates or retrieves a cached Sliding Window Attention (SWA) mask.
+
+        This mask allows attention only within a specific local window (diagonal band),
+        masking out tokens that are too far in the past or in the future.
+
+        Args:
+            dtype (torch.dtype): Data type of the mask.
+            sliding_window (int): The size of the sliding window.
+
+        Returns:
+            torch.Tensor: The SWA mask cast to ACL_FORMAT_FRACTAL_NZ.
+        """
+        assert dtype == torch.float16
+        if sliding_window is not None and self.swa_mask is None:
+            mask = torch.ones(self.max_seqlen, self.max_seqlen, dtype=torch.bool)
+            triu_mask = torch.triu(mask, diagonal=1).to(self.device)
+            tril_mask = torch.tril(mask, -sliding_window).to(self.device)
+            mask = triu_mask + tril_mask
+            swa_mask = torch.zeros((self.max_seqlen, self.max_seqlen), dtype=dtype, device=self.device)
+            swa_mask.masked_fill_(mask, float("-inf"))
+            self.swa_mask = torch_npu.npu_format_cast(nd_to_nz_2d(swa_mask), ACL_FORMAT_FRACTAL_NZ)
+        return self.swa_mask
+
+    def get_attention_mask(self, causal:bool, model_config) -> torch.Tensor:
         """
         Retrieves the appropriate attention mask based on the model configuration.
 
@@ -96,6 +121,7 @@ class AttentionMaskBuilder310:
         on 310P hardware.
 
         Args:
+            causal (bool): Whether to generate a causal mask.
             model_config: Configuration object containing runner details.
 
         Returns:
@@ -105,8 +131,20 @@ class AttentionMaskBuilder310:
             NotImplementedError: If the runner_type is 'pooling'.
         """
         if getattr(model_config, "runner_type", None) == "pooling":
-            # TODO: pooling model will be supported soon.
-            raise NotImplementedError("310P does not support runner_type='pooling'")
+            if causal:
+                return self._get_causal_mask(self.max_seqlen)
+            else:
+                if self.attn_mask_cache is not None:
+                    return self.attn_mask_cache
+
+                max_seq_len = self.max_seqlen
+                attention_mask_npu = torch.zeros(size=(max_seq_len, max_seq_len),
+                                                 dtype=model_config.dtype, device=self.device)
+                attention_mask_npu = nd_to_nz_2d(attention_mask_npu)
+                self.attn_mask_cache = torch_npu.npu_format_cast(attention_mask_npu.contiguous(), 29)
+
+                return self.attn_mask_cache
+
         return self._get_causal_mask(self.max_seqlen)
 
     def _get_causal_mask(self, max_seq_len: int) -> torch.Tensor:

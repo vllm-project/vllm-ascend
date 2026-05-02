@@ -17,6 +17,7 @@
 
 from typing import Any
 
+import torch
 import torch_npu
 from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
@@ -94,6 +95,25 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
     Implementation of attention operations (Prefill, Decode, Chunked Prefill)
     optimized for the Ascend 310P architecture.
     """
+
+    def _forward_encoder_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        torch_npu._npu_flash_attention(query=query,
+                                       key=key,
+                                       value=value,
+                                       mask=attn_metadata.attn_mask,
+                                       seq_len=attn_metadata.seq_lens,
+                                       scale_value=self.scale,
+                                       num_heads=self.num_heads,
+                                       num_kv_heads=self.num_kv_heads,
+                                       out=output)
+        return output
 
     def forward_paged_attention(
         self,

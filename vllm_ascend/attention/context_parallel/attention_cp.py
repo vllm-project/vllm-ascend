@@ -128,7 +128,7 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
             num_actual_tokens_pcp_padded = num_actual_tokens
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens_pcp_padded]
-        attn_mask = self.attn_mask_builder.get_attention_mask(self.model_config)
+        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
         attn_state = common_attn_metadata.attn_state
         num_computed_tokens_cpu = seq_lens - query_lens
 
