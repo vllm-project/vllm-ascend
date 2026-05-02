@@ -81,7 +81,6 @@ e2e-multicard-2-cards:
   is_skipped: true
 - name: tests/e2e/multicard/2-cards/spec_decode/test_spec_decode.py
   estimated_time: 0
-  is_skipped: true
 - name: tests/e2e/multicard/2-cards/test_offline_weight_load.py
   estimated_time: 0
   is_skipped: true
