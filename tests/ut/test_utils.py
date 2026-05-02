@@ -95,23 +95,6 @@ class TestUtils(TestBase):
         )
         self.assertTrue(torch.allclose(output, expected))
 
-    def test_aligned_16(self):
-        # align to 16
-        input_tensor = torch.randn(15, 64)
-        output_tensor = utils.aligned_16(input_tensor)
-        self.assertEqual(output_tensor.shape[0], 16)
-
-        # align to 16
-        input_tensor = torch.randn(16, 64)
-        output_tensor = utils.aligned_16(input_tensor)
-        self.assertEqual(output_tensor.shape[0], 16)
-        self.assertTrue(torch.equal(input_tensor, output_tensor))
-
-        # align to 32
-        input_tensor = torch.randn(17, 64)
-        output_tensor = utils.aligned_16(input_tensor)
-        self.assertEqual(output_tensor.shape[0], 32)
-
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()

@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend import envs
@@ -316,12 +317,6 @@ def maybe_save_kv_layer_to_connector(
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
-
-
-def round_up(val: int, align: int) -> int:
-    if align == 0:
-        return 0
-    return -(val // -align) * align
 
 
 def trans_rope_weight(weight, rope_dim):

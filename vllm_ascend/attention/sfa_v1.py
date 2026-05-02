@@ -12,6 +12,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -48,7 +49,6 @@ from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
-    _round_up,
     dispose_layer,
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
@@ -257,7 +257,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         if self.enable_dsa_cp:
             global_tp_size = get_tp_group().world_size
             num_tokens = num_input_tokens
-            num_tokens_pad = _round_up(num_tokens, global_tp_size)
+            num_tokens_pad = round_up(num_tokens, global_tp_size)
             num_tokens_per_device = num_tokens_pad // global_tp_size
             local_start = get_tp_group().rank_in_group * num_tokens_per_device
             local_end_with_pad = local_start + num_tokens_per_device

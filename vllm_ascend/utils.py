@@ -33,6 +33,7 @@ import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
@@ -51,6 +52,7 @@ REGISTERED_ASCEND_OPS = {}
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
+_ASCEND_DEVICE_TYPE = None
 _CUSTOM_OP_ENABLED = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
@@ -59,7 +61,7 @@ _WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
 _CP_CHUNKEDPREFILL_COMM_STREAM = None
-_ASCEND_CUSTOMOP_IS_REIGISTERED = False
+_ASCEND_CUSTOMOP_IS_REGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
@@ -185,16 +187,6 @@ def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
 
 
-def _round_up(x: int, align: int):
-    # round up x to align, for example, if align is 16, x will be rounded up to 16, 32, 48, etc.
-    # input: 15, 16 -> output: 16
-    # input: 17, 16 -> output: 32
-    # input: 30, 16 -> output: 32
-    # input: 33, 16 -> output: 48
-    # ...
-    return (x + align - 1) // align * align
-
-
 def _custom_pad(x, pad_dims):
     # pad the input tensor to the shape of pad_dims
     # input: (13, 30), pad_dims: [0, 2, 0, 3]
@@ -220,17 +212,17 @@ def nd_to_nz_2d(in_tensor: torch.Tensor) -> torch.Tensor:
     # in_tensor: (13, 30)
     aux_dims = [1, 0, 0, 16]
     # aux_dims[1]: 16
-    aux_dims[1] = _round_up(in_tensor.size(0), 16)
+    aux_dims[1] = round_up(in_tensor.size(0), 16)
     # aux_dims[2]: 2
-    aux_dims[2] = _round_up(in_tensor.size(1), 16) // 16
+    aux_dims[2] = round_up(in_tensor.size(1), 16) // 16
 
     # after: aux_dims: [1, 16, 2, 16]
 
     pad_dims = [0, 0, 0, 0]
     # pad_dims[1]: 2
-    pad_dims[1] = _round_up(in_tensor.size(1), 16) - in_tensor.size(1)
+    pad_dims[1] = round_up(in_tensor.size(1), 16) - in_tensor.size(1)
     # pad_dims[3]: 3
-    pad_dims[3] = _round_up(in_tensor.size(0), 16) - in_tensor.size(0)
+    pad_dims[3] = round_up(in_tensor.size(0), 16) - in_tensor.size(0)
 
     # after: pad_dims: [0, 2, 0, 3]
 
@@ -249,28 +241,6 @@ def nd_to_nz_spec(mask_tensor: torch.Tensor) -> torch.Tensor:
     mask_tensor_pad[0][:num_tokens, :max_seq_len] = mask_tensor
     mask = mask_tensor_pad.reshape((1, tokens_pad, max_seq_len_pad // 16, 16)).permute(0, 2, 1, 3)
     return mask
-
-
-def aligned_16(tensor: torch.Tensor):
-    """Aligned tensor for 310P"""
-
-    # Get the size of the current 0th dimension
-    n = tensor.size(0)
-
-    # Calculate the aligned size
-    n_aligned = ((n + 15) // 16) * 16
-
-    # If already aligned, return the original tensor
-    if n == n_aligned:
-        return tensor
-
-    # Create a new tensor with shape (n_aligned, H, W) and fill it with zeros
-    new_tensor = torch.zeros(n_aligned, *tensor.shape[1:], dtype=tensor.dtype, device=tensor.device)
-
-    # Copy the original tensor to the first N positions of the new tensor
-    new_tensor[:n] = tensor
-
-    return new_tensor
 
 
 def enable_custom_op():
@@ -617,8 +587,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
     and ensure this will execute after model config is initilazed.
     """
-    global _ASCEND_CUSTOMOP_IS_REIGISTERED
-    if _ASCEND_CUSTOMOP_IS_REIGISTERED:
+    global _ASCEND_CUSTOMOP_IS_REGISTERED
+    if _ASCEND_CUSTOMOP_IS_REGISTERED:
         return
     from vllm.model_executor.custom_op import CustomOp
 
@@ -722,7 +692,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered
-    _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+    _ASCEND_CUSTOMOP_IS_REGISTERED = True
 
 
 class AscendDeviceType(Enum):
@@ -732,19 +702,16 @@ class AscendDeviceType(Enum):
     A5 = 3
 
 
-_ascend_device_type = None
-
-
 def _init_ascend_device_type():
-    global _ascend_device_type
+    global _ASCEND_DEVICE_TYPE
     from vllm_ascend import _build_info  # type: ignore
 
-    _ascend_device_type = AscendDeviceType[_build_info.__device_type__]
+    _ASCEND_DEVICE_TYPE = AscendDeviceType[_build_info.__device_type__]
 
 
 def check_ascend_device_type():
-    global _ascend_device_type
-    if _ascend_device_type is None:
+    global _ASCEND_DEVICE_TYPE
+    if _ASCEND_DEVICE_TYPE is None:
         _init_ascend_device_type()
 
     soc_version = torch_npu.npu.get_soc_version()
@@ -759,17 +726,17 @@ def check_ascend_device_type():
     else:
         raise RuntimeError(f"Can not support soc_version: {soc_version}.")
 
-    assert _ascend_device_type == cur_device_type, (
+    assert cur_device_type == _ASCEND_DEVICE_TYPE, (
         f"Current device type: {cur_device_type} does not match the installed version's device type: "
-        f"{_ascend_device_type}, please check your installation package."
+        f"{_ASCEND_DEVICE_TYPE}, please check your installation package."
     )
 
 
 def get_ascend_device_type():
-    global _ascend_device_type
-    if _ascend_device_type is None:
+    global _ASCEND_DEVICE_TYPE
+    if _ASCEND_DEVICE_TYPE is None:
         _init_ascend_device_type()
-    return _ascend_device_type
+    return _ASCEND_DEVICE_TYPE
 
 
 def lmhead_tp_enable() -> bool:
