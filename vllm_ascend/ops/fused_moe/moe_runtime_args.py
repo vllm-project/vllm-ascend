@@ -192,9 +192,13 @@ def build_token_dispatch_input(
     fused_experts_input: MoEFusedExpertsInput,
     topk_ids: torch.Tensor | None = None,
 ) -> MoETokenDispatchInput:
+    topk_weights = fused_experts_input.topk_weights
+    if fused_experts_input.routing.mc2_mask is not None:
+        topk_weights = topk_weights.to(torch.float32)
+
     return MoETokenDispatchInput(
         hidden_states=fused_experts_input.hidden_states,
-        topk_weights=fused_experts_input.topk_weights,
+        topk_weights=topk_weights,
         topk_ids=fused_experts_input.topk_ids if topk_ids is None else topk_ids,
         routing=fused_experts_input.routing,
         quant=fused_experts_input.quant,
