@@ -46,9 +46,6 @@ else:
     from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (  # noqa: F401
         DecodeEagleCudaGraphManager as EagleCudaGraphManager,
     )
-    from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import (
-        PrefillEagleCudaGraphManager,
-    )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
