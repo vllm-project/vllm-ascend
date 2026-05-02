@@ -57,6 +57,9 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
     - PyTorch == 2.9.0, torch-npu == 2.9.0
     - vLLM (the same version as vllm-ascend)
 
+## Accessing Ascend NPU
+If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the Huawei HiDevLab platform to apply for and use them.
+
 ## Getting Started
 
 Please use the following recommended versions to get started quickly:
