@@ -105,6 +105,25 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.builder.build(1, common_attn_metadata, mock_model)
 
+    def test_unpadded_preserves_is_prefilling(self):
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 1, 3]),
+            query_start_loc_cpu=torch.tensor([0, 1, 3]),
+            seq_lens=torch.tensor([4, 5]),
+            seq_lens_cpu=torch.tensor([4, 5]),
+            num_reqs=2,
+            num_actual_tokens=3,
+            max_query_len=2,
+            max_seq_len=5,
+            block_table_tensor=torch.zeros((2, 2), dtype=torch.int32),
+            slot_mapping=torch.tensor([0, 1, 2], dtype=torch.int32),
+            is_prefilling=torch.tensor([False, True]),
+        )
+
+        unpadded = common_attn_metadata.unpadded(num_actual_tokens=3, num_actual_reqs=2)
+
+        self.assertTrue(torch.equal(unpadded.is_prefilling, torch.tensor([False, True])))
+
 
 class TestAscendAttentionBackendImpl(TestBase):
     def setUp(self):

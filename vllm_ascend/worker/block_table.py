@@ -131,6 +131,10 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        if not hasattr(_compute_slot_mapping_kernel, "__getitem__"):
+            self._compute_slot_mapping_fallback(num_reqs, query_start_loc, positions)
+            return
+
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
@@ -149,6 +153,47 @@ class BlockTable:
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=1024,
         )
+
+    def _compute_slot_mapping_fallback(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        num_tokens = positions.shape[0]
+        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        block_span = self.block_size * total_cp_world_size
+
+        query_start_loc_np = query_start_loc.cpu().numpy()
+        positions_np = positions.cpu().numpy()
+        slot_mapping_np = self.slot_mapping.np
+        slot_mapping_np[:num_tokens] = PAD_SLOT_ID
+
+        for req_idx in range(num_reqs):
+            start = int(query_start_loc_np[req_idx])
+            end = int(query_start_loc_np[req_idx + 1])
+            if start >= end:
+                continue
+
+            req_positions = positions_np[start:end].astype(np.int64, copy=False)
+            block_indices = req_positions // block_span
+            block_numbers = self.block_table.np[req_idx, block_indices].astype(np.int64, copy=False)
+            block_offsets = req_positions - block_span * block_indices
+
+            if total_cp_world_size == 1:
+                slot_ids = block_numbers * self.block_size + block_offsets
+            else:
+                is_local = (block_offsets // self.cp_kv_cache_interleave_size) % total_cp_world_size == total_cp_rank
+                rounds = block_offsets // (self.cp_kv_cache_interleave_size * total_cp_world_size)
+                remainder = block_offsets % self.cp_kv_cache_interleave_size
+                local_offsets = rounds * self.cp_kv_cache_interleave_size + remainder
+                slot_ids = block_numbers * self.block_size + local_offsets
+                slot_ids = np.where(is_local, slot_ids, PAD_SLOT_ID)
+
+            slot_mapping_np[start:end] = slot_ids.astype(np.int32, copy=False)
+
+        self.slot_mapping.copy_to_gpu(num_tokens)
 
     def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
