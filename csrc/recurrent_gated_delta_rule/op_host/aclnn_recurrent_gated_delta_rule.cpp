@@ -27,6 +27,7 @@
 #include "aclnn_kernels/transpose.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
+#include "aclnn/acl_meta.h"
 
 using namespace op;
 
@@ -40,6 +41,11 @@ constexpr size_t KEY_DIM_NUM = 3;
 constexpr size_t VALUE_DIM_NUM = 3;
 constexpr size_t BETA_DIM_NUM = 2;
 constexpr size_t STATE_DIM_NUM = 4;
+
+constexpr size_t STATE_DIM = 4;
+constexpr size_t STATE_STRIDE_0 = 0;
+constexpr size_t STATE_STRIDE_1 = 1;
+constexpr size_t STATE_STRIDE_2 = 2;
 
 struct RecurrentGatedDeltaRuleParams {
     // mandatory
@@ -176,10 +182,21 @@ aclnnStatus aclnnRecurrentGatedDeltaRuleGetWorkspaceSize(const aclTensor *query,
 
     auto out_ = l0op::Contiguous(out, uniqueExecutor.get());
 
+    int64_t* stateStridesValues = nullptr;
+    uint64_t stateStridesNum = 0;
+
+    ret = aclGetViewStrides(stateRef, &stateStridesValues, &stateStridesNum);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
+    CHECK_COND(stateStridesNum == STATE_DIM, ACLNN_ERR_PARAM_INVALID, "stateStrideDim must be 4.");
+
+    int64_t stride0 = stateStridesValues[STATE_STRIDE_0];
+    int64_t stride1 = stateStridesValues[STATE_STRIDE_1];
+    int64_t stride2 = stateStridesValues[STATE_STRIDE_2];
+
     // 调用l0接口
     auto outRet =
         l0op::RecurrentGatedDeltaRule(query_, key_, value_, beta_, stateRef, actualSeqLengths_, ssmStateIndices_, g, gk,
-                                      numAcceptedTokens, scaleValue, uniqueExecutor.get());
+                                      numAcceptedTokens, scaleValue, stride0, stride1, stride2, uniqueExecutor.get());
     if (outRet == nullptr) {
         return ACLNN_ERR_INNER_NULLPTR;
     }
@@ -192,6 +209,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRuleGetWorkspaceSize(const aclTensor *query,
     // 获取计算过程中需要使用的workspace大小。
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
     uniqueExecutor.ReleaseTo(executor);
+    delete[] stateStridesValues;
     return ACLNN_SUCCESS;
 }
 
