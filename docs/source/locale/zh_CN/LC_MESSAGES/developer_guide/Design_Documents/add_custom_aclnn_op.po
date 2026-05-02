@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-09 18:37+0800\n"
+"POT-Creation-Date: 2026-04-27 02:14+0000\n"
 "PO-Revision-Date: 2026-04-09 18:37+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,8 +27,7 @@ msgstr "添加自定义 aclnn 算子"
 msgid ""
 "This document describes how to add a custom aclnn operation to vllm-"
 "ascend."
-msgstr ""
-"本文档介绍如何向 vllm-ascend 添加自定义 aclnn 算子。"
+msgstr "本文档介绍如何向 vllm-ascend 添加自定义 aclnn 算子。"
 
 #: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:5
 msgid "How custom aclnn operation works in vllm-ascend?"
@@ -41,8 +40,10 @@ msgid ""
 "ascend. Then the aclnn operators are bound to `torch.ops._C_ascend` "
 "module, enabling users to invoke them in vllm-ascend python code."
 msgstr ""
-"自定义 aclnn 算子在 vllm-ascend 构建过程中会被编译并安装到 `vllm_ascend/cann_ops_custom` 目录。"
-"然后，aclnn 算子会被绑定到 `torch.ops._C_ascend` 模块，使用户能够在 vllm-ascend 的 Python 代码中调用它们。"
+"自定义 aclnn 算子在 vllm-ascend 构建过程中会被编译并安装到 "
+"`vllm_ascend/cann_ops_custom` 目录。然后，aclnn 算子会被绑定到 "
+"`torch.ops._C_ascend` 模块，使用户能够在 vllm-ascend 的 Python "
+"代码中调用它们。"
 
 #: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:9
 msgid "To enable custom operations, use the following code:"
@@ -65,9 +66,11 @@ msgstr "创建 `op_host` 和 `op_kernel` 目录，分别存放主机端和内核
 #: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:21
 msgid ""
 "Add build options in `csrc/build_aclnn.sh` for supported SOC. Note that "
-"multiple ops should be separated with `;`, i.e. `CUSTOM_OPS=op1;op2;op3`."
+"multiple ops should be separated with `;`, i.e. "
+"`CUSTOM_OPS=\"op1;op2;op3\"`."
 msgstr ""
-"在 `csrc/build_aclnn.sh` 中为支持的 SOC 添加编译选项。注意，多个算子应使用 `;` 分隔，例如：`CUSTOM_OPS=op1;op2;op3`。"
+"在 `csrc/build_aclnn.sh` 中为支持的 SOC 添加编译选项。注意，多个算子应使用 `;` "
+"分隔，例如：`CUSTOM_OPS=\"op1;op2;op3\"`。"
 
 #: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:22
 msgid ""
@@ -79,7 +82,7 @@ msgstr "在 `csrc/torch_binding.cpp` 中将 aclnn 算子绑定到 `torch.ops._C_
 msgid ""
 "Write a meta implementation in `csrc/torch_binding_meta.cpp` for the op "
 "to be captured into the aclgraph."
-msgstr "在 `csrc/torch_binding_meta.cpp` 中为算子编写 meta 实现，以便算子能够被捕获到 ACL 计算图中。"
+msgstr "在 `csrc/torch_binding_meta.cpp` 中为算子编写 meta 实现，以便算子能够被捕获到 aclgraph 中。"
 
 #: ../../source/developer_guide/Design_Documents/add_custom_aclnn_op.md:25
 msgid ""

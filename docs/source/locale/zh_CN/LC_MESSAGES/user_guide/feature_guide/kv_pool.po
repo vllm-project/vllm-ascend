@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
+"POT-Creation-Date: 2026-04-27 02:14+0000\n"
 "PO-Revision-Date: 2026-01-22 16:55+0800\n"
 "Last-Translator: Gemini\n"
 "Language: zh_CN\n"
@@ -382,7 +382,10 @@ msgid ""
 "AscendStoreConnector. If the Prefill node enables PP, `prefill_pp_size` "
 "or `prefill_pp_layer_partition` also needs to be set. Example as follows:"
 msgstr ""
-"目前，PD 解耦场景中的键值池默认仅存储由 Prefill 节点生成的 KV 缓存。在使用 MLA 的模型中，现已支持 Decode 节点存储 KV 缓存供 Prefill 节点使用，可通过在 `AscendStoreConnector` 中添加 `consumer_is_to_put: true` 来启用。如果 Prefill 节点启用了流水线并行（PP），则还需要设置 `prefill_pp_size` 或 `prefill_pp_layer_partition`。示例如下："
+"目前，PD 解耦场景中的键值池默认仅存储由 Prefill 节点生成的 KV 缓存。在使用 MLA 的模型中，现已支持 Decode 节点存储 "
+"KV 缓存供 Prefill 节点使用，可通过在 `AscendStoreConnector` 中添加 `consumer_is_to_put: "
+"true` 来启用。如果 Prefill 节点启用了流水线并行（PP），则还需要设置 `prefill_pp_size` 或 "
+"`prefill_pp_layer_partition`。示例如下："
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:308
 msgid "2、Start proxy_server"
@@ -454,7 +457,9 @@ msgid ""
 "overhead and persistent device memory consumption (4 MB of device memory "
 "per connection)."
 msgstr ""
-"这是因为当涉及设备到设备通信时，HCCL 单边通信连接是在实例启动后延迟创建的。目前，需要在所有设备之间建立全连接。建立这些连接会引入一次性时间开销和持续的设备内存消耗（每个连接消耗 4 MB 设备内存）。"
+"这是因为当涉及设备到设备通信时，HCCL "
+"单边通信连接是在实例启动后延迟创建的。目前，需要在所有设备之间建立全连接。建立这些连接会引入一次性时间开销和持续的设备内存消耗（每个连接消耗 4 "
+"MB 设备内存）。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:404
 msgid ""
@@ -475,29 +480,37 @@ msgstr "安装 Memcache"
 msgid ""
 "**MemCache depends on MemFabric. Therefore, MemFabric must be "
 "installed.Installing the memcache after the memfabric is installed.**"
-msgstr "**MemCache 依赖于 MemFabric。因此，必须先安装 MemFabric。在 MemFabric 安装完成后，再安装 Memcache。**"
+msgstr ""
+"**MemCache 依赖于 MemFabric。因此，必须先安装 MemFabric。在 MemFabric 安装完成后，再安装 "
+"Memcache。**"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:412
 msgid ""
 "**memfabric_hybrid**: "
 "<https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
-msgstr "**memfabric_hybrid**: <https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
+msgstr ""
+"**memfabric_hybrid**: "
+"<https://gitcode.com/Ascend/memfabric_hybrid/tree/master/doc/build.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:414
 msgid ""
 "**memcache**: "
 "<https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
-msgstr "**memcache**: <https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
+msgstr ""
+"**memcache**: "
+"<https://gitcode.com/Ascend/memcache/blob/master/doc/build.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:416
 msgid "Configuring the memcache Config File"
 msgstr "配置 Memcache 配置文件"
 
-#: ../../source/user_guide/feature_guide/kv_pool.md:419
+#: ../../source/user_guide/feature_guide/kv_pool.md:418
 msgid ""
-"**Config file parameters "
+"config Path：/usr/local/memcache_hybrid/latest/config/ **Config file "
+"parameters "
 "description**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
-msgstr "**配置文件参数说明**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
+msgstr ""
+"配置路径：/usr/local/memcache_hybrid/latest/config/ **配置文件参数说明**：<https://gitcode.com/Ascend/memcache/blob/develop/doc/memcache_config.md>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:421
 msgid ""
@@ -511,7 +524,9 @@ msgid ""
 "You are advised to copy mmc-local.conf and mmc-meta.conf to your own path"
 " and modify them, and set the MMC_META_CONFIG_PATH environment variable "
 "to the path of your own mmc-meta.conf file."
-msgstr "建议将 mmc-local.conf 和 mmc-meta.conf 复制到您自己的路径并进行修改，并将 MMC_META_CONFIG_PATH 环境变量设置为您自己的 mmc-meta.conf 文件的路径。"
+msgstr ""
+"建议将 mmc-local.conf 和 mmc-meta.conf 复制到您自己的路径并进行修改，并将 MMC_META_CONFIG_PATH"
+" 环境变量设置为您自己的 mmc-meta.conf 文件的路径。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:436
 msgid "**mmc-meta.conf：**"
@@ -576,7 +591,9 @@ msgid ""
 " ROCE available, recommended for A2), `device_sdma` (supported for A3 "
 "when HCCS available, recommended for A3). Currently does not support "
 "heterogeneous protocol setting."
-msgstr "`host_rdma`（默认），`device_rdma`（当设备 ROCE 可用时，A2 和 A3 支持，推荐用于 A2），`device_sdma`（当 HCCS 可用时，A3 支持，推荐用于 A3）。目前不支持异构协议设置。"
+msgstr ""
+"`host_rdma`（默认），`device_rdma`（当设备 ROCE 可用时，A2 和 A3 支持，推荐用于 "
+"A2），`device_sdma`（当 HCCS 可用时，A3 支持，推荐用于 A3）。目前不支持异构协议设置。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md
 msgid "`ock.mmc.local_service.dram.size`"
@@ -609,7 +626,10 @@ msgid ""
 "Using `MultiConnector` to simultaneously utilize both "
 "`MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` "
 "performs kv_transfer, while `AscendStoreConnector` enables KV Cache Pool"
-msgstr "使用 `MultiConnector` 同时利用 `MooncakeConnectorV1` 和 `AscendStoreConnector`。`MooncakeConnectorV1` 执行 kv_transfer，而 `AscendStoreConnector` 启用 KV 缓存池。"
+msgstr ""
+"使用 `MultiConnector` 同时利用 `MooncakeConnectorV1` 和 "
+"`AscendStoreConnector`。`MooncakeConnectorV1` 执行 kv_transfer，而 "
+"`AscendStoreConnector` 启用 KV 缓存池。"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:609
 #: ../../source/user_guide/feature_guide/kv_pool.md:918
@@ -677,8 +697,9 @@ msgstr "元戎数据系统使用 etcd 进行服务发现。以下示例启动一
 #: ../../source/user_guide/feature_guide/kv_pool.md:1149
 msgid ""
 "For production environments, refer to the official etcd clustering "
-"documentation: <https://etcd.io/docs/current/op-guide/clustering/>"
-msgstr "对于生产环境，请参考官方 etcd 集群文档：<https://etcd.io/docs/current/op-guide/clustering/>"
+"documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>"
+msgstr ""
+"对于生产环境，请参考官方 etcd 集群文档：<https://etcd.io/docs/v3.7/op-guide/clustering/>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:1152
 msgid "Start Datasystem Worker"
@@ -699,7 +720,9 @@ msgid ""
 "For more parameters, refer to the `dscli` usage documentation on the "
 "Yuanrong Datasystem official site: <https://atomgit.com/openeuler"
 "/yuanrong-datasystem>"
-msgstr "有关更多参数，请参考元戎数据系统官方网站上的 `dscli` 使用文档：<https://atomgit.com/openeuler/yuanrong-datasystem>"
+msgstr ""
+"有关更多参数，请参考元戎数据系统官方网站上的 `dscli` 使用文档：<https://atomgit.com/openeuler"
+"/yuanrong-datasystem>"
 
 #: ../../source/user_guide/feature_guide/kv_pool.md:1170
 msgid "To stop the worker:"
