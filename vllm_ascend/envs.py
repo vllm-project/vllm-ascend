@@ -112,6 +112,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable Ascend host-side KV offload. This allocates offloaded KV blocks
+    # from ACL host memory and exposes them through NPU-visible mapped pointers.
+    # Default is disabled to preserve the existing CPU-NPU offload behavior.
+    "VLLM_ASCEND_KV_HOST_SIDE": lambda: bool(int(os.getenv("VLLM_ASCEND_KV_HOST_SIDE", "0"))),
+    # Optional hard limit, in bytes, for host-side KV memory allocation. None
+    # disables the explicit vLLM-Ascend guard and relies on ACL allocation
+    # failures. This value is not sensitive.
+    "VLLM_ASCEND_KV_HOST_SIDE_MAX_MEMORY_BYTES": lambda: (
+        int(value) if (value := os.getenv("VLLM_ASCEND_KV_HOST_SIDE_MAX_MEMORY_BYTES")) else None
+    ),
 }
 
 # end-env-vars-definition
