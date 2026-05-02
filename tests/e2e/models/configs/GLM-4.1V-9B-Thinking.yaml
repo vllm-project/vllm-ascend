@@ -1,0 +1,22 @@
+model_name: "zai-org/GLM-4.1V-9B-Thinking"
+model_type: "vllm-vlm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 8192
+  gpu_memory_utilization: 0.9
+  trust_remote_code: true
+  served_model_name: "glm4v"
+
+tasks:
+- name: "mmmu_val"
+  metrics:
+  - name: "acc,none"
+    value: 0.50
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: 32
