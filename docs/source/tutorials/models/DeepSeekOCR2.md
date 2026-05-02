@@ -122,6 +122,19 @@ Single-node deployment is recommended.
 
 We don't need to Prefill-Decode disaggregation
 
+**Notice:**
+The parameters are explained as follows:
+
+- `--tensor-parallel-size` 1 is common settings for tensor parallelism (TP) sizes.
+- `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
+- `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak GPU memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak GPU memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the GPU memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled.
+- `--async-scheduling`: enables the asynchronous scheduling function. When Multi-Token Prediction (MTP) is enabled, asynchronous scheduling of operator delivery can be implemented to overlap the operator delivery latency.
+- `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are "cudagraph_mode" and "cudagraph_capture_sizes", which have the following meanings:
+"cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
+- `cudagraph_capture_sizes`: It is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
+- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+
 ## Functional Verification
 
 If your service start successfully, you can see the info shown below:
