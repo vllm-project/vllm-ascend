@@ -104,6 +104,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Keye-VL-8B-Preview             | ❌            | [1963](https://github.com/vllm-project/vllm-ascend/issues/1963)      |       |
 | Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |       |
 | GLM-4V                         | ❌            | [2260](https://github.com/vllm-project/vllm-ascend/issues/2260)      |       |
-| InternVL2.0/2.5/3.0<br>InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |
+| InternVL2.0/2.5 | ✅ | Supported via upstream vLLM | A2/A3 |
+| InternVL3-8B | ✅ | [1362](https://github.com/vllm-project/vllm-ascend/issues/1362) | A2/A3 |
+| InternVL3-78B | ✅ | [1362](https://github.com/vllm-project/vllm-ascend/issues/1362) | A2/A3 (需要4-8卡) |
+| InternVideo2.5/Mono-InternVL | ❌ | [2064](https://github.com/vllm-project/vllm-ascend/issues/2064) |  |
 | Whisper                        | ❌            | [2262](https://github.com/vllm-project/vllm-ascend/issues/2262)      |       |
 | Ultravox                       | 🟡            | Need test                                                            |       |
