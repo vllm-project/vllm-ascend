@@ -48,11 +48,7 @@ If you do not want to use the docker image, you can also build from source:
 
 Start the online serving service with the following command:
 
-```{test} bash
-:sync-yaml: tests/e2e/models/configs/Minitron-8B-Base.yaml
-:sync-target: test_cases[0].model test_cases[0].server_cmd
-:sync-class: cmd
-
+``` bash
 vllm serve "nv-community/Minitron-8B-Base" \
   --served-model-name minitron-8b-base \
   --tensor-parallel-size 1 \

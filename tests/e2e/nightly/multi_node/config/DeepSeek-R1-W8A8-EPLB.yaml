@@ -2,7 +2,7 @@ test_name: "test DeepSeek-R1-W8A8 disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 4
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
@@ -21,6 +21,8 @@ disaggregated_prefill:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
           --host 0.0.0.0
@@ -58,6 +60,8 @@ deployment:
           '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
           --host 0.0.0.0
@@ -94,6 +98,8 @@ deployment:
           --additional-config
           '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --host 0.0.0.0
@@ -132,6 +138,8 @@ deployment:
         --additional-config
         '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}'
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --headless

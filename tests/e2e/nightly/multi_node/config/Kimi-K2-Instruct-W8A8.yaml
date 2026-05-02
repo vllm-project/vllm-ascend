@@ -3,7 +3,7 @@ model: "vllm-ascend/Kimi-K2-Instruct-W8A8"
 
 num_nodes: 2
 npu_per_node: 16
-env_common:
+env_common: &env_common
   VLLM_USE_MODELSCOPE: true
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
@@ -13,6 +13,8 @@ env_common:
 
 deployment:
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve "vllm-ascend/Kimi-K2-Instruct-W8A8"
       --host 0.0.0.0
@@ -35,6 +37,8 @@ deployment:
       --additional-config '{"torchair_graph_config":{"enabled":true}}'
 
   -
+    envs:
+      <<: *env_common
     server_cmd: >
       vllm serve "vllm-ascend/Kimi-K2-Instruct-W8A8"
       --headless
