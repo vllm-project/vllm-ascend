@@ -30,4 +30,5 @@ sequence_parallelism
 batch_invariance
 lmcache_ascend_deployment
 dynamic_chunk_pipeline_parallel
+enable_megagdn_kernel
 :::

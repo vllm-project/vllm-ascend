@@ -2,3 +2,6 @@
 	path = csrc/third_party/catlass
 	url = https://gitcode.com/cann/catlass.git
 	branch = main
+[submodule "csrc/third_party/pto-isa"]
+	path = csrc/third_party/pto-isa
+	url = https://gitcode.com/cann/pto-isa.git
