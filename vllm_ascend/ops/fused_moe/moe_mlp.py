@@ -134,7 +134,7 @@ def quant_apply_mlp(
         quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
-    _output_dtype = w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype
+    _output_dtype = input_hidden_dtype
 
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
@@ -208,7 +208,7 @@ def quant_apply_mlp(
             use_bf16=use_bf16,
             use_mxfp_quant=use_mxfp_quant,
             bias=None,
-            fallback_output_dtype=w2_scale[0].dtype if isinstance(w2_scale, list) else w2_scale.dtype,
+            fallback_output_dtype=input_hidden_dtype,
         )
     elif w1_offset is not None:
         # gmm1: gate_up_proj

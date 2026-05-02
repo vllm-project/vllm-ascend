@@ -87,7 +87,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
-            layer.weight_scale,
+            layer.weight_scale_fp32,  # use float32 scale; CANN does not support float16 scale
             pertoken_scale=pertoken_scale,
             bias=bias,
             output_dtype=x.dtype,
@@ -250,12 +250,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             w1 = layer.w13_weight_list
             w1_scale = layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
-            w2_scale = layer.fused_w2_scale_list if fused_scale_flag else layer.w2_weight_scale_list
+            w2_scale = layer.fused_w2_scale_list if fused_scale_flag else layer.w2_weight_scale_fp32_list
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
-            w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
+            w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale_fp32]
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -292,6 +292,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(layer.w2_weight_scale.data.shape[0], -1)
+        layer.w2_weight_scale_fp32 = layer.w2_weight_scale.data.to(torch.float32)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(layer.w2_weight_offset.data.shape[0], -1)
 
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
@@ -303,6 +304,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
             layer.w13_weight_scale_fp32_list = [
                 weight.clone() for weight in layer.w13_weight_scale_fp32.data.unbind(dim=0)
+            ]
+            layer.w2_weight_scale_fp32_list = [
+                weight.clone() for weight in layer.w2_weight_scale_fp32.data.unbind(dim=0)
             ]
             layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
@@ -319,6 +323,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w13_weight_scale
             del layer.w13_weight_scale_fp32
             del layer.w2_weight_scale
+            del layer.w2_weight_scale_fp32
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
                 del layer.fused_w1_scale
                 del layer.fused_w2_scale
