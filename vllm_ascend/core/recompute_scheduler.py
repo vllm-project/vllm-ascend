@@ -973,6 +973,7 @@ class RecomputeScheduler(Scheduler):
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
+                        prefill_stats=request.take_prefill_stats(),
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                         **prefill_kwargs,
