@@ -83,6 +83,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def is_monolithic(self) -> bool:
         return False
 
+    def maybe_make_prepare_finalize(self, routing_tables=None):
+        # Ascend uses its own MoE communication and forward_impl path.
+        # Do not let upstream modular-kernel initialization replace it.
+        return None
+
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
