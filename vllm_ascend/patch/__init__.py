@@ -193,6 +193,25 @@
 #       Remove this patch once the runtime vLLM version contains the GLM parser
 #       and streaming finish-chunk fixes.
 #
+# ** 10a. File: platform/patch_kv_cache_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
+#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
+#    Why:
+#       vLLM PR #40860 added a restriction that hybrid KV cache groups with
+#       multiple block sizes do not support context parallelism (dcp/pcp > 1).
+#       This restriction is correct for CUDA but not for Ascend, which
+#       implements context parallelism for MLA and SWA-MLA layers separately.
+#    How：
+#       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
+#       + CP case by returning lcm(block_sizes) * dcp * pcp as scheduler_block_size
+#       instead of raising ValueError.
+#    Related PR (if no, explain why):
+#       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
+#    Future Plan:
+#       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
+#       non-CUDA backends, or exposes a platform hook for this behavior.
+#
 # ** 10. File: platform/patch_kv_cache_interface.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.kv_cache_interface.MLAAttentionSpec`
