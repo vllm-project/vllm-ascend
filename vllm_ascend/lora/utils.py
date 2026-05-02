@@ -5,6 +5,7 @@ from vllm.config import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
@@ -38,7 +39,13 @@ class AscendColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        return type(source_layer) is AscendColumnParallelLinear
+        if type(source_layer) is AscendColumnParallelLinear:
+            return True
+        if type(source_layer) is AscendMergedColumnParallelLinear:
+            if len(packed_modules_list) != 1:
+                return False
+            return not (hasattr(source_layer, "output_sizes") and len(source_layer.output_sizes) >= 3)
+        return False
 
 
 class AscendMergedColumnParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
@@ -51,7 +58,29 @@ class AscendMergedColumnParallelLinearWithLoRA(MergedColumnParallelLinearWithLoR
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        return type(source_layer) is AscendMergedColumnParallelLinear
+        return type(source_layer) is AscendMergedColumnParallelLinear and len(packed_modules_list) == 2
+
+
+class AscendMergedColumnParallelLinearVariableSliceWithLoRA(MergedColumnParallelLinearVariableSliceWithLoRA):
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: PretrainedConfig | None,
+    ) -> bool:
+        if type(source_layer) is not AscendMergedColumnParallelLinear:
+            return False
+
+        if len(packed_modules_list) >= 3:
+            return True
+
+        if len(packed_modules_list) == 2:
+            return False
+
+        return hasattr(source_layer, "output_sizes") and len(source_layer.output_sizes) >= 3
 
 
 class AscendRowParallelLinearWithLoRA(RowParallelLinearWithLoRA):
@@ -187,6 +216,7 @@ class AscendRowParallelLinearWithShardedLoRA(RowParallelLinearWithShardedLoRA):
 def refresh_all_lora_classes():
     vllm.lora.utils._all_lora_classes.add(AscendColumnParallelLinearWithLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendMergedColumnParallelLinearWithLoRA)
+    vllm.lora.utils._all_lora_classes.add(AscendMergedColumnParallelLinearVariableSliceWithLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendRowParallelLinearWithLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendVocabParallelEmbeddingWithLoRA)
     vllm.lora.utils._all_lora_classes.add(AscendQKVParallelLinearWithLoRA)

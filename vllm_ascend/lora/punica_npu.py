@@ -74,7 +74,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        self.bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
+        self.bgmv_shrink(x, w_t_all, y, self._narrow_active_indices(self._token_lora_indices, x), scale)
 
     def _expand_prefill(
         self,
@@ -101,7 +101,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         add_inputs: bool,
     ):
-        self.bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
+        self.bgmv_expand(x, w_t_all, y, self._narrow_active_indices(self._token_lora_indices, x), add_inputs)
 
     def _expand_slice_prefill(
         self,
@@ -134,7 +134,26 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
-        self.bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset, y_slice_size, add_inputs)
+        self.bgmv_expand_slice(
+            x,
+            w_t_all,
+            y,
+            self._narrow_active_indices(self._token_lora_indices, x),
+            y_offset,
+            y_slice_size,
+            add_inputs,
+        )
+
+    def _narrow_active_indices(self, indices: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """Align a preallocated LoRA index buffer with the active token window.
+
+        `PunicaWrapperBase` stores index tensors in max-sized reusable buffers,
+        while the runtime `x` passed into BGMV ops may be a smaller live slice.
+        Narrowing here keeps the first dimension of `indices` consistent with
+        the current `x`/`y` tensors and avoids shape mismatches in dynamic
+        decode / logits paths.
+        """
+        return torch.narrow(indices, 0, 0, x.size(0))
 
     def _apply_expand(
         self,
@@ -344,7 +363,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         if buffer is None:
             buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
 
-        indices = self.sampler_indices
+        indices = self._narrow_active_indices(self._sampler_indices, x)
 
         self.bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
         self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
