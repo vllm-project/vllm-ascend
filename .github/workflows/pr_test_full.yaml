@@ -36,13 +36,38 @@ permissions:
   pull-requests: write
   issues: write
 
-# only cancel in-progress runs of the same workflow
-# and ignore the lint / 1 card / 4 cards test type
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
+  cancel_prev_jobs:
+    name: Cancel previous runs
+    if: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
+    runs-on: linux-aarch64-a2b3-0
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const prNumber = context.payload.pull_request.number;
+
+            for (const status of ['queued', 'in_progress']) {
+              const { data: { workflow_runs } } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner,
+                repo,
+                workflow_id: 'pr_test_full.yaml',
+                event: 'pull_request',
+                status,
+                per_page: 100,
+              });
+
+              for (const run of workflow_runs) {
+                const belongsToThisPR = run.pull_requests.some(pr => pr.number === prNumber);
+                if (belongsToThisPR && run.id !== context.runId) {
+                  console.log(`Cancelling run #${run.id} (${status})`);
+                  await github.rest.actions.cancelWorkflowRun({ owner, repo, run_id: run.id });
+                }
+              }
+            }
+
   changes:
     runs-on: linux-aarch64-a2b3-0
     if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
@@ -92,7 +117,7 @@ jobs:
 
   parse-trigger:
     name: Parse /e2e comment
-    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'singleton') }}
     uses: ./.github/workflows/_parse_trigger.yaml
     with:
       parse_e2e_comment: true
