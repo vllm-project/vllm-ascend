@@ -134,6 +134,10 @@ class AscendFusedMoE310(FusedMoE):
             self.quant_method = self.quant_config.get_quant_method(self, self.layer_name)
 
         assert self.quant_method is not None
+        # Keep base_quant_method aligned with the Ascend-replaced quant_method
+        # so FusedMoE.maybe_init_modular_kernel doesn't dispatch into the
+        # upstream UnquantizedFusedMoEMethod.maybe_make_prepare_finalize.
+        self.base_quant_method = self.quant_method
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
