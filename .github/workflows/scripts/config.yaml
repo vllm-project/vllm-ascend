@@ -23,6 +23,8 @@ e2e-singlecard:
   estimated_time: 131
 - name: tests/e2e/singlecard/test_cpu_offloading.py
   estimated_time: 169
+- name: tests/e2e/singlecard/test_simple_cpu_offload.py
+  estimated_time: 240
 - name: tests/e2e/singlecard/test_guided_decoding.py
   estimated_time: 413
 - name: tests/e2e/singlecard/test_ilama_lora.py
