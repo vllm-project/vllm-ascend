@@ -140,8 +140,8 @@ def build_fused_experts_input(
     mxfp_use_bf16: bool | None = None,
     w1_scale: list[torch.Tensor] | torch.Tensor | None = None,
     w2_scale: list[torch.Tensor] | torch.Tensor | None = None,
-    w1_scale_bias: torch.Tensor | None = None,
-    w2_scale_bias: torch.Tensor | None = None,
+    w1_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
+    w2_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
 ) -> MoEFusedExpertsInput:
