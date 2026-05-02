@@ -100,7 +100,7 @@ docker run -itd -u 0 --ipc=host --privileged \
   --device /dev/davinci_manager \
   --device /dev/devmm_svm \
   --device /dev/hisi_hdc \
-  --shm-size=1200g \
+  --shm-size=1g \
   -v /usr/local/dcmi:/usr/local/dcmi \
   -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
   -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
@@ -108,7 +108,7 @@ docker run -itd -u 0 --ipc=host --privileged \
   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
   -v /etc/ascend_install.info:/etc/ascend_install.info \
   -v /home/:/home/ \
-  -v /opt/data/verification/:/opt/data/verification/ \   # Map the model weights here
+  -v /opt/data/verification/:/opt/data/verification/ \
   -v /root/.cache:/root/.cache \
   -v /mnt/performance/:/mnt/performance/ \
   -it $IMAGE bash
@@ -420,9 +420,9 @@ Use vLLM bench for the **190k/1k, concurrency=4, 16 prompts** scenario:
 ```{code-block} bash
 vllm bench serve --backend vllm \
   --dataset-name prefix_repetition \
-  --prefix-repetition-prefix-len 175104 \   # Input: 190×1024 tokens with 90% prefix repetition
-  --prefix-repetition-suffix-len 19440 \    # Input: 190×1024 tokens minus the prefix length above
-  --prefix-repetition-output-len 1024 \     # Output: 1024 tokens
+  --prefix-repetition-prefix-len 175104 \
+  --prefix-repetition-suffix-len 19440 \
+  --prefix-repetition-output-len 1024 \
   --prefix-repetition-num-prefixes 1 \
   --num-prompts 16 \
   --max-concurrency 4 \
