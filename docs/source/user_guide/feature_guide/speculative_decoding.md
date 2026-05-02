@@ -151,3 +151,22 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
+
+## MTP/EAGLE3 speculators model supported matrix
+
+| model | EAGLE3 | MTP | max_speculative_num supported | supported hardware | note |
+|-------|--------|-----|-------------------------------|--------------------|------|
+| Qwen3-8B | ✅ | | 3 | A2/A3 | |
+| Qwen3-32B | ✅ | | 3 | A2/A3 | |
+| Qwen3-30B | ✅ | | 3 | A2/A3 | |
+| Qwen3-235B | ✅ | | 3 | A2/A3 | |
+| Qwen3-Next | | ✅ | 3 | A2/A3 | |
+| Qwen3.5 | | ✅ | 3 | A2/A3 | |
+| Deepseek-R1 | | ✅ | 3 | A2/A3 | |
+| Deepseek-V3.1 | | ✅ | 3 | A2/A3 | |
+| Deepseek-V3.2 | | ✅ | 3 | A2/A3 | |
+| Llama3.2 | ✅ | | 3 | A2/A3 | |
+| Llama3.3 | ✅ | | 3 | A2/A3 | |
+| Glm5 | | ✅ | 3 | A2/A3 | |
+| Minimax | ✅ | | 3 | A2/A3 | |
+| Kimi2.5 | ✅ | | 3 | A2/A3 | main model, darft model, different attention backend |
