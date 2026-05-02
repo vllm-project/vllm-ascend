@@ -260,6 +260,14 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         "moe_quantize",
         getattr(vllm_config.model_config.hf_text_config, "quantize", None),
     )
+    if quant_type is None and vllm_config.quant_config is not None:
+        quant_desc = getattr(vllm_config.quant_config, "quant_description", {})
+        expert_types = [
+            val.lower() for key, val in quant_desc.items()
+            if "experts" in key and isinstance(val, str)
+        ]
+        if expert_types and all(t == "w8a8_dynamic" for t in expert_types):
+            quant_type = "w8a8_dynamic"
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
