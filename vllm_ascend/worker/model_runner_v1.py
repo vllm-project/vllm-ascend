@@ -44,6 +44,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
@@ -119,6 +120,9 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
+    AscendExtractHiddenStatesProposer,
+)
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
@@ -490,6 +494,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDflashProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
+            | AscendExtractHiddenStatesProposer
             | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
@@ -503,6 +508,9 @@ class NPUModelRunner(GPUModelRunner):
                 if self.speculative_config.method == "eagle3":
                     assert isinstance(self.drafter, AscendEagleProposer)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
+                elif self.speculative_config.method == "extract_hidden_states":
+                    assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
+                    self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = RejectionSampler(self.sampler)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_discarded_requests = 0
@@ -1321,6 +1329,35 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
             )
+        elif self.speculative_config.uses_extract_hidden_states():
+            # Handle extract_hidden_states method
+            assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
+            assert isinstance(valid_sampled_token_ids, torch.Tensor), (
+                "sampled_token_ids should be a torch.Tensor for "
+                "extract_hidden_states method."
+            )
+            if not self.use_aux_hidden_state_outputs or aux_hidden_states is None:
+                raise ValueError(
+                    "aux_hidden_states are required when using `extract_hidden_states`"
+                )
+            common_attn_metadata = spec_decode_common_attn_metadata
+            target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
+
+            draft_token_ids = self.drafter.propose(
+                sampled_token_ids=valid_sampled_token_ids,
+                target_hidden_states=target_hidden_states,
+                common_attn_metadata=common_attn_metadata,
+            )
+            next_token_ids, valid_sampled_tokens_count = (
+                self.drafter.prepare_next_token_ids_padded(
+                    valid_sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_indices.gpu,
+                    self.num_discarded_requests,
+                )
+            )
+            self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
@@ -1903,7 +1940,11 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config:
                 use_padded_batch = (
                     self.speculative_config
-                    and (self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model())
+                    and (
+                        self.speculative_config.use_eagle()
+                        or self.speculative_config.uses_draft_model()
+                        or self.speculative_config.uses_extract_hidden_states()
+                    )
                     and not self.speculative_config.disable_padded_drafter_batch
                 )
                 if use_padded_batch:
@@ -3088,11 +3129,15 @@ class NPUModelRunner(GPUModelRunner):
                 [layer_name],
             )
             attn_layer = attn_layers[layer_name]
-            if not isinstance(attn_layer, MLAAttention):
-                raise TypeError(
-                    f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
-                )
-            return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
+            if isinstance(attn_layer, MLAAttention):
+                # DeepSeek MLA: K=kv_lora_rank, V=qk_rope_head_dim
+                return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
+            # CacheOnlyAttentionLayer uses MLAAttentionSpec but isn't MLAAttention
+            if isinstance(attn_layer, CacheOnlyAttentionLayer):
+                return kv_cache_spec.head_size, kv_cache_spec.head_size
+            raise TypeError(
+                f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
+            )
 
         head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
         return kv_cache_spec.head_size, head_size_v
@@ -3132,10 +3177,13 @@ class NPUModelRunner(GPUModelRunner):
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
+                # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
                 if (
-                    "linear_attn" in layer_name or self.hybrid_with_attn_and_mamba
+                    "linear_attn" in layer_name
+                    or self.hybrid_with_attn_and_mamba
+                    or "cache_only_layers" in layer_name
                 ) and layer_name not in kv_cache_raw_tensors:
-                    # for mamba linear attention or attn-linear hybrid
+                    # for mamba linear attention, attn-linear hybrid, or cache_only_layers (extract_hidden_states)
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                     else:
@@ -3292,6 +3340,22 @@ class NPUModelRunner(GPUModelRunner):
                         # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
                         sum_page_size_bytes = raw_k_tensor.numel()
+                    elif "cache_only_layers" in layer_name:
+                        # Single tensor for extract_hidden_states (no K/V split)
+                        raw_tensor = kv_cache_raw_tensors[layer_name]
+                        assert raw_tensor is not None
+                        assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
+                        num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
+                        assert num_blocks >= kv_cache_config.num_blocks
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            num_blocks,
+                            current_kv_cache_spec.block_size,
+                            current_kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.head_size,
+                        )
+                        k_cache = raw_tensor.view(current_kv_cache_spec.dtype).view(kv_cache_shape)
+                        kv_caches[layer_name] = k_cache
+                        continue  # Skip the rest of the AttentionSpec handling
                     else:
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
                             layer_name
@@ -3711,6 +3775,13 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
+
+            else:
+                # Handle other AttentionLayerBase subclasses (e.g., CacheOnlyAttentionLayer)
+                # that are not Attention, MLAAttention, or MambaBase
+                if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                    kv_cache_spec[layer_name] = spec
+                    attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:
             mamba_page_size_padded = 0
